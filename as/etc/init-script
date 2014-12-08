@@ -27,20 +27,22 @@ if [ -n $LD_PRELOAD ]; then export LD_PRELOAD; fi
 set_shmall() {
 	mem=`/sbin/sysctl -n kernel.shmall`
 	min=4294967296
-	if [ "$mem" -lt $min ]
-	then
-		echo "kernel.shmall too low, setting to 4G pages"
+	if [ ${#mem} -le ${#min} ]; then
+	    if [ $mem -lt $min ]; then
+		echo "kernel.shmall too low, setting to 4G pages = 16TB"
 		/sbin/sysctl -w kernel.shmall=$min
+	    fi
 	fi
 }
 
 set_shmmax() {
 	mem=`/sbin/sysctl -n kernel.shmmax`
 	min=1073741824
-	if [ "$mem" -lt $min ]
-	then
+	if [ ${#mem} -le ${#min} ]; then
+	    if [ $mem -lt $min ]; then
 		echo "kernel.shmmax too low, setting to 1GB"
 		/sbin/sysctl -w kernel.shmmax=$min
+	    fi
 	fi
 }
 
@@ -103,11 +105,6 @@ rh_status_quiet() {
 }
 
 case "$1" in
-	restart)
-		$0 stop
-		sleep 3
-		$0 start
-		;;
 	start)
 		rh_status_quiet && { echo -n "Already "; $0 status ; exit 0; }
 		$1
@@ -123,7 +120,13 @@ case "$1" in
 	status)
 		rh_status
 		;;
+	restart)
+		$0 stop
+		sleep 3
+		$0 start
+		;;
 	*)
 		echo $"Usage: $0 {start|stop|status|coldstart|restart}"
 		exit 2
+		;;
 esac

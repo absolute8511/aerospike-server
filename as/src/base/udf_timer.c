@@ -57,9 +57,10 @@ udf_timer_timedout(const as_timer *as_tt)
 	if (!tt || !tt->end_time || !tt->udata) {
 		return true;
 	}
-	bool timedout = (cf_getns() > tt->end_time(tt));
+	uint64_t now = cf_getns();
+	bool timedout = (now > tt->end_time(tt));
 	if (timedout) {
-		cf_debug(AS_UDF, "UDF Timed Out [%ld:%ld]", cf_getns()/1000000, tt->end_time(tt)/1000000);
+		cf_debug(AS_UDF, "UDF Timed Out [%lu:%lu]", now / 1000000, tt->end_time(tt) / 1000000);
 		return true;
 	}
 	return false;
@@ -72,7 +73,7 @@ udf_timer_timeslice(const as_timer *as_tt)
 	if (!tt || !tt->end_time || !tt->udata) {
 		return true;
 	}
-	uint64_t timeslice = (tt->end_time(tt) - cf_getns())/1000000;
+	uint64_t timeslice = (tt->end_time(tt) - cf_getns()) / 1000000;
 	return (timeslice > 0) ? timeslice : 1;
 }
 

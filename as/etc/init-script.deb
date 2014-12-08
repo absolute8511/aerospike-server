@@ -36,20 +36,22 @@ test -x $ASD || exit 0
 set_shmall() {
 	mem=`/sbin/sysctl -n kernel.shmall`
 	min=4294967296
-	if [ "$mem" -lt $min ]
-	then
-		echo "kernel.shmall too low, setting to 4G pages"
+	if [ ${#mem} -le ${#min} ]; then
+	    if [ $mem -lt $min ]; then
+		echo "kernel.shmall too low, setting to 4G pages = 16TB"
 		/sbin/sysctl -w kernel.shmall=$min
+	    fi
 	fi
 }
 
 set_shmmax() {
 	mem=`/sbin/sysctl -n kernel.shmmax`
 	min=1073741824
-	if [ "$mem" -lt $min ]
-	then
+	if [ ${#mem} -le ${#min} ]; then
+	    if [ $mem -lt $min ]; then
 		echo "kernel.shmmax too low, setting to 1GB"
 		/sbin/sysctl -w kernel.shmmax=$min
+	    fi
 	fi
 }
 
@@ -107,7 +109,7 @@ case "$1" in
 		$0 start
 		;;
 	*)
-		echo $"Usage: $0 {start|stop|status|restart|coldstart}"
+		echo $"Usage: $0 {start|stop|status|coldstart|restart}"
 		exit 2
 		;;
 esac

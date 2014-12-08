@@ -162,6 +162,8 @@ typedef struct drv_ssd_s
 	bool			data_in_memory;
 	bool			started_fresh;		// relevant only for warm restart
 
+	uint64_t		io_min_size;		// device IO operations are aligned and sized in multiples of this
+
 	cf_atomic64		inuse_size;			// number of bytes in actual use on this device
 
 	uint32_t		write_block_size;	// number of bytes to write at a time
@@ -268,20 +270,21 @@ static inline uint32_t RBLOCK_ID_TO_WBLOCK_ID(drv_ssd *ssd, uint64_t rblock_id) 
 
 
 //
-// Linux system block size rounding needed for direct IO.
+// Size rounding needed for direct IO.
 //
 
-// This is a Linux constant, not meant to ever be adjusted:
-#define SYS_RBLOCK_SIZE 512
+// Used when determining a device's io_min_size.
+#define LO_IO_MIN_SIZE 512
+#define HI_IO_MIN_SIZE 4096
 
-// Round bytes down to a multiple of Linux system rblock size.
-static inline uint64_t BYTES_DOWN_TO_SYS_RBLOCK_BYTES(uint64_t bytes) {
-	return bytes & -SYS_RBLOCK_SIZE;
+// Round bytes down to a multiple of device's minimum IO operation size.
+static inline uint64_t BYTES_DOWN_TO_IO_MIN(drv_ssd *ssd, uint64_t bytes) {
+	return bytes & -ssd->io_min_size;
 }
 
-// Round bytes up to a multiple of Linux system rblock size.
-static inline uint64_t BYTES_UP_TO_SYS_RBLOCK_BYTES(uint64_t bytes) {
-	return (bytes + (SYS_RBLOCK_SIZE - 1)) & -SYS_RBLOCK_SIZE;
+// Round bytes up to a multiple of device's minimum IO operation size.
+static inline uint64_t BYTES_UP_TO_IO_MIN(drv_ssd *ssd, uint64_t bytes) {
+	return (bytes + (ssd->io_min_size - 1)) & -ssd->io_min_size;
 }
 
 

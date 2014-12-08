@@ -2678,7 +2678,6 @@ query_agg_istream_read(const as_stream *s)
 					return NULL;
 				}
 				dt                             = ((ll_recl_element*)ele)->dig_arr;
-				((ll_recl_element*)ele)->dig_arr = NULL;
 			}
 			qagg_istream->dtoffset = 0;
 			qagg_istream->dt       = dt;

@@ -920,6 +920,7 @@ struct as_namespace_s {
 	bool		storage_disable_odirect;
 	bool		storage_enable_osync;
 	uint32_t	storage_defrag_lwm_pct;
+	uint32_t	storage_defrag_queue_min;
 	uint32_t	storage_defrag_sleep;
 	int			storage_defrag_startup_minimum;
 	uint64_t	storage_flush_max_us;
