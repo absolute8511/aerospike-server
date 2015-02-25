@@ -868,7 +868,7 @@ udf_aerospike_destroy(as_aerospike * as)
 static cf_clock
 udf_aerospike_get_current_time(const as_aerospike * as)
 {
-	as = as;
+	(void)as;
 	return cf_clock_getabsolute();
 }
 
@@ -1118,7 +1118,7 @@ udf_aerospike_rec_remove(const as_aerospike * as, const as_rec * rec)
 static int
 udf_aerospike_log(const as_aerospike * a, const char * file, const int line, const int lvl, const char * msg)
 {
-	a = a;
+	(void)a;
 	cf_fault_event(AS_UDF, lvl, file, NULL, line, (char *) msg);
 	return 0;
 }
