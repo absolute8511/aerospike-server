@@ -74,11 +74,6 @@ ifeq ($(PREPRO),1)
   SUFFIX = $(PREPRO_SUFFIX)
   AS_CFLAGS += -E -DPREPRO=$(PREPRO) -DGEN_TAG=$(GEN_TAG)"\
 "
-else
-  ifeq ($(MEXP_PHASE),2)
-    AS_CFLAGS += -DUSE_ASM
-    INCLUDES += -I$(ASMALLOC)/include
-  endif
 endif
 
 ifeq ($(WRAP),1)

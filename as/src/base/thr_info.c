@@ -5075,7 +5075,7 @@ info_interfaces_static_fn(void *gcc_is_ass)
 	}
 
 	cf_dyn_buf_free(&temp_service_db);
-	free(service_str);
+	cf_free(service_str);
 
 	// For valid external-address specify the same in service-list 
 	cf_dyn_buf_define(service_db);
