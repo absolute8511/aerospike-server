@@ -1997,8 +1997,10 @@ as_hb_thr(void *arg)
 				cf_debug(AS_HB, "new connection from %s:%d", cpaddr, caddr.sin_port);
 
 				cf_atomic_int_incr(&g_config.heartbeat_connections_opened);
-				as_hb_endpoint_add(csock, false /*is not udp*/, 0 /*node id not known till pulse come*/);
-
+				if (0 != as_hb_endpoint_add(csock, false /*is not udp*/, 0 /*node id not known till pulse come*/)) {
+					close(csock);
+					continue;
+				}
 			} else {
 				/* Catch remotely-closed connections */
 				if (events[i].events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)) {

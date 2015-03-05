@@ -121,6 +121,17 @@ as_sig_handle_hup(int sig_num)
 	cf_fault_sink_logroll();
 }
 
+// We get here on some crashes.
+void
+as_sig_handle_ill(int sig_num)
+{
+	cf_warning(AS_AS, "SIGILL received, aborting %s build %s",
+			aerospike_build_type, aerospike_build_id);
+
+	PRINT_STACK();
+	reraise_signal(sig_num, as_sig_handle_ill);
+}
+
 // We get here on cf_crash_nostack(), cf_assert_nostack().
 void
 as_sig_handle_int(int sig_num)
@@ -197,6 +208,7 @@ as_signal_setup()
 	register_signal_handler(SIGABRT, as_sig_handle_abort);
 	register_signal_handler(SIGFPE, as_sig_handle_fpe);
 	register_signal_handler(SIGHUP, as_sig_handle_hup);
+	register_signal_handler(SIGILL, as_sig_handle_ill);
 	register_signal_handler(SIGINT, as_sig_handle_int);
 	register_signal_handler(SIGQUIT, as_sig_handle_quit);
 	register_signal_handler(SIGSEGV, as_sig_handle_segv);

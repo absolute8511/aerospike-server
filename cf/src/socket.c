@@ -260,9 +260,6 @@ cf_socket_init_svc(cf_socket_cfg *s)
 	return(0);
 }
 
-
-#define CONNECT_TIMEOUT 1000
-
 /* cf_socket_init_client
  * Connect a socket to a remote endpoint
  * DOES A BLOCKING CONNECT INLINE - timeout
@@ -284,7 +281,6 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 //	int flag = (1024 * 32);
 //	setsockopt(s->sock, SOL_SOCKET, SO_SNDBUF, &flag, sizeof(flag) );
 //	setsockopt(s->sock, SOL_SOCKET, SO_RCVBUF, &flag, sizeof(flag) );
-
 
 	memset(&s->saddr,0,sizeof(s->saddr));
 	s->saddr.sin_family = AF_INET;
@@ -372,7 +368,7 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 Retry:
 				cf_debug(CF_SOCKET, "Connect epoll loop:  Retry #%d", tries++);
 				if (start + timeout < cf_getms()) {
-					cf_debug(CF_SOCKET, "Error in delayed connect(): timed out");
+					cf_warning(CF_SOCKET, "Error in delayed connect() to %s:%d: timed out", s->addr, s->port);
 					errno = ETIMEDOUT;
 					goto Fail;
 				}
