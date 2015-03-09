@@ -1132,7 +1132,7 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 	uint64_t total_duration_ms = cf_getms() - start_ms;
 
 	ns->nsup_cycle_duration = (uint32_t)(total_duration_ms / 1000);
-	ns->nsup_cycle_sleep_pct = (uint32_t)((n_general_waits * 100) / total_duration_ms);
+	ns->nsup_cycle_sleep_pct = total_duration_ms == 0 ? 0 : (uint32_t)((n_general_waits * 100) / total_duration_ms);
 
 	cf_info(AS_NSUP, "{%s} Records: %"PRIu64", %"PRIu64" 0-vt, %"
 			PRIu64"(%"PRIu64") expired, %"PRIu64"(%"PRIu64") evicted, %"
