@@ -871,7 +871,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 		udf_optype op = UDF_OPTYPE_NONE;
 		/* Commit the write locally */
 		if (is_delete) {
-			rv = write_delete_local(tr, false, 0);
+			rv = write_delete_local(tr, false, 0, ! g_config.generation_disable);
 			WR_TRACK_INFO(wr, "internal_rw_start: delete local done ");
 			cf_detail(AS_RW,
 					"write_delete_local for digest returns %d, %d digest %"PRIx64"",
@@ -2526,7 +2526,7 @@ Out:
 		as_transaction tr;
 		as_transaction_init(&tr, keyd, NULL);
 		tr.rsv          = *rsv;
-		write_delete_local(&tr, false, masternode);
+		write_delete_local(&tr, false, masternode, false);
 	}
 
 	return (0);
@@ -2717,7 +2717,7 @@ write_process(cf_node node, msg *m, bool respond)
 				cf_atomic_int_incr(&g_config.udf_replica_writes);
 			}
 			if (msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
-				rv = write_delete_local(&tr, true, node);
+				rv = write_delete_local(&tr, true, node, false);
 			} else if (generation == 0) {
 				write_local_generation wlg;
 				wlg.use_gen_check = false;
@@ -2914,7 +2914,8 @@ check_msg_key(as_msg* m, as_storage_rd* rd)
 // masternode gets passed to XDR if we are shipping this write.
 // masternode is 0 if this node is master, otherwise its nodeid
 int
-write_delete_local(as_transaction *tr, bool journal, cf_node masternode)
+write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
+		bool check_gen)
 {
 	// Shortcut pointers & flags.
 	as_msg *m = tr->msgp ? &tr->msgp->msg : NULL;
@@ -2955,7 +2956,7 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode)
 	as_index *r = r_ref.r;
 
 	// Check generation requirement, if any.
-	if (m && ! g_config.generation_disable &&
+	if (check_gen && m &&
 			(((m->info2 & AS_MSG_INFO2_GENERATION) && m->generation != r->generation) ||
 			 ((m->info2 & AS_MSG_INFO2_GENERATION_GT) && m->generation <= r->generation))) {
 		as_record_done(&r_ref, ns);
@@ -4490,7 +4491,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		cf_atomic_int_incr(&g_config.stat_zero_bin_records);
 		cf_debug(AS_RW, "write local: deleting no-bin record %"PRIx64,
 				*(uint64_t*)&tr->keyd);
-		write_delete_local(tr, false, masternode);
+		write_delete_local(tr, false, masternode, false);
 	}
 
 	cf_detail(AS_RW, "WRITE LOCAL: complete digest %"PRIx64"",
@@ -4750,7 +4751,7 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 
 		int rv;
 		if (jqe.delete == true)
-			rv = write_delete_local(&tr, false, 0);
+			rv = write_delete_local(&tr, false, 0, false);
 		else
 			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, false, 0);
 
@@ -4799,7 +4800,7 @@ write_process_op(as_namespace *ns, cf_digest *keyd, cl_msg *msgp,
 
 	int rv = 0;
 	if (msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
-		rv = write_delete_local(&tr, true, node);
+		rv = write_delete_local(&tr, true, node, false);
 	} else if (generation == 0) {
 		write_local_generation wlg;
 		wlg.use_gen_check = false;

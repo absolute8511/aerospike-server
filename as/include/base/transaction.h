@@ -235,7 +235,7 @@ typedef struct as_transaction_s {
 } as_transaction;
 
 typedef struct as_query_transaction_s as_query_transaction;
-extern int write_delete_local(as_transaction *tr, bool journal, cf_node masternode);
+extern int write_delete_local(as_transaction *tr, bool journal, cf_node masternode, bool check_gen);
 
 extern int as_transaction_prepare(as_transaction *tr);
 extern void as_transaction_init(as_transaction *tr, cf_digest *, cl_msg *);

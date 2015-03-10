@@ -1309,7 +1309,7 @@ as_record_merge(as_partition_reservation *rsv, cf_digest *keyd, uint16_t n_compo
 		as_transaction tr;
 		as_transaction_init(&tr, keyd, NULL);
 		tr.rsv = *rsv;
-		write_delete_local(&tr, false, 0);
+		write_delete_local(&tr, false, 0, false);
 	}
 
 	return(0);
@@ -1604,7 +1604,7 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 		as_transaction tr;
 		as_transaction_init(&tr, keyd, NULL);
 		tr.rsv = *rsv;
-		write_delete_local(&tr, false, 0);
+		write_delete_local(&tr, false, 0, false);
 	}
 	return rv;
 }
