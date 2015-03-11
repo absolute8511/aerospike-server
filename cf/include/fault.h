@@ -222,11 +222,17 @@ extern void cf_fault_event_nostack(const cf_fault_context,
 do { \
 	void *bt[MAX_BACKTRACE_DEPTH]; \
 	int sz = backtrace(bt, MAX_BACKTRACE_DEPTH); \
+	cf_warning(AS_AS, "stacktrace: found %d frames", sz); \
 	char **strings = backtrace_symbols(bt, sz); \
-	for (int i = 0; i < sz; i++) { \
-		cf_warning(AS_AS, "stacktrace: frame %d: %s", i, strings[i]); \
+	if (strings) { \
+		for (int i = 0; i < sz; i++) { \
+			cf_warning(AS_AS, "stacktrace: frame %d: %s", i, strings[i]); \
+		} \
+		free(strings); \
 	} \
-	free(strings); \
+	else { \
+		cf_warning(AS_AS, "stacktrace: found no symbols"); \
+	} \
 } while (0);
 
 // The "regular" versions.

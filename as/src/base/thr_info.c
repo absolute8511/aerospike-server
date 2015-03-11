@@ -1593,6 +1593,60 @@ info_command_jem_stats(char *name, char *params, cf_dyn_buf *db)
 }
 
 int
+info_command_double_free(char *name, char *params, cf_dyn_buf *db)
+{
+	cf_debug(AS_INFO, "df command received: params %s", params);
+
+#ifdef USE_DF_DETECT
+	/*
+	 *  Purpose:         Do an intentional double "free()" to test Double "free()" Detection.
+	 *
+	 *  Command Format:  "df:"
+	 *
+	 *  This command operates in a 3-cycle to trigger a double "free()" condition:
+	 *
+	 *  - Executing this command the first time will dynamically allocate a small block of memory.
+	 *
+	 *  - Executing this command the second time will free the block.
+	 *
+	 *  - Executing it a third time will actually perform the double "free()" and should trigger
+	 *       the double "free()" detector, which will log an informative warning message.
+	 *
+	 *  - Executing it thereafter will repeat the 3-cycle, albeit using a different pseudo-random block size.
+	 *
+	 *  ***Warning***:  This command is provided *only* for testing abnormal situations.
+	 *                  Do not use it unless you are prepared for the potential consequences!
+	 */
+
+	static size_t block_sz = 1024, incr = 255, max = 2048;
+	static char *ptr = 0;
+	static int ctr = 0;
+
+	if (!ptr) {
+		cf_dyn_buf_append_string(db, "calling cf_""malloc(");
+		cf_dyn_buf_append_int(db, block_sz);
+		cf_dyn_buf_append_string(db, ")");
+		ptr = cf_malloc(block_sz);
+	} else {
+		cf_dyn_buf_append_string(db, "calling cf_""free(0x");
+		cf_dyn_buf_append_uint64_x(db, (uint64_t) ptr);
+		cf_dyn_buf_append_string(db, ")");
+		cf_free(ptr);
+		if (ctr++) {
+			ctr = 0;
+			ptr = 0;
+			block_sz = (block_sz + incr) % max;
+		}
+	}
+#else
+	cf_warning(AS_INFO, "Double \"free()\" Detection support is not compiled into build ~~ rebuild with \"USE_DF_DETECT=1\" to use");
+	cf_dyn_buf_append_string(db, "error");
+#endif
+
+	return 0;
+}
+
+int
 info_command_asm(char *name, char *params, cf_dyn_buf *db)
 {
 	cf_debug(AS_INFO, "asm command received: params %s", params);
@@ -6920,7 +6974,7 @@ as_info_init()
 	}
 
 	// All commands accepted by asinfo/telnet
-	as_info_set("help", "alloc-info;asm;build;bins;config-get;config-set;digests;"
+	as_info_set("help", "alloc-info;asm;build;bins;config-get;config-set;df;digests;"
 				"dump-fabric;dump-hb;dump-migrates;dump-msgs;dump-paxos;dump-smd;"
 				"dump-wb;dump-wb-summary;dump-wr;dun;get-config;get-sl;hist-dump;"
 				"hist-track-start;hist-track-stop;jem-stats;jobs;latency;log;log-set;"
@@ -6974,6 +7028,7 @@ as_info_init()
 	as_info_set_command("asm", info_command_asm, PERM_SERVICE_CTRL);                          // Control the operation of the ASMalloc library.
 	as_info_set_command("config-get", info_command_config_get, PERM_NONE);                    // Returns running config for specified context.
 	as_info_set_command("config-set", info_command_config_set, PERM_SET_CONFIG);              // Set a configuration parameter at run time, configuration parameter must be dynamic.
+	as_info_set_command("df", info_command_double_free, PERM_SERVICE_CTRL);                   // Do an intentional double "free()" to test Double "free()" Detection.
 	as_info_set_command("dump-fabric", info_command_dump_fabric, PERM_LOGGING_CTRL);          // Print debug information about fabric to the log file.
 	as_info_set_command("dump-hb", info_command_dump_hb, PERM_LOGGING_CTRL);                  // Print debug information about heartbeat state to the log file.
 	as_info_set_command("dump-migrates", info_command_dump_migrates, PERM_LOGGING_CTRL);      // Print debug information about migration.
