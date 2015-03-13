@@ -1188,8 +1188,9 @@ typedef struct tscan_aggr_tr_udata {
 } tscan_aggr_tr_udata_t;
 
 void
-tscan_aggr_tree_reduce_fn(as_index *r, void *udata)
+tscan_aggr_tree_reduce_fn(as_index_ref *r_ref, void *udata)
 {
+	as_index *r = r_ref->r;
 	tscan_aggr_tr_udata_t * d_ptr = (tscan_aggr_tr_udata_t *)(udata);
 	// If this is a valid set, check against the set of the record.
 	if (d_ptr->task->set_id != INVALID_SET_ID) {
@@ -1201,10 +1202,12 @@ tscan_aggr_tree_reduce_fn(as_index *r, void *udata)
 				cf_atomic64_decr(&d_ptr->task->si->stats.recs_pending);
 			}
 			cf_atomic_int_incr(&(d_ptr->task->pjob->n_obj_set_diff));
+			as_record_done(r_ref, d_ptr->task->ns);
 			return;
 		}
 	}
 	tscan_add_digest_list (d_ptr->recl, &(r->key), NULL);
+	as_record_done(r_ref, d_ptr->task->ns);
 }
 
 
@@ -1931,7 +1934,7 @@ tscan_partition_thr(void *q_to_wait_on)
 					.task = &u 
 				};
 
-				as_index_reduce_sync(rsv.tree, tscan_aggr_tree_reduce_fn, (void *)&tree_reduce_udata);
+				as_index_reduce(rsv.tree, tscan_aggr_tree_reduce_fn, (void *)&tree_reduce_udata);
 
 				as_result   *res    = as_result_new();
 				int ret             = as_aggr__process(u.aggr_call, recl, &u, res);
