@@ -312,7 +312,9 @@ cf_buf_builder_reserve(	cf_buf_builder **bb_r, int sz, uint8_t **buf)
 {
 	BB_RESERVE(sz);
 	cf_buf_builder *bb = *bb_r;
-	*buf = &bb->buf[bb->used_sz];
+    if (buf) {
+		*buf = &bb->buf[bb->used_sz];
+	}
 	bb->used_sz += sz;
 	return( 0 );
 }

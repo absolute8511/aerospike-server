@@ -49,9 +49,9 @@ int ai_btree_create(as_sindex_metadata *imd, int simatch, int *bimatch, int nprt
 
 int ai_btree_destroy(as_sindex_metadata *imd);
 
-int ai_btree_put(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, as_sindex_key *key, void *value);
+int ai_btree_put(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, void *key, cf_digest *value);
 
-int ai_btree_delete(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, as_sindex_key *key, void *val);
+int ai_btree_delete(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, void *key, cf_digest *val);
 
 int ai_btree_query(as_sindex_metadata *imd, as_sindex_range *range, as_sindex_qctx *qctx);
 
@@ -87,7 +87,9 @@ int ai_btree_build_defrag_list(as_sindex_metadata *imd, as_sindex_pmetadata *pim
 
 bool ai_btree_defrag_list(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, cf_ll *apk2d, ulong n2del, ulong *deleted);
 
-int ai_btree_key_hash(as_sindex_metadata *imd, as_sindex_bin *sbin);
+int ai_btree_key_hash_from_sbin(as_sindex_metadata *imd, as_sindex_bin_data *sbin);
+
+int ai_btree_key_hash(as_sindex_metadata *imd, void *skey);
 
 int ai_post_index_creation_setup_pmetadata(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, int simatch, int idx);
 

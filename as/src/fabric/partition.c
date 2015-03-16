@@ -1232,9 +1232,10 @@ as_partition_reserve_qnode(as_namespace *ns, as_partition_id pid, as_partition_r
 
 	bool is_qnode  = false;
 	if (p->qnode) {
-		n = p->qnode;
+		n = p->qnode; //	    is_qnode = (n == self);
 	} else {
 		// is_read is always true in case of queries
+		// TODO this is not needed
 		n = find_sync_copy(ns, pid, p, true);
 	}
 	is_qnode = (n == self);
@@ -1258,6 +1259,57 @@ as_partition_reserve_qnode(as_namespace *ns, as_partition_id pid, as_partition_r
 	return ret;
 }
 
+void
+as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_partition_reservation rsv[])
+{
+	/*
+	 * Iterate through all the partitions
+	 * If the node is qnode for the partition 
+	 * 		set the pid index in is_partition_qnode as true
+	 * 		reserve the parition suing rsv of index pid.
+	 * Else 
+	 * 		Set the pid index in is_partition_qnode as false
+	 */
+	as_partition * p = NULL;
+
+	// Iterate through all the partitions in the namespace
+	for (int i=0; i<AS_PARTITIONS; i++) {
+		p = &ns->partitions[i];
+		cf_node self = g_config.self_node;
+
+		if (0 != pthread_mutex_lock(&p->lock))
+			cf_crash(AS_PARTITION, "couldn't acquire partition state lock: %s", cf_strerror(errno));
+
+		bool is_qnode  = false;
+		if (p->qnode) {
+			is_qnode = (p->qnode == self);
+		}
+
+		// If the node is qnode for the partition
+		if (is_qnode) {
+			// Set the pid index in is_parition_qnode as true.
+			// Reserve the partition.
+			
+			AS_PARTITION_RESERVATION_INIT(rsv[i]);
+			as_partition_reserve_lockfree(ns, i, &rsv[i]);
+			is_partition_qnode[i] = true;
+	
+			// Theoretically, any partition which is qnode whould either belong to sync or 
+			// zombie state. Its better to know if some other state is becoming qnode.
+			if (AS_PARTITION_STATE_SYNC != p->state && AS_PARTITION_STATE_ZOMBIE != p->state) {
+				cf_warning(AS_PARTITION, "Not expected - Partition is qnode and partition %d is in %d state", i, p->state);
+			}
+			cf_atomic_int_incr(&g_config.dup_tree_count);
+		}
+		else {
+			is_partition_qnode[i] = false;
+		}
+
+		if (0 != pthread_mutex_unlock(&p->lock))
+			cf_crash(AS_PARTITION, "couldn't unlock partition state lock: %s", cf_strerror(errno));
+
+	}
+}
 /* as_partition_reserve_write
  * Obtain a write reservation on a partition, or get the address of a
  * node who can.
@@ -2427,6 +2479,18 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns, as_partition_id pi
 						cf_debug(AS_PARTITION, "{%s:%d} source node %"PRIx64" not found in migration rx state", ns->name, pid, source_node);
 						break; // out of switch
 					}
+					// Mark master as query node when migration from the
+					// query node to master is finished. mark this node
+					// to reject writes
+					// Position of this logic is crucial.
+					if (source_node == p->qnode) {
+						cf_debug(AS_PARTITION, "[%s:%d] Marking %"PRIx64" as qnode from %"PRIx64"", ns->name, p->partition_id, g_config.self_node, p->qnode);
+						if (g_config.self_node != p->replica[0]) {
+							cf_warning(AS_PARTITION, "[%s:%d] state corruption self %"PRIx64" should be master %"PRIx64"",
+									ns->name, p->partition_id, g_config.self_node, p->replica[0]);
+						}
+						p->qnode = g_config.self_node;
+					}
 
 					if (p->pending_migrate_rx > 0) {
 						cf_debug(AS_PARTITION, "{%s:%d} Received migrate from node %"PRIx64". Waiting for more", ns->name, pid);
@@ -2443,16 +2507,6 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns, as_partition_id pi
 							partition_migrate_record_fill(&r, &p->replica[i], 1, ns, pid, AS_MIGRATE_TYPE_MERGE, as_partition_migrate_tx, (void *)false);
 							cf_queue_push(mq, &r);
 						}
-					}
-					// Mark master as query node when migration from the
-					// query node to master is finished. mark this node
-					// to reject writes
-					if (source_node == p->qnode) {
-						cf_debug(AS_PARTITION, "[%s:%d] Marking %"PRIx64" as qnode from %"PRIx64"", ns->name, p->partition_id, g_config.self_node, p->qnode);
-						if (g_config.self_node != p->replica[0])
-							cf_warning(AS_PARTITION, "[%s:%d] state corruption self %"PRIx64" should be master %"PRIx64"",
-									   ns->name, p->partition_id, g_config.self_node, p->replica[0]);
-						p->qnode = g_config.self_node;
 					}
 			}
 
@@ -3403,35 +3457,34 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 			uint64_t max_ptnsz    = 0;
 			p->qnode              = p->replica[0];
 
+			/*
+			 * QNODE CALCULATION - 
+			 * Iterate in the succession list from 0 to cluster size
+			 * 		Pick the first node with max partition size
+			 * 		Make it qnode.
+			 * 	
+			 * For non-qnode and non-master make qnode as master
+			 *
+			 * Order of preference
+			 * Largest Size
+			 * 		-- Master
+			 * 		-- Replica
+			 * 		-- Duplicate / Non-Replica [ZOMBIE]
+			 */
+			
 			for (int k = 0; k < cluster_size; k++) {
 				size_t n_index = HV_SLINDEX(j, k); // pick up the node offset
 				cf_node cur_node = HV(j, k);       // pick up the nodes
 				cf_debug(AS_PARTITION, "Node %d, has size %ld", k, paxos->c_partition_size[i][n_index][k]);
 
-				// Order of preference
-				// Largest Size
-				// -- Master
-				// -- Replica
-				// -- Duplicate / Non-Replica [ZOMBIE]
-
-				if (max_ptnsz < paxos->c_partition_size[i][n_index][j]) {
-					// If size if greater pick the duplicate node
-					if (cf_contains64(dupl_nodes, n_dupl, cur_node)) {
-						max_ptnsz = paxos->c_partition_size[i][n_index][j];
-						p->qnode = cur_node;
-						cf_debug(AS_PARTITION, "Picked for pid %d from dupl list size %ld node %ld", p->partition_id,
-								 max_ptnsz, k);
-					}
-
-					// over ride it with replica
-					int my_index = find_in_replica_list(p, cur_node);
-					bool is_master_or_replica = (0 <= my_index) && (my_index < p->p_repl_factor);
-					if (is_master_or_replica) {
-						max_ptnsz = paxos->c_partition_size[i][n_index][j];
-						p->qnode = cur_node;
-						cf_debug(AS_PARTITION, "Picked for pid %d from replica list size %ld %ld", p->partition_id,
-								 max_ptnsz, k);
-					}
+				// Since we are iterating in the succession list, 
+				// equal partition size in different nodes will be taken care.
+				// Order of preferance will be maintained.
+				if (max_ptnsz < paxos->c_partition_size[i][n_index][j]) {	
+					p->qnode = cur_node;
+					max_ptnsz = paxos->c_partition_size[i][n_index][j];
+					cf_debug(AS_PARTITION, "Picked for pid %d size %ld node %"PRIx64" index in succession list %d", 
+								p->partition_id, max_ptnsz, cur_node, k);
 				}
 			}
 
@@ -3732,7 +3785,7 @@ as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxo
 
 		for (int j = 0; j < AS_PARTITIONS; j++) {
 			as_partition *p = &ns->partitions[j];
-			cf_debug(AS_PARTITION, "QNODE FOR PID=%"PRIx64"", p->qnode);
+			cf_debug(AS_PARTITION, "QNODE FOR PID %d =%"PRIx64"", j, p->qnode);
 		}
 
 		cf_atomic_int_incr(&g_config.partition_generation);

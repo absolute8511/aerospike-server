@@ -118,20 +118,21 @@ udf_aerospike_delbin(udf_record * urecord, const char * bname)
 		return -1;
 	}
 
-	SINDEX_BINS_SETUP(delbin, 1);
-	int sindex_ret = AS_SINDEX_OK;
-
+	SINDEX_BINS_SETUP(sbins, rd->ns->sindex_cnt);
+	int sindex_found  = 0;
 	bool has_sindex = as_sindex_ns_has_sindex(rd->ns);
 	if (has_sindex) {
-		sindex_ret = as_sindex_sbin_from_bin(rd->ns, as_index_get_set_name(rd->r, rd->ns), b, delbin);
+		SINDEX_GRLOCK();
+		sindex_found += as_sindex_sbins_from_bin(rd->ns, as_index_get_set_name(rd->r, rd->ns), b, sbins, AS_SINDEX_OP_DELETE);
+		SINDEX_GUNLOCK();
 	}
 
 	int32_t i = as_bin_get_index(rd, (byte *)bname, blen);
 	if (i != -1) {
 		if (has_sindex) {
-			tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
-			if (AS_SINDEX_OK ==  sindex_ret) {
-				as_sindex_delete_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), 1, delbin, rd);
+			if (sindex_found > 0) {	
+				tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
+				as_sindex_update_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), sbins, sindex_found, &rd->keyd);
 				//TODO: Check the error code returned through sindex_ret. (like out of sync )
 			}
 		}
@@ -140,8 +141,8 @@ udf_aerospike_delbin(udf_record * urecord, const char * bname)
 		cf_warning(AS_UDF, "udf_aerospike_delbin: Internal Error [Deleting non-existing bin %s]... Fail", bname);
 	}
 
-	if (has_sindex) {
-		as_sindex_sbin_freeall(delbin, 1);
+	if (has_sindex && sindex_found > 0) {
+		as_sindex_sbin_freeall(sbins, sindex_found);
 	}
 
 	return 0;
@@ -281,6 +282,12 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 	as_transaction *tr      = urecord->tr;
 	as_index_ref  * index   = urecord->r_ref;
 
+	SINDEX_BINS_SETUP(sbins, 2 * rd->ns->sindex_cnt);
+	int sindex_found = 0;
+	bool has_sindex          = as_sindex_ns_has_sindex(rd->ns);
+	if (has_sindex) {
+		SINDEX_GRLOCK();
+	}
 	as_bin * b = as_bin_get(rd, (byte *)bname, blen);
 
 	if ( !b && (blen > (AS_ID_BIN_SZ - 1 )
@@ -298,20 +305,14 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 			return -1;
 		}
 	}
-
-	SINDEX_BINS_SETUP(oldbin, 1);
-	SINDEX_BINS_SETUP(newbin, 1);
-	bool needs_sindex_delete = false;
-	bool needs_sindex_put    = false;
-	bool needs_sindex_update = false;
-	bool has_sindex          = as_sindex_ns_has_sindex(rd->ns);
-
-	if (has_sindex
-			&& (as_sindex_sbin_from_bin(rd->ns,
-					as_index_get_set_name(rd->r, rd->ns),
-					b, oldbin) == AS_SINDEX_OK)) {
-		needs_sindex_delete = true;
+	else {
+		if (has_sindex ) {
+			sindex_found += as_sindex_sbins_from_bin(rd->ns, as_index_get_set_name(rd->r, rd->ns), 
+								b, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+		}
 	}
+
+	
 
 	// we know we are doing an update now, make sure there is particle data,
 	// set to be 1 wblock size now @TODO!
@@ -473,43 +474,24 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 
 	// If something fail bailout
 	if (ret) {
-		as_sindex_sbin_freeall(oldbin, 1);
-		as_sindex_sbin_freeall(newbin, 1);
+		if (sindex_found > 0) {
+			as_sindex_sbin_freeall(sbins, sindex_found);
+		}
 		return ret;
 	}
-
+	
 	// Update sindex if required
 	if (has_sindex) {
-		if (as_sindex_sbin_from_bin(rd->ns,
-				as_index_get_set_name(rd->r, rd->ns), b, newbin) == AS_SINDEX_OK) {
-			if (!as_sindex_sbin_match(newbin, oldbin)) {
-				needs_sindex_put    = true;
-			} else {
-				needs_sindex_update = true;
-			}
-		}
-
-		if (needs_sindex_update) {
+		sindex_found += as_sindex_sbins_from_bin(rd->ns, as_index_get_set_name(rd->r, rd->ns),
+								b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+		SINDEX_GUNLOCK();
+		if (sindex_found > 0) {
 			tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
-			as_sindex_delete_by_sbin(rd->ns,
-					as_index_get_set_name(rd->r, rd->ns), 1, oldbin, rd);
-			as_sindex_put_by_sbin(rd->ns,
-					as_index_get_set_name(rd->r, rd->ns), 1, newbin, rd);
-		} else {
-			if (needs_sindex_delete) {
-				tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
-				as_sindex_delete_by_sbin(rd->ns,
-					as_index_get_set_name(rd->r, rd->ns), 1, oldbin, rd);
-			}
-			if (needs_sindex_put) {
-				tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
-				as_sindex_put_by_sbin(rd->ns,
-					as_index_get_set_name(rd->r, rd->ns), 1, newbin, rd);
-			}
+			as_sindex_update_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), sbins, sindex_found, &rd->keyd);	
+			as_sindex_sbin_freeall(sbins, sindex_found);
 		}
-		as_sindex_sbin_freeall(oldbin, 1);
-		as_sindex_sbin_freeall(newbin, 1);
 	}
+
 	return ret;
 } // end udf_aerospike_setbin()
 
@@ -1108,7 +1090,7 @@ udf_aerospike_rec_remove(const as_aerospike * as, const as_rec * rec)
 
 	// Close the storage record associates with this UDF record
 	// do not release the reservation yet !!
-	udf_record_close(urecord, false);
+	udf_record_close(urecord);
 	return 0;
 }
 

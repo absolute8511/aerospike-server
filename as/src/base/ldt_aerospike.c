@@ -713,7 +713,7 @@ ldt_aerospike_crec_close(const as_aerospike * as, const as_rec *crec_p)
 		cf_detail(AS_LDT, "Cannot close record with update ... it needs group commit");
 		return -2;
 	}
-	udf_record_close(c_urecord, false);
+	udf_record_close(c_urecord);
 	udf_record_cache_free(c_urecord);
 	ldt_slot_destroy(lslotp, lrecord);
 	c_urecord->flag &= ~UDF_RECORD_FLAG_ISVALID;

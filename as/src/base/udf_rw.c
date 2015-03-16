@@ -747,7 +747,7 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 		set_id = as_index_get_set_id(r_ref->r);
 	}
 	// Close the record for all the cases
-	udf_record_close(urecord, false);
+	udf_record_close(urecord);
 
 	// Write to XDR pipe after closing the record, in order to release the record lock as
 	// early as possible.
@@ -1163,7 +1163,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		// If both the record and the message have keys, check them.
 		if (rd.key) {
 			if (msg_has_key(m) && ! check_msg_key(m, &rd)) {
-				udf_record_close(&urecord, false);
+				udf_record_close(&urecord);
 				call->transaction->result_code = AS_PROTO_RESULT_FAIL_KEY_MISMATCH;
 				// Necessary to complete transaction, but error string would be
 				// ignored by client, so don't bother sending one.
@@ -1250,7 +1250,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		}
 
 	} else {
-		udf_record_close(&urecord, false);
+		udf_record_close(&urecord);
 		char *rs = as_module_err_string(ret_value);
 		call->transaction->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
 		send_response(call, "FAILURE", 7, AS_PARTICLE_TYPE_STRING, rs, strlen(rs));

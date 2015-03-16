@@ -1172,3 +1172,125 @@ as_msg_send_fin(int fd, uint32_t result_code)
 
 	return as_msg_send_response(fd, (uint8_t*) &m, sizeof(m), MSG_NOSIGNAL);
 }
+
+#define AS_NETIO_MAX_IO_RETRY         5
+static pthread_t      g_netio_th;
+static cf_queue     * g_netio_queue      = 0;
+static cf_queue     * g_netio_slow_queue = 0;
+void                * as_query__netio_th(void *q_to_wait_on);
+
+int
+as_query__send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offset, bool blocking)
+{
+	uint32_t len  = bb_r->used_sz;
+	uint8_t *buf  = bb_r->buf;
+
+	as_proto proto;
+	proto.version = PROTO_VERSION;
+	proto.type    = PROTO_TYPE_AS_MSG;
+	proto.sz      = len - 8;
+	as_proto_swap(&proto);
+
+    memcpy(bb_r->buf, &proto, 8); 
+
+	uint32_t pos = *offset;
+	int rv;
+	int retry = 0;
+	cf_detail(AS_PROTO," Start At %p %d %d", buf, pos, len);
+	while (pos < len) {
+		rv = send(fd_h->fd, buf + pos, len - pos, MSG_NOSIGNAL );
+		if (rv <= 0) {
+			if (errno != EAGAIN) {
+				cf_warning(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
+				shutdown(fd_h->fd, SHUT_RDWR);
+				return AS_NETIO_ERR;
+			}
+			if (!blocking && (retry > AS_NETIO_MAX_IO_RETRY)) {
+				*offset = pos;
+				cf_detail(AS_PROTO," End At %p %d %d", buf, pos, len);
+				return AS_NETIO_CONTINUE;
+			}
+			retry++;
+			// bigger packets so try few extra times 
+			usleep(100);
+		}
+		else {
+			pos += rv;
+		}
+	}
+	return AS_NETIO_OK;
+}
+
+void *
+as_netio_th(void *q_to_wait_on) {
+	cf_queue *           q = (cf_queue*)q_to_wait_on;
+	while (true) {
+		as_netio io;
+		if (cf_queue_pop(q, &io, CF_QUEUE_FOREVER) != 0) {
+			cf_crash(AS_PROTO, "Failed to pop from IO worker queue.");
+		}
+		if (io.slow) {
+			usleep(g_config.proto_slow_netio_sleep_ms * 1000);
+		}
+		if (as_netio_send(&io, g_netio_slow_queue, false) != AS_NETIO_CONTINUE) {
+			AS_RELEASE_FILE_HANDLE(io.fd_h);
+			cf_buf_builder_free(io.bb_r);
+		};
+	}
+}
+
+void 
+as_netio_init()
+{
+	g_netio_queue = cf_queue_create(sizeof(as_netio), true);
+	if (!g_netio_queue)
+		cf_crash(AS_PROTO, "Failed to create netio queue");
+	if (pthread_create(&g_netio_th, NULL, as_netio_th, (void *)g_netio_queue))
+		cf_crash(AS_PROTO, "Failed to create netio thread");
+
+	g_netio_slow_queue = cf_queue_create(sizeof(as_netio), true);
+	if (!g_netio_queue)
+		cf_crash(AS_PROTO, "Failed to create netio queue");
+	if (pthread_create(&g_netio_th, NULL, as_netio_th, (void *)g_netio_slow_queue))
+		cf_crash(AS_PROTO, "Failed to create netio thread");
+}
+
+/*
+ * Based on io object send buffer to the network, if fails
+ * the queues it up to be picked by the asynchronous queueing
+ * thread
+ *
+ * Caller is responsible for freeing up stuff in in the io structure
+ *
+ * qtr related stuff will be taken care of when callback is called.
+ * Callback is called upfront to be able check for timeout
+ *
+ * In case of success or failure module specific callback is called
+ * returns nothing
+ */
+int
+as_netio_send(as_netio *io, void *q_to_use, bool blocking)
+{
+	cf_queue *q = (cf_queue *)q_to_use;
+	int ret = AS_NETIO_CONTINUE;	
+   
+	if (io->start_cb(io, io->seq)) { 
+		ret     = io->finish_cb(io, as_query__send_packet(io->fd_h, io->bb_r, &io->offset, blocking));
+	}
+    // If needs requeue then requeue it
+	switch(ret) {
+		case AS_NETIO_CONTINUE:
+			if (!q) {
+				cf_queue_push(g_netio_queue, io);
+			}
+			else {
+				io->slow = true;
+				cf_queue_push(q, io);
+			}
+			break;
+		default:
+            ret = AS_NETIO_OK;
+			break;
+	}
+    return ret;
+}

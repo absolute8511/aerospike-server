@@ -140,6 +140,7 @@ cfg_set_defaults()
 	c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_MANUAL; // default to the manual paxos recovery policy
 	c->paxos_retransmit_period = 5; // run paxos retransmit once every 5 seconds
 	c->proto_fd_idle_ms = 60000; // 1 minute reaping of proto file descriptors
+	c->proto_slow_netio_sleep_ms = 1; // 1 ms sleep between retry for slow queries
 	c->run_as_daemon = true; // set false only to run in debugger & see console output
 	c->scan_priority = 200; // # of rows between a quick context switch?
 	c->scan_sleep = 1; // amount of time scan thread will sleep between two context switch

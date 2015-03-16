@@ -166,7 +166,7 @@ void ai_init()
 	Num_tbls = 0;
 	Tbl_HW = ntbl;
 
-	if (SHASH_OK != shash_create(&TblD, as_sindex__dict_hash_fn, AS_ID_NAMESPACE_SZ + AS_SET_NAME_MAX_SIZE + 1,
+	if (SHASH_OK != shash_create(&TblD, as_sindex__dict_hash_fn, TBLD_HASH_KEY_SIZE,
 								 sizeof(long), AS_SINDEX_MAX, 0)) {
 		cf_crash(AS_SINDEX, "Failed to allocate tables dictionary");
 	}
@@ -185,7 +185,7 @@ void ai_init()
 	Num_indx = 0;
 	Ind_HW = nindx;
 
-	if (SHASH_OK != shash_create(&IndD, as_sindex__dict_hash_fn, AS_ID_NAMESPACE_SZ + AS_ID_INAME_SZ + 1,
+	if (SHASH_OK != shash_create(&IndD, as_sindex__dict_hash_fn, TBLD_HASH_KEY_SIZE,
 								 sizeof(long), AS_SINDEX_MAX, 0)) {
 		cf_crash(AS_SINDEX, "Failed to allocate tables dictionary");
 	}
@@ -234,8 +234,8 @@ static void emptyIndex(int imatch, bool is_part)
 	}
 	r_tbl_t *rt = &Tbl[ri->tmatch];
 
-	char tmp_name[AS_ID_NAMESPACE_SZ + AS_ID_INAME_SZ + 1];
-	memset(tmp_name, 0, AS_ID_NAMESPACE_SZ + AS_ID_INAME_SZ + 1);
+	char tmp_name[TBLD_HASH_KEY_SIZE];
+	memset(tmp_name, 0, TBLD_HASH_KEY_SIZE);
 	memcpy(tmp_name, ri->name, strlen(ri->name));
 
 	if(SHASH_OK != shash_delete(IndD, tmp_name) ) {
@@ -363,8 +363,8 @@ static int newIndex(char *iname, int tmatch, icol_t *ic, uchar cnstr, uchar dtyp
 		rt->col[ri->icol->cmatch].imatch = imatch;
 		ci_t *ci;
 		// Put the cname into col dict
-		char tmp_cname[AS_ID_BIN_SZ + 10 + 1];
-		memset(tmp_cname, 0, AS_ID_BIN_SZ + 10 + 1);
+		char tmp_cname[CDICT_HASH_KEY_SIZE];
+		memset(tmp_cname, 0, CDICT_HASH_KEY_SIZE);
 		memcpy(tmp_cname, rt->col[ri->icol->cmatch].name, strlen(rt->col[ri->icol->cmatch].name));
 		if(SHASH_OK != shash_get(rt->cdict, tmp_cname, (void**)&ci)) {
 			cf_warning(AS_SINDEX, "shash get failed on %s", rt->col[ri->icol->cmatch].name);
@@ -393,8 +393,8 @@ static int newIndex(char *iname, int tmatch, icol_t *ic, uchar cnstr, uchar dtyp
 	ri->btr = createIndexBT(ri->dtype, imatch);
 
 	// Put the iname into index dict
-	char tmp_name[AS_ID_NAMESPACE_SZ + AS_ID_INAME_SZ + 1];
-	memset(tmp_name, 0, AS_ID_NAMESPACE_SZ + AS_ID_INAME_SZ + 1);
+	char tmp_name[TBLD_HASH_KEY_SIZE];
+	memset(tmp_name, 0, TBLD_HASH_KEY_SIZE);
 	memcpy(tmp_name, ri->name, strlen(ri->name));
 	long tmp_imatch = imatch + 1;
 	if (SHASH_OK != shash_put_unique(IndD, tmp_name, (void*) & (tmp_imatch))) {
@@ -447,7 +447,7 @@ static int newTable(cf_ll *ctypes, cf_ll *cnames, int ccount, char *tname)
 	// NUMERIC - 8 characters
 	// STRING  - 7 characters (we will assume max characters used by bin type to be 10 )
 	// key - bin_name.bin_type (AS_ID_BIN_SZ)
-	if (SHASH_OK != shash_create(&rt->cdict, as_sindex__dict_hash_fn, AS_ID_BIN_SZ + 10 + 1,
+	if (SHASH_OK != shash_create(&rt->cdict, as_sindex__dict_hash_fn, CDICT_HASH_KEY_SIZE,
 								 sizeof(ci_t *), AS_SINDEX_MAX, 0)) {
 		cf_crash(AS_SINDEX, "Failed to allocate tables dictionary");
 	}
@@ -460,8 +460,9 @@ static int newTable(cf_ll *ctypes, cf_ll *cnames, int ccount, char *tname)
 		ci->cmatch = i;
 
 		// Put the cname into col dict
-		char tmp_cname[AS_ID_BIN_SZ + 10 + 1];
-		memset(tmp_cname, 0, AS_ID_BIN_SZ + 10 + 1);
+		
+		char tmp_cname[CDICT_HASH_KEY_SIZE];
+		memset(tmp_cname, 0, CDICT_HASH_KEY_SIZE);
 		memcpy(tmp_cname, cname, strlen(cname));
 		if (SHASH_OK != shash_put_unique(rt->cdict, tmp_cname, (void**)&ci)) {
 			cf_warning(AS_SINDEX, "shash put unique failed for columne table. key - %s", cname);
@@ -474,8 +475,8 @@ static int newTable(cf_ll *ctypes, cf_ll *cnames, int ccount, char *tname)
 	rt->btr = createDBT(rt->col[0].type, tmatch);
 
 	// Put the tname into table dict
-	char tmp_tname[AS_ID_NAMESPACE_SZ + AS_SET_NAME_MAX_SIZE + 1];
-	memset(tmp_tname, 0, AS_ID_NAMESPACE_SZ + AS_SET_NAME_MAX_SIZE + 1);
+	char tmp_tname[TBLD_HASH_KEY_SIZE];
+	memset(tmp_tname, 0, TBLD_HASH_KEY_SIZE);
 	memcpy(tmp_tname, rt->name, strlen(rt->name));
 	long tmp_tmatch = tmatch + 1;
 	if (SHASH_OK != shash_put_unique(TblD, tmp_tname, (void*) & (tmp_tmatch))) {
@@ -636,8 +637,8 @@ int ai_add_column(char *tname, char *cname, int col_type)
 	ci->cmatch = new_col_count - 1;
 
 	// Put the cname into col dict
-	char tmp_cname[AS_ID_BIN_SZ + 10 + 1];
-	memset(tmp_cname, 0, AS_ID_BIN_SZ + 10 + 1);
+	char tmp_cname[CDICT_HASH_KEY_SIZE];
+	memset(tmp_cname, 0, CDICT_HASH_KEY_SIZE);
 	memcpy(tmp_cname, cname, strlen(cname));
 	if (SHASH_OK != shash_put_unique(rt->cdict, tmp_cname, (void**)&ci)) {
 		cf_warning(AS_SINDEX, "shash put unique failed for coumn table. key - %s", cname);
@@ -676,8 +677,9 @@ int ai_drop_column(char *tname, char *cname)
 	cf_free(rt->col);
 	rt->col = tcol;
 	rt->col_count = new_col_count;
-	char tmp_cname[AS_ID_BIN_SZ + 10 + 1];
-	memset(tmp_cname, 0, AS_ID_BIN_SZ + 10 + 1);
+
+	char tmp_cname[CDICT_HASH_KEY_SIZE];	
+	memset(tmp_cname, 0, CDICT_HASH_KEY_SIZE);
 	memcpy(tmp_cname, cname, strlen(cname));
 	if(SHASH_OK != shash_delete(rt->cdict, tmp_cname) ) {
 		cf_warning(AS_SINDEX, "Deletion from Aerospike Column Table failed. %s", cname);
@@ -709,8 +711,8 @@ int ai_drop_table(char *tname)
 		}
 	}
 
-	char tmp_tname[AS_ID_NAMESPACE_SZ + AS_SET_NAME_MAX_SIZE + 1];
-	memset(tmp_tname, 0, AS_ID_NAMESPACE_SZ + AS_SET_NAME_MAX_SIZE + 1);
+	char tmp_tname[TBLD_HASH_KEY_SIZE];
+	memset(tmp_tname, 0, TBLD_HASH_KEY_SIZE);
 	memcpy(tmp_tname, rt->name, strlen(rt->name));
 	if(SHASH_OK != shash_delete(TblD, tmp_tname) ) {
 		cf_warning(AS_SINDEX, "Deletion from Aerospike Table failed. %s", rt->name);

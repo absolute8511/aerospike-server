@@ -116,6 +116,7 @@ struct as_file_handle_s;
 #define AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL   211
 #define AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT     212
 #define AS_PROTO_RESULT_FAIL_QUERY_CBERROR     213
+#define AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR   214
 
 
 /* SYNOPSIS
@@ -201,6 +202,7 @@ typedef struct as_msg_field_s {
 #define AS_MSG_FIELD_TYPE_INDEX_FILTER			23
 #define AS_MSG_FIELD_TYPE_INDEX_LIMIT			24
 #define AS_MSG_FIELD_TYPE_INDEX_ORDER_BY		25
+#define AS_MSG_FIELD_TYPE_INDEX_TYPE  			26
 
 // UDF RANGE: 30-39
 #define AS_MSG_FIELD_TYPE_UDF_FILENAME			30
@@ -521,3 +523,25 @@ extern uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
 extern uint8_t * as_msg_write_header(uint8_t *buf, size_t msg_sz, uint info1,
 		uint info2, uint info3, uint32_t generation, uint32_t record_ttl,
 		uint32_t transaction_ttl, uint32_t n_fields, uint32_t n_ops);
+
+// Async IO 
+typedef int (* as_netio_finish_cb) (void *udata, int retcode);
+typedef bool (* as_netio_start_cb) (void *udata, int seq);
+typedef struct as_netio_s {
+	as_netio_finish_cb         finish_cb;	
+	as_netio_start_cb          start_cb;	
+	void                     * data;
+	// fd and buffer
+	struct as_file_handle_s  * fd_h;
+	cf_buf_builder           * bb_r;
+	uint32_t                   offset;
+	uint32_t                   seq;
+	bool                       slow;
+} as_netio;
+
+void as_netio_init();
+int as_netio_send(as_netio *io, void *q, bool);
+
+#define AS_NETIO_OK        0
+#define AS_NETIO_CONTINUE  1
+#define AS_NETIO_ERR       2 

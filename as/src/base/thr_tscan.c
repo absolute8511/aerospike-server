@@ -1318,6 +1318,9 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 		if (SCAN_JOB_IS_POPULATOR(u->pjob)) {
 			if (u->si) {
 				cf_atomic64_decr(&u->si->stats.recs_pending);
+				SINDEX_GRLOCK();
+				AS_SINDEX_RESERVE(u->si);
+				SINDEX_GUNLOCK();
 				as_sindex_put_rd(u->si, &rd);
 			} else {
 				// No input si mentioned, so go ahead and populate all of the entries.

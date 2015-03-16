@@ -106,7 +106,7 @@ extern const as_rec_hooks udf_subrecord_hooks;
 extern void     udf_record_cache_free   (udf_record *);
 extern int      udf_record_open         (udf_record *);
 extern int      udf_storage_record_open (udf_record *);
-extern void     udf_record_close        (udf_record *, bool);
+extern void     udf_record_close        (udf_record *);
 extern int      udf_storage_record_close(udf_record *);
 extern void     udf_record_init         (udf_record *);
 extern void     udf_record_cleanup      (udf_record *, bool);

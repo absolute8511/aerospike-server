@@ -52,10 +52,11 @@ typedef struct as_aggr_caller_intf_s {
 } as_aggr_caller_intf;
 
 typedef struct query_record_s {
-	as_rec               * urec;
-	void                 * caller;
-	udf_record           * urecord;
-	bool                   read;
+	as_rec                   * urec;
+	void                     * caller;
+	udf_record               * urecord;
+	bool                       read;
+	as_partition_reservation * rsv;
 } query_record;
 
 typedef struct as_aggr_istream_s {
