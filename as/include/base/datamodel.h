@@ -772,6 +772,12 @@ extern void as_partition_getstates(as_partition_states *ps);
 
 extern void as_partition_getreplica_write_node(as_namespace *ns, cf_node *node_a);
 
+extern void as_partition_balance();
+extern void as_partition_balance_init();
+extern void as_partition_balance_init_multi_node_cluster();
+extern void as_partition_balance_init_single_node_cluster();
+extern bool as_partition_balance_is_init_resolved();
+
 typedef struct as_master_prole_stats_s {
 	uint64_t n_master_records;
 	uint64_t n_prole_records;

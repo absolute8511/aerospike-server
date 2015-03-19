@@ -2411,7 +2411,11 @@ info_security_config_get(cf_dyn_buf *db)
 void
 info_xdr_config_get(cf_dyn_buf *db)
 {
-	cf_dyn_buf_append_string(db, "xdr-delete-shipping-enabled=");
+	cf_dyn_buf_append_string(db, "enable-xdr=");
+	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_global_enabled ? "true" : "false");
+	cf_dyn_buf_append_string(db, ";forward-xdr-writes=");
+	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_forward_xdrwrites ? "true" : "false");
+	cf_dyn_buf_append_string(db, ";xdr-delete-shipping-enabled=");
 	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_delete_shipping_enabled ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";xdr-nsup-deletes-enabled=");
 	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_nsup_deletes_enabled ? "true" : "false");
@@ -3441,7 +3445,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 				goto Error;
 			}
 		}
-		else if (0 == as_info_parameter_get(params, "forward-xdr-writes", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "ns-forward-xdr-writes", context, &context_len)) {
 			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
 				cf_info(AS_INFO, "Changing value of sets-enable-xdr of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
 				ns->ns_forward_xdr_writes = true;
@@ -5497,6 +5501,9 @@ info_get_services_reduce_fn(void *key, void *data, void *udata)
 int
 info_get_services(char *name, cf_dyn_buf *db)
 {
+	// If this node is contacted by clients before it sees other nodes, change
+	// its initial state to that of a single-node cluster.
+	as_partition_balance_init_single_node_cluster();
 
 	shash_reduce(g_info_node_info_hash, info_get_services_reduce_fn, (void *) db);
 

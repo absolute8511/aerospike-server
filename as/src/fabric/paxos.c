@@ -79,9 +79,6 @@
 
 void as_paxos_current_init(as_paxos *p);
 
-// Defined in "partition.c":
-void as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxos *paxos);
-
 
 /* AS_PAXOS_PROTOCOL_IDENTIFIER
  * Select the appropriate message identifier for the active Paxos protocol. */
@@ -2779,7 +2776,7 @@ as_paxos_thr(void *arg)
 					/* Clean out the sync states array */
 					memset(p->partition_sync_state, 0, sizeof(p->partition_sync_state));
 
-					as_partition_balance_new(0, 0, true, p);
+					as_partition_balance();
 
 					if (p->cb) {
 						as_paxos_change c;
@@ -2949,7 +2946,7 @@ as_paxos_thr(void *arg)
 						* cluster node has had its state updated before starting partition rebalance?
 						* Currently, the answer to this question is "no."
 						*/
-						as_partition_balance_new(0, 0, true, p);
+						as_partition_balance();
 
 						if (p->cb) {
 							as_paxos_change c;
@@ -2980,7 +2977,7 @@ as_paxos_thr(void *arg)
 				 * We now need to perform migrations as a result of external
 				 * synchronizations, since nodes outside the cluster could contain data due to a cluster merge
 				 */
-				as_partition_balance_new(0, 0, true, p);
+				as_partition_balance();
 
 				if (p->cb) {
 					as_paxos_change c;
@@ -3014,10 +3011,11 @@ cleanup:
 void
 as_paxos_init()
 {
-	as_paxos *p = NULL;
+	g_config.paxos = cf_calloc(1, sizeof(as_paxos));
+	cf_assert(g_config.paxos, AS_PAXOS, CF_CRITICAL, "allocation: %s", cf_strerror(errno));
 
-	p = cf_calloc(1, sizeof(as_paxos));
-	cf_assert(p, AS_PAXOS, CF_CRITICAL, "allocation: %s", cf_strerror(errno));
+	as_paxos *p = g_config.paxos; // shortcut pointer
+
 	if (0 != pthread_mutex_init(&p->lock, NULL)) {
 		cf_crash(AS_PAXOS, "unable to init mutex: %s", cf_strerror(errno));
 	}
@@ -3047,104 +3045,90 @@ as_paxos_init()
 	/* Clean out the sync states array */
 	memset(p->partition_sync_state, 0, sizeof(p->partition_sync_state));
 
-	/* Paxos cluster ignition: start a new cohort with ourselves as the
-	 * principal.  We check if the sequence number is zero to avoid
-	 * re-ignition */
-	if (0 == p->gen.sequence) {
+	memset(p->succession, 0, sizeof(p->succession));
+	p->succession[0] = g_config.self_node;
 
-		memset(p->succession, 0, sizeof(p->succession));
-		p->succession[0] = g_config.self_node;
+	memset(p->alive, 0, sizeof(p->alive));
+	p->alive[0] = true;
 
-		memset(p->alive, 0, sizeof(p->alive));
-		p->alive[0] = true;
+	p->ready = true;
 
-		p->ready = true;
+	// Generate a non-zero cluster key.
+	uint64_t cluster_key;
 
-		/*
-		 * Generate one new key and use this as the Instance ID for all
-		 * the partitions of this newly ignited cluster. The version tree
-		 * path is set to the value "[1]"
-		 */
-		as_partition_vinfo new_vinfo;
-		memset(&new_vinfo, 0, sizeof(new_vinfo));
-		// Generate a non-zero Instance ID.
-		while (!(new_vinfo.iid = cf_get_rand64()))
-		  ;
-		new_vinfo.vtp[0] = (uint16_t)1;
+	while ((cluster_key = cf_get_rand64()) == 0) {
+		;
+	}
 
-		/*
-		 * Set the cluster key
-		 */
-		as_paxos_set_cluster_key(new_vinfo.iid);
-		as_paxos_print_cluster_key("IGNITION");
+	/*
+	 * Set the cluster key
+	 */
+	as_paxos_set_cluster_key(cluster_key);
+	as_paxos_print_cluster_key("IGNITION");
 
-		size_t successful_storage_reads = 0;
-		size_t failed_storage_reads = 0;
-		size_t n_null_storage = 0;
-		size_t n_found_storage = 0;
-		size_t n_uninit_storage = 0;
-		/* Mark all partitions in all namespaces as lost unless there is partition data in storage*/
-		for (int i = 0; i < g_config.namespaces; i++) {
-			/* Initialize every partition's iid and vtp values */
-			as_namespace *ns = g_config.namespace[i];
+	size_t successful_storage_reads = 0;
+	size_t failed_storage_reads = 0;
+	size_t n_null_storage = 0;
+	size_t n_found_storage = 0;
+	size_t n_uninit_storage = 0;
+	/* Mark all partitions in all namespaces as lost unless there is partition data in storage*/
+	for (int i = 0; i < g_config.namespaces; i++) {
+		/* Initialize every partition's iid and vtp values */
+		as_namespace *ns = g_config.namespace[i];
 
-			if (NAMESPACE_HAS_PERSISTENCE(ns)) { // skip loop if no persistent storage
-				for (int j = 0; j < AS_PARTITIONS; j++) {
-					as_partition_vinfo vinfo;
-					size_t vinfo_len = sizeof(vinfo);
+		if (NAMESPACE_HAS_PERSISTENCE(ns)) { // skip loop if no persistent storage
+			for (int j = 0; j < AS_PARTITIONS; j++) {
+				as_partition_vinfo vinfo;
+				size_t vinfo_len = sizeof(vinfo);
 
-					// Find if the value has been set in storage
-					if (0 == as_storage_info_get(ns, j, (uint8_t *)&vinfo, &vinfo_len)) {
-						successful_storage_reads++;
-						if (vinfo_len == sizeof(as_partition_vinfo)) {
-							cf_debug(AS_PAXOS, "{%s:%d} Partition version read from storage: iid %"PRIx64"", ns->name, j, vinfo.iid);
-							memcpy(&ns->partitions[j].version_info, &vinfo, sizeof(as_partition_vinfo));
-							if (is_partition_null(&vinfo))
-								n_null_storage++;
-							else {
-								cf_debug(AS_PAXOS, "{%s:%d} Partition sucessful revive from storage", ns->name, j);
-								ns->partitions[j].state = AS_PARTITION_STATE_SYNC;
-								n_found_storage++;
-							}
-						}
-						else { // treat partition as lost - common on startup
-							cf_debug(AS_PAXOS, "{%s:%d} Error getting info from storage, got len %d; partition will be treated as lost", ns->name, j, vinfo_len);
-							n_uninit_storage++;
+				// Find if the value has been set in storage
+				if (0 == as_storage_info_get(ns, j, (uint8_t *)&vinfo, &vinfo_len)) {
+					successful_storage_reads++;
+					if (vinfo_len == sizeof(as_partition_vinfo)) {
+						cf_debug(AS_PAXOS, "{%s:%d} Partition version read from storage: iid %"PRIx64"", ns->name, j, vinfo.iid);
+						memcpy(&ns->partitions[j].version_info, &vinfo, sizeof(as_partition_vinfo));
+						if (is_partition_null(&vinfo))
+							n_null_storage++;
+						else {
+							cf_debug(AS_PAXOS, "{%s:%d} Partition successful revive from storage", ns->name, j);
+							ns->partitions[j].state = AS_PARTITION_STATE_SYNC;
+							n_found_storage++;
 						}
 					}
-					else {
-						failed_storage_reads++;
+					else { // treat partition as lost - common on startup
+						cf_debug(AS_PAXOS, "{%s:%d} Error getting info from storage, got len %d; partition will be treated as lost", ns->name, j, vinfo_len);
+						n_uninit_storage++;
 					}
-				} // end for
-			} // end if
-
-			/* Allocate and initialize the global partition state structure */
-			size_t vi_sz = sizeof(as_partition_vinfo) * AS_PARTITIONS;
-			as_partition_vinfo *vi = cf_rc_alloc(vi_sz);
-			cf_assert(vi, AS_PAXOS, CF_CRITICAL, "rc_alloc: %s", cf_strerror(errno));
-			for (int j = 0; j < AS_PARTITIONS; j++)
-				memcpy(&vi[j], &ns->partitions[j].version_info, sizeof(as_partition_vinfo));
-			p->c_partition_vinfo[i][0] = vi;
-
-			/* Initialize the partition sizes array for sending in all Paxos protocol v3 or greater PARTITION_SYNC_REQUEST and PARTITION_SYNC messages. */
-			if (AS_PAXOS_PROTOCOL_IS_AT_LEAST_V(3)) {
-				for (int j = 0; j < AS_PARTITIONS; j++) {
-					p->c_partition_size[i][0][j] = ns->partitions[j].vp ? ns->partitions[j].vp->elements : 0;
-					p->c_partition_size[i][0][j] += ns->partitions[j].sub_vp ? ns->partitions[j].sub_vp->elements : 0;
 				}
+				else {
+					failed_storage_reads++;
+				}
+			} // end for
+		} // end if
+
+		/* Allocate and initialize the global partition state structure */
+		size_t vi_sz = sizeof(as_partition_vinfo) * AS_PARTITIONS;
+		as_partition_vinfo *vi = cf_rc_alloc(vi_sz);
+		cf_assert(vi, AS_PAXOS, CF_CRITICAL, "rc_alloc: %s", cf_strerror(errno));
+		for (int j = 0; j < AS_PARTITIONS; j++)
+			memcpy(&vi[j], &ns->partitions[j].version_info, sizeof(as_partition_vinfo));
+		p->c_partition_vinfo[i][0] = vi;
+
+		/* Initialize the partition sizes array for sending in all Paxos protocol v3 or greater PARTITION_SYNC_REQUEST and PARTITION_SYNC messages. */
+		if (AS_PAXOS_PROTOCOL_IS_AT_LEAST_V(3)) {
+			for (int j = 0; j < AS_PARTITIONS; j++) {
+				p->c_partition_size[i][0][j] = ns->partitions[j].vp ? ns->partitions[j].vp->elements : 0;
+				p->c_partition_size[i][0][j] += ns->partitions[j].sub_vp ? ns->partitions[j].sub_vp->elements : 0;
 			}
 		}
+	}
 
-		cf_debug(AS_PAXOS, "storage info reads: total %d successful %d failed %d", successful_storage_reads + failed_storage_reads, successful_storage_reads, failed_storage_reads);
-		cf_info(AS_PAXOS, "partitions from storage: total %d found %d lost(set) %d lost(unset) %d", n_found_storage + n_null_storage + n_uninit_storage, n_found_storage, n_null_storage, n_uninit_storage);
+	cf_debug(AS_PAXOS, "storage info reads: total %d successful %d failed %d", successful_storage_reads + failed_storage_reads, successful_storage_reads, failed_storage_reads);
+	cf_info(AS_PAXOS, "partitions from storage: total %d found %d lost(set) %d lost(unset) %d", n_found_storage + n_null_storage + n_uninit_storage, n_found_storage, n_null_storage, n_uninit_storage);
 
-		as_partition_balance_new(p->succession, p->alive, false, p);
+	as_partition_balance_init();
 
-		cf_info(AS_PAXOS, "Paxos service ignited: %"PRIx64, p->succession[0]);
-	} else
-		cf_info(AS_PAXOS, "Paxos ignited: %"PRIx64, g_config.self_node);
-
-	g_config.paxos = p;
+	cf_info(AS_PAXOS, "Paxos service ignited: %"PRIx64, p->succession[0]);
 }
 
 /*

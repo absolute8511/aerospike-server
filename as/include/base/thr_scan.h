@@ -120,6 +120,7 @@ typedef struct {
 	cf_vector *         binlist;
 	udf_call *          call;                       // read copy @TODO should be ref counted
 	as_aggr_call *      aggr_call;                  // read copy @TODO should be ref counted
+	bool *				aborted;
 } tscan_task_data;
 
 /* Function declarations */

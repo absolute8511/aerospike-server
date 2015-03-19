@@ -416,6 +416,27 @@ process_transaction(as_transaction *tr)
 		goto Cleanup;
 	}
 
+	if (! as_partition_balance_is_init_resolved() &&
+			(tr->flag & AS_TRANSACTION_FLAG_NSUP_DELETE) == 0) {
+		if (tr->preprocessed) {
+			// It's very possible proxy transactions get here.
+	        cf_debug(AS_TSVC, "rejecting fabric transaction - initial partition balance unresolved");
+		}
+		else {
+	        cf_warning(AS_TSVC, "rejecting client transaction - initial partition balance unresolved");
+		}
+
+		if (tr->proto_fd_h) {
+			as_msg_send_reply(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_UNAVAILABLE,
+								0, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
+			tr->proto_fd_h = 0;
+			MICROBENCHMARK_HIST_INSERT_P(error_hist);
+			cf_atomic_int_incr(&g_config.err_tsvc_requests);
+		}
+
+		goto Cleanup;
+	}
+
 	// First, check that the socket is authenticated.
 	if (tr->proto_fd_h) {
 		uint8_t result = as_security_check(tr->proto_fd_h, PERM_NONE);
