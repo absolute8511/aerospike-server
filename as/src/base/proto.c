@@ -1175,6 +1175,7 @@ as_msg_send_fin(int fd, uint32_t result_code)
 
 #define AS_NETIO_MAX_IO_RETRY         5
 static pthread_t      g_netio_th;
+static pthread_t      g_netio_slow_th;
 static cf_queue     * g_netio_queue      = 0;
 static cf_queue     * g_netio_slow_queue = 0;
 void                * as_query__netio_th(void *q_to_wait_on);
@@ -1249,10 +1250,10 @@ as_netio_init()
 		cf_crash(AS_PROTO, "Failed to create netio thread");
 
 	g_netio_slow_queue = cf_queue_create(sizeof(as_netio), true);
-	if (!g_netio_queue)
-		cf_crash(AS_PROTO, "Failed to create netio queue");
-	if (pthread_create(&g_netio_th, NULL, as_netio_th, (void *)g_netio_slow_queue))
-		cf_crash(AS_PROTO, "Failed to create netio thread");
+	if (!g_netio_slow_queue)
+		cf_crash(AS_PROTO, "Failed to create netio slow queue");
+	if (pthread_create(&g_netio_slow_th, NULL, as_netio_th, (void *)g_netio_slow_queue))
+		cf_crash(AS_PROTO, "Failed to create netio slow thread");
 }
 
 /*
@@ -1272,17 +1273,21 @@ int
 as_netio_send(as_netio *io, void *q_to_use, bool blocking)
 {
 	cf_queue *q = (cf_queue *)q_to_use;
-	int ret = AS_NETIO_CONTINUE;	
-   
-	if (io->start_cb(io, io->seq)) { 
+	
+   int ret = io->start_cb(io, io->seq);
+
+	if (ret == AS_NETIO_OK) {
 		ret     = io->finish_cb(io, as_query__send_packet(io->fd_h, io->bb_r, &io->offset, blocking));
+	} 
+	else {
+		ret     = io->finish_cb(io, ret);
 	}
     // If needs requeue then requeue it
 	switch(ret) {
 		case AS_NETIO_CONTINUE:
 			if (!q) {
 				cf_queue_push(g_netio_queue, io);
-			}
+	 		}
 			else {
 				io->slow = true;
 				cf_queue_push(q, io);

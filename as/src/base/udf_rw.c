@@ -341,15 +341,26 @@ udf_rw_update_ldt_err_stats(as_namespace *ns, as_result *res)
 
 			case ERR_FILTER_BAD:
 			case ERR_FILTER_NOT_FOUND:
-			case ERR_KEY_FUN_BAD:
-			case ERR_KEY_FUN_NOT_FOUND:
-			case ERR_TRANS_FUN_BAD:
-			case ERR_TRANS_FUN_NOT_FOUND:
-			case ERR_UNTRANS_FUN_BAD:
-			case ERR_UNTRANS_FUN_NOT_FOUND:
-			case ERR_USER_MODULE_BAD:
-			case ERR_USER_MODULE_NOT_FOUND:
-				cf_atomic_int_incr(&ns->lstats.ldt_err_transform_internal);
+				cf_atomic_int_incr(&ns->lstats.ldt_err_filter);
+				break;
+			case ERR_KEY_BAD:
+			case ERR_KEY_FIELD_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_key);
+				break;
+			case ERR_INPUT_CREATESPEC:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_createspec);
+				break;
+			case ERR_INPUT_USER_MODULE_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_usermodule);
+				break;
+
+			case ERR_INPUT_TOO_LARGE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_input_too_large);
+				break;
+			case ERR_NS_LDT_NOT_ENABLED:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_ldt_not_enabled);
+				break;
+			
 			default:
 				cf_atomic_int_incr(&ns->lstats.ldt_err_unknown);
 		}

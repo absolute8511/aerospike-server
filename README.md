@@ -22,15 +22,15 @@ The majority of the Aerospike source code is written in the C
 programming language, conforming to the ANSI C99 standard. Building
 Aerospike requires the GCC 4.1 or later toolchain, with the standard
 GNU/Linux development tools and libraries installed in the build
-environment, including `autoconf` and `libtool`. In particular, the
-following libraries are needed:
+environment, including `autoconf`, `automake`, and `libtool`. In
+particular, the following libraries are needed:
 
 #### OpenSSL
 
 OpenSSL 0.9.8b or later is required for cryptographic hash functions
 (RIPEMD-160 & SHA-1) and pseudo-random number generation.
 
-* The CentOS 6 OpenSSL packages to install are:  `openssl`,
+* The CentOS 6/7 OpenSSL packages to install are:  `openssl`,
 `openssl-devel`, `openssl-static`.
 
 * The Debian 6/7 and Ubuntu 10/12/14 OpenSSL packages to install are:
@@ -47,8 +47,8 @@ Function (UDF) support.
 * Alternatively, it is possible to build with standard Lua 5.1 provided
 by the build environment.  In that case:
 
-	* The CentOS 6 Lua packages to install are:  `lua`, `lua-devel`, and
-`lua-static`.
+	* The CentOS 6/7 Lua packages to install are:  `lua`,
+`lua-devel`, and `lua-static`.
 
 	* The Debian 6/7 and Ubuntu 10/12/14 Lua packages to install are:
 `lua5.1` and `liblua5.1-dev`.

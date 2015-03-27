@@ -637,6 +637,10 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 					urecord->updates[i].washidden = udf_record_bin_ishidden(urecord, k);
 					rc = udf_aerospike_setbin(urecord, i, k, v, h);
 					if (rc) {
+						if (urecord->updates[i].oldvalue) {
+							as_val_destroy(urecord->updates[i].oldvalue);
+							urecord->updates[i].oldvalue = NULL;
+						} 
 						failmax = i;
 						goto Rollback;
 					}

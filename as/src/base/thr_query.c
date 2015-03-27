@@ -991,15 +991,24 @@ do {                                 \
     } \
 } while(0);
 
-bool
+int
 as_query_netio_start_cb(void *udata, int seq) 
 {
 	as_netio *io               = (as_netio *)udata;
 	as_query_transaction *qtr  = (as_query_transaction *)io->data;
+
+	// If timed out override the decision
+	as_query__check_timeout(qtr);
+	if (QTR_FAILED(qtr)) {
+		return AS_NETIO_ERR;
+	}
+
+	// It is needed to send all the packets in sequence
+	// A packet can be requeued after being half sent.
 	if (seq <= cf_atomic32_get(qtr->pop_seq_number)) {
-		return true;
+		return AS_NETIO_OK;
 	} else {
-		return false;
+		return AS_NETIO_CONTINUE;
 	}
 }
 
@@ -1020,6 +1029,10 @@ as_query_netio_finish_cb(void *data, int retcode)
 		as_query__check_timeout(qtr);
 		if (QTR_FAILED(qtr)) {
 			retcode = AS_NETIO_ERR;
+		}
+
+		if (retcode == AS_NETIO_ERR) {
+			qtr->abort = true;
 		}
 
 		// Release io guys reference.
@@ -1078,7 +1091,8 @@ as_query__netio(as_query_transaction *qtr, bool final)
 
 	cf_atomic32_incr(&qtr->outstanding_net_io);
 	io.seq         = cf_atomic32_incr(&qtr->push_seq_number);
-	int ret = as_netio_send(&io, NULL, qtr->blocking);
+
+	int ret        = as_netio_send(&io, NULL, qtr->blocking);
 	if (ret != AS_NETIO_CONTINUE) {
 		cf_detail(AS_QUERY, "Streamed Out");
 		if (final) {

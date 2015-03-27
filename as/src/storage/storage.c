@@ -425,9 +425,9 @@ as_storage_record_size_and_check(as_storage_rd *rd)
 typedef void (*as_storage_wait_for_defrag_fn)(as_namespace *ns);
 static const as_storage_wait_for_defrag_fn as_storage_wait_for_defrag_table[AS_STORAGE_ENGINE_TYPES] = {
 	NULL,
-	0, // memory doesn't do defrag.
+	0, // memory doesn't do defrag
 	as_storage_wait_for_defrag_ssd,
-	0  // kv doesn't do defrag.
+	0  // kv doesn't do defrag
 };
 
 void
@@ -484,6 +484,26 @@ as_storage_has_space(as_namespace *ns)
 	}
 
 	return true;
+}
+
+//--------------------------------------
+// as_storage_defrag_sweep
+//
+
+typedef void (*as_storage_defrag_sweep_fn)(as_namespace *ns);
+static const as_storage_defrag_sweep_fn as_storage_defrag_sweep_table[AS_STORAGE_ENGINE_TYPES] = {
+	NULL,
+	0, // memory doesn't do defrag
+	as_storage_defrag_sweep_ssd,
+	0  // kv doesn't do defrag
+};
+
+void
+as_storage_defrag_sweep(as_namespace *ns)
+{
+	if (as_storage_defrag_sweep_table[ns->storage_type]) {
+		as_storage_defrag_sweep_table[ns->storage_type](ns);
+	}
 }
 
 //--------------------------------------

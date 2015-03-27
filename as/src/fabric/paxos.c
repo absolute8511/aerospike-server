@@ -3205,6 +3205,32 @@ as_paxos_sup_thr(void *arg)
 void
 as_paxos_start()
 {
+	uint32_t wait_ms = g_config.hb_timeout * g_config.hb_interval * 2;
+	uint32_t wait_intervals = wait_ms < 100 ? 1 : wait_ms / 100;
+
+	cf_info(AS_PAXOS, "listening for other nodes (max %u milliseconds) ...",
+			wait_ms);
+
+	while (wait_intervals > 0) {
+		usleep(100000);
+
+		if (as_partition_balance_is_multi_node_cluster()) {
+			// Heartbeats have been received from other node(s) - we'll be in a
+			// multi-node cluster.
+			cf_info(AS_PAXOS, "... other node(s) detected - node will operate in a multi-node cluster");
+			break;
+		}
+
+		wait_intervals--;
+	}
+
+	if (wait_intervals == 0) {
+		// Didn't hear from other nodes, assume we'll be a single node cluster.
+		cf_info(AS_PAXOS, "... no other nodes detected - node will operate as a single-node cluster");
+
+		as_partition_balance_init_single_node_cluster();
+	}
+
 	as_paxos *p = g_config.paxos;
 	pthread_attr_t thr_attr;
 	pthread_t thr_id;

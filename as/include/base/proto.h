@@ -526,9 +526,9 @@ extern uint8_t * as_msg_write_header(uint8_t *buf, size_t msg_sz, uint info1,
 
 // Async IO 
 typedef int (* as_netio_finish_cb) (void *udata, int retcode);
-typedef bool (* as_netio_start_cb) (void *udata, int seq);
+typedef int (* as_netio_start_cb) (void *udata, int seq);
 typedef struct as_netio_s {
-	as_netio_finish_cb         finish_cb;	
+	as_netio_finish_cb         finish_cb;
 	as_netio_start_cb          start_cb;	
 	void                     * data;
 	// fd and buffer

@@ -101,6 +101,9 @@ extern bool as_cold_start_evict_if_needed(as_namespace* ns);
 #define MIN_SECONDS_OF_WRITE_SMOOTHING_DATA		5
 #define NUM_ELEMS_IN_LBW_CATCH_UP_CALC			5
 
+#define DEFRAG_STARTUP_RESERVE	4
+#define DEFRAG_RUNTIME_RESERVE	4
+
 
 //==========================================================
 // Typedefs.
@@ -618,11 +621,46 @@ ssd_record_defrag(drv_ssd *ssd, drv_ssd_block *block, uint64_t rblock_id,
 }
 
 
+bool
+ssd_is_full(drv_ssd *ssd, uint32_t wblock_id)
+{
+	if (cf_queue_sz(ssd->free_wblock_q) > DEFRAG_STARTUP_RESERVE) {
+		return false;
+	}
+
+	ssd_wblock_state* p_wblock_state = &ssd->alloc_table->wblock_state[wblock_id];
+
+	pthread_mutex_lock(&p_wblock_state->LOCK);
+
+	if (cf_atomic32_get(p_wblock_state->inuse_sz) == 0) {
+		// Lucky - wblock is empty, let ssd_defrag_wblock() free it.
+		pthread_mutex_unlock(&p_wblock_state->LOCK);
+
+		return false;
+	}
+
+	cf_warning(AS_DRV_SSD, "{%s}: defrag: drive %s totally full, re-queuing wblock %u",
+			ssd->ns->name, ssd->name, wblock_id);
+
+	// Not using push_wblock_to_defrag_q() - state is already DEFRAG, we
+	// definitely have a queue, and it's better to push back to head.
+	cf_queue_push_head(ssd->defrag_wblock_q, &wblock_id);
+
+	pthread_mutex_unlock(&p_wblock_state->LOCK);
+
+	// If we got here, we used all our runtime reserve wblocks, but the wblocks
+	// we defragged must still have non-zero inuse_sz. Must wait for those to
+	// become free. Sleep prevents retries from overwhelming the log.
+	sleep(1);
+
+	return true;
+}
+
+
 int
 ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 {
-	if (! as_storage_has_space_ssd(ssd->ns)) {
-		cf_warning(AS_DRV_SSD, "{%s}: defrag: drives full", ssd->ns->name);
+	if (ssd_is_full(ssd, wblock_id)) {
 		return 0;
 	}
 
@@ -2495,6 +2533,39 @@ ssd_fsync(drv_ssd *ssd)
 }
 
 
+// Check all wblocks to load a device's defrag queue at runtime. Triggered only
+// when defrag-lwm-pct is increased by manual intervention.
+void
+ssd_defrag_sweep(drv_ssd *ssd)
+{
+	ssd_alloc_table* at = ssd->alloc_table;
+	uint32_t first_id = BYTES_TO_WBLOCK_ID(ssd, ssd->header_size);
+	uint32_t last_id = at->n_wblocks;
+	uint32_t n_queued = 0;
+
+	for (uint32_t wblock_id = first_id; wblock_id < last_id; wblock_id++) {
+		ssd_wblock_state *p_wblock_state = &at->wblock_state[wblock_id];
+
+		pthread_mutex_lock(&p_wblock_state->LOCK);
+
+		uint32_t inuse_sz = cf_atomic32_get(p_wblock_state->inuse_sz);
+
+		if (! p_wblock_state->swb &&
+				p_wblock_state->state != WBLOCK_STATE_DEFRAG &&
+					inuse_sz != 0 &&
+						inuse_sz < ssd->ns->defrag_lwm_size) {
+			push_wblock_to_defrag_q(ssd, wblock_id);
+			n_queued++;
+		}
+
+		pthread_mutex_unlock(&p_wblock_state->LOCK);
+	}
+
+	cf_info(AS_DRV_SSD, "... %s sweep queued %u wblocks for defrag", ssd->name,
+			n_queued);
+}
+
+
 static inline uint64_t
 next_time(uint64_t now, uint64_t job_interval, uint64_t next)
 {
@@ -2568,6 +2639,13 @@ run_ssd_maintenance(void *udata)
 			ssd_fsync(ssd);
 			prev_fsync = now;
 			next = next_time(now, fsync_max_us, next);
+		}
+
+		if (cf_atomic32_get(ssd->defrag_sweep) != 0) {
+			// May take long enough to mess up other jobs' schedules, but it's a
+			// very rare manually-triggered intervention.
+			ssd_defrag_sweep(ssd);
+			cf_atomic32_decr(&ssd->defrag_sweep);
 		}
 
 		now = cf_getus(); // refresh in case jobs took significant time
@@ -4248,7 +4326,8 @@ as_storage_wait_for_defrag_ssd(as_namespace *ns)
 			n_transaction_threads +		// client writes
 			g_config.n_fabric_workers +	// migration and prole writes
 			1 +							// always 1 defrag thread
-			8;							// reserve for defrag at startup
+			DEFRAG_RUNTIME_RESERVE +	// reserve for defrag at runtime
+			DEFRAG_STARTUP_RESERVE;		// reserve for defrag at startup
 	// TODO - what about UDFs?
 
 	cf_info(AS_DRV_SSD, "{%s} floor set at %u wblocks per device", ns->name,
@@ -4297,6 +4376,19 @@ as_storage_has_space_ssd(as_namespace *ns)
 	}
 
 	return true;
+}
+
+
+void
+as_storage_defrag_sweep_ssd(as_namespace *ns)
+{
+	cf_info(AS_DRV_SSD, "{%s} sweeping all devices for wblocks to defrag ...", ns->name);
+
+	drv_ssds* ssds = (drv_ssds*)ns->storage_private;
+
+	for (int i = 0; i < ssds->n_ssds; i++) {
+		cf_atomic32_incr(&ssds->ssds[i].defrag_sweep);
+	}
 }
 
 

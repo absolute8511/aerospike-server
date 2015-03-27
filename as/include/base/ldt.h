@@ -56,8 +56,8 @@
 
 extern cf_clock cf_clock_getabsoluteus();
 
-#define ERR_TOP_REC_NOT_FOUND   2
-#define ERR_NOT_FOUND           125
+#define ERR_TOP_REC_NOT_FOUND    2
+#define ERR_NOT_FOUND            125
 #define ERR_INTERNAL             1400
 #define ERR_UNIQUE_KEY           1402
 #define ERR_INSERT               1403
@@ -90,14 +90,13 @@ extern cf_clock cf_clock_getabsoluteus();
 
 #define ERR_FILTER_BAD           1430
 #define ERR_FILTER_NOT_FOUND     1431
-#define ERR_KEY_FUN_BAD          1432
-#define ERR_KEY_FUN_NOT_FOUND    1433
-#define ERR_TRANS_FUN_BAD        1434
-#define ERR_TRANS_FUN_NOT_FOUND  1435
-#define ERR_UNTRANS_FUN_BAD      1436
-#define ERR_UNTRANS_FUN_NOT_FOUND 1437
-#define ERR_USER_MODULE_BAD       1438
-#define ERR_USER_MODULE_NOT_FOUND 1439
+#define ERR_KEY_BAD              1432
+#define ERR_KEY_FIELD_NOT_FOUND  1433
+#define ERR_INPUT_USER_MODULE_NOT_FOUND 1439
+#define ERR_INPUT_CREATESPEC     1442
+#define ERR_INPUT_TOO_LARGE      1443
+#define ERR_NS_LDT_NOT_ENABLED   1500
+
 
 typedef struct ldt_sub_gc_info_s {
 	as_namespace	*ns;

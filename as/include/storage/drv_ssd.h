@@ -154,6 +154,8 @@ typedef struct drv_ssd_s
 	cf_atomic_int	defrag_wblock_counter; // total number of wblocks added to the defrag_wblock_q
 	cf_atomic_int	ssd_write_buf_counter; // total number of swbs added to the swb_write_q
 
+	cf_atomic32		defrag_sweep;		// defrag sweep flag
+
 	off_t			file_size;
 	int				file_id;
 

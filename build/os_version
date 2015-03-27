@@ -43,7 +43,7 @@ then
       else
         echo "Unknown redhat version $ver"
         exit 1
-      fi        
+      fi
     fi
   fi
 elif [ -f /etc/issue ]
@@ -82,8 +82,15 @@ then
     exit 1    
   fi
 else
-  echo "Unknown platform."
-  exit 1  
+  os=`uname`
+
+  if [ "$os" = "Darwin" ]
+  then
+      setPlatform mac mac
+  else
+    echo "Unknown platform."
+    exit 1
+  fi
 fi
 
 echo $platform

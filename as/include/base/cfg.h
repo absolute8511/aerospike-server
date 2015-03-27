@@ -276,6 +276,7 @@ typedef struct as_config_s {
 
 	// Temporary dangling prole garbage collection.
 	uint32_t			prole_extra_ttl;	// seconds beyond expiry time after which we garbage collect, 0 for no garbage collection
+	bool				non_master_sets_delete;	// locally delete non-master records in sets that are being emptied
 
 	xdr_config			xdr_cfg;							// XDR related config parameters
 	xdr_lastship_s		xdr_lastship[AS_CLUSTER_SZ];		// last XDR shipping info of other nodes

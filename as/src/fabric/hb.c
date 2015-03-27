@@ -1646,6 +1646,10 @@ as_hb_rx_process(msg *m, cf_sockaddr so, int fd)
 
 			cf_atomic_int_incr(&g_config.heartbeat_received_foreign);
 
+			// If this node encounters other nodes at startup, prevent it from
+			// switching to a single-node cluster.
+			as_partition_balance_init_multi_node_cluster();
+
 			/* Update the node's entry in the adjacencies hash */
 			/* COPY the data into p_pulse */
 

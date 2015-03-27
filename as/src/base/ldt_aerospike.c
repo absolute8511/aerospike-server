@@ -778,8 +778,9 @@ ldt_aerospike_rec_update(const as_aerospike * as, const as_rec * rec)
 		// execution error return as it is
 		cf_debug(AS_LDT, "<%s> Exec Error(%d) from as_aero_rec_update()", meth, ret );
 	} else if (ret == -2) {
-		// Record is not open. Unexpected.  Should not reach here.
-		cf_warning(AS_LDT, "%s: Internal Error [Sub Record update which is not open rv(%d)]... Fail", meth, ret );
+		// Record is not open. Unexpected with LDT usage, though a UDF test case
+		// does come through here.
+		cf_warning(AS_LDT, "%s: Record does not exist or is not open, cannot update");
 	}
 	return ret;
 }
@@ -900,6 +901,39 @@ ldt_aerospike_set_context(const as_aerospike * as, const as_rec *rec, const uint
 	return 0;
 } // end ldt_aerospike_get_current_time()
 
+/**
+ * Provide hook from Lua to fetch server config settings
+ */
+static int
+ldt_aerospike_get_config(const as_aerospike * as, const as_rec *rec, const char *name)
+{
+	static const char * meth = "ldt_aerospike_get_config()";
+	if (!as || !rec || !name) {
+		cf_warning(AS_LDT, "%s: Invalid Parameters [as=%p, record=%p]... Fail", meth, as, rec);
+		return 2;
+	}
+    
+	ldt_record *lrecord = (ldt_record *)as_rec_source(rec);
+	if (!lrecord) {
+		return 2;
+	}
+
+    int val = 0;
+
+	if (strcmp(name, "write-block-size") == 0) {
+		udf_record *h_urecord = (udf_record *)as_rec_source(lrecord->h_urec);
+		val = h_urecord->tr->rsv.ns->storage_write_block_size;
+	} else if (strcmp(name, "ldt-page-size") == 0) {
+		udf_record *h_urecord = (udf_record *)as_rec_source(lrecord->h_urec);
+		val = h_urecord->tr->rsv.ns->ldt_page_size;
+	} else {
+		cf_warning(AS_LDT, "Unknown config requested");
+	}
+    cf_debug(AS_LDT, "Returning %s = %d" ,name, val);
+	return val;
+} // end ldt_aerospike_get_config()
+
+
 
 const as_aerospike_hooks ldt_aerospike_hooks = {
 	.rec_create       = ldt_aerospike_rec_create,
@@ -914,5 +948,6 @@ const as_aerospike_hooks ldt_aerospike_hooks = {
 	.create_subrec    = ldt_aerospike_crec_create,
 	.close_subrec     = ldt_aerospike_crec_close,
 	.open_subrec      = ldt_aerospike_crec_open,
-	.update_subrec    = ldt_aerospike_crec_update
+	.update_subrec    = ldt_aerospike_crec_update,
+	.get_config       = ldt_aerospike_get_config
 };
