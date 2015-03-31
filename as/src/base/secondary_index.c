@@ -2194,7 +2194,7 @@ as_sindex_assert_query(as_sindex *si, as_sindex_range *range)
  *
  */
 cf_vector *
-as_sindex_binlist_from_msg(as_namespace *ns, as_msg *msgp)
+as_sindex_binlist_from_msg(as_namespace *ns, as_msg *msgp, int * num_bins)
 {
 	cf_debug(AS_SINDEX, "as_sindex_binlist_from_msg");
 	as_msg_field *bfp = as_msg_field_get(msgp, AS_MSG_FIELD_TYPE_QUERY_BINLIST);
@@ -2203,10 +2203,17 @@ as_sindex_binlist_from_msg(as_namespace *ns, as_msg *msgp)
 	}
 	const uint8_t *data = bfp->data;
 	int numbins         = *data++;
+	*num_bins           = numbins;
+
 	cf_vector *binlist  = cf_vector_create(AS_ID_BIN_SZ, numbins, 0);
 
 	for (int i = 0; i < numbins; i++) {
 		int binnamesz = *data++;
+		if (binnamesz <= 0 || binnamesz > AS_ID_BIN_SZ - 1) {
+			cf_warning(AS_SINDEX, "Size of the bin name in bin list of sindex query is out of bounds. Size %d", binnamesz);
+			cf_vector_destroy(binlist);
+			return NULL;
+		}
 		char binname[AS_ID_BIN_SZ];
 		memcpy(&binname, data, binnamesz);
 		binname[binnamesz] = 0;

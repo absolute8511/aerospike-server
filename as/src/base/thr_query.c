@@ -129,7 +129,7 @@
 
 // parameter read off from a transaction
 
-extern cf_vector * as_sindex_binlist_from_msg(as_namespace *ns, as_msg *msgp);
+extern cf_vector * as_sindex_binlist_from_msg(as_namespace *ns, as_msg *msgp, int * numbins);
 extern int as_query__queue(as_query_transaction *qtr);
 typedef int (* as_query_ioreq_cb)
 		(void *qtr, as_index_ref *r_ref, as_storage_rd *rd);
@@ -2584,12 +2584,20 @@ as_query(as_transaction *tr)
 		si = as_sindex_from_range(ns, setname, srange);
 	}
 
+	int numbins = 0;
 	// Populate binlist to be Projected by the Query
-	binlist = as_sindex_binlist_from_msg(ns, &tr->msgp->msg);
+	binlist = as_sindex_binlist_from_msg(ns, &tr->msgp->msg, &numbins);
+
+	// If anyone of the bin in the bin is bad, fail the query
+	if (numbins != 0 && !binlist) {
+		tr->result_code = AS_PROTO_RESULT_FAIL_INDEX_GENERIC;
+		rv              = AS_QUERY_ERR;
+		goto Cleanup;
+	}
 
 	if (!has_sindex || !si) {
 		tr->result_code = AS_PROTO_RESULT_FAIL_INDEX_NOTFOUND;
-		rv = AS_QUERY_ERR;
+		rv              = AS_QUERY_ERR;
 		goto Cleanup;
 	}
 

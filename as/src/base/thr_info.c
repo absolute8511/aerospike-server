@@ -6712,16 +6712,16 @@ int info_command_set_scan_priority(char *name, char *params, cf_dyn_buf *db) {
 int info_command_abort_scan(char *name, char *params, cf_dyn_buf *db) {
 	char context[100];
 	int  context_len = sizeof(context);
-	bool found = false;
+	int rv = -1;
 	if (0 == as_info_parameter_get(params, "id", context, &context_len)) {
 		uint64_t trid;
 		trid = strtoull(context, NULL, 10);
 		if (trid != 0) {
-			found = as_tscan_abort(trid);
+			rv = as_tscan_abort(trid);
 		}
 	}
 
-	if (!found) {
+	if (rv != 0) {
 		cf_dyn_buf_append_string(db, "Transaction Not Found");
 	}
 	else {
@@ -6730,6 +6730,7 @@ int info_command_abort_scan(char *name, char *params, cf_dyn_buf *db) {
 
 	return 0;
 }
+
 int info_command_query_kill(char *name, char *params, cf_dyn_buf *db) {
 	char context[100];
 	int  context_len = sizeof(context);
