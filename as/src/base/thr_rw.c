@@ -4158,7 +4158,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 										as_msg_op_get_value_p(op), value_sz, op->particle_type, AS_SINDEX_OP_INSERT);
 						}
 					}
-					as_particle_frombuf(b, op->particle_type,
+					as_particle_fromwire(b, op->particle_type,
 							as_msg_op_get_value_p(op),
 							value_sz, p_stack_particles,
 							ns->storage_data_in_memory);
@@ -4210,7 +4210,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 				if (b) {
 					// There was no bin see the parent if condition so no
 					// old bin value
-					as_particle_frombuf(b, particle_type, p_op_value,
+					as_particle_fromwire(b, particle_type, p_op_value,
 							value_sz, p_stack_particles, ns->storage_data_in_memory);
 
 					if (! ns->storage_data_in_memory && particle_type != AS_PARTICLE_TYPE_INTEGER) {

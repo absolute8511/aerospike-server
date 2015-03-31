@@ -218,9 +218,11 @@ typedef struct as_particle_int_on_device_s {
 } __attribute__ ((__packed__)) as_particle_int_on_device;
 
 /* Particle function declarations */
-extern as_particle *as_particle_frombuf(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
-extern int as_particle_compare_frombuf(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz);
-extern int as_particle_tobuf(as_bin *b, uint8_t *buf, uint32_t *sz);
+extern as_particle *as_particle_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
+extern int as_particle_compare_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz);
+extern int as_particle_towire(as_bin *b, uint8_t *buf, uint32_t *sz);
+extern as_particle *as_particle_fromflat(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
+extern int as_particle_toflat(as_bin *b, uint8_t *buf, uint32_t *sz);
 extern int as_particle_p_get(as_bin *b, uint8_t **buf, uint32_t *sz);
 extern uint32_t as_particle_get_base_size(uint8_t particle_type);
 extern uint32_t as_particle_memory_size(uint8_t type, uint32_t value_size);

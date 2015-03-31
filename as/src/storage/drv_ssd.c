@@ -1103,7 +1103,7 @@ ssd_populate_bin(as_bin *bin, drv_ssd_bin *ssd_bin, uint8_t *block_head,
 		}
 
 		// Destroy old particle.
-		as_particle_frombuf(bin, AS_PARTICLE_TYPE_NULL, 0, 0, 0, true);
+		as_particle_fromflat(bin, AS_PARTICLE_TYPE_NULL, 0, 0, 0, true);
 
 		// Copy the integer particle in-place to the bin.
 		bin->ivalue = pi->i;
@@ -1113,7 +1113,7 @@ ssd_populate_bin(as_bin *bin, drv_ssd_bin *ssd_bin, uint8_t *block_head,
 		if (allocate_memory) {
 			uint32_t base_size = as_particle_get_base_size(p->metadata);
 
-			as_particle_frombuf(bin, p->metadata, (uint8_t*)p + base_size,
+			as_particle_fromflat(bin, p->metadata, (uint8_t*)p + base_size,
 					ssd_bin->len - base_size, 0, true);
 		}
 		else {

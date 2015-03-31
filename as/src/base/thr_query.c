@@ -1317,7 +1317,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 
 			int64_t   i = 0;
 			uint32_t sz = 8;
-			as_particle_tobuf(b, (uint8_t *) &i, &sz);
+			as_particle_towire(b, (uint8_t *) &i, &sz);
 			i = __be64_to_cpu(i);
 			if ((i >= start->u.i64)
 					&& (i <= end->u.i64)) {
@@ -1340,9 +1340,9 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 			}
 
 			uint32_t psz = 32;
-			as_particle_tobuf(b, NULL, &psz);
+			as_particle_towire(b, NULL, &psz);
 			char buf[psz + 1];
-			as_particle_tobuf(b, (uint8_t *) buf, &psz);
+			as_particle_towire(b, (uint8_t *) buf, &psz);
 			buf[psz]     = '\0';
 			cf_digest bin_digest;
 			cf_digest_compute( buf, psz, &bin_digest);

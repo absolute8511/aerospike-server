@@ -369,7 +369,7 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 		sz += 2; // version, bintype
 		sz += 4; // datalen
 
-		as_particle_tobuf(b, 0, &psz[i]); // get the length
+		as_particle_towire(b, 0, &psz[i]); // get the length
 		sz += psz[i];
 	}
 
@@ -398,7 +398,7 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 		*buf++ = as_bin_get_particle_type(b);
 		uint32_t *psz_p = (uint32_t *) buf;    // keep a pointer to the spot you need to patch for particle sz
 		buf += sizeof(uint32_t);
-		as_particle_tobuf(b, buf, &psz[i]); // get the data
+		as_particle_towire(b, buf, &psz[i]); // get the data
 		*psz_p = htonl(psz[i]);
 		buf += psz[i];
 	}
@@ -495,7 +495,7 @@ as_record_count_unpickle_merge_bins_to_create(as_storage_rd *rd, uint8_t *buf, i
 				continue;
 			}
 
-			if (! as_particle_compare_frombuf(curr_bins[j], type, buf, d_sz)) {
+			if (! as_particle_compare_fromwire(curr_bins[j], type, buf, d_sz)) {
 				break; // same particle
 			}
 		}
@@ -578,7 +578,7 @@ as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t s
 				continue;
 			}
 
-			if (! as_particle_compare_frombuf(curr_bins[j], type, buf, d_sz)) {
+			if (! as_particle_compare_fromwire(curr_bins[j], type, buf, d_sz)) {
 				break; // same particle
 			}
 		}
@@ -588,7 +588,7 @@ as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t s
 			if (vmap[version] == -1)
 				vmap[version] = as_record_unused_version_get(rd);
 			as_bin *b = as_bin_create(r, rd, name, name_sz, vmap[version]);
-			as_particle_frombuf(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
+			as_particle_fromwire(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
 
 			if (has_sindex) {
 				sindex_found += as_sindex_sbins_from_bin(ns, as_index_get_set_name(rd->r, ns), 
@@ -705,7 +705,7 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		buf                  += 4;
 		d_sz                  = ntohl(d_sz);
 
-		as_particle_frombuf(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
+		as_particle_fromwire(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
 
 		if (has_sindex) {
 			sindex_found      += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);

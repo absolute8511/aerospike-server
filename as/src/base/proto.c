@@ -166,7 +166,7 @@ as_msg_swap_fields_and_ops(as_msg *m, void *limit)
 //
 
 //PROTOTYPE
-int _as_particle_tobuf(as_bin *b, byte *buf, uint32_t *sz, bool tojson);
+int _as_particle_towire(as_bin *b, byte *buf, uint32_t *sz, bool tojson);
 
 cl_msg *
 as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t void_time,
@@ -185,7 +185,7 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 			if (as_bin_is_hidden(bins[i])) {
 				psz = 0;
 			} else {
-				_as_particle_tobuf(bins[i], 0, &psz, false); // get size
+				_as_particle_towire(bins[i], 0, &psz, false); // get size
 			}
 			msg_sz += psz;
 		}
@@ -318,7 +318,7 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 				op->particle_type = AS_PARTICLE_TYPE_NULL;
 				psz = 0; // packet of size NULL
 			} else {
-				if (0 != _as_particle_tobuf(bins[i], buf, &psz, false)) {
+				if (0 != _as_particle_towire(bins[i], buf, &psz, false)) {
 					cf_warning(AS_PROTO, "particle to buf: could not copy data!");
 				}
 			}
@@ -404,7 +404,7 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 				msg_sz += sizeof(as_msg_op);
 				msg_sz += rd->ns->single_bin ? 0 : strlen(binname);
 				uint32_t psz;
-				as_particle_tobuf(p_bin, 0, &psz); // get size
+				as_particle_towire(p_bin, 0, &psz); // get size
 				msg_sz += psz;
 			}
 		}
@@ -414,7 +414,7 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 				as_bin *p_bin = &rd->bins[i];
 				msg_sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, p_bin->id));
 				uint32_t psz;
-				as_particle_tobuf(p_bin, 0, &psz); // get size
+				as_particle_towire(p_bin, 0, &psz); // get size
 				msg_sz += psz;
 			}
 		}
@@ -510,7 +510,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 				if (as_bin_is_hidden(p_bin)) {
 					psz = 0;
 				} else {
-					as_particle_tobuf(p_bin, 0, &psz); // get size
+					as_particle_towire(p_bin, 0, &psz); // get size
 				}
 				msg_sz += psz;
 			}
@@ -529,7 +529,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 				if (as_bin_is_hidden(p_bin)) {
 					psz = 0;
 				} else {
-					as_particle_tobuf(p_bin, 0, &psz); // get size
+					as_particle_towire(p_bin, 0, &psz); // get size
 				}
 				msg_sz += psz;
 			}
@@ -642,7 +642,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
                 	op->particle_type = AS_PARTICLE_TYPE_NULL;
 					psz = 0;
 				} else {
-					if (0 != as_particle_tobuf(p_bin, buf, &psz)) {
+					if (0 != as_particle_towire(p_bin, buf, &psz)) {
 						cf_warning(AS_PROTO, "particle to buf: could not copy data!");
 					}
 				}
@@ -682,7 +682,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
                 	op->particle_type = AS_PARTICLE_TYPE_NULL;
 					psz = 0;
 				} else {
-					if (0 != as_particle_tobuf(&rd->bins[i], buf, &psz)) {
+					if (0 != as_particle_towire(&rd->bins[i], buf, &psz)) {
 						cf_warning(AS_PROTO, "particle to buf: could not copy data!");
 					}
 				}

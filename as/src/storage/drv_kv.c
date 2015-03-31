@@ -993,7 +993,7 @@ kv_populate_bin(as_bin *bin, drv_kv_bin *kv_bin, uint8_t *block_head, bool singl
 		}
 
 		// destroy old particle
-		as_particle_frombuf(bin, AS_PARTICLE_TYPE_NULL, 0, 0, 0, true);
+		as_particle_fromflat(bin, AS_PARTICLE_TYPE_NULL, 0, 0, 0, true);
 
 		// copy the integer particle in-place to the bin.
 		bin->ivalue = pi->i;
@@ -1002,7 +1002,7 @@ kv_populate_bin(as_bin *bin, drv_kv_bin *kv_bin, uint8_t *block_head, bool singl
 	else {
 		if (allocate_memory) {
 			uint32_t base_size = as_particle_get_base_size(p->metadata);
-			as_particle_frombuf(bin, p->metadata, (uint8_t *)p + base_size, kv_bin->len - base_size, 0, true);
+			as_particle_fromflat(bin, p->metadata, (uint8_t *)p + base_size, kv_bin->len - base_size, 0, true);
 		}
 		else {
 			bin->particle = p;

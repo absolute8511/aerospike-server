@@ -122,7 +122,7 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 		}
 	}
 
-	as_particle_frombuf(bin, vtype, v, vlen, sp_p, ns->storage_data_in_memory);
+	as_particle_fromwire(bin, vtype, v, vlen, sp_p, ns->storage_data_in_memory);
 	*sp_pp = sp_p;
 	return 0;
 }
@@ -1535,7 +1535,7 @@ as_val_frombin(as_bin *bb)
 		{
 			int64_t     i = 0;
 			uint32_t    sz = 8;
-			as_particle_tobuf(bb, (uint8_t *) &i, &sz);
+			as_particle_towire(bb, (uint8_t *) &i, &sz);
 			i = cf_swap_from_be64(i);
 			value = (as_val *) as_integer_new(i);
 			break;
@@ -1543,14 +1543,14 @@ as_val_frombin(as_bin *bb)
 		case AS_PARTICLE_TYPE_STRING:
 		{
 			uint32_t psz = 32;
-			as_particle_tobuf(bb, NULL, &psz);
+			as_particle_towire(bb, NULL, &psz);
 
 			char * buf = cf_malloc(psz + 1);
 			if (!buf) {
 				return value;
 			}
 
-			as_particle_tobuf(bb, (uint8_t *) buf, &psz);
+			as_particle_towire(bb, (uint8_t *) buf, &psz);
 
 			buf[psz] = '\0';
 

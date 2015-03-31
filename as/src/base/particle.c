@@ -43,13 +43,26 @@
 // #define EXTRA_CHECKS 1
 
 // NULL particle type
-as_particle *as_particle_set_null(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+as_particle *as_particle_fromwire_null(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
 {
 	cf_warning(AS_PARTICLE, "trying to set a particle to null via the setter table");
 	return (0);
 }
 
-int as_particle_get_null(as_particle *p, void *data, uint32_t *sz)
+int as_particle_towire_null(as_particle *p, void *data, uint32_t *sz)
+{
+	// attempt to get size
+	if (sz) *sz = 0;
+	return(0);
+}
+
+as_particle *as_particle_fromflat_null(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+{
+	cf_warning(AS_PARTICLE, "trying to set a particle to null via the setter table");
+	return (0);
+}
+
+int as_particle_toflat_null(as_particle *p, void *data, uint32_t *sz)
 {
 	// attempt to get size
 	if (sz) *sz = 0;
@@ -62,7 +75,7 @@ int as_particle_compare_null(as_particle *p, void *data, uint32_t sz)
 }
 
 // arguably null is very flat
-uint32_t as_particle_get_flat_null(as_particle *p)
+uint32_t as_particle_flat_size_null(as_particle *p)
 {
 	return(0);
 }
@@ -99,7 +112,7 @@ uint64_t int_convert(void *data, uint32_t sz)
 	return(r);
 }
 
-as_particle *as_particle_set_int(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+as_particle *as_particle_fromwire_int(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
 {
 	// convert the incoming buffer to a uint64_t
 
@@ -117,7 +130,7 @@ as_particle *as_particle_set_int(as_particle *p, as_particle_type type, void *da
 
 	// The integer particle is never allocated anymore
 	if (!p) {
-		cf_info(AS_PARTICLE, "as_particle_set_int: null particle passed inf or integer. Error ");
+		cf_info(AS_PARTICLE, "as_particle_fromwire_int: null particle passed inf or integer. Error ");
 		return (p);
 	}
 	as_particle_int *pi = (as_particle_int *)p;
@@ -125,7 +138,7 @@ as_particle *as_particle_set_int(as_particle *p, as_particle_type type, void *da
 	return (p);
 }
 
-int as_particle_get_int(as_particle *p, void *data, uint32_t *sz)
+int as_particle_towire_int(as_particle *p, void *data, uint32_t *sz)
 {
 	// attempt to get size
 	if (!data) {
@@ -140,6 +153,61 @@ int as_particle_get_int(as_particle *p, void *data, uint32_t *sz)
 
 	as_particle_int *pi = (as_particle_int *)p;
 	*(uint64_t *) data = __cpu_to_be64(pi->i);
+	cf_detail(AS_PARTICLE, "READING value %"PRIx64"", pi->i);
+
+	*sz = 8;
+	return(0);
+}
+
+as_particle *as_particle_fromflat_int(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+{
+	// convert the incoming buffer to a uint64_t
+
+	uint64_t i;
+
+	if (sz == 8) {
+        i = *(uint64_t *) data;
+	}
+	else if (sz == 4) {
+        i = *(uint32_t *) data;
+	}
+	else if (sz == 2) {
+        i = *(uint16_t *) data;
+	}
+	else if (sz == 1) {
+        i = *(uint8_t *) data;
+	}
+	else {
+        // What kind of int is this?
+        i = 0;
+        cf_assert(false, AS_PARTICLE, CF_CRITICAL, "unexpected integer size");
+	}
+
+	// The integer particle is never allocated anymore
+	if (!p) {
+		cf_info(AS_PARTICLE, "as_particle_fromflat_int: null particle passed inf or integer. Error ");
+		return (p);
+	}
+	as_particle_int *pi = (as_particle_int *)p;
+	pi->i = i;
+	return (p);
+}
+
+int as_particle_toflat_int(as_particle *p, void *data, uint32_t *sz)
+{
+	// attempt to get size
+	if (!data) {
+		*sz = 8;
+		return(0);
+	}
+
+	if (*sz < 8) {
+		*sz = 8;
+		return(-1);
+	}
+
+	as_particle_int *pi = (as_particle_int *)p;
+	*(uint64_t *) data = pi->i;
 	cf_detail(AS_PARTICLE, "READING value %"PRIx64"", pi->i);
 
 	*sz = 8;
@@ -172,7 +240,7 @@ int as_particle_compare_int(as_particle *p, void *data, uint32_t sz)
 		return (0);
 }
 
-uint32_t as_particle_get_flat_int(as_particle *p)
+uint32_t as_particle_flat_size_int(as_particle *p)
 {
 	return (sizeof(as_particle_int_on_device));
 }
@@ -233,15 +301,27 @@ int as_particle_add_int(as_particle *p, void *data, uint32_t sz, bool mc_complia
 // BIGNUM particle type
 //
 
-as_particle *as_particle_set_float(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+as_particle *as_particle_fromwire_float(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
 {
 	cf_info(AS_PARTICLE, "particle set float stub");
 	return(NULL);
 }
 
-int as_particle_get_float(as_particle *p, void *data, uint32_t *sz)
+int as_particle_towire_float(as_particle *p, void *data, uint32_t *sz)
 {
-	cf_info(AS_PARTICLE, "particle get float stub");
+	cf_info(AS_PARTICLE, "particle towire float stub");
+	return(-1);
+}
+
+as_particle *as_particle_fromflat_float(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+{
+	cf_info(AS_PARTICLE, "particle set float stub");
+	return(NULL);
+}
+
+int as_particle_toflat_float(as_particle *p, void *data, uint32_t *sz)
+{
+	cf_info(AS_PARTICLE, "particle toflat float stub");
 	return(-1);
 }
 
@@ -251,15 +331,15 @@ int as_particle_compare_float(as_particle *p, void *data, uint32_t sz)
 	return(-1);
 }
 
-uint32_t as_particle_get_flat_float(as_particle *p)
+uint32_t as_particle_flat_size_float(as_particle *p)
 {
-	cf_info(AS_PARTICLE, "particle get flat float stub");
+	cf_info(AS_PARTICLE, "particle flat size float stub");
 	return(0);
 }
 
 uint32_t as_particle_get_base_size_float(uint8_t particle_type)
 {
-	cf_info(AS_PARTICLE, "particle get base size float stub");
+	cf_info(AS_PARTICLE, "particle base size float stub");
 	return(0);
 }
 
@@ -279,7 +359,7 @@ typedef struct as_particle_string_s {
 } __attribute__ ((__packed__)) as_particle_string;
 
 
-as_particle *as_particle_set_string(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+as_particle *as_particle_fromwire_string(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
 {
 	as_particle_string *ps = (as_particle_string *)p;
 
@@ -307,7 +387,7 @@ as_particle *as_particle_set_string(as_particle *p, as_particle_type type, void 
 	return((as_particle *)ps);
 }
 
-int as_particle_get_string(as_particle *p, void *data, uint32_t *sz)
+int as_particle_towire_string(as_particle *p, void *data, uint32_t *sz)
 {
 	as_particle_string *ps = (as_particle_string *)p;
 	if (! data) {
@@ -323,6 +403,18 @@ int as_particle_get_string(as_particle *p, void *data, uint32_t *sz)
 	memcpy(data, ps->data, ps->sz);
 
 	return(0);
+}
+
+as_particle *as_particle_fromflat_string(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+{
+    // strings are endian neutral
+    return as_particle_fromwire_string(p, type, data, sz, data_in_memory);
+}
+
+int as_particle_toflat_string(as_particle *p, void *data, uint32_t *sz)
+{
+    // strings are endian neutral
+    return as_particle_towire_string(p, data, sz);
 }
 
 int as_particle_get_p_string(as_particle *p, void **data, uint32_t *sz)
@@ -348,7 +440,7 @@ int as_particle_compare_string(as_particle *p, void *data, uint32_t sz)
 	return (memcmp(ps->data, data, (ps->sz > sz) ? ps->sz : sz));
 }
 
-uint32_t as_particle_get_flat_string(as_particle *p)
+uint32_t as_particle_flat_size_string(as_particle *p)
 {
 	return ( sizeof(as_particle_string) + ((as_particle_string *)p)->sz );
 }
@@ -375,7 +467,7 @@ typedef struct as_particle_blob_s {
 } __attribute__ ((__packed__)) as_particle_blob;
 
 
-as_particle *as_particle_set_blob(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+as_particle *as_particle_fromwire_blob(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
 {
 	as_particle_blob *pb = (as_particle_blob *)p;
 	if (data_in_memory) {
@@ -402,7 +494,7 @@ as_particle *as_particle_set_blob(as_particle *p, as_particle_type type, void *d
 	return((as_particle *)pb);
 }
 
-int as_particle_get_blob(as_particle *p, void *data, uint32_t *sz)
+int as_particle_towire_blob(as_particle *p, void *data, uint32_t *sz)
 {
 	as_particle_blob *pb = (as_particle_blob *)p;
 	if (!data) {
@@ -418,6 +510,18 @@ int as_particle_get_blob(as_particle *p, void *data, uint32_t *sz)
 	memcpy(data, pb->data, pb->sz);
 
 	return(0);
+}
+
+as_particle *as_particle_fromflat_blob(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+{
+    // blobs are endian neutral
+    return as_particle_fromwire_blob(p, type, data, sz, data_in_memory);
+}
+
+int as_particle_toflat_blob(as_particle *p, void *data, uint32_t *sz)
+{
+    // blobs are endian neutral
+    return as_particle_towire_blob(p, data, sz);
 }
 
 int as_particle_get_p_blob(as_particle *p, void **data, uint32_t *sz)
@@ -442,7 +546,7 @@ int as_particle_compare_blob(as_particle *p, void *data, uint32_t sz)
 	return(memcmp(pb->data, data, sz));
 }
 
-uint32_t as_particle_get_flat_blob(as_particle *p)
+uint32_t as_particle_flat_size_blob(as_particle *p)
 {
 	return ( sizeof(as_particle_blob) + ((as_particle_blob *)p)->sz );
 }
@@ -463,15 +567,27 @@ void as_particle_destruct_blob(as_particle *p)
 // TIMESTAMP particle type
 //
 
-as_particle *as_particle_set_timestamp(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+as_particle *as_particle_fromwire_timestamp(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
 {
 	cf_info(AS_PARTICLE, "particle set timestamp stub");
 	return(NULL);
 }
 
-int as_particle_get_timestamp(as_particle *p, void *data, uint32_t *sz)
+int as_particle_towire_timestamp(as_particle *p, void *data, uint32_t *sz)
 {
-	cf_info(AS_PARTICLE, "particle get timestamp stub");
+	cf_info(AS_PARTICLE, "particle towire timestamp stub");
+	return(-1);
+}
+
+as_particle *as_particle_fromflat_timestamp(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+{
+	cf_info(AS_PARTICLE, "particle set timestamp stub");
+	return(NULL);
+}
+
+int as_particle_toflat_timestamp(as_particle *p, void *data, uint32_t *sz)
+{
+	cf_info(AS_PARTICLE, "particle toflat timestamp stub");
 	return(-1);
 }
 
@@ -481,15 +597,15 @@ int as_particle_compare_timestamp(as_particle *p, void *data, uint32_t sz)
 	return(-1);
 }
 
-uint32_t as_particle_get_flat_timestamp(as_particle *p)
+uint32_t as_particle_flat_size_timestamp(as_particle *p)
 {
-	cf_info(AS_PARTICLE, "particle get flat timestamp stub");
+	cf_info(AS_PARTICLE, "particle flat size timestamp stub");
 	return(0);
 }
 
 uint32_t as_particle_get_base_size_timestamp(uint8_t particle_type)
 {
-	cf_info(AS_PARTICLE, "particle get base size timestamp stub");
+	cf_info(AS_PARTICLE, "particle base size timestamp stub");
 	return(0);
 }
 
@@ -502,15 +618,27 @@ void as_particle_destruct_timestamp(as_particle *p)
 // DIGEST particle type
 //
 
-as_particle *as_particle_set_digest(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+as_particle *as_particle_fromwire_digest(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
 {
 	cf_info(AS_PARTICLE, "particle set digest stub");
 	return(NULL);
 }
 
-int as_particle_get_digest(as_particle *p, void *data, uint32_t *sz)
+int as_particle_towire_digest(as_particle *p, void *data, uint32_t *sz)
 {
-	cf_info(AS_PARTICLE, "particle get digest stub");
+	cf_info(AS_PARTICLE, "particle towire digest stub");
+	return(-1);
+}
+
+as_particle *as_particle_fromflat_digest(as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory)
+{
+	cf_info(AS_PARTICLE, "particle set digest stub");
+	return(NULL);
+}
+
+int as_particle_toflat_digest(as_particle *p, void *data, uint32_t *sz)
+{
+	cf_info(AS_PARTICLE, "particle toflat digest stub");
 	return(-1);
 }
 
@@ -520,15 +648,15 @@ int as_particle_compare_digest(as_particle *p, void *data, uint32_t sz)
 	return(-1);
 }
 
-uint32_t as_particle_get_flat_digest(as_particle *p)
+uint32_t as_particle_flat_size_digest(as_particle *p)
 {
-	cf_info(AS_PARTICLE, "particle get flat digest stub");
+	cf_info(AS_PARTICLE, "particle flat size digest stub");
 	return( 0 );
 }
 
 uint32_t as_particle_get_base_size_digest(uint8_t particle_type)
 {
-	cf_info(AS_PARTICLE, "particle get base size digest stub");
+	cf_info(AS_PARTICLE, "particle base size digest stub");
 	return(0);
 }
 
@@ -544,50 +672,93 @@ void as_particle_destruct_digest(as_particle *p)
 // NB - using the MAX to set the size of the array helps the compiler make sure
 // that the guard in the define is the right size and all
 
-typedef as_particle * (*as_particle_setter) (as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory);
+typedef as_particle * (*as_particle_from_wire) (as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory);
 
-as_particle_setter g_particle_setter_table[AS_PARTICLE_TYPE_MAX] = {
-	[AS_PARTICLE_TYPE_NULL]				= as_particle_set_null,
-	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_set_int,
-	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_set_float,
-	[AS_PARTICLE_TYPE_STRING]			= as_particle_set_string,
-	[AS_PARTICLE_TYPE_BLOB]				= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_set_timestamp,
-	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_set_digest,
-	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_MAP]				= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_LIST]				= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_set_blob,
+as_particle_from_wire g_particle_fromwire_table[AS_PARTICLE_TYPE_MAX] = {
+	[AS_PARTICLE_TYPE_NULL]				= as_particle_fromwire_null,
+	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_fromwire_int,
+	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_fromwire_float,
+	[AS_PARTICLE_TYPE_STRING]			= as_particle_fromwire_string,
+	[AS_PARTICLE_TYPE_BLOB]				= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_fromwire_timestamp,
+	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_fromwire_digest,
+	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_MAP]				= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_LIST]				= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_fromwire_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_fromwire_blob,
 };
 
-typedef int (*as_particle_getter) (as_particle *p, void *data, uint32_t *sz);
+typedef int (*as_particle_to_wire) (as_particle *p, void *data, uint32_t *sz);
 
-as_particle_getter g_particle_getter_table[AS_PARTICLE_TYPE_MAX] = {
-	[AS_PARTICLE_TYPE_NULL]				= as_particle_get_null,
-	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_get_int,
-	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_get_float,
-	[AS_PARTICLE_TYPE_STRING]			= as_particle_get_string,
-	[AS_PARTICLE_TYPE_BLOB]				= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_get_timestamp,
-	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_get_digest,
-	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_MAP]				= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_LIST]				= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_get_blob,
+as_particle_to_wire g_particle_towire_table[AS_PARTICLE_TYPE_MAX] = {
+	[AS_PARTICLE_TYPE_NULL]				= as_particle_towire_null,
+	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_towire_int,
+	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_towire_float,
+	[AS_PARTICLE_TYPE_STRING]			= as_particle_towire_string,
+	[AS_PARTICLE_TYPE_BLOB]				= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_towire_timestamp,
+	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_towire_digest,
+	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_MAP]				= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_LIST]				= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_towire_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_towire_blob,
 };
 
+typedef as_particle * (*as_particle_from_flat) (as_particle *p, as_particle_type type, void *data, uint32_t sz, bool data_in_memory);
+
+as_particle_from_flat g_particle_fromflat_table[AS_PARTICLE_TYPE_MAX] = {
+	[AS_PARTICLE_TYPE_NULL]				= as_particle_fromflat_null,
+	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_fromflat_int,
+	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_fromflat_float,
+	[AS_PARTICLE_TYPE_STRING]			= as_particle_fromflat_string,
+	[AS_PARTICLE_TYPE_BLOB]				= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_fromflat_timestamp,
+	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_fromflat_digest,
+	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_MAP]				= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_LIST]				= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_fromflat_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_fromflat_blob,
+};
+
+typedef int (*as_particle_to_flat) (as_particle *p, void *data, uint32_t *sz);
+
+as_particle_to_flat g_particle_toflat_table[AS_PARTICLE_TYPE_MAX] = {
+	[AS_PARTICLE_TYPE_NULL]				= as_particle_toflat_null,
+	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_toflat_int,
+	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_toflat_float,
+	[AS_PARTICLE_TYPE_STRING]			= as_particle_toflat_string,
+	[AS_PARTICLE_TYPE_BLOB]				= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_toflat_timestamp,
+	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_toflat_digest,
+	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_MAP]				= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_LIST]				= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_toflat_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_toflat_blob,
+};
 
 typedef int (*as_particle_getter_p) (as_particle *p, void **data, uint32_t *sz);
 as_particle_getter_p g_particle_getter_p_table[AS_PARTICLE_TYPE_MAX] = {
@@ -632,26 +803,26 @@ as_particle_destructor g_particle_destructor_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_destruct_blob,
 };
 
-typedef uint32_t (*as_particle_get_flat) (as_particle *p);
+typedef uint32_t (*as_particle_flat_size_fun) (as_particle *p);
 
-as_particle_get_flat g_particle_get_flat_table[AS_PARTICLE_TYPE_MAX] = {
-	[AS_PARTICLE_TYPE_NULL]				= as_particle_get_flat_null,
-	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_get_flat_int,
-	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_get_flat_float,
-	[AS_PARTICLE_TYPE_STRING]			= as_particle_get_flat_string,
-	[AS_PARTICLE_TYPE_BLOB]				= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_get_flat_timestamp,
-	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_get_flat_digest,
-	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_MAP]				= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_LIST]				= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_get_flat_blob,
+as_particle_flat_size_fun g_particle_flat_size_table[AS_PARTICLE_TYPE_MAX] = {
+	[AS_PARTICLE_TYPE_NULL]				= as_particle_flat_size_null,
+	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_flat_size_int,
+	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_flat_size_float,
+	[AS_PARTICLE_TYPE_STRING]			= as_particle_flat_size_string,
+	[AS_PARTICLE_TYPE_BLOB]				= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_flat_size_timestamp,
+	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_flat_size_digest,
+	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_MAP]				= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_LIST]				= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_flat_size_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_flat_size_blob,
 };
 
 typedef int (*as_particle_compare) (as_particle *p, void *data, uint32_t sz);
@@ -699,11 +870,11 @@ as_particle_get_base g_particle_get_base_size_table[AS_PARTICLE_TYPE_MAX] = {
 };
 
 
-/* as_particle_set
+/* as_particle_fromwire
  * Set the contents of a particle, which safely destroys the old particle
  */
 as_particle *
-as_particle_frombuf(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory)
+as_particle_fromwire(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory)
 {
 
 #ifdef EXTRA_CHECKS
@@ -725,7 +896,7 @@ as_particle_frombuf(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, ui
 			if (type == AS_PARTICLE_TYPE_INTEGER) {
 				// current type is integer, new type is integer
 				// just copy the new integer over the existing one.
-				return (g_particle_setter_table[type](&b->iparticle, type, buf, sz, data_in_memory));
+				return (g_particle_fromwire_table[type](&b->iparticle, type, buf, sz, data_in_memory));
 			}
 			else {
 				// current type is integer, new type is not integer
@@ -752,7 +923,7 @@ as_particle_frombuf(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, ui
 			// current type is not integer, new type is integer
 			as_bin_state_set(b, AS_BIN_STATE_INUSE_INTEGER);
 			// use the iparticle embedded in the bin
-			retval = g_particle_setter_table[type](&b->iparticle, type, buf, sz, data_in_memory);
+			retval = g_particle_fromwire_table[type](&b->iparticle, type, buf, sz, data_in_memory);
 			break;
 		case AS_PARTICLE_TYPE_NULL:
 			// special case, used to free old particle w/o setting new one
@@ -768,7 +939,7 @@ as_particle_frombuf(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, ui
 			} else {
 				as_bin_state_set(b, AS_BIN_STATE_INUSE_OTHER);
 			}
-			b->particle = g_particle_setter_table[type](b->particle, type, buf, sz, data_in_memory);
+			b->particle = g_particle_fromwire_table[type](b->particle, type, buf, sz, data_in_memory);
 			retval = b->particle;
 			break;
 	}
@@ -776,11 +947,11 @@ as_particle_frombuf(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, ui
 	return(retval);
 }
 
-/* as_particle_compare_frombuf
+/* as_particle_compare_fromwire
  * Compares two particles and returns equal or not
  */
 int
-as_particle_compare_frombuf(as_bin *b, as_particle_type type, byte *buf, uint32_t sz)
+as_particle_compare_fromwire(as_bin *b, as_particle_type type, byte *buf, uint32_t sz)
 {
 #ifdef EXTRA_CHECKS
 	// check the incoming type
@@ -801,6 +972,83 @@ as_particle_compare_frombuf(as_bin *b, as_particle_type type, byte *buf, uint32_
 		return (g_particle_compare_table[type](b->particle, buf, sz));
 	else
 		return (-1);
+}
+
+/* as_particle_fromflat
+ * Set the contents of a particle, which safely destroys the old particle
+ */
+as_particle *
+as_particle_fromflat(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory)
+{
+
+#ifdef EXTRA_CHECKS
+	// check the incoming type
+	if (type < AS_PARTICLE_TYPE_NULL || type >= AS_PARTICLE_TYPE_MAX) {
+		cf_info(AS_PARTICLE, "particle set: bad particle type %d, error", (int)type);
+		return(NULL);
+	}
+#endif
+	as_particle *retval = 0;
+
+	if (data_in_memory) {
+		// we have to deal with these cases
+		// current type is integer, new type is integer
+		// current type is not integer, new type is integer
+		// current type is integer, new type is not integer
+		// current type is not integer, new type is not integer
+		if (as_bin_is_integer(b)) {
+			if (type == AS_PARTICLE_TYPE_INTEGER) {
+				// current type is integer, new type is integer
+				// just copy the new integer over the existing one.
+				return (g_particle_fromflat_table[type](&b->iparticle, type, buf, sz, data_in_memory));
+			}
+			else {
+				// current type is integer, new type is not integer
+				// make this the same case as current type is not integer, new type is not integer
+				// cleanup the integer and allocate a pointer.
+				b->particle = 0;
+			}
+		}
+		else if (as_bin_inuse(b)) {
+			// if it's a completely new type, destruct the old one and create a new one
+			uint8_t bin_particle_type = as_bin_get_particle_type(b);
+			if (type != bin_particle_type) {
+				g_particle_destructor_table[bin_particle_type](b->particle);
+				b->particle = 0;
+			}
+		}
+		else {
+			b->particle = 0;
+		}
+	}
+
+	switch (type) {
+		case AS_PARTICLE_TYPE_INTEGER:
+			// current type is not integer, new type is integer
+			as_bin_state_set(b, AS_BIN_STATE_INUSE_INTEGER);
+			// use the iparticle embedded in the bin
+			retval = g_particle_fromflat_table[type](&b->iparticle, type, buf, sz, data_in_memory);
+			break;
+		case AS_PARTICLE_TYPE_NULL:
+			// special case, used to free old particle w/o setting new one
+			break;
+		default:
+			// current type is not integer, new type is not integer
+			if (! data_in_memory) {
+				b->particle = (as_particle *)stack_particle;
+			}
+
+			if (as_particle_type_hidden(type)) {
+				as_bin_state_set(b, AS_BIN_STATE_INUSE_HIDDEN);
+			} else {
+				as_bin_state_set(b, AS_BIN_STATE_INUSE_OTHER);
+			}
+			b->particle = g_particle_fromflat_table[type](b->particle, type, buf, sz, data_in_memory);
+			retval = b->particle;
+			break;
+	}
+
+	return(retval);
 }
 
 /*
@@ -1085,7 +1333,7 @@ as_bin_get_particle_size(as_bin *b)
 
 	uint8_t type = as_bin_get_particle_type(b);
 	uint32_t sz = 0;
-	(void)g_particle_getter_table[type](p, 0, &sz);
+	(void)g_particle_towire_table[type](p, 0, &sz);
 
 	return(sz);
 }
@@ -1142,19 +1390,19 @@ as_particle_get_flat_size(as_bin *b, size_t *flat_size)
 	}
 #endif
 
-	uint32_t size = g_particle_get_flat_table[type](p);
+	uint32_t size = g_particle_flat_size_table[type](p);
 	if (size == 0)	return(-4);
 	*flat_size = size;
 	return(0);
 }
 
 /*
-** as_particle_tobuf
+** as_particle_towire
 ** reduces the particle to a platform-neutral, serial entity, through a buffer
 ** copy
 */
 // NOTE: tojson is IGNORED
-int _as_particle_tobuf(as_bin *b, byte *buf, uint32_t *sz, bool tojson) {
+int _as_particle_towire(as_bin *b, byte *buf, uint32_t *sz, bool tojson) {
 	if (!b)
 		return (-1);
 
@@ -1169,13 +1417,43 @@ int _as_particle_tobuf(as_bin *b, byte *buf, uint32_t *sz, bool tojson) {
 	}
 #endif
 
-	int rv = g_particle_getter_table[type](p, buf, sz);
+	int rv = g_particle_towire_table[type](p, buf, sz);
 
 	return(rv);
 
 }
-int as_particle_tobuf(as_bin *b, byte *buf, uint32_t *sz) {
-	return _as_particle_tobuf(b, buf, sz, 0);
+int as_particle_towire(as_bin *b, byte *buf, uint32_t *sz) {
+	return _as_particle_towire(b, buf, sz, 0);
+}
+
+/*
+** as_particle_toflat
+** reduces the particle to a platform-neutral, serial entity, through a buffer
+** copy
+*/
+// NOTE: tojson is IGNORED
+int _as_particle_toflat(as_bin *b, byte *buf, uint32_t *sz, bool tojson) {
+	if (!b)
+		return (-1);
+
+	as_particle *p = as_bin_get_particle(b);
+	uint8_t type = as_bin_get_particle_type(b);
+
+#ifdef EXTRA_CHECKS
+	// check the incoming type
+	if (type < AS_PARTICLE_TYPE_NULL || type >= AS_PARTICLE_TYPE_MAX) {
+		cf_info(AS_PARTICLE, "particle set: bad particle type %d, error", (int)type);
+		return(-1);
+	}
+#endif
+
+	int rv = g_particle_toflat_table[type](p, buf, sz);
+
+	return(rv);
+
+}
+int as_particle_toflat(as_bin *b, byte *buf, uint32_t *sz) {
+	return _as_particle_toflat(b, buf, sz, 0);
 }
 
 /*
