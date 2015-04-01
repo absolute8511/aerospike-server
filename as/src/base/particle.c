@@ -75,6 +75,13 @@ as_particle *as_particle_frommem_null(as_particle *p, as_particle_type type, voi
 	return (0);
 }
 
+int as_particle_tomem_null(as_particle *p, void *data, uint32_t *sz)
+{
+	// attempt to get size
+	if (sz) *sz = 0;
+	return(0);
+}
+
 int as_particle_compare_null(as_particle *p, void *data, uint32_t sz)
 {
 	return(0); // two null objects are always equal
@@ -225,6 +232,11 @@ int as_particle_toflat_int(as_particle *p, void *data, uint32_t *sz)
 	return(0);
 }
 
+int as_particle_tomem_int(as_particle *p, void *data, uint32_t *sz)
+{
+    return as_particle_toflat_int(p, data, sz);
+}
+
 int as_particle_compare_int(as_particle *p, void *data, uint32_t sz)
 {
 	if (!p || !data)
@@ -342,6 +354,12 @@ as_particle *as_particle_frommem_float(as_particle *p, as_particle_type type, vo
 	return(NULL);
 }
 
+int as_particle_tomem_float(as_particle *p, void *data, uint32_t *sz)
+{
+	cf_info(AS_PARTICLE, "particle tomem float stub");
+	return(-1);
+}
+
 int as_particle_compare_float(as_particle *p, void *data, uint32_t sz)
 {
 	cf_info(AS_PARTICLE, "particle compare float stub");
@@ -438,6 +456,12 @@ as_particle *as_particle_frommem_string(as_particle *p, as_particle_type type, v
 {
     // strings are endian neutral
     return as_particle_fromwire_string(p, type, data, sz, data_in_memory);
+}
+
+int as_particle_tomem_string(as_particle *p, void *data, uint32_t *sz)
+{
+    // strings are endian neutral
+    return as_particle_towire_string(p, data, sz);
 }
 
 int as_particle_get_p_string(as_particle *p, void **data, uint32_t *sz)
@@ -553,6 +577,12 @@ as_particle *as_particle_frommem_blob(as_particle *p, as_particle_type type, voi
     return as_particle_fromwire_blob(p, type, data, sz, data_in_memory);
 }
 
+int as_particle_tomem_blob(as_particle *p, void *data, uint32_t *sz)
+{
+    // blobs are endian neutral
+    return as_particle_towire_blob(p, data, sz);
+}
+
 int as_particle_get_p_blob(as_particle *p, void **data, uint32_t *sz)
 {
 	as_particle_blob *pb = (as_particle_blob *)p;
@@ -626,6 +656,12 @@ as_particle *as_particle_frommem_timestamp(as_particle *p, as_particle_type type
 	return(NULL);
 }
 
+int as_particle_tomem_timestamp(as_particle *p, void *data, uint32_t *sz)
+{
+	cf_info(AS_PARTICLE, "particle tomem timestamp stub");
+	return(-1);
+}
+
 int as_particle_compare_timestamp(as_particle *p, void *data, uint32_t sz)
 {
 	cf_info(AS_PARTICLE, "particle compare timestamp stub");
@@ -681,6 +717,12 @@ as_particle *as_particle_frommem_digest(as_particle *p, as_particle_type type, v
 {
 	cf_info(AS_PARTICLE, "particle frommem digest stub");
 	return(NULL);
+}
+
+int as_particle_tomem_digest(as_particle *p, void *data, uint32_t *sz)
+{
+	cf_info(AS_PARTICLE, "particle tomem digest stub");
+	return(-1);
 }
 
 int as_particle_compare_digest(as_particle *p, void *data, uint32_t sz)
@@ -821,6 +863,28 @@ as_particle_from_mem g_particle_frommem_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_LIST]				= as_particle_frommem_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_frommem_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_frommem_blob,
+};
+
+typedef int (*as_particle_to_mem) (as_particle *p, void *data, uint32_t *sz);
+
+as_particle_to_mem g_particle_tomem_table[AS_PARTICLE_TYPE_MAX] = {
+	[AS_PARTICLE_TYPE_NULL]				= as_particle_tomem_null,
+	[AS_PARTICLE_TYPE_INTEGER]			= as_particle_tomem_int,
+	[AS_PARTICLE_TYPE_FLOAT]			= as_particle_tomem_float,
+	[AS_PARTICLE_TYPE_STRING]			= as_particle_tomem_string,
+	[AS_PARTICLE_TYPE_BLOB]				= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_TIMESTAMP]		= as_particle_tomem_timestamp,
+	[AS_PARTICLE_TYPE_DIGEST]			= as_particle_tomem_digest,
+	[AS_PARTICLE_TYPE_JAVA_BLOB]		= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_CSHARP_BLOB]		= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_PYTHON_BLOB]		= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_MAP]				= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_LIST]				= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_tomem_blob,
+	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_tomem_blob,
 };
 
 typedef int (*as_particle_getter_p) (as_particle *p, void **data, uint32_t *sz);
@@ -1594,6 +1658,36 @@ int _as_particle_toflat(as_bin *b, byte *buf, uint32_t *sz, bool tojson) {
 }
 int as_particle_toflat(as_bin *b, byte *buf, uint32_t *sz) {
 	return _as_particle_toflat(b, buf, sz, 0);
+}
+
+/*
+** as_particle_tomem
+** reduces the particle to a platform-neutral, serial entity, through a buffer
+** copy
+*/
+// NOTE: tojson is IGNORED
+int _as_particle_tomem(as_bin *b, byte *buf, uint32_t *sz, bool tojson) {
+	if (!b)
+		return (-1);
+
+	as_particle *p = as_bin_get_particle(b);
+	uint8_t type = as_bin_get_particle_type(b);
+
+#ifdef EXTRA_CHECKS
+	// check the incoming type
+	if (type < AS_PARTICLE_TYPE_NULL || type >= AS_PARTICLE_TYPE_MAX) {
+		cf_info(AS_PARTICLE, "particle tomem: bad particle type %d, error", (int)type);
+		return(-1);
+	}
+#endif
+
+	int rv = g_particle_tomem_table[type](p, buf, sz);
+
+	return(rv);
+
+}
+int as_particle_tomem(as_bin *b, byte *buf, uint32_t *sz) {
+	return _as_particle_tomem(b, buf, sz, 0);
 }
 
 /*

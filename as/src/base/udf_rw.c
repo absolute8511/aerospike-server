@@ -1535,22 +1535,21 @@ as_val_frombin(as_bin *bb)
 		{
 			int64_t     i = 0;
 			uint32_t    sz = 8;
-			as_particle_towire(bb, (uint8_t *) &i, &sz);
-			i = cf_swap_from_be64(i);
+			as_particle_tomem(bb, (uint8_t *) &i, &sz);
 			value = (as_val *) as_integer_new(i);
 			break;
 		}
 		case AS_PARTICLE_TYPE_STRING:
 		{
 			uint32_t psz = 32;
-			as_particle_towire(bb, NULL, &psz);
+			as_particle_tomem(bb, NULL, &psz);
 
 			char * buf = cf_malloc(psz + 1);
 			if (!buf) {
 				return value;
 			}
 
-			as_particle_towire(bb, (uint8_t *) buf, &psz);
+			as_particle_tomem(bb, (uint8_t *) buf, &psz);
 
 			buf[psz] = '\0';
 

@@ -3446,9 +3446,9 @@ as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_v
 					int_val =  __be64_to_cpup((void*)buf);
 				}
 				else {
-					as_particle_towire(b, 0, &valsz);	
-					as_particle_towire(b, (byte *)&sbin->value.int_val, &valsz);
-					int_val    = __cpu_to_be64(sbin->value.int_val);
+					as_particle_tomem(b, 0, &valsz);	
+					as_particle_tomem(b, (byte *)&sbin->value.int_val, &valsz);
+					int_val    = sbin->value.int_val;
 				}
 
 				if (as_sindex_add_integer_to_sbin(sbin, int_val) == AS_SINDEX_OK) {
@@ -3472,7 +3472,7 @@ as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_v
 					}
 				}
 				else {
-					as_particle_towire(b, 0, &valsz);
+					as_particle_tomem(b, 0, &valsz);
 					if ( valsz < 0 || valsz > AS_SINDEX_MAX_STRING_KSIZE) {
 						cf_warning( AS_SINDEX, "sindex key size out of bounds %d ", valsz);
 						valid_str = false;
@@ -3650,9 +3650,8 @@ as_sindex_diff_sbins_from_sindex(as_sindex * si, as_bin * b, byte * buf, uint32_
 				found = true;
 				uint64_t buf_int = __be64_to_cpup((void*)buf);
 				uint64_t bin_int = 0;
-				as_particle_towire(b, 0, &valsz);
-				as_particle_towire(b, (byte *)&bin_int, &valsz);
-				bin_int    = __cpu_to_be64(bin_int);
+				as_particle_tomem(b, 0, &valsz);
+				as_particle_tomem(b, (byte *)&bin_int, &valsz);
 				if (buf_int != bin_int) {
 					as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, imd_btype, simatch);
 					if (as_sindex_add_integer_to_sbin(sbin, bin_int) == AS_SINDEX_OK) {
@@ -3685,7 +3684,7 @@ as_sindex_diff_sbins_from_sindex(as_sindex * si, as_bin * b, byte * buf, uint32_
 					cf_digest_compute(buf, buf_sz, &buf_dig);
 				}
 
-				as_particle_towire(b, 0, &valsz);
+				as_particle_tomem(b, 0, &valsz);
 				if ( valsz < 0 || valsz > AS_SINDEX_MAX_STRING_KSIZE) {
 					cf_warning( AS_SINDEX, "sindex key size out of bounds %d ", valsz);
 					valid_binstr = false;
