@@ -331,12 +331,12 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 			// cf_detail(AS_UDF, "udf_setbin: string: binname %s value is %s",bname,s);
 
 			if (rd->ns->storage_data_in_memory) {
-				as_particle_fromwire(b, AS_PARTICLE_TYPE_STRING, s, l, NULL, true);
+				as_particle_frommem(b, AS_PARTICLE_TYPE_STRING, s, l, NULL, true);
 			} else {
 				pbytes = l + as_particle_get_base_size(AS_PARTICLE_TYPE_STRING);
 				uint8_t *particle_buf = udf__aerospike_get_particle_buf(urecord, &urecord->updates[offset], type, pbytes);
 				if (particle_buf) {
-					as_particle_fromwire(b, AS_PARTICLE_TYPE_STRING, s, l,
+					as_particle_frommem(b, AS_PARTICLE_TYPE_STRING, s, l,
 										particle_buf,
 										false);
 				} else {
@@ -355,12 +355,12 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 			size_t      l   = as_bytes_size(v);
 
 			if (rd->ns->storage_data_in_memory) {
-				as_particle_fromwire(b, AS_PARTICLE_TYPE_BLOB, s, l, NULL, true);
+				as_particle_frommem(b, AS_PARTICLE_TYPE_BLOB, s, l, NULL, true);
 			} else {
 				pbytes = l + as_particle_get_base_size(AS_PARTICLE_TYPE_BLOB);
 				uint8_t *particle_buf = udf__aerospike_get_particle_buf(urecord, &urecord->updates[offset], type, pbytes);
 				if (particle_buf) {
-					as_particle_fromwire(b, AS_PARTICLE_TYPE_BLOB, s, l, particle_buf, false);
+					as_particle_frommem(b, AS_PARTICLE_TYPE_BLOB, s, l, particle_buf, false);
 				} else {
 					cf_warning(AS_UDF, "udf_aerospike_setbin: Allocation Error [Bytes: bin %s "
 										"data size too big: pbytes %d]... Fail",
@@ -374,15 +374,15 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 		case AS_BOOLEAN: {
 			as_boolean *    v   = as_boolean_fromval(val);
 			bool            d   = as_boolean_get(v);
-			int64_t         i   = __be64_to_cpup((void *)&d);
+            int64_t         i   = * (int64_t *) &d;
 
 			if (rd->ns->storage_data_in_memory) {
-				as_particle_fromwire(b, AS_PARTICLE_TYPE_INTEGER, (uint8_t *) &i, 8, NULL, true);
+				as_particle_frommem(b, AS_PARTICLE_TYPE_INTEGER, (uint8_t *) &i, 8, NULL, true);
 			} else {
 				pbytes = 8 + as_particle_get_base_size(AS_PARTICLE_TYPE_INTEGER);
 				uint8_t *particle_buf = udf__aerospike_get_particle_buf(urecord, &urecord->updates[offset], type, pbytes);
 				if (particle_buf) {
-					as_particle_fromwire(b, AS_PARTICLE_TYPE_INTEGER,
+					as_particle_frommem(b, AS_PARTICLE_TYPE_INTEGER,
 										(uint8_t *) &i, 8,
 										particle_buf, false);
 				} else {
@@ -398,16 +398,15 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 		case AS_INTEGER: {
 			as_integer *    v   = as_integer_fromval(val);
 			int64_t         i   = as_integer_get(v);
-			int64_t         j   = __be64_to_cpup((void *)&i);
 
 			if (rd->ns->storage_data_in_memory) {
-				as_particle_fromwire(b, AS_PARTICLE_TYPE_INTEGER, (uint8_t *) &j, 8, NULL, true);
+				as_particle_frommem(b, AS_PARTICLE_TYPE_INTEGER, (uint8_t *) &i, 8, NULL, true);
 			} else {
 				pbytes = 8 + as_particle_get_base_size(AS_PARTICLE_TYPE_INTEGER);
 				uint8_t *particle_buf = udf__aerospike_get_particle_buf(urecord, &urecord->updates[offset], type, pbytes);
 				if (particle_buf) {
-					as_particle_fromwire(b, AS_PARTICLE_TYPE_INTEGER,
-										(uint8_t *) &j, 8, particle_buf,
+					as_particle_frommem(b, AS_PARTICLE_TYPE_INTEGER,
+										(uint8_t *) &i, 8, particle_buf,
 										false);
 				} else {
 					cf_warning(AS_UDF, "udf_aerospike_setbin: Allocation Error [Integer: bin %s "
@@ -446,13 +445,13 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 				ptype = to_particle_type(type);
 			}
 			if (rd->ns->storage_data_in_memory) {
-				as_particle_fromwire(b, ptype, (uint8_t *) buf.data, buf.size, NULL, true);
+				as_particle_frommem(b, ptype, (uint8_t *) buf.data, buf.size, NULL, true);
 			}
 			else {
 				pbytes = buf.size + as_particle_get_base_size(ptype);
 				uint8_t *particle_buf = udf__aerospike_get_particle_buf(urecord, &urecord->updates[offset], type, pbytes);
 				if (particle_buf) {
-					as_particle_fromwire(b, ptype, (uint8_t *) buf.data, buf.size,
+					as_particle_frommem(b, ptype, (uint8_t *) buf.data, buf.size,
 										particle_buf, false);
 				} else {
 					cf_warning(AS_UDF, "udf_aerospike_setbin: Allocation Error [Map-List: bin %s "

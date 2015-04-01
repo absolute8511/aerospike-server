@@ -1016,11 +1016,11 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 
 	uint8_t pbytes = 0;
 	if (rd->ns->storage_data_in_memory) {
-		as_particle_fromwire(binp, AS_PARTICLE_TYPE_HIDDEN_MAP, (uint8_t *) buf.data, buf.size, NULL, true);
+		as_particle_frommem(binp, AS_PARTICLE_TYPE_HIDDEN_MAP, (uint8_t *) buf.data, buf.size, NULL, true);
 	}
 	else {
 		pbytes = buf.size + as_particle_get_base_size(AS_PARTICLE_TYPE_HIDDEN_MAP);
-		as_particle_fromwire(binp, AS_PARTICLE_TYPE_HIDDEN_MAP, (uint8_t *) buf.data,
+		as_particle_frommem(binp, AS_PARTICLE_TYPE_HIDDEN_MAP, (uint8_t *) buf.data,
 					buf.size, pp_stack_particles, rd->ns->storage_data_in_memory);
 	}
 	as_serializer_destroy(&s);

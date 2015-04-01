@@ -81,7 +81,7 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 	uint32_t        sz          = 0;
 	uint32_t        tsz         = sz + vlen + as_particle_get_base_size(vtype);
 	uint8_t *   v           = NULL;
-	int64_t     swapped_int = 0;
+	int64_t     unswapped_int = 0;
 	uint8_t     *sp_p = *sp_pp;
 
 	if (tsz > sp_sz) {
@@ -105,8 +105,8 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 			if (vlen != 8) {
 				cf_crash(AS_UDF, "unexpected int %d", vlen);
 			}
-			swapped_int = __be64_to_cpup(val);
-			v = (uint8_t *) &swapped_int;
+            unswapped_int = * (int64_t *) val;
+			v = (uint8_t *) &unswapped_int;
 			break;
 		}
 		case AS_PARTICLE_TYPE_BLOB:
@@ -122,7 +122,7 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 		}
 	}
 
-	as_particle_fromwire(bin, vtype, v, vlen, sp_p, ns->storage_data_in_memory);
+	as_particle_frommem(bin, vtype, v, vlen, sp_p, ns->storage_data_in_memory);
 	*sp_pp = sp_p;
 	return 0;
 }
