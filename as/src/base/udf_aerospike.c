@@ -373,8 +373,7 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 		}
 		case AS_BOOLEAN: {
 			as_boolean *    v   = as_boolean_fromval(val);
-			bool            d   = as_boolean_get(v);
-            int64_t         i   = * (int64_t *) &d;
+			int64_t         i   = (int64_t) as_boolean_get(v);
 
 			if (rd->ns->storage_data_in_memory) {
 				as_particle_frommem(b, AS_PARTICLE_TYPE_INTEGER, (uint8_t *) &i, 8, NULL, true);
