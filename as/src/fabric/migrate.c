@@ -2298,7 +2298,6 @@ migrate_xmit_fn(void *arg)
 		// Retry on DESYNC,
 		switch (mig->rsv.state) {
 			case AS_PARTITION_STATE_DESYNC:
-			case AS_PARTITION_STATE_LIFESUPPORT:
 				cf_debug(AS_MIGRATE, " attempt to send-migrate a non-sync partition (%d), reinserting as low priority {%s:%d}", mig->rsv.state, mig->rsv.ns->name, (int)mig->rsv.pid);
 				as_partition_reserve_update_state(&mig->rsv);
 				if (0 != cf_queue_priority_push(g_migrate_q, (void *) &mig, CF_QUEUE_PRIORITY_LOW)) {
