@@ -249,7 +249,7 @@ as_bin_get_and_size_all(as_storage_rd *rd, as_bin *stack_bins)
 
 			size_t flat_size;
 
-			if (0 != as_particle_get_flat_size(b, &flat_size)) {
+			if (0 != as_bin_particle_flat_size(b, &flat_size)) {
 				return false;
 			}
 

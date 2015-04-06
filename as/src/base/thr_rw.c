@@ -3349,7 +3349,7 @@ static inline uint32_t
 old_flat_size(as_bin* bin)
 {
 	size_t size = 0;
-	as_particle_get_flat_size(bin, &size);
+	as_bin_particle_flat_size(bin, &size);
 	return (uint32_t)size;
 }
 

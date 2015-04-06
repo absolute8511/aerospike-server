@@ -123,8 +123,6 @@ typedef struct as_partition_vinfo_s as_partition_vinfo;
 typedef struct as_partition_reservation_s as_partition_reservation;
 typedef struct as_index_s as_record;
 typedef struct as_bin_s as_bin;
-typedef struct as_particle_s as_particle;
-typedef struct as_particle_iparticle_s as_particle_iparticle;
 typedef struct as_index_ref_s as_index_ref;
 typedef struct as_set_s as_set;
 typedef struct as_treex_s as_treex;
@@ -174,7 +172,7 @@ typedef enum {
 	AS_PARTICLE_TYPE_STRING = 3,
 	AS_PARTICLE_TYPE_BLOB = 4,
 	AS_PARTICLE_TYPE_TIMESTAMP = 5,
-	AS_PARTICLE_TYPE_DIGEST = 6,
+	AS_PARTICLE_TYPE_UNUSED_6 = 6,
 	AS_PARTICLE_TYPE_JAVA_BLOB = 7,
 	AS_PARTICLE_TYPE_CSHARP_BLOB = 8,
 	AS_PARTICLE_TYPE_PYTHON_BLOB = 9,
@@ -192,11 +190,11 @@ typedef enum {
  * The common part of a particle
  * this is poor man's subclassing - IE, how to do a subclassed interface in C
  * Go look in particle.c to see all the subclass implementation and structure */
-struct as_particle_s {
+typedef struct as_particle_s {
 	uint8_t		metadata;		// used by the iparticle for is_integer and inuse, as well as version in multi bin mode only
 								// used by *particle for type
 	uint8_t		data[];
-} __attribute__ ((__packed__));
+} __attribute__ ((__packed__)) as_particle;
 
 // Bit Flag constants used for the particle state value (2 bits, 4 values)
 #define AS_BIN_STATE_UNUSED			0
@@ -204,39 +202,50 @@ struct as_particle_s {
 #define AS_BIN_STATE_INUSE_HIDDEN	2 // Denotes a server-side, hidden bin
 #define AS_BIN_STATE_INUSE_OTHER	3
 
-struct as_particle_iparticle_s {
+typedef struct as_particle_iparticle_s {
 	uint8_t		version: 4;		// can only be used in multi bin
 	uint8_t		unused: 2;		// can only be used in multi bin
 	uint8_t		state: 2;		// IF 0: unused, IF 1: integer, IF 2: HIDDEN bin, IF 3: inuse, other bin type
 	uint8_t		data[];
-} __attribute__ ((__packed__));
-
-typedef struct as_particle_int_on_device_s {
-	uint8_t		type;			// must start with type!
-	uint8_t		len;
-	uint64_t	i;
-} __attribute__ ((__packed__)) as_particle_int_on_device;
+} __attribute__ ((__packed__)) as_particle_iparticle;
 
 /* Particle function declarations */
-extern as_particle *as_particle_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
-extern int as_particle_compare_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz);
-extern int as_particle_towire(as_bin *b, uint8_t *buf, uint32_t *sz);
-extern as_particle *as_particle_fromflat(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
-extern int as_particle_toflat(as_bin *b, uint8_t *buf, uint32_t *sz);
-extern as_particle *as_particle_frommem(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
-extern int as_particle_tomem(as_bin *b, uint8_t *buf, uint32_t *sz);
-extern int as_particle_p_get(as_bin *b, uint8_t **buf, uint32_t *sz);
+
+extern uint32_t as_particle_memory_size(uint8_t type, uint32_t value_size); // deprecate? for from_wire sizing
+extern uint32_t as_particle_flat_size(uint8_t type, uint32_t value_size); // deprecate? for from_wire flat sizing
 extern uint32_t as_particle_get_base_size(uint8_t particle_type);
-extern uint32_t as_particle_memory_size(uint8_t type, uint32_t value_size);
-extern uint32_t as_particle_flat_size(uint8_t type, uint32_t value_size);
-extern int as_particle_get_flat_size(as_bin *b, size_t *flat_sz); // fail if not flat type - size is complete, with 'type'
-extern int as_particle_increment(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, bool mc_compliant);
-extern void as_particle_destroy(as_bin *b, bool data_in_memory);
-extern uint32_t as_particle_get_size_in_memory(as_bin *b, as_particle *particle);
-extern int as_particle_append_prepend_data(as_bin *b, as_particle_type type, byte *data, uint32_t data_len, bool data_in_memory, bool is_append, bool mc_compliant);
 extern as_particle_type as_particle_type_convert(as_particle_type type);
 extern as_particle_type as_particle_type_convert_to_hidden(as_particle_type type);
 extern bool as_particle_type_hidden(as_particle_type type);
+
+// as_bin particle function declarations
+// TODO - rename with 'bin', move.
+
+// should be from_wire:
+extern int as_particle_increment(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, bool mc_compliant);
+extern int as_particle_append_prepend_data(as_bin *b, as_particle_type type, byte *data, uint32_t data_len, bool data_in_memory, bool is_append, bool mc_compliant);
+
+extern uint32_t as_particle_get_size_in_memory(as_bin *b, as_particle *particle); // WTF ???
+extern uint32_t as_bin_get_particle_size(as_bin *b); // WTF ??? this is value size, excluding particle metadata
+
+extern void as_particle_destroy(as_bin *b, bool data_in_memory);
+extern int as_particle_p_get(as_bin *b, uint8_t **buf, uint32_t *sz);
+
+// wire:
+extern int as_particle_compare_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz);
+extern as_particle *as_particle_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
+extern int as_particle_towire(as_bin *b, uint8_t *buf, uint32_t *sz);
+
+// mem:
+extern as_particle *as_particle_frommem(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
+extern int as_particle_tomem(as_bin *b, uint8_t *buf, uint32_t *sz);
+
+// flat:
+extern int as_bin_particle_flat_size(as_bin *b, size_t *flat_sz);
+extern int as_bin_particle_size_from_flat(as_bin *b, uint32_t *p_flat_size); // TODO - implement
+extern int as_bin_particle_cast_from_flat(as_bin *b, uint8_t *flat, uint32_t flat_size);
+extern int as_bin_particle_replace_from_flat(as_bin *b, const uint8_t *flat, uint32_t flat_size);
+extern uint32_t as_bin_particle_to_flat(const as_bin *b, uint8_t *flat);
 
 
 #define BIN_VERSION_MAX 15 // the largest number we can place in the version
@@ -283,13 +292,13 @@ typedef struct as_rec_space_s {
 } __attribute__ ((__packed__)) as_rec_space;
 
 static inline bool
-as_bin_inuse(as_bin *b)
+as_bin_inuse(const as_bin *b)
 {
 	return (((as_particle_iparticle *)b)->state);
 }
 
 static inline uint8_t
-as_bin_state(as_bin *b)
+as_bin_state(const as_bin *b)
 {
 	return ((as_particle_iparticle *)b)->state;
 }
@@ -301,13 +310,39 @@ as_bin_state_set(as_bin *b, uint8_t val)
 	((as_particle_iparticle *)b)->unused = 0;
 }
 
+static inline void
+as_bin_state_set_from_type(as_bin *b, as_particle_type type)
+{
+	switch (type) {
+	case AS_PARTICLE_TYPE_NULL:
+		((as_particle_iparticle *)b)->state = AS_BIN_STATE_UNUSED;
+		break;
+	case AS_PARTICLE_TYPE_INTEGER:
+		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_INTEGER;
+		break;
+	case AS_PARTICLE_TYPE_FLOAT:
+	case AS_PARTICLE_TYPE_TIMESTAMP:
+		// TODO - unsupported
+		((as_particle_iparticle *)b)->state = AS_BIN_STATE_UNUSED;
+		break;
+	case AS_PARTICLE_TYPE_HIDDEN_LIST:
+	case AS_PARTICLE_TYPE_HIDDEN_MAP:
+		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_HIDDEN;
+		break;
+	default:
+		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_OTHER;
+		break;
+	}
+
+	((as_particle_iparticle *)b)->unused = 0;
+}
+
 static inline bool
 as_bin_inuse_has(as_storage_rd *rd)
 {
 	// In-use bins are at the beginning - only need to check the first bin.
 	return (rd->n_bins && as_bin_inuse(rd->bins));
 }
-
 
 static inline void
 as_bin_set_empty(as_bin *b)
@@ -352,7 +387,7 @@ as_bin_set_all_empty(as_storage_rd *rd) {
 }
 
 static inline bool
-as_bin_is_integer(as_bin *b) {
+as_bin_is_integer(const as_bin *b) {
 	return (((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_INTEGER);
 }
 
@@ -365,7 +400,7 @@ as_bin_get_particle(as_bin *b) {
  * Quick test to show if this bin is one of the HIDDEN bins.
  */
 static inline bool
-as_bin_is_hidden(as_bin *b) {
+as_bin_is_hidden(const as_bin *b) {
 	return  (((as_particle_iparticle *)b)->state) == AS_BIN_STATE_INUSE_HIDDEN;
 }
 
@@ -375,7 +410,7 @@ as_bin_is_hidden(as_bin *b) {
  * actual type.
  */
 static inline uint8_t
-as_bin_get_particle_type(as_bin *b) {
+as_bin_get_particle_type(const as_bin *b) {
 	switch (((as_particle_iparticle *)b)->state) {
 		case AS_BIN_STATE_INUSE_INTEGER:
 			return (AS_PARTICLE_TYPE_INTEGER);
@@ -389,7 +424,7 @@ as_bin_get_particle_type(as_bin *b) {
 }
 
 static inline uint8_t
-as_bin_get_version(as_bin *b, bool single_bin) {
+as_bin_get_version(const as_bin *b, bool single_bin) {
 	return (single_bin ? 0 : ((as_particle_iparticle *)b)->version);
 }
 
@@ -424,7 +459,6 @@ extern void as_bin_destroy_from(as_storage_rd *rd, uint16_t i);
 extern void as_bin_destroy_all(as_storage_rd *rd);
 extern uint16_t as_bin_inuse_count(as_storage_rd *rd);
 extern void as_bin_all_dump(as_storage_rd *rd, char *msg);
-extern uint32_t as_bin_get_particle_size(as_bin *b);
 
 extern void as_bin_init(as_namespace *ns, as_bin *b, byte *name, size_t namesz, uint version);
 

@@ -1085,55 +1085,6 @@ ssd_wblock_init(drv_ssd *ssd)
 }
 
 
-static int
-ssd_populate_bin(as_bin *bin, drv_ssd_bin *ssd_bin, uint8_t *block_head,
-		bool single_bin, bool allocate_memory)
-{
-	as_particle *p = (as_particle*)(block_head + ssd_bin->offset);
-
-	if (p->metadata == AS_PARTICLE_TYPE_INTEGER) {
-		if (ssd_bin->len != 10) {
-			cf_warning(AS_DRV_SSD, "Possible memory corruption: integer value overflows: expected 10 bytes got %d bytes",
-					ssd_bin->len);
-		}
-
-		as_particle_int_on_device *pi = (as_particle_int_on_device*)p;
-		if (pi->len != 8) {
-			return -1;
-		}
-
-		// Destroy old particle.
-		as_particle_fromflat(bin, AS_PARTICLE_TYPE_NULL, 0, 0, 0, true);
-
-		// Copy the integer particle in-place to the bin.
-		bin->ivalue = pi->i;
-		as_bin_state_set(bin, AS_BIN_STATE_INUSE_INTEGER);
-	}
-	else {
-		if (allocate_memory) {
-			uint32_t base_size = as_particle_get_base_size(p->metadata);
-
-			as_particle_fromflat(bin, p->metadata, (uint8_t*)p + base_size,
-					ssd_bin->len - base_size, 0, true);
-		}
-		else {
-			bin->particle = p;
-
-			if (as_particle_type_hidden(p->metadata)) {
-				as_bin_state_set(bin, AS_BIN_STATE_INUSE_HIDDEN);
-			}
-			else {
-				as_bin_state_set(bin, AS_BIN_STATE_INUSE_OTHER);
-			}
-		}
-	}
-
-	as_bin_set_version(bin, ssd_bin->version, single_bin);
-
-	return 0;
-}
-
-
 //==========================================================
 // Storage API implementation: reading records.
 //
@@ -1267,8 +1218,8 @@ as_storage_particle_read_all_ssd(as_storage_rd *rd)
 		as_bin_set_version(&rd->bins[i], ssd_bin->version, rd->ns->single_bin);
 		as_bin_set_id_from_name(rd->ns, &rd->bins[i], ssd_bin->name);
 
-		int rv = ssd_populate_bin(&rd->bins[i], ssd_bin, block_head,
-				rd->ns->single_bin, false);
+		int rv = as_bin_particle_cast_from_flat(&rd->bins[i],
+				block_head + ssd_bin->offset, ssd_bin->len);
 
 		if (0 != rv) {
 			return rv;
@@ -1302,8 +1253,8 @@ as_storage_particle_read_and_size_all_ssd(as_storage_rd *rd)
 		as_bin_set_version(&rd->bins[i], ssd_bin->version, rd->ns->single_bin);
 		as_bin_set_id_from_name(rd->ns, &rd->bins[i], ssd_bin->name);
 
-		int rv = ssd_populate_bin(&rd->bins[i], ssd_bin, block_head,
-				rd->ns->single_bin, false);
+		int rv = as_bin_particle_cast_from_flat(&rd->bins[i],
+				block_head + ssd_bin->offset, ssd_bin->len);
 
 		if (0 != rv) {
 			return rv;
@@ -1796,7 +1747,7 @@ as_storage_record_size(as_storage_rd *rd)
 		}
 
 		size_t particle_flat_sz;
-		int rv = as_particle_get_flat_size(bin, &particle_flat_sz);
+		int rv = as_bin_particle_flat_size(bin, &particle_flat_sz);
 
 		if (rv != 0) {
 			// Should never get here.
@@ -1971,24 +1922,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 
 			ssd_bin->offset = buf - buf_start;
 
-			size_t particle_flat_size;
-
-			if (0 == as_particle_get_flat_size(bin, &particle_flat_size)) {
-				if (as_bin_is_integer(bin)) {
-					as_particle_int_on_device *p =
-							(as_particle_int_on_device*)buf;
-					p->type = AS_PARTICLE_TYPE_INTEGER;
-					p->len = sizeof(uint64_t);
-					p->i = bin->ivalue;
-				}
-				else {
-					memcpy(buf, as_bin_get_particle(bin), particle_flat_size);
-				}
-			}
-			else {
-				cf_warning(AS_DRV_SSD, "can't get flat particle size - writing empty bin");
-				particle_flat_size = 0;
-			}
+			size_t particle_flat_size = as_bin_particle_to_flat(bin, buf);
 
 			buf += particle_flat_size;
 			ssd_bin->len = particle_flat_size;
@@ -3209,7 +3143,10 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 						strlen(ssd_bin->name), ssd_bin->version);
 			}
 
-			ssd_populate_bin(b, ssd_bin, block_head, ns->single_bin, true);
+			// TODO - what if this fails?
+			as_bin_particle_replace_from_flat(b, block_head + ssd_bin->offset,
+					ssd_bin->len);
+
 			ssd_bin = (drv_ssd_bin*)(block_head + ssd_bin->next);
 
 			if (has_sindex) {
