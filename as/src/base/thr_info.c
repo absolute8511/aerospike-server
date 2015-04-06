@@ -6305,7 +6305,6 @@ as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn
 		char *path_str;
 		cf_vector_get(str_v, i * 2, &path_str);
 		imd->path_str = cf_strdup(path_str);
-		cf_info(AS_SINDEX, "path %s", imd->path_str);
 		// Extract the path and bin
 		if (as_sindex_extract_bin_path(imd, path_str)) {
 			cf_warning(AS_INFO, "Failed to create secondary index: Path_str is not valid- %s", path_str);

@@ -1294,6 +1294,8 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 		return rv;
     }
 
+	r->void_time  = c->void_time;
+	r->generation = c->generation;
 	// Update the version in the parent. In case it is incoming migration
 	//
 	// Should it be done only in case of migration ?? for LDT currently
@@ -1307,9 +1309,6 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 			p_stack_particles += pbytes;			
 		}
 	}
-
-	r->void_time  = c->void_time;
-	r->generation = c->generation;
 
 	// cf_info(AS_RECORD, "flatten: key %"PRIx64" used incoming component %d generation %d",*(uint64_t *)keyd, idx,r->generation);
 
@@ -1427,10 +1426,10 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 
 			if (COMPONENT_IS_LDT_SUB(&components[0])) {
 
-				cf_detail_digest(AS_RECORD, keyd, "LDT_MERGE merge component is LDT_SUB %d", components[0].flag);
+				cf_detail_digest(AS_LDT, keyd, "LDT_MERGE merge component is LDT_SUB %d", components[0].flag);
 
 				if (as_ldt_merge_component_is_candidate(rsv, &components[0]) == false) {
-					cf_detail_digest(AS_LDT, keyd, "LDT subrec is not a merge candidate");
+					cf_debug_digest(AS_LDT, keyd, "LDT subrec is not a merge candidate");
 					return 0;
 				}
 
@@ -1457,7 +1456,7 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 	as_index  *r        = NULL;
 	int ret             = as_record_get_create(tree, keyd, &r_ref, rsv->ns, is_subrec);
 	if (-1 == ret) {
-		cf_warning_digest(AS_RECORD, keyd, "{%s} record flatten: could not get-create record ", rsv->ns->name);
+		cf_warning_digest(AS_RECORD, keyd, "{%s} record flatten: could not get-create record %b", rsv->ns->name, is_subrec);
 		return(-1);
 	} else if (ret) {
 		has_local_copy  = false;
@@ -1484,7 +1483,7 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 	int  rv              = 0;
 	bool delete_record = false;
 	if (*winner_idx != -1) {
-		cf_detail(AS_RECORD, "Flatten Record Remote LDT Winner @ %d", *winner_idx);
+		cf_detail(AS_LDT, "Flatten Record Remote LDT Winner @ %d", *winner_idx);
 		as_record_merge_component *c = &components[*winner_idx];
 
 		if (COMPONENT_IS_LDT_DUMMY(c)) {
@@ -1496,7 +1495,7 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 				cf_warning(AS_RECORD, "DUMMY LDT Component in Non Duplicate Resolution Code");
 				rv = -1;
 			} else {
-					cf_detail(AS_RECORD, "Ship Operation");
+					cf_detail(AS_LDT, "Ship Operation");
 				// NB: DO NOT CHANGE THIS RETURN. IT MEANS A SPECIAL THING TO THE CALLER
 				rv = -2;
 			}
@@ -1504,7 +1503,7 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 			// Case 2:
 			// In case the winning component is remote then write it locally. Create record
 			// in case there is no local copy of record.
-			cf_detail_digest(AS_RECORD, keyd, "Local (%d:%d) Remote (%d:%d)", r->generation, r->void_time, c->generation, c->void_time);
+			cf_detail_digest(AS_RECORD, keyd, "is_subrec (%d) Local (%d:%d) Remote (%d:%d)", is_subrec, r->generation, r->void_time, c->generation, c->void_time);
 
 			as_storage_rd rd;
 			if (has_local_copy) {

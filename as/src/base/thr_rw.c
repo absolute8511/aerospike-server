@@ -137,6 +137,10 @@ void print_digest(u_char *d) {
 		printf("%02x", d[i]);
 }
 
+void g_write_hash_delete(global_keyd *gk) {
+	rchash_delete(g_write_hash, gk, sizeof(global_keyd));
+}
+
 // forward references internal to the file
 void rw_complete(as_transaction *tr, as_record_lock *rl, int record_get_rv);
 int write_local(as_transaction *tr, write_local_generation *wlg,
@@ -1002,6 +1006,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 				"node %"PRIx64", with TRANSACTION_FLAG_SHIPPED_OP not set and without any cluster key "
 				"mismatch too. Cluster key is %"PRIx64", cluster size = %d my id %"PRIx64"", 
 				g_config.self_node, tr->rsv.cluster_key, g_config.paxos->cluster_size , g_config.self_node);
+			//PRINT_STACK();
 		}
 
 		if ((!qnode_found) && (tr->rsv.p->qnode != tr->rsv.p->replica[0])) {
@@ -1304,9 +1309,9 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 
 			cf_atomic_int_incr(&g_config.n_waiting_transactions);
 
-			cf_detail(AS_RW,
-					"as rw start:  write in progress QUEUEING returning 0 (%d:%p) %"PRIx64"",
-					tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, *(uint64_t*)&tr->keyd);
+			cf_detail_digest(AS_RW, &tr->keyd,
+					"as rw start:  write in progress QUEUEING returning 0 (%d:%p:%"PRIx64") wr(%p) %ld",
+					tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, tr->proxy_node, wr2, tr->trid);
 
 			as_partition_release(&tr->rsv);
 			cf_atomic_int_decr(&g_config.rw_tree_count);
@@ -1468,6 +1473,7 @@ void rw_msg_get_ldt_dupinfo(as_record_merge_component *c, msg *m) {
 int
 finish_rw_process_prole_ack(write_request *wr, uint32_t result_code)
 {
+    cf_debug(AS_RW, "Prole Ack");
 	if (wr->shipped_op) {
 		cf_detail_digest(AS_RW, &wr->keyd, "SHIPPED_OP WINNER [Digest %"PRIx64"] Replication Done",
 				*(uint64_t *)&wr->keyd);
@@ -2459,16 +2465,19 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 	}
 
 	uint64_t version_to_set = 0;
+    bool     set_version    = false;
 	// Set the ldt prole version if there be need
 	if (is_ldt_parent) {
 		if (linfo->replication_partition_version_match && linfo->ldt_prole_version_set) {
 			version_to_set = linfo->ldt_prole_version;
+			set_version    = true;
 		} else if (!linfo->replication_partition_version_match) {
 			version_to_set = linfo->ldt_source_version;
-		}
+			set_version    = true;
+		} 
 	}
 
-	if (version_to_set) {
+	if (set_version) {
 		int pbytes = as_ldt_parent_storage_set_version(&rd, version_to_set, p_stack_particles, __FILE__, __LINE__);
 		if (pbytes < 0) {
 			cf_warning(AS_LDT, "write_local_pickled: LDT Parent storage version set failed %d", pbytes);
@@ -2476,7 +2485,8 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		} else {
 			p_stack_particles += pbytes;
 		}
-		cf_detail_digest(AS_LDT, keyd, "Wrote the destination version %d %d %ld", linfo->replication_partition_version_match, linfo->ldt_prole_version_set, linfo->ldt_prole_version);
+		cf_detail_digest(AS_LDT, keyd, "Wrote the destination version match %s set version (%ld) out of prole (%d:%ld) source(%ld)", 
+						linfo->replication_partition_version_match ? "true" : "false", version_to_set, linfo->ldt_prole_version_set, linfo->ldt_prole_version, linfo->ldt_source_version);
 	}
 
 Out:
@@ -5119,6 +5129,8 @@ rw_retransmit_reduce_fn(void *key, uint32_t keylen, void *data, void *udata)
 		// finished
 		if (!wr->shipped_op_initiator) {
 			finished = finish_rw_process_ack(wr, AS_PROTO_RESULT_OK);
+		} else {
+			cf_debug(AS_LDT, "Skipping process ack for LDT ship op initiator");
 		}
 		pthread_mutex_unlock(&wr->lock);
 

@@ -4990,3 +4990,68 @@ END:
 	}
 	return NULL;
 }
+
+// Sindex ticker start
+void
+as_sindex_ticker_start(as_namespace * ns, as_sindex * si)
+{
+	cf_info(AS_SINDEX, "Sindex-ticker start: ns=%s si=%s job=%s", ns->name ? ns->name : "<all>", 
+			si ? si->imd->iname : "<all>", si ? "SINDEX_POPULATE" : "SINDEX_POPULATEALL");
+
+}
+// Sindex ticker
+void
+as_sindex_ticker(as_namespace * ns, as_sindex * si, uint64_t n_obj_scanned, uint64_t start_time)
+{
+	const uint64_t sindex_ticker_obj_count = 500000;
+
+	if (n_obj_scanned % sindex_ticker_obj_count == 0 && n_obj_scanned != 0) {
+		// Ticker can be dumped from here, we'll be in this place for both
+		// sindex populate and populate-all.
+		// si memory gets set from as_sindex_reserve_data_memory() which in turn gets set from :
+		// ai_btree_put() <- for every single sindex insertion (boot-time/dynamic)
+		// as_sindex_create() : for dynamic si creation, cluster change, smd on boot-up.
+
+		uint64_t si_memory   = 0;
+		char   * si_name     = NULL;
+		
+		if (si) {
+			si_memory        = cf_atomic64_get(si->data_memory_used);
+			si_name          = si->imd->iname;
+		}
+		else {
+			si_memory        = (uint64_t)cf_atomic_int_get(ns->sindex_data_memory_used);
+			si_name          = "<all>";
+		}
+
+		uint64_t n_objects       = (uint64_t)cf_atomic_int_get(ns->n_objects);
+		uint64_t pct_obj_scanned = n_objects == 0 ? 100 : ((n_obj_scanned * 100) / n_objects);
+		uint64_t elapsed         = (cf_getms() - start_time);
+		uint64_t est_time        = (elapsed * n_objects)/n_obj_scanned - elapsed;
+
+		cf_info(AS_SINDEX, " Sindex-ticker: ns=%s si=%s obj-scanned=%"PRIu64" si-mem-used=%"PRIu64""
+				" progress=%d%% est-time=%"PRIu64" ms",
+				ns->name, si_name, n_obj_scanned, si_memory, pct_obj_scanned, est_time);
+	}
+}
+
+// Sindex ticker end
+void
+as_sindex_ticker_done(as_namespace * ns, as_sindex * si, uint64_t start_time)
+{
+	uint64_t si_memory   = 0;
+	char   * si_name     = NULL;
+
+	if (si) {
+		si_memory        = cf_atomic64_get(si->data_memory_used);
+		si_name          = si->imd->iname;
+	}
+	else {
+		si_memory        = (uint64_t)cf_atomic_int_get(ns->sindex_data_memory_used);
+		si_name          = "<all>";
+	}
+
+	cf_info(AS_SINDEX, "Sindex-ticker done: ns=%s si=%s si-mem-used=%"PRIu64" elapsed=%"PRIu64" ms", 
+				ns->name, si_name, si_memory, cf_getms() - start_time);
+
+}
