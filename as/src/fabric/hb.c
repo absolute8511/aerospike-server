@@ -127,7 +127,7 @@ typedef struct mesh_host_queue_element_s {
 	char        host[128];
 	int         port;
 	int         remove_fd;
-	bool	    seed;
+	bool        seed;
 } mesh_host_queue_element;
 
 /* as_hb
@@ -137,10 +137,11 @@ typedef struct as_hb_s {
 	shash *adjacencies;
 	shash *discovered_list;
 
+	// [Note:  Ideally a hash table would be used to maintain the txlist instead of parallel arrays.]
 #define AS_HB_TXLIST_SZ 1024 * 64
 	bool endpoint_txlist[AS_HB_TXLIST_SZ];
 	bool endpoint_txlist_isudp[AS_HB_TXLIST_SZ];
-	cf_node endpoint_txlist_node_id[AS_HB_TXLIST_SZ]; //HB BUG: to monitor the nodeId of a fd : we should have a hash to maintain txlist instead of array
+	cf_node endpoint_txlist_node_id[AS_HB_TXLIST_SZ]; // Node ID associated with a given mesh fd.
 
 	struct epoll_event ev;
 	int efd;
@@ -397,18 +398,18 @@ as_hb_getaddr(cf_node node, cf_sockaddr *so)
 	return(0);
 }
 
-//HB Bug
-//Putting them as 5 for now, but logically there can only be two one from either side will change it to 2 after some testing
+// There can only be two open sockets to any other given node: one going in each direction.
 #define AS_HB_MAX_OPEN_CONN_PER_NODE 2
 
 typedef struct discovered_node_conn_s {
-	int fd; //TODO add more parameter for debugging
-}discovered_node_conn_t;
+	int fd;
+	// [TODO:  Add more parameters for debugging.]
+} discovered_node_conn_t;
 
 typedef struct discovered_node_hval_s {
-	int                  num_conn;
+	int                      num_conn;
 	discovered_node_conn_t   conn[AS_HB_MAX_OPEN_CONN_PER_NODE];
-}discovered_node_hval_t;
+} discovered_node_hval_t;
 
 
 static void
@@ -1025,7 +1026,8 @@ void as_hb_try_connecting_remote(mesh_host_list_element * e)
 
 			if ( 0 != cf_socket_init_client(&s, ((g_config.hb_interval * g_config.hb_timeout) / 2)) ) {
 				cf_debug(AS_HB, "could not create heartbeat connection to node %s:%d", e->host, e->port);
-				e->next_try = cf_getms() + ((g_config.hb_interval * g_config.hb_timeout) / 2); // retry to be put same as connect timeout
+				// Retry after waiting 10x longer than timeout.
+				e->next_try = cf_getms() + 10 * (g_config.hb_interval * g_config.hb_timeout);
 				e = e->next;
 				continue;
 			}
@@ -1035,11 +1037,25 @@ void as_hb_try_connecting_remote(mesh_host_list_element * e)
 			char some_addr[24];
 			some_addr[0] = 0;
 
+			struct sockaddr_in addr_in2;
+			socklen_t addr_len2 = sizeof(addr_in2);
+
+			char some_addr2[24];
+			some_addr2[0] = 0;
+
 			// Try to get the client details for better logging.
 			// Otherwise, fall back to generic log message.
 			if (getpeername(s.sock, (struct sockaddr*)&addr_in, &addr_len) == 0
 					&& inet_ntop(AF_INET, &addr_in.sin_addr.s_addr, (char *)some_addr, sizeof(some_addr)) != NULL) {
-				cf_info(AS_HB, "initiated connection to mesh host at %s:%d socket %d from %s:%d", e->host, e->port, s.sock,some_addr, ntohs(addr_in.sin_port));
+
+				if (getsockname(s.sock, (struct sockaddr*)&addr_in2, &addr_len2) == 0
+					&& inet_ntop(AF_INET, &addr_in2.sin_addr.s_addr, (char *)some_addr2, sizeof(some_addr2)) != NULL) {
+
+					cf_info(AS_HB, "initiated connection to mesh host at %s:%d (%s:%d) via socket %d from %s:%d",
+							some_addr, ntohs(addr_in.sin_port), e->host, e->port, s.sock, some_addr2, ntohs(addr_in2.sin_port));
+				} else {
+					cf_warning(AS_HB, "getsockname() failed: %s", cf_strerror(errno));
+				}
 			} else {
 				as_hb_error(AS_HB_ERR_MESH_CONNECT_FAIL);
 				cf_debug(AS_HB, "failed - initiated connection to mesh host at %s:%d socket %d from %s:%d", e->host, e->port, s.sock,some_addr, ntohs(addr_in.sin_port));
@@ -1056,7 +1072,6 @@ void as_hb_try_connecting_remote(mesh_host_list_element * e)
 			} else {
 				e->fd = s.sock;
 			}
-
 		}
 		e = e->next;
 	}
@@ -1456,9 +1471,9 @@ as_hb_endpoint_add(int socket, bool isudp, cf_node node_id)
 static void
 as_hb_tcp_close(int fd)
 {
-	cf_detail(AS_HB, "as_hb_tcp_close() fd %d ", fd);
+	cf_detail(AS_HB, "as_hb_tcp_close():  Closing HB TCP fd %d to node %"PRIx64, fd, g_hb.endpoint_txlist_node_id[fd]);
 	g_hb.endpoint_txlist[fd] = false;
-	//HB Bug :remove for discovered list
+	// Remove node from discovered list.
 	if (g_hb.endpoint_txlist_node_id[fd]) {
 		as_hb_nodes_discovered_hash_del_conn(g_hb.endpoint_txlist_node_id[fd], fd);
 	}
@@ -1656,10 +1671,10 @@ as_hb_rx_process(msg *m, cf_sockaddr so, int fd)
 			as_hb_pulse *p_pulse;
 			pthread_mutex_t *vlock = NULL;
 
-			//HB Bug: check in for node associated with the fd for mesh
+			// Add the association between this node ID and mesh fd.
 			if ((AS_HB_MODE_MESH == g_config.hb_mode) && (g_hb.endpoint_txlist_node_id[fd] == 0)) {
 				g_hb.endpoint_txlist_node_id[fd] = node;
-				as_hb_nodes_discovered_hash_put_conn(node,fd);
+				as_hb_nodes_discovered_hash_put_conn(node, fd);
 			}
 
 			int rv = shash_get_vlock(g_hb.adjacencies, &node, (void **) &p_pulse, &vlock);
@@ -1872,7 +1887,7 @@ as_hb_rx_process(msg *m, cf_sockaddr so, int fd)
 				cf_debug(AS_HB, "connecting to remote heartbeat service: %s:%d", cpaddr, port);
 				// could be both seed and non-seed but we are passing is_seed = 0, 
 				// as mesh_list_service_fn will take care of duplicates
-				mesh_host_list_add(cpaddr,port,false); 
+				mesh_host_list_add(cpaddr, port, false);
 			}
 			break;
 
@@ -1950,8 +1965,7 @@ as_hb_thr(void *arg)
 	if (0 > epoll_ctl(g_hb.efd, EPOLL_CTL_ADD, sock, &g_hb.ev))
 		cf_crash(AS_HB,  "unable to add socket %d to epoll fd list: %s", sock, cf_strerror(errno));
 
-	/* Mesh-topology systems allow config-file bootstraping; connect to the provided
-	 * node */
+	/* Mesh-topology systems allow config-file bootstraping; connect to the provided node */
 	if ((AS_HB_MODE_MESH == g_config.hb_mode)) {
 		if (g_config.hb_init_addr) {
 			cf_info(AS_HB, "connecting to remote heartbeat service at %s:%d", g_config.hb_init_addr, g_config.hb_init_port);
@@ -1961,13 +1975,12 @@ as_hb_thr(void *arg)
 			}
 		} else {
 			for (int i = 0; i < AS_CLUSTER_SZ; i++) {
-				if(g_config.hb_mesh_seed_addrs[i]) {
+				if (g_config.hb_mesh_seed_addrs[i]) {
 					cf_info(AS_HB, "connecting to remote heartbeat service at %s:%d", g_config.hb_mesh_seed_addrs[i], g_config.hb_mesh_seed_ports[i]);
 
 					if (0 != mesh_host_list_add(g_config.hb_mesh_seed_addrs[i], g_config.hb_mesh_seed_ports[i], true)) {
 						cf_crash(AS_HB, "couldn't add remote heartbeat service %s:%d to mesh host list", g_config.hb_mesh_seed_addrs[i], g_config.hb_mesh_seed_ports[i]);
 					}
-
 				} else {
 					break;
 				}
@@ -2012,7 +2025,7 @@ CloseSocket:
 					as_hb_error(AS_HB_ERR_REMOTE_CLOSE);
 					cf_debug(AS_HB, "remote close: fd %d event %x", fd, events[i].events);
 					g_hb.endpoint_txlist[fd] = false;
-					//HB Bug :remove for discovered list
+					// Remove node from the discovered list.
 					if (g_hb.endpoint_txlist_node_id[fd]) {
 						as_hb_nodes_discovered_hash_del_conn(g_hb.endpoint_txlist_node_id[fd], fd);
 					}

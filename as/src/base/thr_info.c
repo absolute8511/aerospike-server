@@ -1919,49 +1919,93 @@ info_command_mon_cmd(char *name, char *params, cf_dyn_buf *db)
 
 	/* Command format : "jobs:[module=<string>;cmd=<command>;<parameters]"
 	*                   asinfo -v 'jobs'              -> list all jobs
-	*                   asinfo -v 'jobs:module=query" -> list all jobs for query module
-	*                   asinfo -v 'jobs:module=query;cmd=kill;trid=<trid>
-	*                   asinfo -v 'jobs:module=query;cmd=setpriority;trid=<trid>;value=<val>
+	*                   asinfo -v 'jobs:module=query' -> list all jobs for query module
+	*                   asinfo -v 'jobs:module=query;cmd=kill-job;trid=<trid>'
+	*                   asinfo -v 'jobs:module=query;cmd=set-priority;trid=<trid>;value=<val>'
 	* where <module> is one of following :
 	* 		- query
 	* 		- scan
-	* 		- demo
 	*/
 
-	char cmd[11];
+	char cmd[13];
 	char module[21];
 	char job_id[24];
-	char val_str[24];
+	char val_str[11];
 	int cmd_len       = sizeof(cmd);
 	int module_len    = sizeof(module);
 	int job_id_len    = sizeof(job_id);
 	int val_len       = sizeof(val_str);
 	uint64_t trid     = 0;
-	uint64_t value    = ULONG_MAX;
+	uint32_t value    = 0;
 
 	cmd[0]     = '\0';
 	module[0]  = '\0';
 	job_id[0]  = '\0';
 	val_str[0] = '\0';
 
-	// read cmd module trid value
-	if (as_info_parameter_get(params, "module", module, &module_len)) {
+	// Read the parameters: module cmd trid value
+	int rv = as_info_parameter_get(params, "module", module, &module_len);
+	if (rv == -1) {
 		as_mon_info_cmd(NULL, NULL, 0, 0, db);
 		return 0;
 	}
-
-	if (as_info_parameter_get(params, "cmd", cmd, &cmd_len)) {
-		as_mon_info_cmd(module, NULL, 0, 0, db);
-	} else {
-		if (0 == as_info_parameter_get(params, "trid", job_id, &job_id_len)) {
-			trid  = strtoull(job_id, NULL, 10);
-		}
-		if (0 == as_info_parameter_get(params, "value", val_str, &val_len)) {
-			value = strtoull(val_str, NULL, 10);
-		}
-		cf_info(AS_SCAN, "%s %s %ld %ld", module, cmd, trid, value);
-		as_mon_info_cmd(module, cmd, trid, value, db);
+	else if (rv == -2) {
+		cf_dyn_buf_append_string(db, "ERROR:");
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_PARAMETER);
+		cf_dyn_buf_append_string(db, ":\"module\" parameter too long (> ");
+		cf_dyn_buf_append_int(db, module_len-1);
+		cf_dyn_buf_append_string(db, " chars)");
+		return 0;
 	}
+
+	rv = as_info_parameter_get(params, "cmd", cmd, &cmd_len);
+	if (rv == -1) {
+		as_mon_info_cmd(module, NULL, 0, 0, db);
+		return 0;
+	}
+	else if (rv == -2) {
+		cf_dyn_buf_append_string(db, "ERROR:");
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_PARAMETER);
+		cf_dyn_buf_append_string(db, ":\"cmd\" parameter too long (> ");
+		cf_dyn_buf_append_int(db, cmd_len-1);
+		cf_dyn_buf_append_string(db, " chars)");
+		return 0;
+	}
+
+	rv = as_info_parameter_get(params, "trid", job_id, &job_id_len);
+	if (rv == 0) {
+		trid  = strtoull(job_id, NULL, 10);
+	}
+	else if (rv == -1) {
+		cf_dyn_buf_append_string(db, "ERROR:");
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_PARAMETER);
+		cf_dyn_buf_append_string(db, ":no \"trid\" parameter specified");
+		return 0;
+	}
+	else if (rv == -2) {
+		cf_dyn_buf_append_string(db, "ERROR:");
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_PARAMETER);
+		cf_dyn_buf_append_string(db, ":\"trid\" parameter too long (> ");
+		cf_dyn_buf_append_int(db, job_id_len-1);
+		cf_dyn_buf_append_string(db, " chars)");
+		return 0;
+	}
+
+	rv = as_info_parameter_get(params, "value", val_str, &val_len);
+	if (rv == 0) {
+		value = strtoul(val_str, NULL, 10);
+	}
+	else if (rv == -2) {
+		cf_dyn_buf_append_string(db, "ERROR:");
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_PARAMETER);
+		cf_dyn_buf_append_string(db, ":\"value\" parameter too long (> ");
+		cf_dyn_buf_append_int(db, val_len-1);
+		cf_dyn_buf_append_string(db, " chars)");
+		return 0;
+	}
+
+	cf_info(AS_SCAN, "%s %s %lu %u", module, cmd, trid, value);
+	as_mon_info_cmd(module, cmd, trid, value, db);
 	return 0;
 }
 
@@ -4614,13 +4658,14 @@ as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool de
 // cmd:param=value;param=value
 //
 // The main parser gives us the entire parameter string
-// so use this function to scan through and get the parameter parameter value
+// so use this function to scan through and get the particular parameter value
 // you're looking for
 //
 // The 'param_string' is the param passed by the command parser into a command
 //
-// @return -1 : NUll param name
-//         -2 : param name out of bounds ..
+// @return  0 : success
+//         -1 : parameter not found
+//         -2 : parameter found but value is too long
 //
 
 int
@@ -4639,7 +4684,7 @@ as_info_parameter_get(char *param_str, char *param, char *value, int *value_len)
 				tok = c;
 				while ( *c != 0 && *c != ';') c++;
 				if (*value_len <= c - tok)	{
-					// This handles the case of set name out of bounds.
+					// The found value is too long.
 					return(-2);
 				}
 				*value_len = c - tok;
@@ -6719,10 +6764,12 @@ int info_command_abort_scan(char *name, char *params, cf_dyn_buf *db) {
 	}
 
 	if (rv != 0) {
-		cf_dyn_buf_append_string(db, "Transaction Not Found");
+		cf_dyn_buf_append_string(db, "ERROR:");
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		cf_dyn_buf_append_string(db, ":Transaction Not Found");
 	}
 	else {
-		cf_dyn_buf_append_string(db, "Ok");
+		cf_dyn_buf_append_string(db, "OK");
 	}
 
 	return 0;

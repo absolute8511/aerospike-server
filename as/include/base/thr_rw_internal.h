@@ -174,5 +174,3 @@ rw_msg_setup(
 	uint16_t ldt_rectype_bits,
 	bool has_udf
 	);
-
-extern void g_write_hash_delete(global_keyd *gk);
