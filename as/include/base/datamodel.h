@@ -211,9 +211,12 @@ typedef struct as_particle_iparticle_s {
 
 /* Particle function declarations */
 
-extern uint32_t as_particle_memory_size(uint8_t type, uint32_t value_size); // deprecate? for from_wire sizing
+extern int32_t as_particle_size_from_client(const as_msg_op *op);
+extern int32_t as_particle_size_from_pickled(const uint8_t *pickled, uint8_t **p_pickled);
+
 extern uint32_t as_particle_flat_size(uint8_t type, uint32_t value_size); // deprecate? for from_wire flat sizing
-extern uint32_t as_particle_get_base_size(uint8_t particle_type);
+extern uint32_t as_particle_get_base_size(uint8_t particle_type); // deprecate
+
 extern as_particle_type as_particle_type_convert(as_particle_type type);
 extern as_particle_type as_particle_type_convert_to_hidden(as_particle_type type);
 extern bool as_particle_type_hidden(as_particle_type type);
@@ -225,27 +228,30 @@ extern bool as_particle_type_hidden(as_particle_type type);
 extern int as_particle_increment(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, bool mc_compliant);
 extern int as_particle_append_prepend_data(as_bin *b, as_particle_type type, byte *data, uint32_t data_len, bool data_in_memory, bool is_append, bool mc_compliant);
 
-extern uint32_t as_particle_get_size_in_memory(as_bin *b, as_particle *particle); // WTF ???
-extern uint32_t as_bin_get_particle_size(as_bin *b); // WTF ??? this is value size, excluding particle metadata
-
 extern void as_particle_destroy(as_bin *b, bool data_in_memory);
 extern int as_particle_p_get(as_bin *b, uint8_t **buf, uint32_t *sz);
 
 // wire:
 extern int as_particle_compare_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz);
+	// TODO - implement
+extern int32_t as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op);
+extern int32_t as_bin_particle_replace_from_pickled(as_bin *b, const uint8_t *pickled, uint8_t **p_pickled);
+extern int32_t as_bin_stack_particle_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op);
+extern int32_t as_bin_stack_particle_from_pickled(as_bin *b, uint8_t* stack, const uint8_t *pickled, uint8_t **p_pickled);
+	// deprecate:
 extern as_particle *as_particle_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
 extern int as_particle_towire(as_bin *b, uint8_t *buf, uint32_t *sz);
 
 // mem:
+extern uint32_t as_bin_particle_size(as_bin *b);
 extern as_particle *as_particle_frommem(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
 extern int as_particle_tomem(as_bin *b, uint8_t *buf, uint32_t *sz);
 
 // flat:
-extern int as_bin_particle_flat_size(as_bin *b, size_t *flat_sz);
-extern int as_bin_particle_size_from_flat(as_bin *b, uint32_t *p_flat_size); // TODO - implement
+extern int32_t as_bin_particle_flat_size(as_bin *b);
 extern int as_bin_particle_cast_from_flat(as_bin *b, uint8_t *flat, uint32_t flat_size);
 extern int as_bin_particle_replace_from_flat(as_bin *b, const uint8_t *flat, uint32_t flat_size);
-extern uint32_t as_bin_particle_to_flat(const as_bin *b, uint8_t *flat);
+extern int32_t as_bin_particle_to_flat(const as_bin *b, uint8_t *flat);
 
 
 #define BIN_VERSION_MAX 15 // the largest number we can place in the version

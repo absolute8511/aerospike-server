@@ -284,7 +284,7 @@ static inline uint8_t * as_msg_op_get_value_p(as_msg_op *op)
 	return (uint8_t*)op + sizeof(as_msg_op) + op->name_sz;
 }
 
-static inline uint32_t as_msg_op_get_value_sz(as_msg_op *op)
+static inline uint32_t as_msg_op_get_value_sz(const as_msg_op *op)
 {
 	return op->op_sz - (4 + op->name_sz);
 }

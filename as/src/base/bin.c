@@ -247,13 +247,13 @@ as_bin_get_and_size_all(as_storage_rd *rd, as_bin *stack_bins)
 				break;
 			}
 
-			size_t flat_size;
+			int32_t flat_size = as_bin_particle_flat_size(b);
 
-			if (0 != as_bin_particle_flat_size(b, &flat_size)) {
+			if (flat_size < 0) {
 				return false;
 			}
 
-			rd->particles_flat_size += flat_size;
+			rd->particles_flat_size += (uint32_t)flat_size;
 		}
 
 		rd->n_bins_to_write = (uint32_t)i;

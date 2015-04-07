@@ -687,13 +687,7 @@ as_storage_record_get_n_bytes_memory(as_storage_rd *rd)
 	uint64_t n_bytes_memory = 0;
 
 	for (uint16_t i = 0; i < rd->n_bins; i++) {
-		as_bin *b = &rd->bins[i];
-
-		if (as_bin_inuse(b) && ! as_bin_is_integer(b)) {
-			n_bytes_memory +=
-					as_particle_get_base_size(as_bin_get_particle_type(b)) +
-					as_bin_get_particle_size(b);
-		}
+		n_bytes_memory += as_bin_particle_size(&rd->bins[i]);
 	}
 
 	if (! rd->ns->single_bin) {

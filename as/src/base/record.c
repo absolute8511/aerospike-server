@@ -443,14 +443,7 @@ as_record_buf_get_stack_particles_sz(uint8_t *buf) {
 		byte name_sz = *buf;
 		buf += name_sz + 2;
 
-		as_particle_type type = *buf++;
-		uint32_t d_sz = *(uint32_t *) buf;
-		d_sz = ntohl(d_sz);
-		buf += 4 + d_sz;
-
-		if (type != AS_PARTICLE_TYPE_INTEGER) {
-			stack_particles_sz += as_particle_get_base_size(type) + d_sz;
-		}
+		stack_particles_sz += as_particle_size_from_pickled(buf, &buf);
 	}
 
 	return (stack_particles_sz);
@@ -588,7 +581,9 @@ as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t s
 			if (vmap[version] == -1)
 				vmap[version] = as_record_unused_version_get(rd);
 			as_bin *b = as_bin_create(r, rd, name, name_sz, vmap[version]);
-			as_particle_fromwire(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
+
+			cf_crash(AS_RECORD, "unpickle merge should be unreachable");
+//			as_particle_fromwire(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
 
 			if (has_sindex) {
 				sindex_found += as_sindex_sbins_from_bin(ns, as_index_get_set_name(rd->r, ns), 
@@ -700,6 +695,18 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 			b = as_bin_create(r, rd, name, name_sz, version);
 		}
 
+		if (ns->storage_data_in_memory) {
+			as_bin_particle_replace_from_pickled(b, buf, &buf);
+		}
+		else {
+			*stack_particles += as_bin_stack_particle_from_pickled(b, *stack_particles, buf, &buf);
+		}
+
+		if (has_sindex) {
+			sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+		}
+
+		/*
 		as_particle_type type = *buf++;
 		uint32_t d_sz         = *(uint32_t *) buf;
 		buf                  += 4;
@@ -717,6 +724,7 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		}
 
 		buf += d_sz;
+		*/
 	}
 
 	if (buf > buf_lim) {
