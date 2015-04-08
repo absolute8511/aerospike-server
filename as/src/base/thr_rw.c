@@ -3358,8 +3358,7 @@ get_msg_key(as_msg* m, as_storage_rd* rd)
 static inline uint32_t
 old_flat_size(as_bin* bin)
 {
-	int32_t size = as_bin_particle_flat_size(bin);
-	return size < 0 ? 0 : (uint32_t)size;
+	return as_bin_particle_flat_size(bin);
 }
 
 static inline uint32_t
@@ -4171,7 +4170,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 						as_bin_particle_replace_from_client(b, op);
 					}
 					else {
-						p_stack_particles += as_bin_stack_particle_from_client(b, p_stack_particles, op);
+						p_stack_particles += as_bin_particle_stack_from_client(b, p_stack_particles, op);
 					}
 
 					/*
@@ -4230,7 +4229,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 						as_bin_particle_replace_from_client(b, op);
 					}
 					else {
-						p_stack_particles += as_bin_stack_particle_from_client(b, p_stack_particles, op);
+						p_stack_particles += as_bin_particle_stack_from_client(b, p_stack_particles, op);
 					}
 
 					/*

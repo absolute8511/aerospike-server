@@ -359,11 +359,18 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 	// only pickle the n_bins in use
 	uint16_t n_bins_inuse = as_bin_inuse_count(rd);
 
-	uint32_t psz[n_bins_inuse];
+//	uint32_t psz[n_bins_inuse];
 
 	for (uint16_t i = 0; i < n_bins_inuse; i++) {
 		as_bin *b = &rd->bins[i];
 
+		sz += 1; // binname-len field
+		sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, b->id)); // number of bytes in the name
+		sz += 1; // version
+
+		sz += as_bin_particle_pickled_size(b);
+
+		/*
 		sz += 1; // binname-len field
 		sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, b->id)); // number of bytes in the name
 		sz += 2; // version, bintype
@@ -371,6 +378,7 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 
 		as_particle_towire(b, 0, &psz[i]); // get the length
 		sz += psz[i];
+		*/
 	}
 
 	byte *buf = cf_malloc(sz);
@@ -395,12 +403,16 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 		buf += namelen;
 		*buf++ = as_bin_get_version(b, rd->ns->single_bin);
 
+		buf += as_bin_particle_to_pickled(b, buf);
+
+		/*
 		*buf++ = as_bin_get_particle_type(b);
 		uint32_t *psz_p = (uint32_t *) buf;    // keep a pointer to the spot you need to patch for particle sz
 		buf += sizeof(uint32_t);
 		as_particle_towire(b, buf, &psz[i]); // get the data
 		*psz_p = htonl(psz[i]);
 		buf += psz[i];
+		*/
 	}
 
 	if (buf > buf_lim)
@@ -443,7 +455,7 @@ as_record_buf_get_stack_particles_sz(uint8_t *buf) {
 		byte name_sz = *buf;
 		buf += name_sz + 2;
 
-		stack_particles_sz += as_particle_size_from_pickled(buf, &buf);
+		stack_particles_sz += as_particle_size_from_pickled(&buf);
 	}
 
 	return (stack_particles_sz);
@@ -696,10 +708,10 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		}
 
 		if (ns->storage_data_in_memory) {
-			as_bin_particle_replace_from_pickled(b, buf, &buf);
+			as_bin_particle_replace_from_pickled(b, &buf);
 		}
 		else {
-			*stack_particles += as_bin_stack_particle_from_pickled(b, *stack_particles, buf, &buf);
+			*stack_particles += as_bin_particle_stack_from_pickled(b, *stack_particles, &buf);
 		}
 
 		if (has_sindex) {

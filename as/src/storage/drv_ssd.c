@@ -1746,18 +1746,9 @@ as_storage_record_size(as_storage_rd *rd)
 			break;
 		}
 
-		int32_t particle_flat_sz = as_bin_particle_flat_size(bin);
-
-		if (particle_flat_sz < 0) {
-			// Should never get here.
-			cf_warning(AS_DRV_SSD, "can't get particle flat size for bin %s",
-					as_bin_get_name_from_id(rd->ns, bin->id));
-			return 0;
-		}
-
 		// TODO: could factor out sizeof(drv_ssd_bin) and multiply by i, but
 		// for now let's favor the low bin-count case and leave it this way.
-		write_size += sizeof(drv_ssd_bin) + (uint32_t)particle_flat_sz;
+		write_size += sizeof(drv_ssd_bin) + as_bin_particle_flat_size(bin);
 	}
 
 	return write_size;
@@ -1921,8 +1912,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 
 			ssd_bin->offset = buf - buf_start;
 
-			// At this point, this can't fail.
-			uint32_t particle_flat_size = (uint32_t)as_bin_particle_to_flat(bin, buf);
+			uint32_t particle_flat_size = as_bin_particle_to_flat(bin, buf);
 
 			buf += particle_flat_size;
 			ssd_bin->len = particle_flat_size;
