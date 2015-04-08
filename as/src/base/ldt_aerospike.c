@@ -436,12 +436,12 @@ ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec, cf_digest *keyd)
 int
 ldt_crec_open(ldt_record *lrecord, cf_digest *keyd, ldt_slot **lslotp)
 {
-	cf_debug_digest(AS_LDT, keyd, "[ENTER] ldt_crec_open(): Digest: ");
+	cf_detail_digest(AS_LDT, keyd, "[ENTER] ldt_crec_open(): Digest: ");
 
 	// 1. Search in opened record
 	*lslotp = ldt_crec_find_by_digest(lrecord, keyd);
 	if (*lslotp) {
-		cf_detail(AS_LDT, "ldt_aerospike_crec_open : Found already open");
+		cf_debug(AS_LDT, "ldt_aerospike_crec_open : Found already open");
 		return 0;
 	}
 
@@ -649,7 +649,7 @@ ldt_aerospike_crec_remove(const as_aerospike * as, const as_rec * crec)
 		return -1;
 	}
 	as_aerospike * las  = lrecord->as;
-	cf_debug(AS_LDT, "Calling as_aerospike_rec_update() ldt_aerospike_crec_update" );
+	cf_detail(AS_LDT, "Calling as_aerospike_rec_update() ldt_aerospike_crec_update" );
 	return as_aerospike_rec_remove(las, crec);
 }
 
@@ -710,7 +710,7 @@ ldt_aerospike_crec_close(const as_aerospike * as, const as_rec *crec_p)
 	}
 	cf_detail(AS_LDT, "ldt_aerospike_crec_close");
 	if (c_urecord->flag & UDF_RECORD_FLAG_HAS_UPDATES) {
-		cf_detail(AS_LDT, "Cannot close record with update ... it needs group commit");
+		cf_debug(AS_LDT, "Cannot close record with update ... it needs group commit");
 		return -2;
 	}
 	udf_record_close(c_urecord);
@@ -773,7 +773,7 @@ ldt_aerospike_rec_update(const as_aerospike * as, const as_rec * rec)
 	as_aerospike *las   = lrecord->as;
 	int ret = as_aerospike_rec_update(las, h_urec);
 	if (0 == ret) {
-		cf_debug(AS_LDT, "<%s> ZERO return(%d) from as_aero_rec_update()", meth, ret );
+		cf_detail(AS_LDT, "<%s> ZERO return(%d) from as_aero_rec_update()", meth, ret );
 	} else if (ret == -1) {
 		// execution error return as it is
 		cf_debug(AS_LDT, "<%s> Exec Error(%d) from as_aero_rec_update()", meth, ret );
@@ -929,7 +929,7 @@ ldt_aerospike_get_config(const as_aerospike * as, const as_rec *rec, const char 
 	} else {
 		cf_warning(AS_LDT, "Unknown config requested");
 	}
-    cf_debug(AS_LDT, "Returning %s = %d" ,name, val);
+    cf_detail(AS_LDT, "Returning %s = %d" ,name, val);
 	return val;
 } // end ldt_aerospike_get_config()
 

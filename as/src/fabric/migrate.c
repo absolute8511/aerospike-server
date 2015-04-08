@@ -465,6 +465,7 @@ migrate_recv_control_destroy(void *parm)
 	}
 
 	shash_delete(g_migrate_incoming_ldt_version_hash, &mc_l);
+    cf_detail(AS_LDT, "Remove incoming for pid:%d",mc_l.pid); 
 
 	cf_atomic_int_decr(&g_config.migrate_rx_object_count);
 }
@@ -561,7 +562,7 @@ as_ldt_fill_mig_msg(migration *mig, msg *m, pickled_record *pr, bool is_subrecor
 			msg_set_uint32(m, MIG_FIELD_PGENERATION, r_ref.r->generation);
 			as_record_done(&r_ref, mig->rsv.ns);
 		} else {
-			cf_detail_digest(AS_LDT, &pr->pkey, "No parent found that would mean this is stale version ... skip rv = %d", rv);
+			cf_debug_digest(AS_LDT, &pr->pkey, "No parent found that would mean this is stale version ... skip rv = %d", rv);
 			return -1;
 		}
 
@@ -694,7 +695,7 @@ as_ldt_get_migrate_info(migrate_recv_control *mc, as_record_merge_component *c, 
 			c->flag |= AS_COMPONENT_FLAG_LDT_ESR;
 		}
 	} else {
-		cf_detail(AS_LDT, "Incomplete Migration information resorting to defaults !!!");
+		cf_debug(AS_LDT, "Incomplete Migration information resorting to defaults !!!");
 	}
 
 	size_t sz = 0;
@@ -1610,7 +1611,7 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				mc_l.pid                  = mc->pid;
 
 				shash_put(g_migrate_incoming_ldt_version_hash, &mc_l, &mc); 
-				cf_detail(AS_MIGRATE, "LDT_MIGRATION: Incoming Version %ld, Started Receiving SubRecord Migration !! %s:%d:%d:%d",
+				cf_detail(AS_LDT, "LDT_MIGRATION: Incoming Version %ld, Started Receiving SubRecord Migration !! %s:%d:%d:%d",
 						  mc->incoming_ldt_version,
 						  mc->rsv.ns->name, mc->rsv.p->partition_id, mc->rsv.p->vp->elements, 
 						  mc->rsv.p->sub_vp->elements);
@@ -2298,7 +2299,6 @@ migrate_xmit_fn(void *arg)
 		// Retry on DESYNC,
 		switch (mig->rsv.state) {
 			case AS_PARTITION_STATE_DESYNC:
-			case AS_PARTITION_STATE_LIFESUPPORT:
 				cf_debug(AS_MIGRATE, " attempt to send-migrate a non-sync partition (%d), reinserting as low priority {%s:%d}", mig->rsv.state, mig->rsv.ns->name, (int)mig->rsv.pid);
 				as_partition_reserve_update_state(&mig->rsv);
 				if (0 != cf_queue_priority_push(g_migrate_q, (void *) &mig, CF_QUEUE_PRIORITY_LOW)) {
@@ -2696,7 +2696,7 @@ as_migrate(cf_node *dst_node, uint dst_sz, as_namespace *ns, as_partition_id par
 	if (mig->rsv.ns->ldt_enabled) {
 		mig->rsv.p->current_outgoing_ldt_version = as_ldt_generate_version();
 		if (AS_PARTITION_HAS_DATA(mig->rsv.p))
-			cf_detail(AS_PARTITION, "LDT_MIGRATION Generated new Version @ start of migration %d:%ld",
+			cf_detail(AS_LDT, "LDT_MIGRATION Generated new Version @ start of migration %d:%ld",
 				  mig->rsv.p->partition_id, mig->rsv.p->current_outgoing_ldt_version);
 		mig->txstate = AS_PARTITION_MIG_TX_STATE_SUBRECORD;
 		cf_detail(AS_MIGRATE, "LDT_MIGRATION: OutGoing Version %ld Started Sending SubRecord Migration !! %s:%d:%d:%d",
@@ -2781,6 +2781,7 @@ as_migrate_is_incoming(cf_digest *subrec_digest, uint64_t version, as_partition_
 				if (mc->rxstate == rxstate) {
 					return true;
 				} else {
+					cf_detail(AS_LDT, "No Incoming for pid:%d mc->rxstate:%d", partition_id, mc->rxstate);
 					return false;
 				}
 			} else {
@@ -2788,6 +2789,7 @@ as_migrate_is_incoming(cf_digest *subrec_digest, uint64_t version, as_partition_
 			}
 		}
 	}
+	cf_detail(AS_LDT, "No Incoming for pid:%d, No mig item", partition_id);
 	return false;
 }
 

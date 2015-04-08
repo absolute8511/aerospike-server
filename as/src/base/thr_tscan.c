@@ -387,19 +387,8 @@ scan_job_done(tscan_job *job)
 
 	// Print end of sindex ticker here:
 	if (SCAN_JOB_IS_POPULATOR(job)) {
-		char *si_name = "<all>";
-		uint64_t si_memory   = (uint64_t)cf_atomic_int_get(job->ns->sindex_data_memory_used);
-
-		if (job->si) {
-			si_memory   = cf_atomic64_get(job->si->data_memory_used);
-			si_name = job->si->imd->iname;
-		}
-
-		cf_info(AS_SCAN, " Sindex-ticker done: ns=%s si=%s si-mem-used=%"PRIu64""
-				" elapsed=%"PRIu64" ms",
-				job->ns->name, si_name,
-				si_memory, cf_getms() - job->start_time);
-
+		as_sindex_ticker_done(job->ns, job->si, job->start_time);
+		
 		if (job->job_type == SCAN_JOB_TYPE_SINDEX_POPULATEALL) {
 			as_sindex_boot_populateall_done(job->ns);
 		}
@@ -750,10 +739,7 @@ int tscan_start_job(tscan_job *job, as_transaction *tr, bool scan_disconnected_j
 
 		// Print start of sindex ticker here:
 		if (SCAN_JOB_IS_POPULATOR(job)) {
-			cf_info(AS_SCAN, " Sindex-ticker start: ns=%s si=%s job=%s",
-					job->ns->name ? job->ns->name : "<all>",
-					job->si ? job->si->imd->iname : "<all>",
-					(job->job_type == SCAN_JOB_TYPE_SINDEX_POPULATEALL) ? "SINDEX_POPULATEALL" : "SINDEX_POPULATE");
+			as_sindex_ticker_start(job->ns, job->si);
 		}
 
 		for (int i = 0; i < AS_PARTITIONS; i++) {
@@ -1239,6 +1225,12 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 		if (u->si) cf_atomic64_decr(&u->si->stats.recs_pending);
 		cf_atomic_int_incr(&(u->pjob->n_obj_expired));
 		as_record_done(r_ref, u->ns);
+		if (SCAN_JOB_IS_POPULATOR(u->pjob)) {
+			uint64_t scanned = (uint64_t)cf_atomic_int_get(u->pjob->n_obj_scanned) + 
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_set_diff) + 
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_expired);
+			as_sindex_ticker(u->pjob->ns, u->si, scanned, u->pjob->start_time);
+		}
 		return;
 	}
 
@@ -1251,13 +1243,22 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 			if (u->si) cf_atomic64_decr(&u->si->stats.recs_pending);
 			cf_atomic_int_incr(&(u->pjob->n_obj_set_diff));
 			as_record_done(r_ref, u->ns);
+			if (SCAN_JOB_IS_POPULATOR(u->pjob)) {
+				uint64_t scanned = (uint64_t)cf_atomic_int_get(u->pjob->n_obj_scanned) + 
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_set_diff) + 
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_expired);
+				as_sindex_ticker(u->pjob->ns, u->si, scanned, u->pjob->start_time);
+			}
 			return;
 		}
 	}
 
 	// Increment the number of objects scanned outside of all the checks for
 	// udf/si, etc.
-	uint64_t n_obj_scanned = (uint64_t)cf_atomic_int_incr(&(u->pjob->n_obj_scanned));
+	// It is important to take in account the objects from different set and expired objects
+	uint64_t n_obj_scanned = (uint64_t)cf_atomic_int_incr(&(u->pjob->n_obj_scanned)) + 
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_set_diff) + 
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_expired);
 
 	// Execute if UDF Call is defined. UDF cannot be executed inline. The logic
 	// is to create a internal transaction.
@@ -1324,50 +1325,22 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 
 		// This reduce function is called for loading data into secondary index.
 		if (SCAN_JOB_IS_POPULATOR(u->pjob)) {
+			
 			if (u->si) {
 				cf_atomic64_decr(&u->si->stats.recs_pending);
 				SINDEX_GRLOCK();
 				AS_SINDEX_RESERVE(u->si);
 				SINDEX_GUNLOCK();
 				as_sindex_put_rd(u->si, &rd);
+				as_sindex_ticker(u->pjob->ns, u->si, n_obj_scanned, u->pjob->start_time);
 			} else {
 				// No input si mentioned, so go ahead and populate all of the entries.
 				// SCAN_JOB_TYPE_SINDEX_POPULATEALL case.
 				// This function will parse all the ns si's, reserve it and read the data.
 				as_sindex_putall_rd(u->ns, &rd);
+				as_sindex_ticker(u->pjob->ns, NULL, n_obj_scanned, u->pjob->start_time);
 			}
 
-			const int sindex_ticker_obj_count = 100000;
-
-			if (n_obj_scanned % sindex_ticker_obj_count == 0) {
-				// Ticker can be dumped from here, we'll be in this place for both
-				// sindex populate and populate-all.
-				char *si_name = "<all>";
-				// si memory gets set from as_sindex_reserve_data_memory() which in turn gets set from :
-				// ai_btree_put() <- for every single sindex insertion (boot-time/dynamic)
-				// as_sindex_create() : for dynamic si creation, cluster change, smd on boot-up.
-
-				uint64_t si_memory   = (uint64_t)cf_atomic_int_get(u->pjob->ns->sindex_data_memory_used);
-
-				if (u->si) {
-					si_memory   = cf_atomic64_get(u->pjob->si->data_memory_used);
-					si_name = u->pjob->si->imd->iname;
-				}
-
-				uint64_t pct_obj_scanned = (n_obj_scanned * 100) / cf_atomic_int_get(u->pjob->ns->n_objects);
-				uint64_t elapsed = (cf_getms() - u->pjob->start_time);
-				uint64_t est_time = 0;
-
-				if (pct_obj_scanned > 0) {
-					est_time = ((elapsed * 100) / (uint64_t)pct_obj_scanned) - elapsed;
-				}
-
-				cf_info(AS_SCAN, " Sindex-ticker: ns=%s si=%s obj-scanned=%"PRIu64" si-mem-used=%"PRIu64""
-						" progress=%d%% est-time=%"PRIu64" ms",
-						u->pjob->ns->name, si_name,
-						u->pjob->n_obj_scanned,
-						si_memory, pct_obj_scanned, est_time);
-			}
 		} else {
 			if (! *bb_r) {
 				*bb_r = cf_buf_builder_create_size(INITIAL_BUFBUILDER_SIZE);
@@ -1398,6 +1371,11 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 
 			// Hack - didn't want to add a reset method to cf_buf_builder.
 			(*bb_r)->used_sz = 0;
+		}
+
+		if (IS_SCAN_JOB_ABORTED(u->pjob)) {
+			*u->aborted = true;
+			u->pjob->result = AS_PROTO_RESULT_FAIL_SCAN_ABORT;
 		}
 	}
 
@@ -1637,22 +1615,6 @@ NextElement:
 		usleep(1000);
 	} while(1);
 	return (0);
-}
-
-bool
-as_tscan_set_priority(uint64_t trid, uint16_t priority) {
-	tscan_job * job = NULL;
-	if (RCHASH_OK != rchash_get(g_scan_job_hash, &trid, sizeof(trid), (void **) &job)) {
-		cf_info(AS_SCAN, "Scan job with transaction id [%"PRIu64"] does not exist anymore", trid);
-		return false;
-	}
-	// Priority maps to number of threads in a job internally.
-	cf_info(AS_SCAN, "UDF: Received priority change for job [%"PRIu64"], setting number of threads to [%d]", job->tid, priority);
-	pthread_mutex_lock(&job->LOCK);
-	job->n_threads = priority;
-	pthread_mutex_unlock(&job->LOCK);
-	scan_job_release_and_destroy(job);
-	return true;
 }
 
 int

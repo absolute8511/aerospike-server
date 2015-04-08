@@ -875,22 +875,30 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 			is_ldt = true;
 			subrec_count++;
 			udf_record *c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
-			if (g_config.ldt_benchmarks 
-					&& c_urecord->tr->rsv.ns
-					&& NAMESPACE_HAS_PERSISTENCE(c_urecord->tr->rsv.ns)
-					&& c_urecord->rd) {
-				total_flat_size += as_storage_record_size(c_urecord->rd);
+			if (g_config.ldt_benchmarks) {
+				udf_rw_getop(c_urecord, &urecord_op);
+				if (UDF_OP_IS_WRITE(urecord_op)) {
+					if (c_urecord->tr->rsv.ns
+						&& NAMESPACE_HAS_PERSISTENCE(c_urecord->tr->rsv.ns)
+						&& c_urecord->rd) {
+						total_flat_size += as_storage_record_size(c_urecord->rd);
+					}
+				}
 			}
 			udf_rw_post_processing(c_urecord, &urecord_op, set_id);
 		}
 
 		// Process the parent record in the end .. this is to make sure
 		// the lock is held till the end. 
-		if (g_config.ldt_benchmarks 
-			&& h_urecord->tr->rsv.ns
-			&& NAMESPACE_HAS_PERSISTENCE(h_urecord->tr->rsv.ns)
-			&& h_urecord->rd) {
-			total_flat_size += as_storage_record_size(h_urecord->rd);
+		if (g_config.ldt_benchmarks) {
+			udf_rw_getop(h_urecord, &urecord_op);
+			if (UDF_OP_IS_WRITE(urecord_op)) { 
+				if (h_urecord->tr->rsv.ns
+					&& NAMESPACE_HAS_PERSISTENCE(h_urecord->tr->rsv.ns)
+					&& h_urecord->rd) {
+					total_flat_size += as_storage_record_size(h_urecord->rd);
+				}
+			}
 		}
 		udf_rw_post_processing(h_urecord, &urecord_op, set_id);
 

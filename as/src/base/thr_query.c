@@ -293,7 +293,7 @@ as_query_request * as_query__qreq_poolrequest();
 // GENERATOR
 static pthread_t      g_query_threads[AS_QUERY_MAX_THREADS];
 static pthread_attr_t g_query_th_attr;
-static cf_queue     * g_query_queue           = 0;
+static cf_queue     * g_query_short_queue     = 0;
 static cf_queue     * g_query_long_queue      = 0;
 static cf_atomic32    g_query_threadcnt       = 0;
 inline void           as_query__generator(as_query_transaction *qtr);
@@ -2193,8 +2193,8 @@ as_query_init()
 				as_query__worker_th, (void*)g_query_request_queue);
 	}
 
-	g_query_queue = cf_queue_create(sizeof(as_query_transaction *), true);
-	if (!g_query_queue)
+	g_query_short_queue = cf_queue_create(sizeof(as_query_transaction *), true);
+	if (!g_query_short_queue)
 		cf_crash(AS_QUERY, "Failed to create short query transaction queue");
 
 	g_query_long_queue = cf_queue_create(sizeof(as_query_transaction *), true);
@@ -2212,10 +2212,10 @@ as_query_init()
 	max = g_config.query_threads;
 	for (int i = 0; i < max; i += 2) {
 		if (pthread_create(&g_query_threads[i], &g_query_th_attr,
-					as_query__th, (void*)g_query_queue)
+					as_query__th, (void*)g_query_short_queue)
 				|| pthread_create(&g_query_threads[i + 1], &g_query_th_attr,
 						as_query__th, (void*)g_query_long_queue)) {
-			cf_crash(AS_QUERY, "Failed to create query transaction threads");
+			cf_crash(AS_QUERY, "Failed to create query transaction threads for query short queue");
 		}
 	}
 	char hist_name[64];
@@ -2346,7 +2346,7 @@ as_query_reinit(int set_size, int *actual_size)
 		for (; i < set_size; i++) {
 			cf_detail(AS_QUERY, "Creating thread %d", i);
 			if (0 != pthread_create(&g_query_threads[i], &g_query_th_attr,
-					as_query__th, (void*)g_query_queue)) {
+					as_query__th, (void*)g_query_short_queue)) {
 				break;
 			}
 			i++;
@@ -2373,8 +2373,8 @@ as_query__queue(as_query_transaction *qtr)
 	cf_atomic64 * queue_full_err;
 	if (qtr->short_running) {
 		limit          = g_config.query_short_q_max_size;
-		size           = cf_queue_sz(g_query_queue);
-		q              = g_query_queue;
+		size           = cf_queue_sz(g_query_short_queue);
+		q              = g_query_short_queue;
 		queue_full_err = &g_config.query_short_queue_full;
 	}
 	else {
@@ -2799,6 +2799,12 @@ as_query_stat(char *name, cf_dyn_buf *db)
 	cf_dyn_buf_append_uint64(db,  (agg + lkup) ? ( agg_records + lkup_records )
 									/ (agg + lkup) : 0);
 
+	cf_dyn_buf_append_string(db, ";query_short_queue_size=");
+	cf_dyn_buf_append_uint64(db, cf_queue_sz(g_query_short_queue));
+
+	cf_dyn_buf_append_string(db, ";query_long_queue_size=");
+	cf_dyn_buf_append_uint64(db, cf_queue_sz(g_query_long_queue));
+	
 	cf_dyn_buf_append_string(db, ";query_short_queue_full=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_short_queue_full));
 

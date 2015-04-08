@@ -900,7 +900,7 @@ as_ldt_get_from_map(const as_map *prop_map, char prop_type, void *value)
 int
 as_ldt_set_in_map(as_map *prop_map, char prop_type, void *value)
 {
-	cf_debug(AS_LDT, "[ENTER] PropType(%c)", prop_type );
+	cf_detail(AS_LDT, "[ENTER] PropType(%c)", prop_type );
 
 	int rv = 0;
 	switch(prop_type) {
@@ -923,7 +923,7 @@ as_ldt_set_in_map(as_map *prop_map, char prop_type, void *value)
 					cf_free(valstr2);
 				}
 			} else {
-				cf_detail(AS_LDT, "Failed to set version %c=%d",
+				cf_debug(AS_LDT, "Failed to set version %c=%d",
 						prop_type, ldt_version);
 				// note: not necessary to destroy key_val here.
 				rv = -2;
@@ -1026,6 +1026,8 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 	as_serializer_destroy(&s);
 	as_buffer_destroy(&buf);
 	as_val_destroy(valp);
+	cf_debug(AS_LDT, "(%s:%d) Setting parent version to %ld %d", fname, lineno, ldt_version,rd->r->generation);
+	//PRINT_STACK();
 
 	rd->write_to_device = true;
 	return pbytes;
@@ -1060,7 +1062,7 @@ as_ldt_parent_storage_get_version(as_storage_rd *rd, uint64_t *ldt_version, bool
 				cf_warning_digest(AS_LDT, &rd->keyd, "Control bin not found LDT parent record %s %d", fname, lineno);
 			}
 		} else {
-			cf_detail(AS_LDT, "Control bin not found");
+			cf_debug(AS_LDT, "Control bin not found");
 		}
 		rv                      = -1;
 	} else {
@@ -1085,7 +1087,7 @@ as_ldt_parent_storage_get_version(as_storage_rd *rd, uint64_t *ldt_version, bool
 		rv                      = as_ldt_get_from_map(prop_map, RPM_Version, (void *)ldt_version);
 		as_val_destroy(valp);
 	}
-	cf_detail(AS_LDT, "Version Search find %ld with rv = %d", *ldt_version, rv);
+	cf_debug(AS_LDT, "(%s,%d)Version Search find %ld with rv = %d", fname, lineno, *ldt_version, rv);
 	return rv;
 }
 
@@ -1126,7 +1128,7 @@ as_ldt_subrec_storage_get_digests(as_storage_rd *rd, cf_digest *edigest, cf_dige
 		cf_warning(AS_LDT, "Property Bin %s Corrupted", SUBREC_PROP_BIN);
 		return -2;
 	}
-	cf_debug(AS_LDT, "Got a value from the bin: type(%d)", valp->type);
+	cf_detail(AS_LDT, "Got a value from the bin: type(%d)", valp->type);
 
 	// We must always retrieve typed values from as_val using the type specific
 	// accessor function -- which will return NULL if we guessed wrong on the
@@ -1241,7 +1243,7 @@ as_ldt_is_parent_and_version_match(uint64_t subrec_version, as_index_tree *tree,
 
 	if (!as_ldt_record_is_parent(r)) {
 		// if parent is not a LDT parent version does not match
-		cf_detail(AS_LDT, "LDT_INDEXBIT Expected Parent Bits Not Found");
+		cf_debug(AS_LDT, "LDT_INDEXBIT Expected Parent Bits Not Found");
 		as_record_done(&r_ref, ns);
 		return false;
 	}
@@ -1261,11 +1263,11 @@ as_ldt_is_parent_and_version_match(uint64_t subrec_version, as_index_tree *tree,
 	uint64_t parent_version = 0;
 	rv = as_ldt_parent_storage_get_version(&rd, &parent_version, false, __FILE__, __LINE__);
 	if (0 != rv) {
-		cf_detail(AS_LDT, "LDT_SUB_GC Something wrong could not get LDT parent version rv = %d", rv);
+		cf_debug(AS_LDT, "LDT_SUB_GC Something wrong could not get LDT parent version rv = %d", rv);
 		goto Cleanup;
 	}
 
-	cf_detail_digest(AS_LDT, keyd, "LDT_SUB_GC Subrec and parent version check %ld != %ld %p",
+	cf_debug_digest(AS_LDT, keyd, "LDT_SUB_GC Subrec and parent version check %ld != %ld %p",
 			  parent_version, subrec_version, rd.r);
 	if (parent_version == subrec_version) {
 		rv = 0;
@@ -1334,7 +1336,7 @@ as_ldt_sub_gc_fn(as_index_ref *r_ref, void *udata)
 	cf_atomic_int_incr(&ns->lstats.ldt_gc_processed);
 
 	if (r->void_time != 0) {
-		cf_detail(AS_LDT, "No void time should be set in subrecord !!! found %d", r->void_time);
+		cf_debug(AS_LDT, "No void time should be set in subrecord !!! found %d", r->void_time);
 	}
 
 	// Subrecord Version
@@ -1643,7 +1645,7 @@ as_ldt_record_pickle(ldt_record *lrecord,
 Out:
 
 	if (ret) {
-		cf_detail(AS_LDT, "MULTI_OP Packing failed with ret = %d", ret);
+		cf_debug(AS_LDT, "MULTI_OP Packing failed with ret = %d", ret);
 		if (*pickled_buf) {
 			cf_free(*pickled_buf);
 			*pickled_buf = NULL;

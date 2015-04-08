@@ -437,7 +437,6 @@ as_partition_reinit(as_partition *p, as_namespace *ns, int pid)
 
 	p->n_dupl = 0;
 	memset(p->dupl_nodes, 0, sizeof(p->dupl_nodes));
-	memset(p->dupl_pvinfo, 0, sizeof(p->dupl_pvinfo));
 	p->reject_writes = false;
 	p->waiting_for_master = false;
 	memset(&p->primary_version_info, 0, sizeof(p->primary_version_info));
@@ -762,9 +761,6 @@ as_partition_getstates(as_partition_states *ps)
 					break;
 				case AS_PARTITION_STATE_WAIT:
 					ps->wait++;
-					break;
-				case AS_PARTITION_STATE_LIFESUPPORT:
-					ps->lifesupport++;
 					break;
 				case AS_PARTITION_STATE_ABSENT:
 					ps->absent++;
@@ -1755,8 +1751,6 @@ as_partition_getstate_str(int state)
 			return 'Z';
 		case AS_PARTITION_STATE_WAIT:
 			return 'W';
-		case AS_PARTITION_STATE_LIFESUPPORT:
-			return 'L';
 		case AS_PARTITION_STATE_ABSENT:
 			return 'A';
 		default:
@@ -2021,7 +2015,6 @@ as_partition_migrate_tx(as_migrate_state s, as_namespace *ns, as_partition_id pi
 		p->target = 0;
 		p->n_dupl = 0;
 		memset(p->dupl_nodes, 0, sizeof(p->dupl_nodes));
-		memset(p->dupl_pvinfo, 0, sizeof(p->dupl_pvinfo));
 	}
 
 	/*
@@ -2190,7 +2183,6 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns, as_partition_id pi
 
 			switch (p->state) {
 				case AS_PARTITION_STATE_UNDEF:
-				case AS_PARTITION_STATE_LIFESUPPORT:
 				case AS_PARTITION_STATE_JOURNAL_APPLY: // should never happen - it's a dummy state
 					cf_debug(AS_PARTITION, "{%s:%d} migrate rx start while in state %d, fail", ns->name, pid, p->state);
 					rv = AS_MIGRATE_CB_FAIL;
@@ -2373,7 +2365,6 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns, as_partition_id pi
 
 			switch (p->state) {
 				case AS_PARTITION_STATE_UNDEF:
-				case AS_PARTITION_STATE_LIFESUPPORT:
 				case AS_PARTITION_STATE_JOURNAL_APPLY: // should never happen - it's a dummy state
 				case AS_PARTITION_STATE_WAIT:
 				case AS_PARTITION_STATE_ABSENT:
@@ -2465,13 +2456,10 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns, as_partition_id pi
 						if (found) {
 							if (i == (p->n_dupl - 1)) { // delete last entry
 								p->dupl_nodes[i] = (cf_node)0;
-								memset(&p->dupl_pvinfo[i], 0, sizeof(as_partition_vinfo));
 							}
 							else { // copy last entry into deleted entry
 								p->dupl_nodes[i] = p->dupl_nodes[p->n_dupl - 1];
 								p->dupl_nodes[p->n_dupl - 1] = (cf_node)0;
-								memcpy(&p->dupl_pvinfo[i], &p->dupl_pvinfo[p->n_dupl - 1], sizeof(as_partition_vinfo));
-								memset(&p->dupl_pvinfo[p->n_dupl - 1], 0, sizeof(as_partition_vinfo));
 							}
 							p->pending_migrate_rx--; // one more migrate completed
 							p->n_dupl--; // reduce array size
@@ -3260,7 +3248,6 @@ as_partition_balance()
 			/* Reinitialize duplication list */
 			p->n_dupl = 0;
 			memset(p->dupl_nodes, 0, sizeof(p->dupl_nodes));
-			memset(p->dupl_pvinfo, 0, sizeof(p->dupl_pvinfo));
 			p->reject_writes = false;
 			p->waiting_for_master = false;
 			memset(&p->primary_version_info, 0, sizeof(p->primary_version_info));
@@ -3596,7 +3583,6 @@ as_partition_balance()
 						if (n_dupl > 0) {
 							p->n_dupl = n_dupl;
 							memcpy(p->dupl_nodes, dupl_nodes, sizeof(cf_node) * p->n_dupl);
-							memcpy(p->dupl_pvinfo, dupl_pvinfo, sizeof(dupl_pvinfo));
 							for (int k = 0; k < p->n_dupl; k++) {
 								p->pending_migrate_rx++;
 								cf_debug(AS_PARTITION, "{%s:%d} Master: expect data from duplicate partition in node %"PRIx64"", ns->name, j, p->dupl_nodes[k]);
@@ -3706,7 +3692,6 @@ as_partition_balance()
 							if (n_dupl > 0) {
 								p->n_dupl = n_dupl;
 								memcpy(p->dupl_nodes, dupl_nodes, sizeof(cf_node) * p->n_dupl);
-								memcpy(p->dupl_pvinfo, dupl_pvinfo, sizeof(dupl_pvinfo));
 							}
 							partition_migrate_record_fill(&pmr, &HV(j, 0), 1, ns, j, AS_MIGRATE_TYPE_MERGE, as_partition_migrate_tx, (void *)true);
 						} else // duplicate nodes reject writes, so no need to flush
@@ -3777,9 +3762,6 @@ as_partition_balance()
 					cf_warning(AS_PARTITION, "Reached what should be unreachable area of the code!");
 					break;
 			}
-
-			if (AS_PARTITION_STATE_LIFESUPPORT == p->state)
-				cf_warning(AS_PARTITION, "{%s:%d} ERROR in STATE: becoming lifesupport replica", ns->name, j);
 
 			/* copy the new succession list over the old succession list */
 			memcpy(p->old_sl, &hv_ptr[j * g_config.paxos_max_cluster_size], sizeof(cf_node) * g_config.paxos_max_cluster_size);

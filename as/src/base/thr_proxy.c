@@ -252,8 +252,8 @@ as_proxy_shipop(cf_node dst, write_request *wr)
 	info |= PROXY_INFO_SHIPPED_OP;
 	msg_set_uint32(m, PROXY_FIELD_INFO, info);
 
-	cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP %s->WINNER msg %p [Digest %"PRIx64"] Proxy Sent to %"PRIx64" %p",
-			wr->proxy_msg ? "NONORIG" : "ORIG", m, *(uint64_t *)&wr->keyd, dst, wr);
+	cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP %s->WINNER msg %p Proxy Sent to %"PRIx64" %p tid(%d)",
+			wr->proxy_msg ? "NONORIG" : "ORIG", m, dst, wr, tid);
 
 	// Fill out a retransmit structure, insert into the retransmit hash.
 	msg_incr_ref(m);
@@ -354,8 +354,12 @@ as_proxy_shipop_response_hdlr(msg *m, proxy_request *pr, bool *free_msg)
 	// Case 1: Non-originating node.
 	if (wr->proxy_msg) {
 		// Remember that "digest" gets printed at the end of cf_detail_digest().
+		// Fake the ORIGINATING Proxy tid
+		uint32_t transaction_id = 0;
+		msg_get_uint32(wr->proxy_msg, PROXY_FIELD_TID, &transaction_id);
+		msg_set_uint32(m, PROXY_FIELD_TID, transaction_id);
 		cf_detail_digest(AS_PROXY, &(wr->keyd), "SHIPPED_OP NON-ORIG :: Got Op Response(%p) :", wr);
-		cf_detail_digest(AS_PROXY, &(wr->keyd), "SHIPPED_OP NON-ORIG :: Forwarding Response. : ");
+		cf_detail_digest(AS_PROXY, &(wr->keyd), "SHIPPED_OP NON-ORIG :: Back Forwarding Response for tid (%d). : ", transaction_id);
 		if (0 != (rv = as_fabric_send(wr->proxy_node, m, AS_FABRIC_PRIORITY_MEDIUM))) {
 			cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP NONORIG Failed Forwarding Response");
 			as_fabric_msg_put(m);
@@ -427,6 +431,13 @@ as_proxy_shipop_response_hdlr(msg *m, proxy_request *pr, bool *free_msg)
 		}
 		pthread_mutex_unlock(&wr->lock);
 	}
+
+	// This node is shipOp initiator. Remove it from the Global
+	// hash
+	global_keyd gk;
+	gk.ns_id = wr->rsv.ns->id;
+	gk.keyd = wr->keyd;
+	g_write_hash_delete(&gk);
 
 	WR_RELEASE(pr->wr);
 	pr->wr = NULL;
@@ -510,7 +521,7 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 				tr.flag |= AS_TRANSACTION_FLAG_SHIPPED_OP;
 				cf_detail_digest(AS_PROXY, &tr.keyd, "SHIPPED_OP WINNER Operation Received");
 			} else {
-				cf_detail_digest(AS_PROXY, &tr.keyd, "Received Proxy Request digest");
+				cf_detail_digest(AS_PROXY, &tr.keyd, "Received Proxy Request digest tid(%d)", tr.trid);
 			}
 
 			MICROBENCHMARK_RESET();

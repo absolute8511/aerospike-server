@@ -133,6 +133,7 @@ cfg_set_defaults()
 	c->migrate_xmit_lwm = 5; // because the monitor the queue depth
 	c->migrate_xmit_priority = 40; // # of rows between a quick context switch? not a great way to tune
 	c->migrate_xmit_sleep = 500; // # of rows between a quick context switch? not a great way to tune
+	c->nsup_delete_sleep = 100; // 100 microseconds means a delete rate of 10k TPS
 	c->nsup_period = 120; // run nsup once every 2 minutes
 	c->nsup_startup_evict = true;
 	c->paxos_max_cluster_size = AS_CLUSTER_DEFAULT_SZ; // default the maximum cluster size to a "reasonable" value
@@ -446,8 +447,8 @@ typedef enum {
 	CASE_NAMESPACE_HIGH_WATER_DISK_PCT,
 	CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT,
 	CASE_NAMESPACE_LDT_ENABLED,
-	CASE_NAMESPACE_LDT_PAGESIZE,
 	CASE_NAMESPACE_LDT_GC_RATE,
+	CASE_NAMESPACE_LDT_PAGE_SIZE,
 	CASE_NAMESPACE_MAX_TTL,
 	CASE_NAMESPACE_OBJ_SIZE_HIST_MAX,
 	CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE,
@@ -810,8 +811,8 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "high-water-disk-pct",			CASE_NAMESPACE_HIGH_WATER_DISK_PCT },
 		{ "high-water-memory-pct",			CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT },
 		{ "ldt-enabled",					CASE_NAMESPACE_LDT_ENABLED },
-		{ "ldt-page-size",					CASE_NAMESPACE_LDT_PAGESIZE },
 		{ "ldt-gc-rate",                    CASE_NAMESPACE_LDT_GC_RATE },
+		{ "ldt-page-size",					CASE_NAMESPACE_LDT_PAGE_SIZE },
 		{ "max-ttl",						CASE_NAMESPACE_MAX_TTL },
 		{ "obj-size-hist-max",				CASE_NAMESPACE_OBJ_SIZE_HIST_MAX },
 		{ "read-consistency-level-override", CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE },
@@ -2392,15 +2393,11 @@ as_config_init()
 			case CASE_NAMESPACE_LDT_ENABLED:
 				ns->ldt_enabled = cfg_bool(&line);
 				break;
-			case CASE_NAMESPACE_LDT_PAGESIZE:
-				ns->ldt_page_size = cfg_u32_no_checks(&line);
-				if (ns->ldt_page_size > ns->storage_write_block_size) {
-					// 1Kb head room
-					ns->ldt_page_size = ns->storage_write_block_size - 1024;
-				}
-				break;
 			case CASE_NAMESPACE_LDT_GC_RATE:
 				ns->ldt_gc_sleep_us = cfg_u64(&line, 1, LDT_SUB_GC_MAX_RATE) * 1000000;
+				break;
+			case CASE_NAMESPACE_LDT_PAGE_SIZE:
+				ns->ldt_page_size = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_MAX_TTL:
 				ns->max_ttl = cfg_seconds(&line);
@@ -2504,6 +2501,9 @@ as_config_init()
 				else {
 					c->n_namespaces_not_in_memory++;
 				}
+				if (ns->ldt_page_size > ns->storage_write_block_size) {
+					ns->ldt_page_size = ns->storage_write_block_size - 1024; // 1K headroom
+				}
 				ns = NULL;
 				cfg_end_context(&state);
 				break;
@@ -2533,10 +2533,6 @@ as_config_init()
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_WRITE_BLOCK_SIZE:
 				ns->storage_write_block_size = cfg_u32_no_checks(&line);
-				if (ns->ldt_page_size > ns->storage_write_block_size) {
-					// 1Kb head room
-					ns->ldt_page_size = ns->storage_write_block_size - 1024;
-				}
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_MEMORY_ALL:
 				cfg_renamed_name_tok(&line, "data-in-memory");
