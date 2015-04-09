@@ -165,9 +165,6 @@ as_msg_swap_fields_and_ops(as_msg *m, void *limit)
 // Either way it returns what it filled in.
 //
 
-//PROTOTYPE
-int _as_particle_towire(as_bin *b, byte *buf, uint32_t *sz, bool tojson);
-
 cl_msg *
 as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t void_time,
 		as_msg_op **ops, as_bin **bins, uint16_t bin_count, as_namespace *ns,
@@ -181,6 +178,8 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 		if (bins[i]) {
 			msg_sz += ns->single_bin ? 0 :
 					  strlen(as_bin_get_name_from_id(ns, bins[i]->id));
+			msg_sz += (int)as_bin_particle_client_value_size(bins[i]);
+			/*
 			uint32_t psz;
 			if (as_bin_is_hidden(bins[i])) {
 				psz = 0;
@@ -188,6 +187,7 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 				_as_particle_towire(bins[i], 0, &psz, false); // get size
 			}
 			msg_sz += psz;
+			*/
 		}
 		else if (ops[i])  // no bin, only op, no particle size
 			msg_sz += ops[i]->name_sz;
@@ -310,6 +310,9 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 		// in a minute.
 		op->op_sz = 4 + op->name_sz;
 
+		buf += as_bin_particle_to_client(bins[i], op);
+
+		/*
 		if (bins[i] && as_bin_inuse(bins[i])) {
 			op->particle_type = as_particle_type_convert(as_bin_get_particle_type(bins[i]));
 
@@ -328,6 +331,7 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 		else {
 			op->particle_type = AS_PARTICLE_TYPE_NULL;
 		}
+		*/
 
 		as_msg_swap_op(op);
 
