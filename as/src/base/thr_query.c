@@ -1316,8 +1316,9 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 			}
 
 			int64_t   i = 0;
-			uint32_t sz = 8;
-			as_particle_tomem(b, (uint8_t *) &i, &sz);
+			as_bin_particle_to_mem(b, (uint8_t *) &i);
+//			uint32_t sz = 8;
+//			as_particle_tomem(b, (uint8_t *) &i, &sz);
 			if ((i >= start->u.i64)
 					&& (i <= end->u.i64)) {
 				return true;
@@ -1338,10 +1339,12 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 				return false;
 			}
 
-			uint32_t psz = 32;
-			as_particle_tomem(b, NULL, &psz);
+			uint32_t psz = as_bin_particle_mem_size(b);
+//			uint32_t psz = 32;
+//			as_particle_tomem(b, NULL, &psz);
 			char buf[psz + 1];
-			as_particle_tomem(b, (uint8_t *) buf, &psz);
+			as_bin_particle_to_mem(b, (uint8_t *) buf);
+//			as_particle_tomem(b, (uint8_t *) buf, &psz);
 			buf[psz]     = '\0';
 			cf_digest bin_digest;
 			cf_digest_compute( buf, psz, &bin_digest);

@@ -522,7 +522,7 @@ as_bin_allocate_bin_space(as_record *r, as_storage_rd *rd, int32_t delta) {
 void
 as_bin_destroy(as_storage_rd *rd, uint16_t i)
 {
-	as_particle_destroy(&rd->bins[i], rd->ns->storage_data_in_memory);
+	as_bin_particle_destroy(&rd->bins[i], rd->ns->storage_data_in_memory);
 	as_bin_set_empty_shift(rd, i);
 }
 
@@ -534,7 +534,7 @@ as_bin_destroy_from(as_storage_rd *rd, uint16_t from)
 			break;
 		}
 
-		as_particle_destroy(&rd->bins[i], rd->ns->storage_data_in_memory);
+		as_bin_particle_destroy(&rd->bins[i], rd->ns->storage_data_in_memory);
 	}
 
 	as_bin_set_empty_from(rd, from);

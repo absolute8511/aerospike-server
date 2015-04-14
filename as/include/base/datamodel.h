@@ -213,41 +213,40 @@ typedef struct as_particle_iparticle_s {
 
 extern int32_t as_particle_size_from_client(const as_msg_op *op);
 extern int32_t as_particle_size_from_pickled(uint8_t **p_pickled);
+extern uint32_t as_particle_size_from_mem(as_particle_type type, const uint8_t *value, uint32_t value_size);
+extern int32_t as_particle_size_from_flat(const uint8_t *flat, uint32_t flat_size); // TODO - will we ever need this?
 
-extern uint32_t as_particle_flat_size(uint8_t type, uint32_t value_size); // deprecate? for from_wire flat sizing
-extern uint32_t as_particle_get_base_size(uint8_t particle_type); // deprecate
+extern uint32_t as_particle_flat_size(uint8_t type, uint32_t value_size); // TODO - deprecate - for from-wire flat sizing
 
 extern as_particle_type as_particle_type_convert(as_particle_type type);
 extern as_particle_type as_particle_type_convert_to_hidden(as_particle_type type);
 extern bool as_particle_type_hidden(as_particle_type type);
 
 // as_bin particle function declarations
-// TODO - rename with 'bin', move.
 
-// should be from_wire:
+extern void as_bin_particle_destroy(as_bin *b, bool free_particle);
+extern uint32_t as_bin_particle_size(as_bin *b);
+extern uint32_t as_bin_particle_ptr(as_bin *b, uint8_t **p_value);
+
+// TODO - should be from_wire:
 extern int as_particle_increment(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, bool mc_compliant);
 extern int as_particle_append_prepend_data(as_bin *b, as_particle_type type, byte *data, uint32_t data_len, bool data_in_memory, bool is_append, bool mc_compliant);
 
-extern void as_particle_destroy(as_bin *b, bool data_in_memory);
-extern int as_particle_p_get(as_bin *b, uint8_t **buf, uint32_t *sz);
-
 // wire:
-extern int as_particle_compare_fromwire(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz);
-extern int32_t as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op);
-extern int32_t as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled);
+extern int as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op);
+extern int as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled);
 extern int32_t as_bin_particle_stack_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op);
 extern int32_t as_bin_particle_stack_from_pickled(as_bin *b, uint8_t* stack, uint8_t **p_pickled);
-	// TODO - implement
 extern uint32_t as_bin_particle_client_value_size(as_bin *b);
 extern uint32_t as_bin_particle_to_client(const as_bin *b, as_msg_op *op);
 extern uint32_t as_bin_particle_pickled_size(as_bin *b);
 extern uint32_t as_bin_particle_to_pickled(const as_bin *b, uint8_t *pickled);
-//extern int as_particle_towire(as_bin *b, uint8_t *buf, uint32_t *sz);
 
 // mem:
-extern uint32_t as_bin_particle_size(as_bin *b);
-extern as_particle *as_particle_frommem(as_bin *b, as_particle_type type, uint8_t *buf, uint32_t sz, uint8_t *stack_particle, bool data_in_memory);
-extern int as_particle_tomem(as_bin *b, uint8_t *buf, uint32_t *sz);
+extern int as_bin_particle_replace_from_mem(as_bin *b, as_particle_type type, const uint8_t *value, uint32_t value_size);
+extern uint32_t as_bin_particle_stack_from_mem(as_bin *b, uint8_t* stack, as_particle_type type, const uint8_t *value, uint32_t value_size);
+extern uint32_t as_bin_particle_mem_size(as_bin *b);
+extern uint32_t as_bin_particle_to_mem(const as_bin *b, uint8_t *value);
 
 // flat:
 extern int as_bin_particle_cast_from_flat(as_bin *b, uint8_t *flat, uint32_t flat_size);

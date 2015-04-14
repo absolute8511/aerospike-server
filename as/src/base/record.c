@@ -169,7 +169,7 @@ as_record_clean_bins_from(as_storage_rd *rd, uint16_t from)
 		as_bin *b = &rd->bins[i];
 
 		if (as_bin_inuse(b)) {
-			as_particle_destroy(b, rd->ns->storage_data_in_memory);
+			as_bin_particle_destroy(b, rd->ns->storage_data_in_memory);
 			as_bin_set_empty(b);
 		}
 	}
@@ -461,6 +461,7 @@ as_record_buf_get_stack_particles_sz(uint8_t *buf) {
 	return (stack_particles_sz);
 }
 
+/*
 uint16_t
 as_record_count_unpickle_merge_bins_to_create(as_storage_rd *rd, uint8_t *buf, int sz) {
 	uint16_t bins_to_create = 0;
@@ -518,6 +519,7 @@ as_record_count_unpickle_merge_bins_to_create(as_storage_rd *rd, uint8_t *buf, i
 
 	return(bins_to_create);
 }
+*/
 
 // the unpickle merge
 // takes an existing record, and lays in the incoming data
@@ -525,6 +527,8 @@ as_record_count_unpickle_merge_bins_to_create(as_storage_rd *rd, uint8_t *buf, i
 int
 as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t sz, uint8_t **stack_particles, bool *record_written)
 {
+	cf_crash(AS_RECORD, "as_record_unpickle_merge() should be unreachable");
+/*
 	as_namespace *ns = rd->ns;
 
 	// create a 'version map'
@@ -594,8 +598,7 @@ as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t s
 				vmap[version] = as_record_unused_version_get(rd);
 			as_bin *b = as_bin_create(r, rd, name, name_sz, vmap[version]);
 
-			cf_crash(AS_RECORD, "unpickle merge should be unreachable");
-//			as_particle_fromwire(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
+			as_particle_fromwire(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
 
 			if (has_sindex) {
 				sindex_found += as_sindex_sbins_from_bin(ns, as_index_get_set_name(rd->r, ns), 
@@ -627,7 +630,7 @@ as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t s
 	if (buf > buf_lim) {
 		cf_crash(AS_RECORD, "as_record_unpickle_merge: bad format, last bin of %u", newbins);
 	}
-
+*/
 	return(0);
 }
 
