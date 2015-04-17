@@ -228,11 +228,8 @@ extern void as_bin_particle_destroy(as_bin *b, bool free_particle);
 extern uint32_t as_bin_particle_size(as_bin *b);
 extern uint32_t as_bin_particle_ptr(as_bin *b, uint8_t **p_value);
 
-// TODO - should be from_wire:
-//extern int as_particle_increment(as_bin *b, as_particle_type type, byte *buf, uint32_t sz, bool mc_compliant);
-//extern int as_particle_append_prepend_data(as_bin *b, as_particle_type type, byte *data, uint32_t data_len, bool data_in_memory, bool is_append, bool mc_compliant);
-
 // wire:
+extern int32_t as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op);
 extern int as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op);
 extern int32_t as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op);
 extern int as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op);
@@ -244,7 +241,7 @@ extern uint32_t as_bin_particle_to_client(const as_bin *b, as_msg_op *op);
 extern uint32_t as_bin_particle_pickled_size(as_bin *b);
 extern uint32_t as_bin_particle_to_pickled(const as_bin *b, uint8_t *pickled);
 
-// mem:
+// mem: TODO - replace with as_val family.
 extern int as_bin_particle_replace_from_mem(as_bin *b, as_particle_type type, const uint8_t *value, uint32_t value_size);
 extern uint32_t as_bin_particle_stack_from_mem(as_bin *b, uint8_t* stack, as_particle_type type, const uint8_t *value, uint32_t value_size);
 extern uint32_t as_bin_particle_mem_size(as_bin *b);

@@ -24,7 +24,6 @@
  * particle operations
  */
 
-#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -254,14 +253,19 @@ as_particle_incr_from_wire_int(as_particle_type wire_type, const uint8_t *wire_v
 	case 1:
 		i = (uint64_t)*wire_value;
 		break;
+	case 16: // memcache increment - it's special
+		i = cf_swap_from_be64(*(uint64_t *)wire_value);
+		// For memcache, decrements floor at 0.
+		if ((int64_t)i < 0 && *(uint64_t*)pp + i > *(uint64_t*)pp) {
+			*pp = 0;
+			return 0;
+		}
+		break;
 	default:
 		*pp = 0;
 		cf_warning(AS_PARTICLE, "unexpected value size %u", value_size);
 		return -1;
 	}
-
-//	uint64_t i_existing = (uint64_t)*pp;
-//	*pp = (as_particle *)(i_existing + i);
 
 	(*(uint64_t*)pp) += i;
 
@@ -1320,7 +1324,6 @@ as_bin_particle_ptr(as_bin *b, uint8_t **p_value)
 
 //------------------------------------------------
 // Operations (arithmetic, append, prepend).
-// TODO - should be 'from_wire' functions!
 //
 
 /*
@@ -1602,6 +1605,44 @@ as_particle_append_prepend_data(as_bin *b, as_particle_type type, byte *data, ui
 // Handle "wire" format.
 //
 
+// Unlike the other "size_from" methods, this one needs the existing bin. And
+// unlike the "modify" methods, this can be called with a null bin pointer.
+int32_t
+as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op)
+{
+	uint8_t operation = op->op;
+	as_particle_type op_type = (as_particle_type)op->particle_type;
+	uint32_t op_value_size = as_msg_op_get_value_sz(op);
+	uint8_t *op_value = as_msg_op_get_value_p((as_msg_op *)op);
+
+	// Currently all operations become creates if there's no existing particle.
+	if (! (b && as_bin_inuse(b))) {
+		// Memcache increment is weird - manipulate to create integer.
+		if (operation == AS_MSG_OP_MC_INCR) {
+			op_type = AS_PARTICLE_TYPE_INTEGER;
+		}
+
+		return g_particle_size_from_wire_table[op_type](op_value, op_value_size);
+	}
+
+	// There is an existing particle, which we will modify.
+	uint8_t existing_type = as_bin_get_particle_type(b);
+
+	switch (operation) {
+	case AS_MSG_OP_MC_INCR:
+	case AS_MSG_OP_INCR:
+		// Currently only embedded types can be incremented.
+		return 0;
+	case AS_MSG_OP_MC_APPEND:
+	case AS_MSG_OP_APPEND:
+	case AS_MSG_OP_MC_PREPEND:
+	case AS_MSG_OP_PREPEND:
+		return g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
+	default:
+		return -1;
+	}
+}
+
 int
 as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 {
@@ -1660,7 +1701,12 @@ as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 
 	switch (operation) {
 	case AS_MSG_OP_MC_INCR:
-		// TODO
+		if (op_value_size != 2 * sizeof(uint64_t) || op_type != AS_PARTICLE_TYPE_BLOB) {
+			return -1;
+		}
+		op_type = AS_PARTICLE_TYPE_INTEGER;
+		// op_value_size of 16 will flag operation as memcache increment...
+		// no break
 	case AS_MSG_OP_INCR:
 		return g_particle_incr_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	case AS_MSG_OP_MC_APPEND:
@@ -1747,7 +1793,12 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 
 	switch (operation) {
 	case AS_MSG_OP_MC_INCR:
-		// TODO
+		if (op_value_size != 2 * sizeof(uint64_t) || op_type != AS_PARTICLE_TYPE_BLOB) {
+			return -1;
+		}
+		op_type = AS_PARTICLE_TYPE_INTEGER;
+		// op_value_size of 16 will flag operation as memcache increment...
+		// no break
 	case AS_MSG_OP_INCR:
 		return g_particle_incr_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	case AS_MSG_OP_MC_APPEND:

@@ -3367,11 +3367,11 @@ new_flat_size(as_msg_op* op)
 	return as_particle_flat_size(op->particle_type, as_msg_op_get_value_sz(op));
 }
 
-static inline uint32_t
-new_memory_size(as_msg_op* op)
-{
-	return (uint32_t)as_particle_size_from_client(op);
-}
+//static inline uint32_t
+//new_memory_size(as_msg_op* op)
+//{
+//	return (uint32_t)as_particle_size_from_client(op);
+//}
 
 const uint32_t MAX_BIN_ID_BITMAP_SIZE = 8 * 1024;
 
@@ -3925,7 +3925,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 				// In a AS_MSG_OP_MC_INCR, there are actually two uint64s mashed
 				// into a blob value - an initial value and an increment value.
 				if (as_msg_op_get_value_sz(op) != 2 * sizeof(uint64_t)) {
-					cf_warning(AS_RW, "write_local: mc_touch data size invalid");
+					cf_warning(AS_RW, "write_local: mc_incr data size invalid");
 					write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_PARAMETER);
 					return -1;
 				}
@@ -3973,7 +3973,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 
 				if (! ns->storage_data_in_memory) {
 					// Any incoming particle goes in the stack buffer.
-					stack_particles_sz += new_memory_size(op);
+					stack_particles_sz += as_particle_size_from_client(op);
 				}
 			}
 			else if (bin && ns->storage_type == AS_STORAGE_ENGINE_SSD) {
@@ -3983,17 +3983,21 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 			}
 		}
 		else if (OP_IS_MODIFY(op->op)) {
+			if (! ns->storage_data_in_memory) {
+				stack_particles_sz += as_bin_particle_size_modify_from_client(bin, op);
+			}
+
 			if (! bin) {
 				// A modify operation creates a bin if there wasn't one.
 
 				if (ns->storage_data_in_memory) {
 					newbins++;
 				}
-				else {
-					// MC increment op comes with two integers packed together.
-					stack_particles_sz += op->op == AS_MSG_OP_MC_INCR ?
-							0 : new_memory_size(op);
-				}
+//				else {
+//					// MC increment op comes with two integers packed together.
+//					stack_particles_sz += op->op == AS_MSG_OP_MC_INCR ?
+//							0 : new_memory_size(op);
+//				}
 
 				if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
 					rd.n_bins_to_write++;
@@ -4007,11 +4011,12 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 				// Any concatenation op increases the size - old plus new
 				// particle (value) sizes plus particle overhead.
 
-				if (! ns->storage_data_in_memory) {
-					// Here, new_memory_size contributes the particle overhead.
-					// TODO - replace with as_bin_particle_pend_from_wire() etc.
-					stack_particles_sz += (as_bin_particle_size(bin) - 5) + new_memory_size(op);
-				}
+//				if (! ns->storage_data_in_memory) {
+//					as_bin_particle_size_modify_from_client(bin, op);
+//					// Here, new_memory_size contributes the particle overhead.
+//					// TODO - replace with as_bin_particle_pend_from_wire() etc.
+//					stack_particles_sz += (as_bin_particle_size(bin) - 5) + new_memory_size(op);
+//				}
 
 				if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
 					// Here, existing size contains the particle overhead.
