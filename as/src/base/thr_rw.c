@@ -4197,6 +4197,39 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		}
 		// these next ops modify the existing value, unlike the standard WRITE op
 		else if (OP_IS_MODIFY(op->op)) {
+			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+//			int sindex_found_yet = sindex_found;
+
+			if (! b) {
+				b = as_bin_create(r, &rd, op->name, op->name_sz, version);
+				// TODO - check failure.
+			}
+			else {
+				if (has_sindex) {
+					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+				}
+			}
+
+			if (ns->storage_data_in_memory) {
+				as_bin_particle_replace_modify_from_client(b, op);
+			}
+			else {
+				p_stack_particles += as_bin_particle_stack_modify_from_client(b, p_stack_particles, op);
+			}
+
+			if (has_sindex) {
+				sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+			}
+
+			rd.write_to_device = true;
+
+			// TODO - check failure of modify function calls.
+//			if (has_sindex) {
+//				as_sindex_sbin_freeall(&sbins[sindex_found_yet], sindex_found - sindex_found_yet);
+//				sindex_found = sindex_found_yet;
+//			}
+
+			/*
 			cf_detail(AS_RW, "received modify-type operation");
 
 			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
@@ -4225,21 +4258,12 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 				b = as_bin_create(r, &rd, op->name, op->name_sz, version);
 
 				if (b) {
-					if (ns->storage_data_in_memory) {
-						as_bin_particle_replace_from_client(b, op);
-					}
-					else {
-						p_stack_particles += as_bin_particle_stack_from_client(b, p_stack_particles, op);
-					}
-
-					/*
 					as_particle_fromwire(b, particle_type, p_op_value,
 							value_sz, p_stack_particles, ns->storage_data_in_memory);
 
 					if (! ns->storage_data_in_memory && particle_type != AS_PARTICLE_TYPE_INTEGER) {
 						p_stack_particles += as_particle_get_base_size(particle_type) + value_sz;
 					}
-					*/
 
 					if (has_sindex) {
 						sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
@@ -4310,6 +4334,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 					break;
 				}
 			}
+			*/
 		}
 	}
 
