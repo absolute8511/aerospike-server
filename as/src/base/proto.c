@@ -1301,8 +1301,8 @@ int
 as_netio_send(as_netio *io, void *q_to_use, bool blocking)
 {
 	cf_queue *q = (cf_queue *)q_to_use;
-	
-   int ret = io->start_cb(io, io->seq);
+
+	int ret = io->start_cb(io, io->seq);
 
 	if (ret == AS_NETIO_OK) {
 		ret     = io->finish_cb(io, as_query__send_packet(io->fd_h, io->bb_r, &io->offset, blocking));
