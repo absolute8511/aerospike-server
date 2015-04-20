@@ -798,6 +798,14 @@ info_get_replicas_master(char *name, cf_dyn_buf *db)
 	return(0);
 }
 
+int
+info_get_replicas_all(char *name, cf_dyn_buf *db)
+{
+	as_partition_get_replicas_all_str(db);
+
+	return(0);
+}
+
 //
 // COMMANDS
 //
@@ -7009,7 +7017,7 @@ as_info_init()
 	as_info_set("node", istr, true);                     // Node ID. Unique 15 character hex string for each node based on the mac address and port.
 	as_info_set("name", istr, false);                    // Alias to 'node'.
 	// Returns list of features supported by this server
-	as_info_set("features", "as_msg;replicas-read;replicas-prole;replicas-write;replicas-master;cluster-generation;partition-info;partition-generation;udf", true);
+	as_info_set("features", "replicas-all;replicas-master;replicas-prole;udf", true);
 	if (g_config.hb_mode == AS_HB_MODE_MCAST) {
 		sprintf(istr, "%s:%d", g_config.hb_addr, g_config.hb_port);
 		as_info_set("mcast", istr, false);               // Returns the multicast heartbeat address and port used by this server. Only available in multicast heartbeat mode.
@@ -7051,6 +7059,7 @@ as_info_init()
 	as_info_set_dynamic("replicas-prole",info_get_replicas_prole, false);   // Base 64 encoded binary representation of partitions this node is prole (replica) for.
 	as_info_set_dynamic("replicas-write",info_get_replicas_write, false);   //
 	as_info_set_dynamic("replicas-master",info_get_replicas_master, false); // Base 64 encoded binary representation of partitions this node is master (replica) for.
+	as_info_set_dynamic("replicas-all", info_get_replicas_all, false);      // Base 64 encoded binary representation of partitions this node is replica for.
 	as_info_set_dynamic("service",info_get_service, false);           // IP address and server port for this node, expected to be a single.
 	                                                                  // address/port per node, may be multiple address if this node is configured.
 	                                                                  // to listen on multiple interfaces (typically not advised).

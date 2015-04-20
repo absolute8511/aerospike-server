@@ -764,6 +764,7 @@ extern void as_partition_getreplica_read_str(cf_dyn_buf *db);
 extern void as_partition_getreplica_prole_str(cf_dyn_buf *db);
 extern void as_partition_getreplica_write_str(cf_dyn_buf *db);
 extern void as_partition_getreplica_master_str(cf_dyn_buf *db);
+extern void as_partition_get_replicas_all_str(cf_dyn_buf *db);
 extern void as_partition_getinfo_str(cf_dyn_buf *db);
 extern void as_partition_getstates(as_partition_states *ps);
 
