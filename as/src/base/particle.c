@@ -1646,8 +1646,6 @@ as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op)
 int
 as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 {
-	uint8_t existing_type = as_bin_get_particle_type(b);
-
 	uint8_t operation = op->op;
 	as_particle_type op_type = (as_particle_type)op->particle_type;
 	uint32_t op_value_size = as_msg_op_get_value_sz(op);
@@ -1696,6 +1694,7 @@ as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 	}
 
 	// There is an existing particle, which we will modify.
+	uint8_t existing_type = as_bin_get_particle_type(b);
 	int32_t new_mem_size = 0;
 	as_particle *new_particle = NULL;
 
@@ -1743,8 +1742,6 @@ as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 int32_t
 as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op)
 {
-	uint8_t existing_type = as_bin_get_particle_type(b);
-
 	uint8_t operation = op->op;
 	as_particle_type op_type = (as_particle_type)op->particle_type;
 	uint32_t op_value_size = as_msg_op_get_value_sz(op);
@@ -1789,6 +1786,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 	}
 
 	// There is an existing particle, which we will modify.
+	uint8_t existing_type = as_bin_get_particle_type(b);
 	int32_t new_mem_size = 0;
 
 	switch (operation) {
