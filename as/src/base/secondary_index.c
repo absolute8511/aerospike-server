@@ -141,6 +141,23 @@ const char *as_sindex_err_str(int op_code) {
 }
 
 /*
+ * Function as_sindex_isactive
+ *
+ * Returns sindex state
+ */
+inline bool as_sindex_isactive(as_sindex *si)
+{
+	if ((!si) || (!si->imd)) return FALSE;
+	bool ret;
+	if (si->state == AS_SINDEX_ACTIVE) {
+		ret = TRUE;
+	} else {
+		ret = FALSE;
+	}
+	return ret;
+}
+
+/*
  * Notes-
  * 		Translation from sindex internal error code to generic client visible
  * 		Aerospike error code
@@ -1138,6 +1155,10 @@ as_sindex_shutdown(as_namespace *ns)
 int
 as_sindex_reserve(as_sindex *si, char *fname, int lineno)
 {
+	if (!as_sindex_isactive(si)) {
+		cf_warning(AS_SINDEX, "Trying to reserve sindex %s in a state other than active. State is %d", 
+							si->imd->iname, si->state);
+	}
 	if (si->imd) cf_rc_reserve(si->imd);
 	int count = cf_rc_count(si->imd);
 	cf_debug(AS_SINDEX, "Index %s in %d state Reserved to reference count %d < 2 at %s:%d", si->imd->iname, si->state, count, fname, lineno);
@@ -1192,7 +1213,8 @@ as_sindex_release(as_sindex *si, char *fname, int lineno)
 					si->imd->iname, si->state, val, fname, lineno);
 		// Display a warning when rc math is messed-up during sindex-delete
 		if(si->state == AS_SINDEX_DESTROY){
-			cf_debug(AS_SINDEX,"Returning from a sindex destroy op for: %s with reference count %"PRIu64"", si->imd->iname, val);
+			cf_info(AS_SINDEX,"Returning from a sindex destroy op for: %s with reference count %"PRIu64"", 
+								si->imd->iname, val);
 		}
 		SINDEX_UNLOCK(&si->imd->slock);
 	}
@@ -1965,10 +1987,12 @@ as_sindex_list_str(as_namespace *ns, cf_dyn_buf *db)
 {
 	SINDEX_GRLOCK();
 	for (int i = 0; i < AS_SINDEX_MAX; i++) {
-		if (&(ns->sindex[i]) && (ns->sindex[i].imd) && as_sindex_isactive(&ns->sindex[i])) {
+		if (&(ns->sindex[i]) && (ns->sindex[i].imd)) {
 			as_sindex si = ns->sindex[i];
-			AS_SINDEX_RESERVE(&si);
-			SINDEX_RLOCK(&si.imd->slock);
+			if (as_sindex_isactive(&si)) {
+				AS_SINDEX_RESERVE(&si);
+				SINDEX_RLOCK(&si.imd->slock);
+			}
 			cf_dyn_buf_append_string(db, "ns=");
 			cf_dyn_buf_append_string(db, ns->name);
 			cf_dyn_buf_append_string(db, ":set=");
@@ -2015,8 +2039,10 @@ as_sindex_list_str(as_namespace *ns, cf_dyn_buf *db)
 			else {
 				cf_dyn_buf_append_string(db, ":state=D;");
 			}
-			SINDEX_UNLOCK(&si.imd->slock);
-			AS_SINDEX_RELEASE(&si);
+			if (as_sindex_isactive(&si)) {
+				SINDEX_UNLOCK(&si.imd->slock);
+				AS_SINDEX_RELEASE(&si);
+			}
 		}
 	}
 	SINDEX_GUNLOCK();
@@ -3963,23 +3989,6 @@ as_sindex_can_defrag_record(as_namespace *ns, cf_digest *keyd)
 
 }
 
-/*
- * Function as_sindex_isactive
- *
- * Returns sindex state
- */
-inline bool as_sindex_isactive(as_sindex *si)
-{
-	if ((!si) || (!si->imd)) return FALSE;
-	bool ret;
-	if (si->state == AS_SINDEX_ACTIVE) {
-		ret = TRUE;
-	} else {
-		ret = FALSE;
-	}
-	return ret;
-}
-
 int
 as_sindex_histogram_dumpall(as_namespace *ns)
 {
@@ -4406,47 +4415,67 @@ as_sindex_smd_can_accept_cb(char *module, as_smd_item_t *item, void *udata)
 	as_namespace * ns     = NULL;
 	int retval            = AS_SINDEX_ERR;
 
-		switch (item->action) {
-			case AS_SMD_ACTION_SET:
-				{
-					params = item->value;
-					bool smd_op = false;
-					if (as_info_parse_params_to_sindex_imd(params, &imd, NULL, true, &smd_op)){
-						goto ERROR;
-					}
-					ns     = as_namespace_get_byname(imd.ns_name);
-					retval = as_sindex_create_check_params(ns, &imd);
-
-					if(retval != AS_SINDEX_OK){
-						cf_info(AS_SINDEX, "Callback from paxos master for validation failed with error code %d", retval);
-						goto ERROR;
-					}
-					break;
+	switch (item->action) {
+		case AS_SMD_ACTION_SET:
+			{
+				params = item->value;
+				bool smd_op = false;
+				if (as_info_parse_params_to_sindex_imd(params, &imd, NULL, true, &smd_op)){
+					goto ERROR;
 				}
-			case AS_SMD_ACTION_DELETE:
-				{
-					char ns_name[100], ix_name[100];
-					ns_name[0] = ix_name[0] = '\0';
+				ns     = as_namespace_get_byname(imd.ns_name);
+				retval = as_sindex_create_check_params(ns, &imd);
 
-					if (2 != sscanf(item->key, "%[^:]:%s", (char *) &ns_name, (char *) &ix_name)) {
-						cf_warning(AS_SINDEX, "failed to extract namespace name and index name from SMD delete item value");
-						retval = AS_SINDEX_ERR;
-						goto ERROR;
-					} else {
-						imd.ns_name = cf_strdup(ns_name);
-						imd.iname   = cf_strdup(ix_name);
-						ns          = as_namespace_get_byname(imd.ns_name);
-						if (as_sindex_lookup_by_iname(ns, imd.iname, AS_SINDEX_LOOKUP_FLAG_NORESERVE | AS_SINDEX_LOOKUP_FLAG_ISACTIVE)) {
-							retval = AS_SINDEX_OK;
-						} else {
-							retval = AS_SINDEX_ERR_NOTFOUND;
-						}
-					}
-					break;
+				if(retval != AS_SINDEX_OK){
+					cf_info(AS_SINDEX, "Callback from paxos master for validation failed with error code %d", retval);
+					goto ERROR;
 				}
-	}				
-	
-ERROR:
+				break;
+			}
+		case AS_SMD_ACTION_DELETE:
+			{
+				char * key_dup = cf_strdup(item->key);
+				// Get ns name 
+				// Using strtok_r instead of strtok due to MT environment.
+				char * saveptr;
+				char * ns_tmpname    = strtok_r(key_dup, ":", &saveptr);
+				if (!ns_tmpname) {
+					cf_warning(AS_SINDEX, "Failed to extract namspace name from SMD delete item value");
+					retval = AS_SINDEX_ERR;
+					cf_free(key_dup);
+					goto ERROR;
+				}
+				else {
+					cf_debug(AS_SINDEX, "Extracted namespace name from SMD delete item value -> %s", ns_tmpname);
+				}
+
+				// Get index name
+				char * i_tmpname      = strtok_r(NULL, ":", &saveptr);
+				if (!i_tmpname) {
+					cf_warning(AS_SINDEX, "Failed to extract index name from SMD delete item value");
+					retval = AS_SINDEX_ERR;
+					cf_free(key_dup);
+					goto ERROR;
+				}
+				else {
+					cf_debug(AS_SINDEX, "Extracted index name from SMD delete item value -> %s", i_tmpname);
+				}
+
+				imd.ns_name = cf_strdup(ns_tmpname);
+				imd.iname   = cf_strdup(i_tmpname);
+				ns          = as_namespace_get_byname(imd.ns_name);
+				if (as_sindex_lookup_by_iname(ns, imd.iname, AS_SINDEX_LOOKUP_FLAG_NORESERVE | AS_SINDEX_LOOKUP_FLAG_ISACTIVE)) {
+					retval = AS_SINDEX_OK;
+				}
+				else {
+					retval = AS_SINDEX_ERR_NOTFOUND;
+				}
+				cf_free(key_dup);
+				break;
+			}
+	}
+
+ERROR:	
 	as_sindex_imd_free(&imd);
 	return retval;
 }
@@ -4554,17 +4583,37 @@ as_sindex_smd_accept_cb(char *module, as_smd_item_list_t *items, void *udata, ui
 			}
 			case AS_SMD_ACTION_DELETE:
 			{
-				char ns_name[100], ix_name[100];
-				ns_name[0] = ix_name[0] = '\0';
-
-				if (2 != sscanf(items->item[i]->key, "%[^:]:%s", (char *) &ns_name, (char *) &ix_name)) {
-					cf_warning(AS_SINDEX, "failed to extract namespace name and index name from SMD delete item value");
-				} else {
-					imd.ns_name = cf_strdup(ns_name);
-					imd.iname = cf_strdup(ix_name);
-					ns = as_namespace_get_byname(imd.ns_name);
-					as_sindex_destroy(ns, &imd);
+				char * key_dup = cf_strdup(items->item[i]->key);
+				
+				char * saveptr;
+				// Using strtok_r instead of strtok due to MT environment.
+				// Get ns name 
+				char * ns_tmpname    = strtok_r(key_dup, ":", &saveptr);
+				if (!ns_tmpname) {
+					cf_warning(AS_SINDEX, "Failed to extract namspace name from SMD delete item value");
+					cf_free(key_dup);
+					break;
 				}
+				else {
+					cf_debug(AS_SINDEX, "Extracted namespace name from SMD delete item value -> %s", ns_tmpname);
+				}
+
+				// Get index name
+				char * i_tmpname      = strtok_r(NULL, ":", &saveptr);
+				if (!i_tmpname) {
+					cf_warning(AS_SINDEX, "Failed to extract index name from SMD delete item value");
+					cf_free(key_dup);
+					break;
+				}
+				else {
+					cf_debug(AS_SINDEX, "Extracted index name from SMD delete item value -> %s", i_tmpname);
+				}
+
+				imd.ns_name = cf_strdup(ns_tmpname);
+				imd.iname   = cf_strdup(i_tmpname);
+				ns          = as_namespace_get_byname(imd.ns_name);
+				as_sindex_destroy(ns, &imd);
+				cf_free(key_dup);
 				break;
 			}
 		}
