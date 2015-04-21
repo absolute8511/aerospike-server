@@ -797,6 +797,14 @@ info_get_replicas_master(char *name, cf_dyn_buf *db)
 	return(0);
 }
 
+int
+info_get_replicas_all(char *name, cf_dyn_buf *db)
+{
+	as_partition_get_replicas_all_str(db);
+
+	return(0);
+}
+
 //
 // COMMANDS
 //
@@ -7049,6 +7057,7 @@ as_info_init()
 	as_info_set_dynamic("replicas-prole",info_get_replicas_prole, false);   // Base 64 encoded binary representation of partitions this node is prole (replica) for.
 	as_info_set_dynamic("replicas-write",info_get_replicas_write, false);   //
 	as_info_set_dynamic("replicas-master",info_get_replicas_master, false); // Base 64 encoded binary representation of partitions this node is master (replica) for.
+	as_info_set_dynamic("replicas-all", info_get_replicas_all, false);      // Base 64 encoded binary representation of partitions this node is replica for.
 	as_info_set_dynamic("service",info_get_service, false);           // IP address and server port for this node, expected to be a single.
 	                                                                  // address/port per node, may be multiple address if this node is configured.
 	                                                                  // to listen on multiple interfaces (typically not advised).

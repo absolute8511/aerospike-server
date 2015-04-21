@@ -138,7 +138,7 @@ cleangit:
 	$(GIT_CLEAN)
 
 .PHONY: rpm deb tar
-rpm deb tar:
+rpm deb tar src:
 	$(MAKE) -C pkg/$@ EDITION=$(EDITION)
 
 $(VERSION_SRC):	targetdirs
@@ -188,16 +188,11 @@ $(JEMALLOC)/Makefile: $(JEMALLOC)/configure
 $(LUAJIT)/src/luaconf.h: $(LUAJIT)/src/luaconf.h.orig
 	ln -s $(notdir $<) $@
 
+
+
 .PHONY: source
-source:
-	$(eval EDITION := community)
-	$(RM) $(VERSION_SRC)
-	$(MAKE) $(VERSION_SRC) EDITION=$(EDITION)
-	cp -p $(VERSION_SRC) $(DEPTH)
-	tar cvfj $(SRCTAR) \
-            -C .. `git ls-files | sed 's|^|aerospike-server/|'` \
-                  "aerospike-server/version.c"
-	$(RM) $(DEPTH)/version.c
+source: src
+
 
 tags etags:
 	etags `find ai as cf modules xdr $(EEREPO) -name "*.[ch]" | egrep -v '(target/Linux|m4)'` `find /usr/include -name "*.h"`

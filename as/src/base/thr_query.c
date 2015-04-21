@@ -820,6 +820,10 @@ as_qtr__release(as_query_transaction *qtr, char *fname, int lineno)
 		if (val > 1) {
 			cf_rc_release(qtr);
 		} else {
+			// Cannot check for abort here as we not sure if abort is due
+			// to FD screwed up or not. We could potentially have it. 
+			// Currently fin will attempt send and fail after one final
+			// send attempt
 			if (qtr->has_send_fin) {
 				cf_rc_release(qtr);
 				cf_detail(AS_QUERY, "Free qtr ref count is zero");
@@ -1010,11 +1014,23 @@ do {                                 \
     } \
 } while(0);
 
+/*
+ * Call back function to determine if the IO should go ahead or not.
+ * Purpose
+ * 1. If we already have fin packet pushed in simply do send
+ * 2. If our sequence number does not match requeue
+ * 3. Do not send out result if the query has timedout. In those cases
+ *    the request would send back with fin packed jammed in.
+ */ 
 int
 as_query_netio_start_cb(void *udata, int seq) 
 {
 	as_netio *io               = (as_netio *)udata;
 	as_query_transaction *qtr  = (as_query_transaction *)io->data;
+
+	if (qtr->has_send_fin) {
+		return AS_NETIO_OK;
+	}
 
 	// If timed out override the decision
 	as_query__check_timeout(qtr);
@@ -1031,6 +1047,14 @@ as_query_netio_start_cb(void *udata, int seq)
 	}
 }
 
+/*
+ * The function after the IO on the network has been done.
+ * 1. If OK was done successfully bump up the sequence number and 
+ *    fix stats
+ * 2. Release the qtr if something fails ... which would trigger 
+ *    fin packet send and eventually free up qtr
+ * Abort it set if something goes wrong
+ */ 
 int
 as_query_netio_finish_cb(void *data, int retcode)
 {
