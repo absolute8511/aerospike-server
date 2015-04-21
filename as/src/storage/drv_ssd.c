@@ -3786,7 +3786,7 @@ ssd_init_devices(as_namespace *ns, drv_ssds **ssds_p)
 	for (int i = 0; i < n_ssds; i++) {
 		drv_ssd *ssd = &ssds->ssds[i];
 
-		strcpy(ssd->name, ns->storage_devices[i]);
+		ssd->name = ns->storage_devices[i];
 
 		ssd->open_flag = O_RDWR |
 				(ns->storage_disable_odirect ? 0 : O_DIRECT) |
@@ -3863,7 +3863,7 @@ ssd_init_files(as_namespace *ns, drv_ssds **ssds_p)
 	for (int i = 0; i < n_ssds; i++) {
 		drv_ssd *ssd = &ssds->ssds[i];
 
-		strcpy(ssd->name, ns->storage_files[i]);
+		ssd->name = ns->storage_files[i];
 
 		if (ns->cold_start && ns->storage_cold_start_empty) {
 			if (0 == remove(ssd->name)) {

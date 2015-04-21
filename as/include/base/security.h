@@ -51,7 +51,10 @@ typedef enum {
 	// Data transactions' system metadata management.
 	PERM_INDEX_MANAGE	= 0x00010000,
 	PERM_UDF_MANAGE		= 0x00020000,
-	// ... 6 unused bits ...
+	PERM_SCAN_MANAGE	= 0x00040000,
+	PERM_QUERY_MANAGE	= 0x00080000,
+	PERM_JOB_MONITOR	= 0x00100000,
+	// ... 3 unused bits ...
 
 	// Deployment operations management.
 	PERM_SET_CONFIG		= 0x01000000,

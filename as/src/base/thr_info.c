@@ -7130,7 +7130,7 @@ as_info_init()
 	as_info_set_command("udf-clear-cache", udf_cask_info_clear_cache, PERM_UDF_MANAGE);
 
 	// JOBS
-	as_info_set_command("jobs", info_command_mon_cmd, PERM_SERVICE_CTRL);  // Manipulate the multi-key lookup monitoring infrastructure.
+	as_info_set_command("jobs", info_command_mon_cmd, PERM_JOB_MONITOR);  // Manipulate the multi-key lookup monitoring infrastructure.
 
 	// Undocumented Secondary Index Command
 	as_info_set_command("sindex-histogram", info_command_sindex_histogram, PERM_SERVICE_CTRL);
@@ -7139,9 +7139,9 @@ as_info_init()
 	as_info_set_command("sindex-qnodemap", info_command_sindex_qnodemap, PERM_NONE);
 
 	as_info_set_dynamic("query-list", as_query_list, false);
-	as_info_set_command("query-kill", info_command_query_kill, PERM_SERVICE_CTRL);
+	as_info_set_command("query-kill", info_command_query_kill, PERM_QUERY_MANAGE);
 	as_info_set_dynamic("query-stat", as_query_stat, false);
-	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SERVICE_CTRL);  // Abort a tscan with a given id.
+	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SCAN_MANAGE);   // Abort a tscan with a given id.
 	as_info_set_dynamic("scan-list", as_tscan_list, false);                         // List job ids of all scans.
 	as_info_set_command("sindex-describe", info_command_sindex_describe, PERM_NONE);
 	as_info_set_command("sindex-stat", info_command_sindex_stat, PERM_NONE);
