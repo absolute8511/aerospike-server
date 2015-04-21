@@ -1204,28 +1204,64 @@ cfg_not_supported(const cfg_line* p_line, const char *feature)
 }
 
 char*
-cfg_strdup(const cfg_line* p_line)
+cfg_strdup_anyval_no_checks(const cfg_line* p_line, const char* val_tok)
 {
-	// TODO - should we check for empty string?
-
-	char* str = cf_strdup(p_line->val_tok_1);
+	char* str = cf_strdup(val_tok);
 
 	if (! str) {
 		cf_crash_nostack(AS_CFG, "line %d :: failed alloc for %s: %s",
-				p_line->num, p_line->name_tok, p_line->val_tok_1);
+				p_line->num, p_line->name_tok, val_tok);
 	}
 
 	return str;
 }
 
 char*
+cfg_strdup_no_checks(const cfg_line* p_line)
+{
+	return cfg_strdup_anyval_no_checks(p_line, p_line->val_tok_1);
+}
+
+char*
+cfg_strdup_val2_no_checks(const cfg_line* p_line)
+{
+	return cfg_strdup_anyval_no_checks(p_line, p_line->val_tok_2);
+}
+
+char*
+cfg_strdup_anyval(const cfg_line* p_line, const char* val_tok, bool is_required)
+{
+	if (val_tok[0] == 0) {
+		if (is_required) {
+			cf_crash_nostack(AS_CFG, "line %d :: %s must have a value specified",
+					p_line->num, p_line->name_tok);
+		}
+
+		// Do not duplicate empty strings.
+		return NULL;
+	}
+
+	return cfg_strdup_anyval_no_checks(p_line, val_tok);
+}
+
+char*
+cfg_strdup(const cfg_line* p_line, bool is_required)
+{
+	return cfg_strdup_anyval(p_line, p_line->val_tok_1, is_required);
+}
+
+char*
+cfg_strdup_val2(const cfg_line* p_line, bool is_required)
+{
+	return cfg_strdup_anyval(p_line, p_line->val_tok_2, is_required);
+}
+
+char*
 cfg_strdup_one_of(const cfg_line* p_line, const char* toks[], int num_toks)
 {
-	// TODO - should we check for empty string?
-
 	for (int i = 0; i < num_toks; i++) {
 		if (strcmp(p_line->val_tok_1, toks[i]) == 0) {
-			return cfg_strdup(p_line);
+			return cfg_strdup_no_checks(p_line);
 		}
 	}
 
@@ -1738,7 +1774,7 @@ as_config_init(const char *config_file)
 				c->paxos_single_replica_limit = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_PIDFILE:
-				c->pidfile = cfg_strdup(&line);
+				c->pidfile = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_SERVICE_SERVICE_THREADS:
 				c->n_service_threads = cfg_int(&line, 1, MAX_DEMARSHAL_THREADS);
@@ -1799,7 +1835,7 @@ as_config_init(const char *config_file)
 				c->hist_track_slice = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_HIST_TRACK_THRESHOLDS:
-				c->hist_track_thresholds = cfg_strdup(&line);
+				c->hist_track_thresholds = cfg_strdup_no_checks(&line);
 				// TODO - if config key present but no value (not even space) failure mode is bad...
 				break;
 			case CASE_SERVICE_INFO_THREADS:
@@ -1962,7 +1998,7 @@ as_config_init(const char *config_file)
 				c->use_queue_per_device = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_WORK_DIRECTORY:
-				c->work_directory = cfg_strdup(&line);
+				c->work_directory = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_SERVICE_WRITE_DUPLICATE_RESOLUTION_DISABLE:
 				c->write_duplicate_resolution_disable = cfg_bool(&line);
@@ -2130,7 +2166,7 @@ as_config_init(const char *config_file)
 			switch(cfg_find_tok(line.name_tok, NETWORK_SERVICE_OPTS, NUM_NETWORK_SERVICE_OPTS)) {
 			case CASE_NETWORK_SERVICE_ADDRESS:
 				// TODO - is the strdup necessary (addr ever freed)?
-				c->socket.addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup(&line);
+				c->socket.addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_SERVICE_PORT:
 				c->socket.port = cfg_port(&line);
@@ -2139,11 +2175,11 @@ as_config_init(const char *config_file)
 				cfg_renamed_name_tok(&line, "access-address");
 				// Intentional fall-through.
 			case CASE_NETWORK_SERVICE_ACCESS_ADDRESS:
-				c->external_address = cfg_strdup(&line);
+				c->external_address = cfg_strdup_no_checks(&line);
 				c->is_external_address_virtual = strcmp(line.val_tok_2, "virtual") == 0;
 				break;
 			case CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME:
-				c->network_interface_name = cfg_strdup(&line);
+				c->network_interface_name = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_SERVICE_REUSE_ADDRESS:
 				c->socket_reuse_addr = cfg_bool_no_value_is_true(&line);
@@ -2178,19 +2214,19 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case CASE_NETWORK_HEARTBEAT_ADDRESS:
-				c->hb_addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup(&line);
+				c->hb_addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_PORT:
 				c->hb_port = cfg_int_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_ADDRESS:
-				c->hb_init_addr = cfg_strdup(&line);
+				c->hb_init_addr = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_PORT:
 				c->hb_init_port = cfg_port(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_SEED_ADDRESS_PORT:
-				cfg_add_mesh_seed_addr_port(cfg_strdup(&line), cfg_port_val2(&line));
+				cfg_add_mesh_seed_addr_port(cfg_strdup_no_checks(&line), cfg_port_val2(&line));
 				break;
 			case CASE_NETWORK_HEARTBEAT_INTERVAL:
 				c->hb_interval = cfg_u32_no_checks(&line);
@@ -2199,7 +2235,7 @@ as_config_init(const char *config_file)
 				c->hb_timeout = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS:
-				c->hb_tx_addr = cfg_strdup(&line);
+				c->hb_tx_addr = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MCAST_TTL:
 				c->hb_mcast_ttl = cfg_u8_no_checks(&line);
@@ -2510,10 +2546,10 @@ as_config_init(const char *config_file)
 		case NAMESPACE_STORAGE_DEVICE:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_DEVICE_OPTS, NUM_NAMESPACE_STORAGE_DEVICE_OPTS)) {
 			case CASE_NAMESPACE_STORAGE_DEVICE_DEVICE:
-				cfg_add_storage_device(ns, cfg_strdup(&line));
+				cfg_add_storage_device(ns, cfg_strdup(&line, true));
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_FILE:
-				cfg_add_storage_file(ns, cfg_strdup(&line));
+				cfg_add_storage_file(ns, cfg_strdup(&line, true));
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_FILESIZE:
 				ns->storage_filesize = cfg_i64_no_checks(&line);
@@ -2598,7 +2634,7 @@ as_config_init(const char *config_file)
 		case NAMESPACE_STORAGE_KV:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_KV_OPTS, NUM_NAMESPACE_STORAGE_KV_OPTS)) {
 			case CASE_NAMESPACE_STORAGE_KV_DEVICE:
-				cfg_add_storage_file(ns, cfg_strdup(&line));
+				cfg_add_storage_file(ns, cfg_strdup(&line, true));
 				break;
 			case CASE_NAMESPACE_STORAGE_KV_FILESIZE:
 				ns->storage_filesize = cfg_i64_no_checks(&line);
@@ -2741,7 +2777,7 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case XDR_CASE_NAMEDPIPE_PATH:
-				c->xdr_cfg.xdr_digestpipe_path = cfg_strdup(&line);
+				c->xdr_cfg.xdr_digestpipe_path = cfg_strdup_no_checks(&line);
 				break;
 			case XDR_CASE_FORWARD_XDR_WRITES:
 				c->xdr_cfg.xdr_forward_xdrwrites = cfg_bool(&line);
