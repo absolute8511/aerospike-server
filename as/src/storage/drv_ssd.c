@@ -1644,7 +1644,7 @@ ssd_flush_swb(drv_ssd *ssd, ssd_write_buf *swb)
 
 	ssize_t rv_s = write(fd, swb->buf, ssd->write_block_size);
 
-	if (rv_s != ssd->write_block_size) {
+	if (rv_s != (ssize_t)ssd->write_block_size) {
 		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
 				ssd->name, errno, cf_strerror(errno));
 	}
@@ -2863,11 +2863,9 @@ as_storage_empty_header(int fd, const char* device_name)
 }
 
 
-int
-as_storage_write_header(drv_ssd *ssd, ssd_device_header *header)
+void
+as_storage_write_header(drv_ssd *ssd, ssd_device_header *header, size_t size)
 {
-	cf_detail(AS_DRV_SSD, "storage write header: device %s", ssd->name);
-
 	int fd = ssd_fd_get(ssd);
 
 	if (lseek(fd, 0, SEEK_SET) != 0) {
@@ -2875,16 +2873,14 @@ as_storage_write_header(drv_ssd *ssd, ssd_device_header *header)
 				ssd->name, errno, cf_strerror(errno));
 	}
 
-	ssize_t sz = write(fd, (void*)header, header->header_length);
+	ssize_t sz = write(fd, (void*)header, size);
 
-	if (sz != header->header_length) {
+	if (sz != (ssize_t)size) {
 		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
 				ssd->name, errno, cf_strerror(errno));
 	}
 
 	ssd_fd_put(ssd, fd);
-
-	return 0;
 }
 
 
@@ -4447,7 +4443,7 @@ as_storage_info_flush_ssd(as_namespace *ns)
 	for (int i = 0; i < ssds->n_ssds; i++) {
 		drv_ssd *ssd = &ssds->ssds[i];
 
-		as_storage_write_header(ssd, ssds->header);
+		as_storage_write_header(ssd, ssds->header, ssds->header->header_length);
 	}
 
 	return 0;
@@ -4462,27 +4458,14 @@ as_storage_save_evict_void_time_ssd(as_namespace *ns, uint32_t evict_void_time)
 	ssds->header->last_evict_void_time = evict_void_time;
 
 	// Customized write instead of using as_storage_info_flush_ssd() so we can
-	// write 512b instead of 1Mb (and not interfere with potentially concurrent
-	// writes for partition info), and so we can avoid fsync() which is slow.
+	// write 512-4096b instead of 1Mb (and not interfere with potentially
+	// concurrent writes for partition info).
 
 	for (int i = 0; i < ssds->n_ssds; i++) {
 		drv_ssd* ssd = &ssds->ssds[i];
-		int fd = ssd_fd_get(ssd);
-
-		if (lseek(fd, 0, SEEK_SET) != 0) {
-			cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED seek: errno %d (%s)",
-					ssd->name, errno, cf_strerror(errno));
-		}
-
 		size_t peek_size = BYTES_UP_TO_IO_MIN(ssd, sizeof(ssd_device_header));
-		ssize_t sz = write(fd, (void*)ssds->header, peek_size);
 
-		if (sz != peek_size) {
-			cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
-					ssd->name, errno, cf_strerror(errno));
-		}
-
-		ssd_fd_put(ssd, fd);
+		as_storage_write_header(ssd, ssds->header, peek_size);
 	}
 }
 
