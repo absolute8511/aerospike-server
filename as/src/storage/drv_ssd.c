@@ -161,8 +161,8 @@ ssd_fd_get(drv_ssd *ssd)
 		fd = open(ssd->name, ssd->open_flag, S_IRUSR | S_IWUSR);
 
 		if (-1 == fd) {
-			cf_crash(AS_DRV_SSD, "unable to open file %s: %s",
-					ssd->name, cf_strerror(errno));
+			cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED open: errno %d (%s)",
+					ssd->name, errno, cf_strerror(errno));
 		}
 	}
 
@@ -668,7 +668,6 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 	int num_old_records = 0;
 	int num_deleted_records = 0;
 	int record_err_count = 0;
-	int fd = -1;
 
 	ssd_wblock_state* p_wblock_state = &ssd->alloc_table->wblock_state[wblock_id];
 
@@ -676,21 +675,14 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 		goto Finished;
 	}
 
-	fd = ssd_fd_get(ssd);
-
-	if (-1 == fd) {
-		cf_warning(AS_DRV_SSD, "defrag: unable to get file descriptor for device %s errno %d",
-				ssd->name, errno);
-		goto Finished;
-	}
-
+	int fd = ssd_fd_get(ssd);
 	uint64_t file_offset = WBLOCK_ID_TO_BYTES(ssd, wblock_id);
 
 	uint64_t start_ns = g_config.storage_benchmarks ? cf_getns() : 0;
 
 	if (lseek(fd, (off_t)file_offset, SEEK_SET) != (off_t)file_offset) {
-		cf_warning(AS_DRV_SSD, "DEVICE FAILED: device %s can't seek errno %d",
-				ssd->name, errno);
+		cf_warning(AS_DRV_SSD, "%s: seek failed: offset %lu: errno %d (%s)",
+				ssd->name, file_offset, errno, cf_strerror(errno));
 		close(fd);
 		fd = -1;
 		goto Finished;
@@ -698,9 +690,9 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 
 	ssize_t rlen = read(fd, read_buf, ssd->write_block_size);
 
-	if (rlen != ssd->write_block_size) {
-		cf_info(AS_DRV_SSD, "defrag read failed: offset %"PRIu64" errno %d rv %zd",
-				file_offset, errno, rlen);
+	if (rlen != (ssize_t)ssd->write_block_size) {
+		cf_warning(AS_DRV_SSD, "%s: read failed (%ld): errno %d (%s)",
+				ssd->name, rlen, errno, cf_strerror(errno));
 		close(fd);
 		fd = -1;
 		goto Finished;
@@ -709,6 +701,8 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 	if (start_ns != 0) {
 		histogram_insert_data_point(ssd->hist_large_block_read, start_ns);
 	}
+
+	ssd_fd_put(ssd, fd);
 
 	size_t wblock_offset = 0; // current offset within the wblock, in bytes
 
@@ -777,10 +771,6 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 	}
 
 Finished:
-
-	if (fd != -1) {
-		ssd_fd_put(ssd, fd);
-	}
 
 	// Note - usually wblock's inuse_sz is 0 here, but may legitimately be non-0
 	// e.g. if a dropped partition's tree is not done purging. In this case, we
@@ -1204,20 +1194,26 @@ as_storage_record_read_ssd(as_storage_rd *rd)
 
 		uint64_t start_ns = g_config.storage_benchmarks ? cf_getns() : 0;
 
-		lseek(fd, (off_t)read_offset, SEEK_SET);
-
-		ssize_t rv = read(fd, read_buf, read_size);
-
-		if (start_ns != 0) {
-			histogram_insert_data_point(ssd->hist_read, start_ns);
-		}
-
-		if (rv != read_size) {
-			cf_warning(AS_DRV_SSD,"read failed: expected %d got %d: fd %d data %p errno %d",
-					read_size, rv, fd, read_buf, errno);
+		if (lseek(fd, (off_t)read_offset, SEEK_SET) != (off_t)read_offset) {
+			cf_warning(AS_DRV_SSD, "%s: seek failed: offset %lu: errno %d (%s)",
+					ssd->name, read_offset, errno, cf_strerror(errno));
 			cf_free(read_buf);
 			close(fd);
 			return -1;
+		}
+
+		ssize_t rv = read(fd, read_buf, read_size);
+
+		if (rv != (ssize_t)read_size) {
+			cf_warning(AS_DRV_SSD, "%s: read failed (%ld): size %lu: errno %d (%s)",
+					ssd->name, rv, read_size, errno, cf_strerror(errno));
+			cf_free(read_buf);
+			close(fd);
+			return -1;
+		}
+
+		if (start_ns != 0) {
+			histogram_insert_data_point(ssd->hist_read, start_ns);
 		}
 
 		ssd_fd_put(ssd, fd);
@@ -1642,19 +1638,19 @@ ssd_flush_swb(drv_ssd *ssd, ssd_write_buf *swb)
 	uint64_t start_ns = g_config.storage_benchmarks ? cf_getns() : 0;
 
 	if (lseek(fd, write_offset, SEEK_SET) != write_offset) {
-		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED: can't seek errno %d (%s)",
-				ssd->name, errno, cf_strerror(errno));
+		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED seek: offset %ld: errno %d (%s)",
+				ssd->name, write_offset, errno, cf_strerror(errno));
 	}
 
 	ssize_t rv_s = write(fd, swb->buf, ssd->write_block_size);
 
-	if (start_ns != 0) {
-		histogram_insert_data_point(ssd->hist_write, start_ns);
+	if (rv_s != ssd->write_block_size) {
+		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
+				ssd->name, errno, cf_strerror(errno));
 	}
 
-	if (rv_s != ssd->write_block_size) {
-		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED: can't write errno %d (%s)",
-				ssd->name, errno, cf_strerror(errno));
+	if (start_ns != 0) {
+		histogram_insert_data_point(ssd->hist_write, start_ns);
 	}
 
 	ssd_fd_put(ssd, fd);
@@ -2255,39 +2251,35 @@ as_storage_analyze_wblock(as_namespace* ns, int device_index,
 	}
 
 	drv_ssd* ssd = &ssds->ssds[device_index];
-
-	int fd = ssd_fd_get(ssd);
-
-	if (-1 == fd) {
-		cf_warning(AS_DRV_SSD, "analyze wblock ERROR: can't get fd");
-		return -1;
-	}
-
-	uint64_t file_offset = WBLOCK_ID_TO_BYTES(ssd, wblock_id);
-
-	if (lseek(fd, (off_t)file_offset, SEEK_SET) != (off_t)file_offset) {
-		cf_warning(AS_DRV_SSD, "analyze wblock ERROR: fail fd seek");
-		close(fd);
-		return -1;
-	}
-
 	uint8_t* read_buf = cf_valloc(ssd->write_block_size);
 
 	if (! read_buf) {
 		cf_warning(AS_DRV_SSD, "analyze wblock ERROR: fail valloc");
+		return -1;
+	}
+
+	int fd = ssd_fd_get(ssd);
+	uint64_t file_offset = WBLOCK_ID_TO_BYTES(ssd, wblock_id);
+
+	if (lseek(fd, (off_t)file_offset, SEEK_SET) != (off_t)file_offset) {
+		cf_warning(AS_DRV_SSD, "%s: seek failed: offset %lu: errno %d (%s)",
+				ssd->name, file_offset, errno, cf_strerror(errno));
+		cf_free(read_buf);
 		close(fd);
 		return -1;
 	}
 
 	ssize_t rlen = read(fd, read_buf, ssd->write_block_size);
 
-	close(fd);
-
 	if (rlen != (ssize_t)ssd->write_block_size) {
-		cf_warning(AS_DRV_SSD, "analyze wblock ERROR: fail fd read");
+		cf_warning(AS_DRV_SSD, "%s: read failed (%ld): errno %d (%s)",
+				ssd->name, rlen, errno, cf_strerror(errno));
 		cf_free(read_buf);
+		close(fd);
 		return -1;
 	}
+
+	ssd_fd_put(ssd, fd);
 
 	uint32_t living_populations[AS_PARTITIONS];
 	uint32_t zombie_populations[AS_PARTITIONS];
@@ -2684,13 +2676,7 @@ as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
 
 	int rv = -1;
 
-	int fd = open(ssd->name, ssd->open_flag, S_IRUSR | S_IWUSR);
-
-	if (fd <= 0) {
-		cf_info(AS_DRV_SSD, "read_header: can't open dev %s error %s",
-				ssd->name, cf_strerror(errno));
-		return -1;
-	}
+	int fd = ssd_fd_get(ssd);
 
 	size_t peek_size = BYTES_UP_TO_IO_MIN(ssd, sizeof(ssd_device_header));
 	ssd_device_header *header = cf_valloc(peek_size);
@@ -2699,24 +2685,26 @@ as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
 		goto Fail;
 	}
 
-	off_t off = lseek(fd, 0, SEEK_SET);
-
-	if (off != 0) {
-		cf_info(AS_DRV_SSD, "read_header: dev %s: unable to seek: rv %zd error %s",
-				ssd->name, off, cf_strerror(errno));
+	if (lseek(fd, 0, SEEK_SET) != 0) {
+		cf_warning(AS_DRV_SSD, "%s: seek failed: errno %d (%s)", ssd->name,
+				errno, cf_strerror(errno));
+		close(fd);
+		fd = -1;
 		goto Fail;
 	}
 
 	ssize_t sz = read(fd, (void*)header, peek_size);
 
-	if (sz != peek_size) {
-		cf_info(AS_DRV_SSD, "read_header: dev %s: unable to read: rv %zd error %s",
-				ssd->name, sz, cf_strerror(errno));
+	if (sz != (ssize_t)peek_size) {
+		cf_warning(AS_DRV_SSD, "%s: read failed (%ld): errno %d (%s)",
+				ssd->name, sz, errno, cf_strerror(errno));
+		close(fd);
+		fd = -1;
 		goto Fail;
 	}
 
 	// Make sure all following checks that return -1 or -2 are also done in
-	// as_storage_namespace_peek_ssd().
+	// peek_devices() in the enterprise repo.
 
 	if (header->magic != SSD_HEADER_MAGIC) { // normal path for a fresh drive
 		cf_detail(AS_DRV_SSD, "read_header: device %s no magic, not a Citrusleaf drive",
@@ -2767,10 +2755,21 @@ as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
 		goto Fail;
 	}
 
-	lseek(fd, 0, SEEK_SET);
+	if (lseek(fd, 0, SEEK_SET) != 0) {
+		cf_warning(AS_DRV_SSD, "%s: seek failed: errno %d (%s)", ssd->name,
+				errno, cf_strerror(errno));
+		close(fd);
+		fd = -1;
+		goto Fail;
+	}
+
 	sz = read(fd, (void*)header, h_len);
 
-	if (sz != header->header_length) {
+	if (sz != (ssize_t)header->header_length) {
+		cf_warning(AS_DRV_SSD, "%s: read failed (%ld): errno %d (%s)",
+				ssd->name, sz, errno, cf_strerror(errno));
+		close(fd);
+		fd = -1;
 		goto Fail;
 	}
 
@@ -2784,7 +2783,8 @@ as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
 	header->write_block_size = ns->storage_write_block_size;
 
 	*header_r = header;
-	close(fd);
+
+	ssd_fd_put(ssd, fd);
 
 	return 0;
 
@@ -2795,7 +2795,7 @@ Fail:
 	}
 
 	if (fd != -1) {
-		close(fd);
+		ssd_fd_put(ssd, fd);
 	}
 
 	return rv;
@@ -2868,26 +2868,22 @@ as_storage_write_header(drv_ssd *ssd, ssd_device_header *header)
 {
 	cf_detail(AS_DRV_SSD, "storage write header: device %s", ssd->name);
 
-	int fd = open(ssd->name, ssd->open_flag, S_IRUSR | S_IWUSR);
+	int fd = ssd_fd_get(ssd);
 
-	if (fd <= 0) {
-		cf_warning(AS_DRV_SSD, "unable to open file %s: %s", ssd->name,
-				cf_strerror(errno));
-		return -1;
+	if (lseek(fd, 0, SEEK_SET) != 0) {
+		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED seek: errno %d (%s)",
+				ssd->name, errno, cf_strerror(errno));
 	}
-
-	lseek(fd, 0, SEEK_SET);
 
 	ssize_t sz = write(fd, (void*)header, header->header_length);
 
 	if (sz != header->header_length) {
-		cf_info(AS_DRV_SSD, "storage write header: failure: wrote %"PRIu64" expected %"PRIu64" %s",
-			sz, header->header_length, ssd->name);
-		close(fd);
-		return -1;
+		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
+				ssd->name, errno, cf_strerror(errno));
 	}
 
-	close(fd);
+	ssd_fd_put(ssd, fd);
+
 	return 0;
 }
 
@@ -3282,17 +3278,18 @@ ssd_load_device_sweep(drv_ssds *ssds, drv_ssd *ssd)
 {
 	uint8_t *buf = cf_valloc(LOAD_BUF_SIZE);
 
-	int fd = open(ssd->name, ssd->open_flag, S_IRUSR | S_IWUSR);
-
-	if (-1 == fd) {
-		cf_crash(AS_DRV_SSD, "unable to open device %s: %s",
-				ssd->name, cf_strerror(errno));
-	}
+	int fd = ssd_fd_get(ssd);
 
 	// Seek past the header.
 	off_t file_offset = ssds->header->header_length;
 
-	lseek(fd, file_offset, SEEK_SET);
+	if (lseek(fd, file_offset, SEEK_SET) != file_offset) {
+		cf_warning(AS_DRV_SSD, "%s: seek failed: offset %ld: errno %d (%s)",
+				ssd->name, file_offset, errno, cf_strerror(errno));
+		close(fd);
+		fd = -1;
+		goto Finished;
+	}
 
 	int error_count = 0;
 
@@ -3303,8 +3300,10 @@ ssd_load_device_sweep(drv_ssds *ssds, drv_ssd *ssd)
 		ssize_t rlen = read(fd, buf, LOAD_BUF_SIZE);
 
 		if (rlen != LOAD_BUF_SIZE) {
-			cf_warning(AS_DRV_SSD, "startup read failed: offset %"PRIu64" errno %d rv %zd",
-					file_offset, errno, rlen);
+			cf_warning(AS_DRV_SSD, "%s: read failed (%ld): errno %d (%s)",
+					ssd->name, rlen, errno, cf_strerror(errno));
+			close(fd);
+			fd = -1;
 			goto Finished;
 		}
 
@@ -3398,8 +3397,7 @@ Finished:
 	ssd->cold_start_block_counter = ssd->file_size / LOAD_BUF_SIZE;
 
 	if (fd != -1) {
-		close(fd);
-		fd = -1;
+		ssd_fd_put(ssd, fd);
 	}
 
 	cf_free(buf);
@@ -4145,26 +4143,7 @@ as_storage_cold_start_ticker_ssd()
 int
 as_storage_namespace_destroy_ssd(as_namespace *ns)
 {
-	drv_ssds *ssds = (drv_ssds*)ns->storage_private;
-
-	for (int i = 0; i < ssds->n_ssds; i++) {
-		drv_ssd *ssd = &ssds->ssds[i];
-
-		while (true) {
-			int fd = ssd_fd_get(ssd);
-
-			if (fd == -1) {
-				break;
-			}
-
-			close(fd);
-		}
-
-		pthread_mutex_destroy(&ssd->LOCK);
-	}
-
-	cf_free(ssds);
-
+	// This is not called - for now we don't bother unwinding.
 	return 0;
 }
 
@@ -4488,28 +4467,22 @@ as_storage_save_evict_void_time_ssd(as_namespace *ns, uint32_t evict_void_time)
 
 	for (int i = 0; i < ssds->n_ssds; i++) {
 		drv_ssd* ssd = &ssds->ssds[i];
+		int fd = ssd_fd_get(ssd);
 
-		int fd = open(ssd->name, ssd->open_flag, S_IRUSR | S_IWUSR);
-
-		if (fd <= 0) {
-			cf_warning(AS_DRV_SSD, "device %s: unable to open - %s",
-					ssd->name, cf_strerror(errno));
-			continue;
+		if (lseek(fd, 0, SEEK_SET) != 0) {
+			cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED seek: errno %d (%s)",
+					ssd->name, errno, cf_strerror(errno));
 		}
-
-		lseek(fd, 0, SEEK_SET);
 
 		size_t peek_size = BYTES_UP_TO_IO_MIN(ssd, sizeof(ssd_device_header));
 		ssize_t sz = write(fd, (void*)ssds->header, peek_size);
 
 		if (sz != peek_size) {
-			cf_warning(AS_DRV_SSD, "device %s: failed write to tip of header",
-					ssd->name);
-			close(fd);
-			continue;
+			cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
+					ssd->name, errno, cf_strerror(errno));
 		}
 
-		close(fd);
+		ssd_fd_put(ssd, fd);
 	}
 }
 
