@@ -137,6 +137,7 @@ typedef struct drv_ssd_s
 	as_namespace	*ns;
 
 	char			*name;				// this device's name
+	char			*shadow_name;		// this device's shadow's name, if any
 
 	pthread_mutex_t	LOCK;
 
@@ -145,6 +146,7 @@ typedef struct drv_ssd_s
 	cf_atomic32		n_writers;			// number of concurrent writers to current swb
 
 	cf_queue		*fd_q;				// queue of open fds
+	cf_queue		*shadow_fd_q;		// queue of open fds on shadow, if any
 
 	cf_queue		*free_wblock_q;		// IDs of free wblocks
 	cf_queue		*defrag_wblock_q;	// IDs of wblocks to defrag
@@ -195,6 +197,7 @@ typedef struct drv_ssd_s
 	histogram		*hist_read;
 	histogram		*hist_large_block_read;
 	histogram		*hist_write;
+	histogram		*hist_shadow_write;
 	histogram		*hist_fsync;
 } drv_ssd;
 
