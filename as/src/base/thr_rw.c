@@ -3367,12 +3367,6 @@ new_flat_size(as_msg_op* op)
 	return as_particle_flat_size(op->particle_type, as_msg_op_get_value_sz(op));
 }
 
-//static inline uint32_t
-//new_memory_size(as_msg_op* op)
-//{
-//	return (uint32_t)as_particle_size_from_client(op);
-//}
-
 const uint32_t MAX_BIN_ID_BITMAP_SIZE = 8 * 1024;
 
 static uint32_t
@@ -3993,11 +3987,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 				if (ns->storage_data_in_memory) {
 					newbins++;
 				}
-//				else {
-//					// MC increment op comes with two integers packed together.
-//					stack_particles_sz += op->op == AS_MSG_OP_MC_INCR ?
-//							0 : new_memory_size(op);
-//				}
 
 				if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
 					rd.n_bins_to_write++;
@@ -4010,13 +3999,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 					 op->op == AS_MSG_OP_APPEND || op->op == AS_MSG_OP_PREPEND) {
 				// Any concatenation op increases the size - old plus new
 				// particle (value) sizes plus particle overhead.
-
-//				if (! ns->storage_data_in_memory) {
-//					as_bin_particle_size_modify_from_client(bin, op);
-//					// Here, new_memory_size contributes the particle overhead.
-//					// TODO - replace with as_bin_particle_pend_from_wire() etc.
-//					stack_particles_sz += (as_bin_particle_size(bin) - 5) + new_memory_size(op);
-//				}
 
 				if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
 					// Here, existing size contains the particle overhead.
@@ -4178,17 +4160,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 						p_stack_particles += as_bin_particle_stack_from_client(b, p_stack_particles, op);
 					}
 
-					/*
-					as_particle_fromwire(b, op->particle_type,
-							as_msg_op_get_value_p(op),
-							value_sz, p_stack_particles,
-							ns->storage_data_in_memory);
-
-					if (! ns->storage_data_in_memory && op->particle_type != AS_PARTICLE_TYPE_INTEGER) {
-						p_stack_particles += as_particle_get_base_size(op->particle_type) + value_sz;
-					}
-					*/
-
 					rd.write_to_device = true;
 				}
 				else {
@@ -4233,113 +4204,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 //				as_sindex_sbin_freeall(&sbins[sindex_found_yet], sindex_found - sindex_found_yet);
 //				sindex_found = sindex_found_yet;
 //			}
-
-			/*
-			cf_detail(AS_RW, "received modify-type operation");
-
-			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
-
-			uint8_t *p_op_value = as_msg_op_get_value_p(op);
-			uint32_t value_sz   = as_msg_op_get_value_sz(op);
-
-			// In the case of AS_MSG_OP_MC_INCR, there are actually two uint64s
-			// mashed into a blob value - an initial value and an increment value. We
-			// also check the REPLACE flag - if it's set, we're not allowed to
-			// create a new record, and the operation will fail.
-			if (op->op == AS_MSG_OP_MC_INCR) {
-				value_sz = sizeof(uint64_t); // we're only going to use one of the fields
-			}
-
-			if (b == 0) { // increment turns into write if there was no bin there before
-
-				as_particle_type particle_type = op->particle_type;
-				// Note that in the case of an MC_INCR (memcache compatible incr), we
-				// may have an initial value, and the operation is allowed to fail.
-				if (op->op == AS_MSG_OP_MC_INCR) {
-					particle_type = AS_PARTICLE_TYPE_INTEGER;  // incoming type will be blob or string - but it's really an int!
-					p_op_value += sizeof(uint64_t); // initial value is the second uint64 in the struct
-				}
-
-				b = as_bin_create(r, &rd, op->name, op->name_sz, version);
-
-				if (b) {
-					as_particle_fromwire(b, particle_type, p_op_value,
-							value_sz, p_stack_particles, ns->storage_data_in_memory);
-
-					if (! ns->storage_data_in_memory && particle_type != AS_PARTICLE_TYPE_INTEGER) {
-						p_stack_particles += as_particle_get_base_size(particle_type) + value_sz;
-					}
-
-					if (has_sindex) {
-						sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
-					}
-					rd.write_to_device = true;
-				}
-			}
-			else { // normal case, one there already that needs modifying
-				switch (op->op) {
-				case AS_MSG_OP_MC_INCR:
-				case AS_MSG_OP_INCR:
-				{
-					int sindex_found_yet = sindex_found;
-					if (has_sindex) {
-						sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
-					}
-					int modify_ret = as_particle_increment(b, AS_PARTICLE_TYPE_INTEGER, p_op_value, value_sz, op->op == AS_MSG_OP_MC_INCR);
-					if (modify_ret == 0) {
-						if (has_sindex) {
-							sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
-						}
-						rd.write_to_device = true;
-					}
-					else if (modify_ret == -2 && op->op == AS_MSG_OP_MC_INCR) {
-						if (has_sindex) {
-							as_sindex_sbin_freeall(&sbins[sindex_found_yet], sindex_found - sindex_found_yet);
-							sindex_found = sindex_found_yet;
-						}
-					}
-					break;
-				}
-				case AS_MSG_OP_MC_PREPEND:
-				case AS_MSG_OP_MC_APPEND:
-				case AS_MSG_OP_APPEND:
-				case AS_MSG_OP_PREPEND:
-					// copy from stack particles if we're doing data not in memory
-					if (! ns->storage_data_in_memory && as_bin_get_particle_type(b) != AS_PARTICLE_TYPE_INTEGER ) {
-						memcpy(p_stack_particles, b->particle, as_bin_particle_size(b));
-						b->particle = (as_particle*)p_stack_particles;
-					}
-
-					int sindex_found_yet = sindex_found;
-					if (has_sindex) {
-						sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
-					}
-
-					// Append or prepend the data
-					if (0 == as_particle_append_prepend_data(b, op->particle_type, p_op_value, value_sz,
-							ns->storage_data_in_memory,
-							op->op == AS_MSG_OP_MC_APPEND || op->op == AS_MSG_OP_APPEND,
-							op->op == AS_MSG_OP_MC_APPEND || op->op == AS_MSG_OP_MC_PREPEND)) {
-						rd.write_to_device = true;
-						if (! ns->storage_data_in_memory) {
-							p_stack_particles += as_bin_particle_size(b);
-						}
-						if (has_sindex) {
-							sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
-						}
-					} else {
-						// operation failed set to invalid
-						if (has_sindex) {
-							as_sindex_sbin_freeall(&sbins[sindex_found_yet], sindex_found - sindex_found_yet);
-							sindex_found = sindex_found_yet;
-						}
-					}
-					break;
-				default:
-					break;
-				}
-			}
-			*/
 		}
 	}
 
