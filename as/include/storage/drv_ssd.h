@@ -136,6 +136,8 @@ typedef struct drv_ssd_s
 {
 	as_namespace	*ns;
 
+	char			*name;				// this device's name
+
 	pthread_mutex_t	LOCK;
 
 	uint32_t		running;
@@ -194,8 +196,6 @@ typedef struct drv_ssd_s
 	histogram		*hist_large_block_read;
 	histogram		*hist_write;
 	histogram		*hist_fsync;
-
-	char			name[512];
 } drv_ssd;
 
 
