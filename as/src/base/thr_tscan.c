@@ -1110,7 +1110,7 @@ tscan_add_digest_list(cf_ll * recl, cf_digest * digest, int * dnum)
 	dig_arr_t *dt;
 	if (!create) {
 		dt = ((ll_recl_element*)ele)->dig_arr;
-		if (dt->num == NUM_DIGS_PER_ARR) {
+		if (dt->num == NUM_SINDEX_KV_PER_ARR) {
 			create = true;
 		}
 	}

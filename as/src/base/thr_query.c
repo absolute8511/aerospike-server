@@ -1216,21 +1216,13 @@ bool as_query_match_integer_fromval(as_query_transaction * qtr, as_val *v, as_si
 	}
 	as_integer * i = as_integer_fromval(v);
 	int64_t value  = as_integer_get(i);
-	if ((value >= start->u.i64) && (value <= end->u.i64)) {
-		if (skey && qtr->srange->isrange) {
-			if (skey->key.int_key != value) {
-				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does " 
-					"not matches bin value in record. skey %ld bin value %ld", skey->key.int_key, value);
-				return false;
-			}
-		}
-		return true;
-	} else {
-		cf_detail(AS_QUERY, "as_query_record_matches: "
-				"Integer mismatch %ld not in %ld - %ld", value, start->u.i64, end->u.i64);
+	if (skey->key.int_key != value) {
+		cf_debug(AS_QUERY, "as_query_record_matches: sindex key does " 
+			"not matches bin value in record. skey %ld bin value %ld", skey->key.int_key, value);
 		return false;
 	}
-	return false;
+
+	return true;
 }
 
 bool as_query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key *skey)
@@ -1251,21 +1243,12 @@ bool as_query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sin
 	cf_digest str_digest;
 	cf_digest_compute(str_val, strlen(str_val), &str_digest);
 
-	if (memcmp(&str_digest, &start->digest, AS_DIGEST_KEY_SZ)) {
-		cf_detail(AS_QUERY, "as_query_record_validation: "
-				" String mismatch |%s|  of size %d", str_val, strlen(str_val)+1);
+	if (memcmp(&str_digest, &skey->key.str_key, AS_DIGEST_KEY_SZ)) {
+		cf_debug(AS_QUERY, "as_query_record_matches: sindex key does not matches bin value in record."
+				" skey %"PRIu64" value in bin %"PRIu64"", skey->key.str_key, str_digest);
 		return false;
-	} else {
-		if (skey && qtr->srange->isrange) {
-			if (memcmp(&str_digest, &skey->key.str_key, AS_DIGEST_KEY_SZ)) {
-				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
-					"not matches bin value in record.");
-				return false;
-			}
-		}
-		return true;
 	}
-	return false;
+	return true;
 }
 
 typedef struct as_sindex_qtr_skey_s {
@@ -1361,23 +1344,12 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			uint32_t sz = 8;
 			as_particle_tobuf(b, (uint8_t *) &i, &sz);
 			i = __be64_to_cpu(i);
-			if ((i >= start->u.i64)
-					&& (i <= end->u.i64)) {
-				// Confirm that the skey matches the value inside the record.
-				if (skey && qtr->srange->isrange) {
-					if (skey->key.int_key != i) {
-						cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
-							"not matches bin value in record. bin value %ld skey value %ld", i, skey->key.int_key);
-						return false;
-					}
-				}
-				return true;
-			} else {
-				cf_detail(AS_QUERY, "as_query_record_matches: "
-						"Integer mismatch %ld not in %ld - %ld", i, start->u.i64, end->u.i64);
+			if (skey->key.int_key != i) {
+				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
+						"not matches bin value in record. bin value %ld skey value %ld", i, skey->key.int_key);
 				return false;
 			}
-			break;
+			return true;
 		}
 		case AS_PARTICLE_TYPE_STRING : {
 			if ((type != as_sindex_pktype(qtr->si->imd))
@@ -1396,21 +1368,13 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			buf[psz]     = '\0';
 			cf_digest bin_digest;
 			cf_digest_compute( buf, psz, &bin_digest);
-			if (memcmp(&bin_digest, &start->digest, AS_DIGEST_KEY_SZ)) {
-				cf_detail(AS_QUERY, "as_query_record_validation: "
-						" String mismatch |%s|  of size %d", buf, psz);
+			if (memcmp(&skey->key.str_key, &bin_digest, AS_DIGEST_KEY_SZ)) {
+				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does not matches bin value in record."
+				" skey %"PRIu64" value in bin %"PRIu64"", skey->key.str_key, bin_digest);
+	
 				return false;
-			} else {
-				if (skey && qtr->srange->isrange) {
-					if (memcmp(&skey->key.str_key, &bin_digest, AS_DIGEST_KEY_SZ)) {
-						cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
-							"not matches bin value in record.");
-						return false;
-					}
-				}
-				return true;
 			}
-			break;
+			return true;
 		}
 		case AS_PARTICLE_TYPE_MAP : {
 			as_val * v = as_val_frombin(b);
@@ -1455,22 +1419,29 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			}
 		}
 		else if (res_val->type == AS_MAP) {
+			as_sindex_qtr_skey q_s;
+			q_s.qtr  = qtr;
+			q_s.skey = skey;
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPKEYS) {
 				as_map * map = as_map_fromval(res_val);
-				return !as_map_foreach(map, as_query_match_mapkeys_foreach, qtr);
+				return !as_map_foreach(map, as_query_match_mapkeys_foreach, &q_s);
 			}
 			else if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPVALUES){
 				as_map * map = as_map_fromval(res_val);
-				return !as_map_foreach(map, as_query_match_mapvalues_foreach, qtr);
+				return !as_map_foreach(map, as_query_match_mapvalues_foreach, &q_s);
 			}
 			return false;
 		}
 		else if (res_val->type == AS_LIST) {
+			as_sindex_qtr_skey q_s;
+			q_s.qtr  = qtr;
+			q_s.skey = skey;
+	
 			// Defensive check
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_LIST) {
 				as_list * list = as_list_fromval(res_val);
-				return !as_list_foreach(list, as_query_match_listele_foreach, qtr);
+				return !as_list_foreach(list, as_query_match_listele_foreach, &q_s);
 			}
 			else {
 				return false;
