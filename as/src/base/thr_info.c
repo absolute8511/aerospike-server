@@ -2399,6 +2399,16 @@ info_network_info_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, g_config.socket_reuse_addr ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";fabric-port=");
 	cf_dyn_buf_append_int(db, g_config.fabric_port);
+
+	cf_dyn_buf_append_string(db, ";fabric-keepalive-enabled=");
+	cf_dyn_buf_append_string(db, g_config.fabric_keepalive_enabled ? "true" : "false");
+	cf_dyn_buf_append_string(db, ";fabric-keepalive-time=");
+	cf_dyn_buf_append_int(db, g_config.fabric_keepalive_time);
+	cf_dyn_buf_append_string(db, ";fabric-keepalive-intvl=");
+	cf_dyn_buf_append_int(db, g_config.fabric_keepalive_intvl);
+	cf_dyn_buf_append_string(db, ";fabric-keepalive-probes=");
+	cf_dyn_buf_append_int(db, g_config.fabric_keepalive_probes);
+
 // network-info-port is the asd info port variable/output, This was chosen because info-port conflicts with XDR config parameter.
 // Ideally XDR should use xdr-info-port and asd should use info-port.
 	cf_dyn_buf_append_string(db, ";network-info-port=");
