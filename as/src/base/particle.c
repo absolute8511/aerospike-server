@@ -213,21 +213,21 @@ int32_t
 as_particle_concat_size_from_wire_int(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	cf_warning(AS_PARTICLE, "concat size for integer/float");
-	return -1;
+	return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 }
 
 int32_t
 as_particle_append_from_wire_int(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	cf_warning(AS_PARTICLE, "append to integer/float");
-	return -1;
+	return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 }
 
 int32_t
 as_particle_prepend_from_wire_int(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	cf_warning(AS_PARTICLE, "prepend to integer/float");
-	return -1;
+	return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 }
 
 int32_t
@@ -235,7 +235,7 @@ as_particle_incr_from_wire_int(as_particle_type wire_type, const uint8_t *wire_v
 {
 	if (wire_type != AS_PARTICLE_TYPE_INTEGER) {
 		cf_warning(AS_PARTICLE, "increment with non integer type %u", wire_type);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 	}
 
 	uint64_t i;
@@ -264,7 +264,7 @@ as_particle_incr_from_wire_int(as_particle_type wire_type, const uint8_t *wire_v
 	default:
 		*pp = 0;
 		cf_warning(AS_PARTICLE, "unexpected value size %u", value_size);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	(*(uint64_t*)pp) += i;
@@ -300,7 +300,7 @@ as_particle_from_wire_int(as_particle_type type, const uint8_t *wire_value, uint
 	default:
 		*pp = 0;
 		cf_warning(AS_PARTICLE, "unexpected value size %u", value_size);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	*pp = (as_particle *)i;
@@ -380,7 +380,7 @@ as_particle_cast_from_flat_int(uint8_t *flat, uint32_t flat_size, as_particle **
 	if (p_int_flat->size != 8 || flat_size != sizeof(as_particle_int_flat)) {
 		cf_warning(AS_PARTICLE, "unexpected flat integer: flat_size %u, len %u",
 				flat_size, p_int_flat->size);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	// Integer values live in an as_bin instead of a pointer. Also, flat
@@ -400,7 +400,7 @@ as_particle_from_flat_int(const uint8_t *flat, uint32_t flat_size, as_particle *
 	if (p_int_flat->size != 8 || flat_size != sizeof(as_particle_int_flat)) {
 		cf_warning(AS_PARTICLE, "unexpected flat integer: flat_size %u, len %u",
 				flat_size, p_int_flat->size);
-		return -1;
+		return -1; // TODO - AS_PROTO error code seems inappropriate?
 	}
 
 	// Integer values live in an as_bin instead of a pointer. Also, flat
@@ -442,7 +442,7 @@ as_particle_incr_from_wire_float(as_particle_type wire_type, const uint8_t *wire
 	// For now we won't allow adding integers (or anything else) to floats.
 	if (wire_type != AS_PARTICLE_TYPE_FLOAT) {
 		cf_warning(AS_PARTICLE, "increment with non float type %u", wire_type);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 	}
 
 	double x;
@@ -457,7 +457,7 @@ as_particle_incr_from_wire_float(as_particle_type wire_type, const uint8_t *wire
 	default:
 		*pp = 0;
 		cf_warning(AS_PARTICLE, "unexpected value size %u", value_size);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	(*(double*)pp) += x;
@@ -471,7 +471,7 @@ as_particle_from_wire_float(as_particle_type type, const uint8_t *wire_value, ui
 	if (! (value_size == 8 || value_size == 4)) {
 		*pp = 0;
 		cf_warning(AS_PARTICLE, "unexpected value size %u", value_size);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	return as_particle_from_wire_int(type, wire_value, value_size, pp);
@@ -531,7 +531,7 @@ as_particle_concat_size_from_wire_blob(as_particle_type wire_type, const uint8_t
 
 	if (wire_type != p_blob_mem->type) {
 		cf_warning(AS_PARTICLE, "type mismatch concat sizing blob/string, %d:%d", p_blob_mem->type, wire_type);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 	}
 
 	return (int32_t)(sizeof(as_particle_blob_mem) + p_blob_mem->sz + value_size);
@@ -544,7 +544,7 @@ as_particle_append_from_wire_blob(as_particle_type wire_type, const uint8_t *wir
 
 	if (wire_type != p_blob_mem->type) {
 		cf_warning(AS_PARTICLE, "type mismatch appending to blob/string, %d:%d", p_blob_mem->type, wire_type);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 	}
 
 	memcpy(p_blob_mem->data + p_blob_mem->sz, wire_value, value_size);
@@ -560,7 +560,7 @@ as_particle_prepend_from_wire_blob(as_particle_type wire_type, const uint8_t *wi
 
 	if (wire_type != p_blob_mem->type) {
 		cf_warning(AS_PARTICLE, "type mismatch prepending to blob/string, %d:%d", p_blob_mem->type, wire_type);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 	}
 
 	memmove(p_blob_mem->data + value_size, p_blob_mem->data, p_blob_mem->sz);
@@ -574,7 +574,7 @@ int32_t
 as_particle_incr_from_wire_blob(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	cf_warning(AS_PARTICLE, "unexpected increment of blob/string");
-	return -1;
+	return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 }
 
 int32_t
@@ -666,7 +666,7 @@ as_particle_size_from_flat_blob(const uint8_t *flat, uint32_t flat_size)
 	if (p_blob_flat->size != flat_size - sizeof(as_particle_blob_flat)) {
 		cf_warning(AS_PARTICLE, "unexpected flat blob/string: flat size %u, len %u",
 				flat_size, p_blob_flat->size);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	// Flat value is same as in-memory value.
@@ -677,8 +677,10 @@ int
 as_particle_cast_from_flat_blob(uint8_t *flat, uint32_t flat_size, as_particle **pp)
 {
 	// Sizing is only a sanity check.
-	if (as_particle_size_from_flat_blob(flat, flat_size) == -1) {
-		return -1;
+	int32_t mem_size = as_particle_size_from_flat_blob(flat, flat_size);
+
+	if (mem_size < 0) {
+		return mem_size;
 	}
 
 	// We can do this only because the flat and in-memory formats are identical.
@@ -692,15 +694,15 @@ as_particle_from_flat_blob(const uint8_t *flat, uint32_t flat_size, as_particle 
 {
 	int32_t mem_size = as_particle_size_from_flat_blob(flat, flat_size);
 
-	if (mem_size == -1) {
-		return -1;
+	if (mem_size < 0) {
+		return mem_size;
 	}
 
 	as_particle_blob_mem *p_blob_mem = (as_particle_blob_mem *)cf_malloc((size_t)mem_size);
 
 	if (! p_blob_mem) {
 		cf_warning(AS_PARTICLE, "failed malloc for blob/string (%d)", mem_size);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	const as_particle_blob_flat *p_blob_flat = (const as_particle_blob_flat *)flat;
@@ -1639,7 +1641,8 @@ as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op)
 	case AS_MSG_OP_PREPEND:
 		return g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	default:
-		return -1;
+		// TODO - just crash?
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 }
 
@@ -1656,7 +1659,7 @@ as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 		// Memcache increment is weird - manipulate to create integer.
 		if (operation == AS_MSG_OP_MC_INCR) {
 			if (op_value_size != 2 * sizeof(uint64_t) || op_type != AS_PARTICLE_TYPE_BLOB) {
-				return -1;
+				return -AS_PROTO_RESULT_FAIL_PARAMETER;
 			}
 
 			op_type = AS_PARTICLE_TYPE_INTEGER;
@@ -1668,14 +1671,14 @@ as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 
 		if (mem_size < 0) {
 			// Leave existing particle intact.
-			return -1;
+			return (int)mem_size;
 		}
 
 		if (mem_size != 0) {
 			b->particle = cf_malloc((size_t)mem_size);
 
 			if (! b->particle) {
-				return -1;
+				return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
 		}
 
@@ -1701,7 +1704,7 @@ as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 	switch (operation) {
 	case AS_MSG_OP_MC_INCR:
 		if (op_value_size != 2 * sizeof(uint64_t) || op_type != AS_PARTICLE_TYPE_BLOB) {
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_PARAMETER;
 		}
 		op_type = AS_PARTICLE_TYPE_INTEGER;
 		// op_value_size of 16 will flag operation as memcache increment...
@@ -1710,32 +1713,41 @@ as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 		return g_particle_incr_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	case AS_MSG_OP_MC_APPEND:
 		if (existing_type != AS_PARTICLE_TYPE_STRING) {
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 		}
 		// no break
 	case AS_MSG_OP_APPEND:
 		new_mem_size = g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
-		if (new_mem_size < 0 || ! (new_particle = cf_realloc(b->particle, (size_t)new_mem_size))) {
+		if (new_mem_size < 0) {
 			// Leave existing particle intact.
-			return -1;
+			return new_mem_size;
+		}
+		if (! (new_particle = cf_realloc(b->particle, (size_t)new_mem_size))) {
+			// Leave existing particle intact.
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 		b->particle = new_particle;
 		return g_particle_append_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	case AS_MSG_OP_MC_PREPEND:
 		if (existing_type != AS_PARTICLE_TYPE_STRING) {
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 		}
 		// no break
 	case AS_MSG_OP_PREPEND:
 		new_mem_size = g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
-		if (new_mem_size < 0 || ! (new_particle = cf_realloc(b->particle, (size_t)new_mem_size))) {
+		if (new_mem_size < 0) {
 			// Leave existing particle intact.
-			return -1;
+			return new_mem_size;
+		}
+		if (! (new_particle = cf_realloc(b->particle, (size_t)new_mem_size))) {
+			// Leave existing particle intact.
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 		b->particle = new_particle;
 		return g_particle_prepend_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	default:
-		return -1;
+		// TODO - just crash?
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 }
 
@@ -1752,7 +1764,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 		// Memcache increment is weird - manipulate to create integer.
 		if (operation == AS_MSG_OP_MC_INCR) {
 			if (op_value_size != 2 * sizeof(uint64_t) || op_type != AS_PARTICLE_TYPE_BLOB) {
-				return -1;
+				return -AS_PROTO_RESULT_FAIL_PARAMETER;
 			}
 
 			op_type = AS_PARTICLE_TYPE_INTEGER;
@@ -1764,7 +1776,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 
 		if (mem_size < 0) {
 			// Leave existing particle intact.
-			return -1;
+			return mem_size;
 		}
 
 		// Instead of allocating, we use the stack buffer provided. (Note that
@@ -1782,7 +1794,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 			b->particle = NULL;
 		}
 
-		return result == 0 ? mem_size : -1;
+		return result == 0 ? mem_size : (int32_t)result;
 	}
 
 	// There is an existing particle, which we will modify.
@@ -1792,7 +1804,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 	switch (operation) {
 	case AS_MSG_OP_MC_INCR:
 		if (op_value_size != 2 * sizeof(uint64_t) || op_type != AS_PARTICLE_TYPE_BLOB) {
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_PARAMETER;
 		}
 		op_type = AS_PARTICLE_TYPE_INTEGER;
 		// op_value_size of 16 will flag operation as memcache increment...
@@ -1801,34 +1813,35 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 		return g_particle_incr_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	case AS_MSG_OP_MC_APPEND:
 		if (existing_type != AS_PARTICLE_TYPE_STRING) {
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 		}
 		// no break
 	case AS_MSG_OP_APPEND:
 		new_mem_size = g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 		if (new_mem_size < 0) {
 			// Leave existing particle intact.
-			return -1;
+			return new_mem_size;
 		}
 		memcpy(stack, b->particle, g_particle_size_table[existing_type](b->particle));
 		b->particle = (as_particle *)stack;
 		return g_particle_append_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	case AS_MSG_OP_MC_PREPEND:
 		if (existing_type != AS_PARTICLE_TYPE_STRING) {
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 		}
 		// no break
 	case AS_MSG_OP_PREPEND:
 		new_mem_size = g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 		if (new_mem_size < 0) {
 			// Leave existing particle intact.
-			return -1;
+			return new_mem_size;
 		}
 		memcpy(stack, b->particle, g_particle_size_table[existing_type](b->particle));
 		b->particle = (as_particle *)stack;
 		return g_particle_prepend_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 	default:
-		return -1;
+		// TODO - just crash?
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 }
 
@@ -1846,7 +1859,7 @@ as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op)
 
 	if (new_mem_size < 0) {
 		// Leave existing particle intact.
-		return -1;
+		return (int)new_mem_size;
 	}
 
 	if ((uint32_t)new_mem_size != old_mem_size) {
@@ -1863,7 +1876,7 @@ as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op)
 
 		if (! b->particle) {
 			as_bin_set_empty(b);
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 	}
 
@@ -1905,7 +1918,7 @@ as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled)
 
 	if (new_mem_size < 0) {
 		// Leave existing particle intact.
-		return -1;
+		return (int)new_mem_size;
 	}
 
 	if ((uint32_t)new_mem_size != old_mem_size) {
@@ -1922,7 +1935,7 @@ as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled)
 
 		if (! b->particle) {
 			as_bin_set_empty(b);
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 	}
 
@@ -1959,7 +1972,7 @@ as_bin_particle_stack_from_client(as_bin *b, uint8_t *stack, const as_msg_op *op
 
 	if (mem_size < 0) {
 		// Leave existing particle intact.
-		return -1;
+		return mem_size;
 	}
 
 	// Instead of allocating, we use the stack buffer provided. (Note that
@@ -1978,7 +1991,7 @@ as_bin_particle_stack_from_client(as_bin *b, uint8_t *stack, const as_msg_op *op
 		as_bin_set_empty(b);
 	}
 
-	return result == 0 ? mem_size : -1;
+	return result == 0 ? mem_size : (int32_t)result;
 }
 
 int32_t
@@ -1998,7 +2011,7 @@ as_bin_particle_stack_from_pickled(as_bin *b, uint8_t *stack, uint8_t **p_pickle
 
 	if (mem_size < 0) {
 		// Leave existing particle intact.
-		return -1;
+		return mem_size;
 	}
 
 	// Instead of allocating, we use the stack buffer provided. (Note that
@@ -2017,7 +2030,7 @@ as_bin_particle_stack_from_pickled(as_bin *b, uint8_t *stack, uint8_t **p_pickle
 		as_bin_set_empty(b);
 	}
 
-	return result == 0 ? mem_size : -1;
+	return result == 0 ? mem_size : (int32_t)result;
 }
 
 uint32_t
@@ -2223,7 +2236,7 @@ as_bin_particle_replace_from_mem(as_bin *b, as_particle_type type, const uint8_t
 
 		if (! b->particle) {
 			as_bin_set_empty(b);
-			return -1;
+			return -1; // TODO - AS_PROTO error code seems inappropriate?
 		}
 	}
 
@@ -2312,6 +2325,7 @@ int
 as_bin_particle_cast_from_flat(as_bin *b, uint8_t *flat, uint32_t flat_size)
 {
 	if (as_bin_inuse(b)) {
+		// TODO - just crash?
 		cf_warning(AS_PARTICLE, "cast from flat into used bin");
 		return -1;
 	}
