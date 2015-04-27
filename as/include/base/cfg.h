@@ -136,6 +136,12 @@ typedef struct as_config_s {
 	/* The TCP port for the fabric */
 	int					fabric_port;
 
+	/* Fabric TCP socket keepalive parameters */
+	bool				fabric_keepalive_enabled;
+	int					fabric_keepalive_time;
+	int					fabric_keepalive_intvl;
+	int					fabric_keepalive_probes;
+
 	/* The TCP port for the info socket */
 	int					info_port;
 
