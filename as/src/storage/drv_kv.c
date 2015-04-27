@@ -965,7 +965,7 @@ as_storage_record_open_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_
 	return(0);
 }
 
-void
+int
 as_storage_record_close_kv(as_record *r, as_storage_rd *rd)
 {
 	cf_detail(AS_DRV_KV, "record close: r %p rd %p", r, rd);
@@ -976,6 +976,8 @@ as_storage_record_close_kv(as_record *r, as_storage_rd *rd)
 	if (rd->u.kv.block && rd->u.kv.must_free_block) {
 		cf_free(rd->u.kv.block);
 	}
+
+	return 0;
 }
 
 static int
@@ -1235,10 +1237,12 @@ as_storage_record_open_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_
 	return 0;
 }
 
-void
+int
 as_storage_record_close_kv(as_record *r, as_storage_rd *rd)
 {
 	error_out();
+
+	return 0;
 }
 
 uint16_t

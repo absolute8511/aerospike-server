@@ -1227,21 +1227,6 @@ as_particle_size_from_flat(const uint8_t *flat, uint32_t flat_size)
 	return g_particle_size_from_flat_table[type](flat, flat_size);
 }
 
-// TODO - deprecate - for from-wire flat sizing.
-uint32_t
-as_particle_flat_size(uint8_t type, uint32_t value_size)
-{
-	switch (type) {
-	case AS_PARTICLE_TYPE_NULL:
-		return 0;
-	case AS_PARTICLE_TYPE_INTEGER:
-	case AS_PARTICLE_TYPE_FLOAT:
-		return (uint32_t)sizeof(as_particle_int_flat);
-	default:
-		return sizeof(as_particle_blob_mem) + value_size;
-	}
-}
-
 as_particle_type
 as_particle_type_convert(as_particle_type type)
 {
@@ -1284,6 +1269,8 @@ as_particle_type_hidden(as_particle_type type)
 // Destructor, etc.
 //
 
+// TODO - rewrite to accommodate other embedded types!
+// TODO - shouldn't this set the bin state to UNUSED?
 void
 as_bin_particle_destroy(as_bin *b, bool free_particle)
 {

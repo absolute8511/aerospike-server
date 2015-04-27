@@ -216,8 +216,6 @@ extern int32_t as_particle_size_from_pickled(uint8_t **p_pickled);
 extern uint32_t as_particle_size_from_mem(as_particle_type type, const uint8_t *value, uint32_t value_size);
 extern int32_t as_particle_size_from_flat(const uint8_t *flat, uint32_t flat_size); // TODO - will we ever need this?
 
-extern uint32_t as_particle_flat_size(uint8_t type, uint32_t value_size); // TODO - deprecate - for from-wire flat sizing
-
 extern as_particle_type as_particle_type_convert(as_particle_type type);
 extern as_particle_type as_particle_type_convert_to_hidden(as_particle_type type);
 extern bool as_particle_type_hidden(as_particle_type type);
@@ -456,7 +454,6 @@ extern bool as_bin_get_and_size_all(as_storage_rd *rd, as_bin *stack_bins);
 extern void as_bin_get_all_p(as_storage_rd *rd, as_bin **bin_ptrs);
 extern as_bin *as_bin_create(as_record *r, as_storage_rd *rd, uint8_t *name, size_t namesz, uint version);
 extern as_bin *as_bin_get(as_storage_rd *rd, uint8_t *name, size_t namesz);
-extern as_bin *as_bin_get_and_reserve_name(as_storage_rd *rd, uint8_t *name, size_t namesz, bool *p_reserved, uint32_t *p_idx);
 extern int32_t as_bin_get_index(as_storage_rd *rd, uint8_t *name, size_t namesz);
 extern int as_bin_get_all_versions(as_storage_rd *rd, uint8_t *name, size_t namesz, as_bin **curr_bins);
 extern void as_bin_allocate_bin_space(as_record *r, as_storage_rd *rd, int32_t delta);

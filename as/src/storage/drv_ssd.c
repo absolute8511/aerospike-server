@@ -1228,45 +1228,6 @@ as_storage_particle_read_all_ssd(as_storage_rd *rd)
 }
 
 
-// TODO: Eventually conflate this with above method.
-int
-as_storage_particle_read_and_size_all_ssd(as_storage_rd *rd)
-{
-	if (! rd->u.ssd.block) {
-		if (0 != as_storage_record_read_ssd(rd)) {
-			cf_warning(AS_DRV_SSD, "read_and_size_all: failed as_storage_record_read_ssd()");
-			return -1;
-		}
-	}
-
-	drv_ssd_block *block = rd->u.ssd.block;
-	uint8_t *block_head = (uint8_t*)rd->u.ssd.block;
-
-	uint8_t *bins_start = block->data + block->bins_offset;
-	drv_ssd_bin *ssd_bin = (drv_ssd_bin*)bins_start;
-
-	for (uint16_t i = 0; i < block->n_bins; i++) {
-		as_bin_set_version(&rd->bins[i], ssd_bin->version, rd->ns->single_bin);
-		as_bin_set_id_from_name(rd->ns, &rd->bins[i], ssd_bin->name);
-
-		int rv = as_bin_particle_cast_from_flat(&rd->bins[i],
-				block_head + ssd_bin->offset, ssd_bin->len);
-
-		if (0 != rv) {
-			return rv;
-		}
-
-		ssd_bin = (drv_ssd_bin*)(block_head + ssd_bin->next);
-	}
-
-	rd->n_bins_to_write = block->n_bins;
-	rd->particles_flat_size = ((uint8_t*)ssd_bin - bins_start) -
-			(block->n_bins * sizeof(drv_ssd_bin));
-
-	return 0;
-}
-
-
 bool
 as_storage_record_get_key_ssd(as_storage_rd *rd)
 {
@@ -1751,29 +1712,13 @@ as_storage_record_size(as_storage_rd *rd)
 }
 
 
-uint32_t
+static inline uint32_t
 ssd_write_calculate_size(as_record *r, as_storage_rd *rd)
 {
 	// Note - this function is the only place where rounding size (up to a
 	// multiple of RBLOCK_SIZE) is really necessary.
 
-	// TODO - use when we're confident duplicate bins were the only issue:
-#ifdef HANDLE_DUPLICATE_BINS
-	// If we already know the flat size, just need to round it.
-	if (rd->flat_size != 0) {
-		return BYTES_TO_RBLOCK_BYTES(rd->flat_size);
-	}
-#endif
-
-	uint32_t write_size = as_storage_record_size(rd);
-
-	// TODO - remove when we're confident duplicate bins were the only issue:
-	if (rd->flat_size != 0 && rd->flat_size != write_size) {
-		cf_warning(AS_DRV_SSD, "flat_size %u != write_size %u - duplicate bins?",
-				rd->flat_size, write_size);
-	}
-
-	return BYTES_TO_RBLOCK_BYTES(write_size);
+	return BYTES_TO_RBLOCK_BYTES(as_storage_record_size(rd));
 }
 
 
@@ -4139,17 +4084,21 @@ as_storage_record_open_ssd(as_namespace *ns, as_record *r, as_storage_rd *rd,
 }
 
 
-void
+int
 as_storage_record_close_ssd(as_record *r, as_storage_rd *rd)
 {
+	int result = 0;
+
 	// All record writes come through here!
 	if (rd->write_to_device && as_bin_inuse_has(rd)) {
-		ssd_write(r, rd);
+		result = ssd_write(r, rd);
 	}
 
 	if (rd->u.ssd.must_free_block) {
 		cf_free(rd->u.ssd.must_free_block);
 	}
+
+	return result;
 }
 
 
@@ -4161,23 +4110,9 @@ as_storage_record_close_ssd(as_record *r, as_storage_rd *rd)
 
 
 bool
-as_storage_record_can_fit_ssd(as_storage_rd *rd)
-{
-	rd->flat_size =
-			as_storage_record_overhead_size(rd) +
-			(rd->n_bins_to_write * sizeof(drv_ssd_bin)) +
-			rd->particles_flat_size;
-
-	return rd->ns->storage_write_block_size >= rd->flat_size;
-}
-
-
-bool
 as_storage_record_size_and_check_ssd(as_storage_rd *rd)
 {
-	rd->flat_size = as_storage_record_size(rd);
-
-	return rd->ns->storage_write_block_size >= rd->flat_size;
+	return rd->ns->storage_write_block_size >= as_storage_record_size(rd);
 }
 
 

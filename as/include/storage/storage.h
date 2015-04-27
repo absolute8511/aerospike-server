@@ -108,11 +108,6 @@ typedef struct as_storage_rd_s {
 	uint32_t		key_size;
 	uint8_t			*key;
 
-	// Info gathered by write_local() for pre-write checks:
-	uint32_t		n_bins_to_write;			// how many bins we'll end up writing
-	uint32_t		particles_flat_size;		// includes particle storage overhead
-	uint32_t		flat_size;					// includes vinfo, rec-props and all storage overhead
-
 	as_storage_type storage_type;
 
 	union {
@@ -153,13 +148,12 @@ extern int as_storage_record_destroy(as_namespace *ns, as_record *r); // not the
 // Start and finish an as_storage_rd usage cycle.
 extern int as_storage_record_create(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_digest *keyd);
 extern int as_storage_record_open(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_digest *keyd);
-extern void as_storage_record_close(as_record *r, as_storage_rd *rd);
+extern int as_storage_record_close(as_record *r, as_storage_rd *rd);
 
 // Called within as_storage_rd usage cycle.
 extern uint16_t as_storage_record_get_n_bins(as_storage_rd *rd);
 extern int as_storage_record_read(as_storage_rd *rd);
 extern int as_storage_particle_read_all(as_storage_rd *rd);
-extern bool as_storage_record_can_fit(as_storage_rd *rd);
 extern bool as_storage_record_size_and_check(as_storage_rd *rd);
 
 // Storage capacity monitoring.
@@ -219,13 +213,11 @@ extern int as_storage_record_destroy_ssd(as_namespace *ns, as_record *r);
 
 extern int as_storage_record_create_ssd(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_digest *keyd);
 extern int as_storage_record_open_ssd(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_digest *keyd);
-extern void as_storage_record_close_ssd(as_record *r, as_storage_rd *rd);
+extern int as_storage_record_close_ssd(as_record *r, as_storage_rd *rd);
 
 extern uint16_t as_storage_record_get_n_bins_ssd(as_storage_rd *rd);
 extern int as_storage_record_read_ssd(as_storage_rd *rd);
 extern int as_storage_particle_read_all_ssd(as_storage_rd *rd);
-extern int as_storage_particle_read_and_size_all_ssd(as_storage_rd *rd); // called directly by as_bin_get_and_size_all()
-extern bool as_storage_record_can_fit_ssd(as_storage_rd *rd);
 extern bool as_storage_record_size_and_check_ssd(as_storage_rd *rd);
 
 extern void as_storage_wait_for_defrag_ssd(as_namespace *ns);
@@ -260,7 +252,7 @@ extern int as_storage_record_exists_kv(as_namespace *ns, cf_digest *keyd);
 
 extern int as_storage_record_create_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_digest *keyd);
 extern int as_storage_record_open_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_digest *keyd);
-extern void as_storage_record_close_kv(as_record *r, as_storage_rd *rd);
+extern int as_storage_record_close_kv(as_record *r, as_storage_rd *rd);
 
 extern uint16_t as_storage_record_get_n_bins_kv(as_storage_rd *rd);
 extern int as_storage_record_read_kv(as_storage_rd *rd);
