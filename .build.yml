@@ -6,7 +6,7 @@ environment:
 
 dependency:
   - url: git@github.com:citrusleaf/aerospike-server-enterprise
-    ref: prod3.0
+    ref: particle
     dir: $EEREPO
   - url: git@github.com:citrusleaf/client
     ref: prod2.0
