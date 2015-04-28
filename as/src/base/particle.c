@@ -93,7 +93,7 @@ as_particle_size_from_wire_null(const uint8_t *wire_value, uint32_t value_size)
 }
 
 int
-as_particle_from_wire_null(as_particle_type type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
+as_particle_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	return -1;
 }
@@ -280,7 +280,7 @@ as_particle_size_from_wire_int(const uint8_t *wire_value, uint32_t value_size)
 }
 
 int
-as_particle_from_wire_int(as_particle_type type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
+as_particle_from_wire_int(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	uint64_t i;
 
@@ -466,7 +466,7 @@ as_particle_incr_from_wire_float(as_particle_type wire_type, const uint8_t *wire
 }
 
 int
-as_particle_from_wire_float(as_particle_type type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
+as_particle_from_wire_float(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	if (! (value_size == 8 || value_size == 4)) {
 		*pp = 0;
@@ -474,7 +474,7 @@ as_particle_from_wire_float(as_particle_type type, const uint8_t *wire_value, ui
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	return as_particle_from_wire_int(type, wire_value, value_size, pp);
+	return as_particle_from_wire_int(wire_type, wire_value, value_size, pp);
 }
 
 
@@ -585,11 +585,11 @@ as_particle_size_from_wire_blob(const uint8_t *wire_value, uint32_t value_size)
 }
 
 int
-as_particle_from_wire_blob(as_particle_type type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
+as_particle_from_wire_blob(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	as_particle_blob_mem *p_blob_mem = (as_particle_blob_mem *)*pp;
 
-	p_blob_mem->type = type;
+	p_blob_mem->type = wire_type;
 	p_blob_mem->sz = value_size;
 	memcpy(p_blob_mem->data, wire_value, p_blob_mem->sz);
 
@@ -925,7 +925,7 @@ as_particle_size_from_wire_fn g_particle_size_from_wire_table[AS_PARTICLE_TYPE_M
 	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_size_from_wire_blob,
 };
 
-typedef int (*as_particle_from_wire_fn) (as_particle_type type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp);
+typedef int (*as_particle_from_wire_fn) (as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp);
 
 as_particle_from_wire_fn g_particle_from_wire_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_NULL]				= as_particle_from_wire_null,
