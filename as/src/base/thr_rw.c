@@ -5689,18 +5689,15 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 
 	for (uint32_t i_old = 0; i_old < n_old_bins; i_old++) {
 		as_bin *b_old = &old_bins[i_old];
-		as_particle *p_old = as_bin_get_particle(b_old);
 		bool found = false;
 
 		for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
 			as_bin *b_new = &new_bins[i_new];
 
 			if (b_old->id == b_new->id) {
-				// TODO - actually compare particles.
-				if (p_old != as_bin_get_particle(b_new)) {
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
-				}
+				// TODO - use a "dirty bit" to avoid comparing particles!
+				sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+				sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
 
 				found = true;
 				break;
@@ -5781,8 +5778,12 @@ write_local_dim_unwind(as_bin* old_bins, uint32_t n_old_bins, as_bin* new_bins,
 			break;
 		}
 
-		// TODO - can skip old loop for embedded new types, or if record-level replace - worth it?
-		as_particle *p_new = as_bin_get_particle(b_new);
+		// Embedded particles have no-op destructors - skip loop over old bins.
+		if (as_bin_is_embedded_particle(b_new)) {
+			continue;
+		}
+
+		as_particle *p_new = b_new->particle;
 
 		for (uint32_t i_old = 0; i_old < n_old_bins; i_old++) {
 			as_bin *b_old = &old_bins[i_old];
@@ -5838,7 +5839,7 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 			(m->info3 & AS_MSG_INFO3_REPLACE_ONLY);
 
 	// Loop over ops to check and modify flags.
-	as_msg_op *op = 0;
+	as_msg_op *op = NULL;
 	int i = 0;
 
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
@@ -5882,7 +5883,7 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 	// Find or create as_index, populate as_index_ref, lock record.
 	as_index_ref r_ref;
 	r_ref.skip_lock = false;
-	as_index *r = 0;
+	as_index *r = NULL;
 	bool record_created = false;
 
 	if (must_not_create) {
@@ -6023,9 +6024,6 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 		get_msg_key(m, &rd);
 	}
 
-	// For data-in-memory - never read from drive.
-	rd.ignore_record_on_device = true;
-
 	// For data-in-memory - number of bins in existing record.
 	rd.n_bins = as_bin_get_n_bins(r, &rd);
 
@@ -6095,7 +6093,7 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 
 	bool increment_generation = false;
 
-	op = 0;
+	op = NULL;
 	i = 0;
 
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
@@ -6159,13 +6157,12 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 					return -1;
 				}
 
-				// TODO - convert result to AS_PROTO_ result code.
 				result = as_bin_particle_replace_from_client(b, op);
 
-				if (result != 0) {
+				if (result < 0) {
 					cf_warning(AS_RW, "write_local: failed alloc from client");
 					write_local_dim_unwind(new_bins, n_new_bins, old_bins, n_old_bins);
-					write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+					write_local_failed(tr, &r_ref, record_created, tree, &rd, -result);
 					return -1;
 				}
 			}
@@ -6195,13 +6192,12 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 				return -1;
 			}
 
-			// TODO - convert result to AS_PROTO_ result code.
 			result = as_bin_particle_replace_modify_from_client(b, op);
 
-			if (result != 0) {
+			if (result < 0) {
 				cf_warning(AS_RW, "write_local: failed modify from client");
 				write_local_dim_unwind(new_bins, n_new_bins, old_bins, n_old_bins);
-				write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+				write_local_failed(tr, &r_ref, record_created, tree, &rd, -result);
 				return -1;
 			}
 		}
@@ -6224,6 +6220,7 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 		cf_warning(AS_RW, "write_local: failed alloc new as_bin_space");
 		write_local_dim_unwind(new_bins, n_new_bins, old_bins, n_old_bins);
 		write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		return -1;
 	}
 
 	// LDT: In case there is REPLACE flag set which destroy LDT bin by directly,
@@ -6256,13 +6253,13 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 	rd.write_to_device = true;
 
 	int write_result = as_storage_record_close(r, &rd);
-	// TODO - return AS_PROTO_ result codes directly?
 
-	if (write_result != 0) {
+	if (write_result < 0) {
 		cf_warning(AS_RW, "write_local: failed as_storage_record_close()");
 		cf_free(new_bin_space);
 		write_local_dim_unwind(new_bins, n_new_bins, old_bins, n_old_bins);
-		write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_RECORD_TOO_BIG);
+		write_local_failed(tr, &r_ref, record_created, tree, &rd, -write_result);
+		return -1;
 	}
 
 	if (g_config.microbenchmarks && start_ns) {
@@ -6303,8 +6300,12 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 	for (uint32_t i_old = 0; i_old < n_old_bins; i_old++) {
 		as_bin *b_old = &old_bins[i_old];
 
-		// TODO - can skip new loop for embedded old types - worth it!
-		as_particle *p_old = as_bin_get_particle(b_old);
+		// Embedded particles have no-op destructors - skip loop over new bins.
+		if (as_bin_is_embedded_particle(b_old)) {
+			continue;
+		}
+
+		as_particle *p_old = b_old->particle;
 		bool found = false;
 
 		for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
@@ -6332,6 +6333,566 @@ write_local_dim(as_transaction *tr, write_local_generation *wlg,
 	// Swizzle the index element's as_bin_space pointer.
 	cf_free(as_index_get_bin_space(r));
 	as_index_set_bin_space(r, new_bin_space);
+
+
+	//------------------------------------------------------
+	// Done - release the record lock.
+	//
+
+	// Get set-id before releasing.
+	uint16_t set_id = as_index_get_set_id(r_ref.r);
+
+	as_record_done(&r_ref, ns);
+
+	// Do XDR write if
+	// 1. If the write is not a migration write and
+	// 2. If the write is a non-XDR write or
+	// 3. If the write is a XDR write and forwarding is enabled (either globally or for namespace).
+	if (! (m->info1 & AS_MSG_INFO1_XDR) ||
+			g_config.xdr_cfg.xdr_forward_xdrwrites ||
+			ns->ns_forward_xdr_writes) {
+		xdr_write(ns, tr->keyd, r->generation, masternode, false, set_id);
+	}
+	else {
+		cf_detail(AS_RW,
+				"XDR Write but forwarding is disabled. Digest %"PRIx64" is not written to the digest pipe.",
+				*(uint64_t *) &tr->keyd);
+	}
+
+	// If we ended up with no bins, delete the record.
+	if (! as_bin_inuse_has(&rd)) {
+		cf_atomic_int_incr(&g_config.stat_zero_bin_records);
+		write_delete_local(tr, false, masternode, false);
+	}
+
+	return 0;
+}
+
+
+int
+write_local_ssd(as_transaction *tr, write_local_generation *wlg,
+		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
+		as_rec_props *p_pickled_rec_props, bool journal, cf_node masternode)
+{
+	//------------------------------------------------------
+	// Perform checks that don't need to loop over ops, or
+	// create or find (and lock) the as_index.
+	//
+
+	bool is_done = false;
+	int rsp = write_local_preprocessing(tr, wlg, journal, &is_done);
+
+	if (is_done) {
+		return rsp;
+	}
+
+
+	//------------------------------------------------------
+	// Perform checks that don't need to create or find (and
+	// lock) the as_index. Set some essential policy flags.
+	//
+
+	// Shortcut pointers & flags.
+	as_msg *m = &tr->msgp->msg;
+	as_namespace *ns = tr->rsv.ns;
+
+	bool must_not_create =
+			(m->info3 & AS_MSG_INFO3_UPDATE_ONLY) ||
+			(m->info3 & AS_MSG_INFO3_REPLACE_ONLY) ||
+			(m->info3 & AS_MSG_INFO3_BIN_REPLACE_ONLY);
+
+	bool record_level_replace =
+			(m->info3 & AS_MSG_INFO3_CREATE_OR_REPLACE) ||
+			(m->info3 & AS_MSG_INFO3_REPLACE_ONLY);
+
+	bool must_fetch_data = false;
+
+	// Loop over ops to check and modify flags.
+	as_msg_op *op = NULL;
+	int i = 0;
+
+	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
+		if (OP_IS_TOUCH(op->op)) {
+			if (record_level_replace) {
+				cf_warning(AS_RW, "write_local: touch op can't have record-level replace flag");
+				write_local_failed(tr, 0, false, 0, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
+				return -1;
+			}
+
+			must_not_create = true;
+			must_fetch_data = true;
+			break;
+		}
+
+		if (OP_IS_MODIFY(op->op)) {
+			if (record_level_replace) {
+				cf_warning(AS_RW, "write_local: modify op can't have record-level replace flag");
+				write_local_failed(tr, 0, false, 0, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
+				return -1;
+			}
+
+			must_fetch_data = true;
+			break; // modify and touch shouldn't be in same command
+		}
+	}
+
+
+	//------------------------------------------------------
+	// Find or create the as_index and get a reference -
+	// this locks the record. Perform all checks that don't
+	// need the as_storage_rd.
+	//
+
+	// Use the appropriate partition tree.
+	as_index_tree *tree = tr->rsv.tree;
+
+	if (ns->ldt_enabled && (tr->flag & AS_TRANSACTION_FLAG_LDT_SUB)) {
+		cf_detail(AS_RW, "LDT subrecord write request received %"PRIx64, *(uint64_t*)&tr->keyd);
+		tree = tr->rsv.sub_tree;
+	}
+
+	// Find or create as_index, populate as_index_ref, lock record.
+	as_index_ref r_ref;
+	r_ref.skip_lock = false;
+	as_index *r = NULL;
+	bool record_created = false;
+
+	if (must_not_create) {
+		if (0 != as_record_get(tree, &tr->keyd, &r_ref, ns)) {
+			write_local_failed(tr, 0, record_created, tree, 0, AS_PROTO_RESULT_FAIL_NOTFOUND);
+			return -1;
+		}
+
+		r = r_ref.r;
+
+		if (r->void_time && r->void_time < as_record_void_time_get()) {
+			cf_debug(AS_RW, "write_local: found expired record");
+			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_NOTFOUND);
+			return -1;
+		}
+	}
+	else {
+		int rv = as_record_get_create(tree, &tr->keyd, &r_ref, ns, false);
+
+		if (rv < 0) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: fail as_record_get_create() ", ns->name);
+			write_local_failed(tr, 0, record_created, tree, 0, AS_PROTO_RESULT_FAIL_UNKNOWN);
+			return -1;
+		}
+
+		r = r_ref.r;
+		record_created = rv == 1;
+
+		// If it's an expired record, pretend it's a fresh create.
+		if (! record_created && r->void_time
+				&& r->void_time < as_record_void_time_get()) {
+			// TODO - do we need to do memory accounting in here?
+			cf_debug(AS_RW, "write_local: reclaiming expired record by reinitializing");
+			as_record_destroy(r, ns);
+			as_record_initialize(&r_ref, ns);
+			cf_atomic_int_add(&ns->n_objects, 1);
+			record_created = true;
+		}
+	}
+
+	// Enforce record-level create-only existence policy.
+	if (wlg->use_msg_gen && (m->info2 & AS_MSG_INFO2_CREATE_ONLY)) {
+		if (! record_created) {
+			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_RECORD_EXISTS);
+			return -1;
+		}
+	}
+
+	// Check generation equality (master case).
+	if (! g_config.generation_disable && wlg->use_msg_gen && (m->info2 & AS_MSG_INFO2_GENERATION)) {
+		if (m->generation != r->generation) {
+			cf_debug(AS_RW, "write_local: %lx%s: wrong generation [rec %u msg %u]",
+					*(uint64_t*)&tr->keyd, record_created ? " created" : "", r->generation, m->generation);
+			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_GENERATION);
+			if (m->info1 & AS_MSG_INFO1_XDR) {
+				cf_atomic_int_incr(&g_config.err_write_fail_generation_xdr);
+			}
+			return -1;
+		}
+	}
+
+	// Check generation inequality (master case).
+	if (wlg->use_msg_gen && (m->info2 & AS_MSG_INFO2_GENERATION_GT)) {
+		if (m->generation <= r->generation) {
+			cf_debug(AS_RW, "write_local: %lx%s: wrong generation inequality [rec %u msg %u]",
+					*(uint64_t*)&tr->keyd, record_created ? " created" : "", r->generation, m->generation);
+			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_GENERATION);
+			if (m->info1 & AS_MSG_INFO1_XDR) {
+				cf_atomic_int_incr(&g_config.err_write_fail_generation_xdr);
+			}
+			return -1;
+		}
+	}
+
+	// If creating record, write set-ID into index.
+	if (record_created) {
+		int rv_set = as_record_set_set_from_msg(r, ns, m);
+
+		if (rv_set == -1) {
+			cf_warning(AS_RW, "write_local: set can't be added");
+			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
+			return -1;
+		}
+		else if (rv_set == AS_NAMESPACE_SET_THRESHOLD_EXCEEDED) {
+			cf_debug(AS_RW, "write_local: set threshold exceeded or clearing set");
+			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_FORBIDDEN);
+			return -1;
+		}
+	}
+
+	// Shortcut set name.
+	const char* set_name = as_index_get_set_name(r, ns);
+
+	// If record existed, check that as_msg set name matches.
+	if (! record_created && ! check_msg_set_name(m, set_name)) {
+		write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
+		return -1;
+	}
+
+
+	//------------------------------------------------------
+	// Open or create the as_storage_rd. Read the existing
+	// record from device if necessary.
+	//
+
+	as_storage_rd rd;
+
+	if (record_created) {
+		as_storage_record_create(ns, r, &rd, &tr->keyd);
+	}
+	else {
+		as_storage_record_open(ns, r, &rd, &tr->keyd);
+	}
+
+	// Deal with key storage as needed.
+	if (as_index_is_flag_set(r, AS_INDEX_FLAG_KEY_STORED)) {
+		// Key stored for this record - be sure it gets rewritten.
+
+		// This will force a device read, even if must_fetch_data is false!
+		// Since there's no advantage to using the loaded block after this if
+		// must_fetch_data is false, leave the subsequent code as-is.
+		// TODO - use client-sent key instead of device-stored key if available?
+		if (! as_storage_record_get_key(&rd)) {
+			cf_warning(AS_RW, "write_local: can't get stored key");
+			write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+			return -1;
+		}
+
+		// Check the client-sent key, if any, against the stored key.
+		if (msg_has_key(m) && ! check_msg_key(m, &rd)) {
+			write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_KEY_MISMATCH);
+			return -1;
+		}
+	}
+	// If we got a key without a digest, it's an old client, not a cue to store
+	// the key. (Remove this check when we're sure all old C clients are gone.)
+	else if (as_msg_field_get(m, AS_MSG_FIELD_TYPE_DIGEST_RIPE)) {
+		// Key not stored for this record - store one if sent from client.
+		get_msg_key(m, &rd);
+	}
+
+	// Must be after acquiring olock to ensure record gets indexed in any sindex
+	// currently being created.
+	bool has_sindex = as_sindex_ns_has_sindex(ns);
+
+	// If it's not touch or modify, determine if we must read existing record.
+	if (! must_fetch_data) {
+		must_fetch_data = has_sindex || ! record_level_replace;
+	}
+
+	rd.ignore_record_on_device = ! must_fetch_data;
+
+	// For non-data-in-memory:
+	// - if record-level replace and no sindex - 0
+	// - otherwise - number of bins in existing record
+	rd.n_bins = as_bin_get_n_bins(r, &rd);
+
+	uint32_t n_old_bins = (uint32_t)rd.n_bins;
+	uint32_t n_new_bins = n_old_bins + m->n_ops; // can't be more than this
+
+	// For non-data-in-memory - stack space for resulting record's bins.
+	as_bin old_bins[n_old_bins];
+	as_bin new_bins[n_new_bins];
+
+	// Set rd.bins!
+	// For non-data-in-memory:
+	// - if just created record, or record-level replace and no sindex - sets
+	//		rd.bins to empty new_bins
+	// - otherwise - sets rd.bins to new_bins, reads existing record off device
+	//		and populates bins (including particle pointers into block buffer)
+	if (! as_bin_get_and_size_all(&rd, new_bins)) {
+		cf_warning(AS_RW, "write_local: failed as_bin_get_and_size_all()");
+		write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		return -1;
+	}
+
+	// Assemble record properties from index information.
+	size_t rec_props_data_size = as_storage_record_rec_props_size(&rd);
+	uint8_t rec_props_data[rec_props_data_size];
+
+	if (rec_props_data_size > 0) {
+		as_storage_record_set_rec_props(&rd, rec_props_data);
+	}
+
+#ifdef USE_JEM
+	// Set this thread's JEMalloc arena to one used by the current namespace for long-term storage.
+	int arena = as_namespace_get_jem_arena(ns->name);
+	cf_debug(AS_RW, "Setting JEMalloc arena #%d for long-term storage in namespace \"%s\"", arena, ns->name);
+	jem_set_arena(arena);
+#endif
+
+
+	//------------------------------------------------------
+	// Loop over ops to gather stack particles size info.
+	//
+
+	op = NULL;
+	i = 0;
+
+	uint32_t stack_particles_sz = 0;
+
+	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
+		if (op->op == AS_MSG_OP_WRITE) {
+			if (op->particle_type != AS_PARTICLE_TYPE_NULL) {
+				// Any incoming particle goes in the stack buffer.
+				int32_t result = as_particle_size_from_client(op);
+
+				if (result < 0) {
+					cf_warning(AS_RW, "particle size from client failed");
+					write_local_failed(tr, &r_ref, record_created, tree, &rd, -result);
+					return -1;
+				}
+
+				stack_particles_sz += (uint32_t)result;
+			}
+		}
+		else if (OP_IS_MODIFY(op->op)) {
+			// If the existing record has this bin, get it.
+			as_bin *bin = as_bin_get(&rd, op->name, op->name_sz);
+			int32_t result = as_bin_particle_size_modify_from_client(bin, op);
+
+			if (result < 0) {
+				cf_warning(AS_RW, "particle size modify from client failed");
+				write_local_failed(tr, &r_ref, record_created, tree, &rd, -result);
+				return -1;
+			}
+
+			stack_particles_sz += (uint32_t)result;
+		}
+	}
+
+	uint8_t stack_particles[stack_particles_sz];
+	uint8_t *p_stack_particles = stack_particles;
+
+
+	//------------------------------------------------------
+	// Copy old bins (if any) - which are currently in new
+	// bins array - to old bins array, for sindex purposes.
+	//
+
+	if (has_sindex && n_old_bins != 0) {
+		memcpy(old_bins, new_bins, n_old_bins * sizeof(as_bin));
+	}
+
+	rd.n_bins = (uint16_t)n_new_bins;
+	// rd.bins is already new_bins;
+
+
+	//------------------------------------------------------
+	// Loop over bin ops to affect new bin space, creating
+	// the new record bins to write.
+	//
+
+	bool increment_generation = false;
+
+	op = NULL;
+	i = 0;
+
+	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
+		if (op->op == AS_MSG_OP_READ) {
+			// The client can send read and write operations in one command,
+			// e.g. increment & get. Here, skip such read operations.
+			continue;
+		}
+
+		if (op->op != AS_MSG_OP_MC_TOUCH) {
+			increment_generation = true;
+		}
+
+		if (OP_IS_TOUCH(op->op)) {
+			continue;
+		}
+
+		if (op->name_sz >= AS_ID_BIN_SZ) {
+			cf_warning(AS_RW, "too large bin name %d passed in, parameter error", op->name_sz);
+			write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_BIN_NAME);
+			return -1;
+		}
+
+		if (op->op == AS_MSG_OP_WRITE) {
+			// AS_PARTICLE_TYPE_NULL means delete the bin.
+			if (op->particle_type == AS_PARTICLE_TYPE_NULL) {
+				if (record_level_replace) {
+					cf_warning(AS_RW, "bin delete can't have record-level replace flag");
+					write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_PARAMETER);
+					return -1;
+				}
+
+				int32_t j = as_bin_get_index(&rd, op->name, op->name_sz);
+
+				if (j != -1) {
+					as_bin_destroy(&rd, j);
+				}
+			}
+			// It's a regular bin write.
+			else {
+				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+				int result = write_local_bin_check(b, m);
+
+				if (result != 0) {
+					cf_warning(AS_RW, "write_local: bin check (%d)", result);
+					write_local_failed(tr, &r_ref, record_created, tree, &rd, result);
+					return -1;
+				}
+
+				if (! b) {
+					b = as_bin_create(r, &rd, op->name, op->name_sz, 0);
+				}
+
+				if (! b) {
+					cf_warning(AS_RW, "write_local: failed bin create");
+					write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+					return -1;
+				}
+
+				result = as_bin_particle_stack_from_client(b, p_stack_particles, op);
+
+				if (result < 0) {
+					cf_warning(AS_RW, "write_local: failed alloc from client");
+					write_local_failed(tr, &r_ref, record_created, tree, &rd, -result);
+					return -1;
+				}
+
+				p_stack_particles += (uint32_t)result;
+			}
+		}
+		// Modify an existing bin value.
+		else if (OP_IS_MODIFY(op->op)) {
+			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+			int result = write_local_bin_check(b, m);
+
+			if (result != 0) {
+				cf_warning(AS_RW, "write_local: bin check (%d)", result);
+				write_local_failed(tr, &r_ref, record_created, tree, &rd, result);
+				return -1;
+			}
+
+			// Currently all modify operations become creates if there's no
+			// existing particle.
+			if (! b) {
+				b = as_bin_create(r, &rd, op->name, op->name_sz, 0);
+			}
+
+			if (! b) {
+				cf_warning(AS_RW, "write_local: failed bin create");
+				write_local_failed(tr, &r_ref, record_created, tree, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+				return -1;
+			}
+
+			result = as_bin_particle_stack_modify_from_client(b, p_stack_particles, op);
+
+			if (result < 0) {
+				cf_warning(AS_RW, "write_local: failed modify from client");
+				write_local_failed(tr, &r_ref, record_created, tree, &rd, -result);
+				return -1;
+			}
+
+			p_stack_particles += (uint32_t)result;
+		}
+	}
+
+
+	//------------------------------------------------------
+	// Created the new record bins to write.
+	//
+
+	// Adjust - find the actual number of new bins.
+	rd.n_bins = as_bin_inuse_count(&rd);
+	n_new_bins = (uint32_t)rd.n_bins;
+
+	// LDT: In case there is REPLACE flag set which destroy LDT bin by directly,
+	// we will have index flag inconsistent with storage. Make sure the control
+	// bin is around .. if it is not then reset the LDT parent flag in the index...
+	// Note: LDT parent flag governs code flow in lot of places this is
+	// cost to be paid for storing a information in two different places
+	// in index and in storage (to optimize use cases and to avoid I/O to
+	// fetch this info)
+	if (as_ldt_record_is_parent(r_ref.r)) {
+		uint64_t parent_version = 0;
+		int rv = as_ldt_parent_storage_get_version(&rd, &parent_version, false, __FILE__, __LINE__);
+		if (0 != rv) {
+			// TODO - do we need to unwind this on failure???
+			as_index_clear_flags(r_ref.r, AS_INDEX_FLAG_SPECIAL_BINS);
+			// Set rec_props to remove ldt_rectype_bits if necessary.
+			// Note that this does no need resize of array. Size if at all
+			// should decrease.
+			as_storage_record_set_rec_props(&rd, rec_props_data);
+		}
+	}
+
+
+	//------------------------------------------------------
+	// Write the record to storage.
+	//
+
+	uint64_t start_ns = g_config.microbenchmarks ? cf_getns() : 0;
+
+	rd.write_to_device = true;
+
+	int write_result = as_storage_record_close(r, &rd);
+
+	if (write_result < 0) {
+		cf_warning(AS_RW, "write_local: failed as_storage_record_close()");
+		write_local_failed(tr, &r_ref, record_created, tree, &rd, -write_result);
+		return -1;
+	}
+
+	if (g_config.microbenchmarks && start_ns) {
+		histogram_insert_data_point(g_config.write_storage_close_hist, start_ns);
+	}
+
+
+	//------------------------------------------------------
+	// Success - now ok to make changes to as_index.
+	//
+
+	// Now ok to accommodate a new stored key.
+	if (! as_index_is_flag_set(r, AS_INDEX_FLAG_KEY_STORED) && rd.key) {
+		as_record_allocate_key(r, rd.key, rd.key_size);
+		as_index_set_flags(r, AS_INDEX_FLAG_KEY_STORED);
+	}
+
+	// Set void-time & generation, and pickle for replica write.
+	write_local_post_processing(tr, ns, NULL, pickled_buf, pickled_sz,
+			pickled_void_time, p_pickled_rec_props, increment_generation, wlg,
+			r, &rd, 0);
+
+	// Adjust secondary index if appropriate.
+	if (has_sindex &&
+			write_local_sindex_update(ns, set_name, &tr->keyd,
+					old_bins, n_old_bins, new_bins, n_new_bins)) {
+		tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
+	}
+
+
+	//------------------------------------------------------
+	// Cleanup - none, since everything is on the stack.
+	//
 
 
 	//------------------------------------------------------

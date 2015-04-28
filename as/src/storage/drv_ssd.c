@@ -1690,7 +1690,7 @@ as_storage_record_size(as_storage_rd *rd)
 	uint32_t write_size = as_storage_record_overhead_size(rd);
 
 	if (! rd->bins) {
-		// Should never get here.
+		// TODO - just crash?
 		cf_warning(AS_DRV_SSD, "cannot calculate write size, no bins pointer");
 		return 0;
 	}
@@ -1731,7 +1731,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 	if (write_size == 0 || write_size > ssd->write_block_size) {
 		cf_warning(AS_DRV_SSD, "write: rejecting %"PRIx64" write size: %u",
 				*(uint64_t*)&rd->keyd, write_size);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_RECORD_TOO_BIG;
 	}
 
 	// Reserve the portion of the current swb where this record will be written.
@@ -1746,7 +1746,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 		if (! swb) {
 			cf_warning(AS_DRV_SSD, "write bins: couldn't get swb");
 			pthread_mutex_unlock(&ssd->LOCK);
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_PARTITION_OUT_OF_SPACE;
 		}
 	}
 
@@ -1775,7 +1775,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 		if (! swb) {
 			cf_warning(AS_DRV_SSD, "write bins: couldn't get swb");
 			pthread_mutex_unlock(&ssd->LOCK);
-			return -1;
+			return -AS_PROTO_RESULT_FAIL_PARTITION_OUT_OF_SPACE;
 		}
 	}
 
@@ -1830,9 +1830,10 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 	uint32_t write_nbins = 0;
 
 	if (0 == rd->bins) {
+		// TODO - just crash?
 		cf_warning(AS_DRV_SSD, "write bins: no bins array");
 		cf_atomic32_decr(&ssd->n_writers);
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	for (uint16_t i = 0; i < rd->n_bins; i++) {
@@ -1922,7 +1923,7 @@ ssd_write(as_record *r, as_storage_rd *rd)
 	if (! ssd) {
 		cf_warning(AS_DRV_SSD, "{%s} ssd_write: no drv_ssd for file_id %d",
 				rd->ns->name, ssd_get_file_id(ssds, &rd->keyd));
-		return -1;
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	int rv = ssd_write_bins(r, rd);
