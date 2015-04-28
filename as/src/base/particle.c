@@ -1289,7 +1289,7 @@ as_particle_type_hidden(as_particle_type type)
 void
 as_bin_particle_destroy(as_bin *b, bool free_particle)
 {
-	if (as_bin_is_integer(b)) {
+	if (as_bin_is_embedded_particle(b)) {
 		b->particle = 0;
 	}
 	else if (b->particle) {

@@ -393,13 +393,13 @@ as_bin_set_all_empty(as_storage_rd *rd) {
 }
 
 static inline bool
-as_bin_is_integer(const as_bin *b) {
-	return (((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_INTEGER);
+as_bin_is_embedded_particle(const as_bin *b) {
+	return ((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_INTEGER;
 }
 
 static inline as_particle *
 as_bin_get_particle(as_bin *b) {
-	return (as_bin_is_integer(b) ? &b->iparticle : b->particle);
+	return as_bin_is_embedded_particle(b) ? &b->iparticle : b->particle;
 }
 
 /**
