@@ -154,6 +154,12 @@ cfg_set_defaults()
 	c->socket.proto = SOCK_STREAM; // not configurable, but addr and port are
 	c->socket_reuse_addr = true;
 
+	// Fabric TCP socket keepalive defaults.
+	c->fabric_keepalive_enabled = true;
+	c->fabric_keepalive_time = 1; // seconds
+	c->fabric_keepalive_intvl = 1; // seconds
+	c->fabric_keepalive_probes = 10; // tries
+
 	// Network heartbeat defaults.
 	c->hb_mode = AS_HB_MODE_UNDEF; // must supply heartbeat mode in the configuration file
 	c->hb_interval = 150;
@@ -407,6 +413,11 @@ typedef enum {
 	// Normally visible, in canonical configuration file order:
 	CASE_NETWORK_FABRIC_ADDRESS,
 	CASE_NETWORK_FABRIC_PORT,
+	// Normally hidden, in canonical configuration file order:
+	CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED,
+	CASE_NETWORK_FABRIC_KEEPALIVE_TIME,
+	CASE_NETWORK_FABRIC_KEEPALIVE_INTVL,
+	CASE_NETWORK_FABRIC_KEEPALIVE_PROBES,
 
 	// Network info options:
 	// Normally visible, in canonical configuration file order:
@@ -772,6 +783,10 @@ const cfg_opt NETWORK_HEARTBEAT_PROTOCOL_OPTS[] = {
 const cfg_opt NETWORK_FABRIC_OPTS[] = {
 		{ "address",						CASE_NETWORK_FABRIC_ADDRESS },
 		{ "port",							CASE_NETWORK_FABRIC_PORT },
+		{ "keepalive-enabled",				CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED },
+		{ "keepalive-time",					CASE_NETWORK_FABRIC_KEEPALIVE_TIME },
+		{ "keepalive-intvl",				CASE_NETWORK_FABRIC_KEEPALIVE_INTVL },
+		{ "keepalive-probes",				CASE_NETWORK_FABRIC_KEEPALIVE_PROBES },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -2283,6 +2298,18 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NETWORK_FABRIC_PORT:
 				c->fabric_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED:
+				c->fabric_keepalive_enabled = cfg_bool(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_TIME:
+				c->fabric_keepalive_time = cfg_int_no_checks(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_INTVL:
+				c->fabric_keepalive_intvl = cfg_int_no_checks(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_PROBES:
+				c->fabric_keepalive_probes = cfg_int_no_checks(&line);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);
