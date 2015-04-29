@@ -250,3 +250,5 @@ as_ldt_string_todigest(const char *bdig, cf_digest *keyd)
 	cf_detail(AS_LDT, "Convert %s to %"PRIx64"", bdig, keyd);
 	return 0;
 }
+
+as_val * as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_bin *binp); 

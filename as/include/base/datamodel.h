@@ -936,6 +936,7 @@ struct as_namespace_s {
 	bool                        ldt_enabled;
 	uint32_t                    ldt_page_size;
 	uint32_t					ldt_gc_sleep_us;
+	uint32_t					scan_ldt_buff_max;
 
 	/* XDR */
 	bool						enable_xdr;
