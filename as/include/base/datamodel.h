@@ -211,6 +211,12 @@ typedef struct as_particle_iparticle_s {
 
 /* Particle function declarations */
 
+static inline bool
+is_embedded_particle_type(as_particle_type type)
+{
+	return type == AS_PARTICLE_TYPE_INTEGER || type == AS_PARTICLE_TYPE_FLOAT;
+}
+
 extern int32_t as_particle_size_from_client(const as_msg_op *op);
 extern int32_t as_particle_size_from_pickled(uint8_t **p_pickled);
 extern uint32_t as_particle_size_from_mem(as_particle_type type, const uint8_t *value, uint32_t value_size);
