@@ -4432,7 +4432,7 @@ as_sindex_smd_can_accept_cb(char *module, as_smd_item_t *item, void *udata)
 				char * key_dup = cf_strdup(item->key);
 				// Get ns name 
 				// Using strtok_r instead of strtok due to MT environment.
-				char * saveptr;
+				char * saveptr = NULL;
 				char * ns_tmpname    = strtok_r(key_dup, ":", &saveptr);
 				if (!ns_tmpname) {
 					cf_warning(AS_SINDEX, "Failed to extract namspace name from SMD delete item value");
@@ -4580,7 +4580,7 @@ as_sindex_smd_accept_cb(char *module, as_smd_item_list_t *items, void *udata, ui
 			{
 				char * key_dup = cf_strdup(items->item[i]->key);
 				
-				char * saveptr;
+				char * saveptr = NULL;
 				// Using strtok_r instead of strtok due to MT environment.
 				// Get ns name 
 				char * ns_tmpname    = strtok_r(key_dup, ":", &saveptr);

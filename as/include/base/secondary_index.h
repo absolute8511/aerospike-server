@@ -206,6 +206,14 @@ typedef struct as_sindex_bin_data_s {
 	} u;
 	cf_digest         digest;
 } as_sindex_bin_data;
+
+// Caution: Using this will waste 12 bytes per long type skey 
+typedef struct as_sindex_key_s {
+	union {
+		cf_digest str_key;
+		uint64_t  int_key;
+	} key;
+} as_sindex_key;
 // **************************************************************************************************
 
 /* 

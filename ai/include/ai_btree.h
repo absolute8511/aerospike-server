@@ -28,8 +28,9 @@
 #include <citrusleaf/cf_ll.h>
 
 #define NUM_DIGS_PER_ARR 51
+#define NUM_SINDEX_KV_PER_ARR 51
 
-typedef struct dig_arr_t { //NOTE: this data structure MUST be 1KB exactly
+typedef struct dig_arr_t { 
 	cf_digest digs[NUM_DIGS_PER_ARR];
 	uint32_t  num;
 } __attribute__ ((packed)) dig_arr_t;
@@ -39,7 +40,20 @@ typedef struct ll_recl_element_s {
 	dig_arr_t     * dig_arr;
 } ll_recl_element;
 
+typedef struct sindex_kv_arr_s { //NOTE: this data structure MUST be 1KB exactly
+	as_sindex_key skeys[NUM_SINDEX_KV_PER_ARR];
+	cf_digest     digs[NUM_SINDEX_KV_PER_ARR];	
+	uint32_t      num;
+} __attribute__ ((packed)) sindex_kv_arr;
+
+typedef struct ll_sindex_kv_element_s {
+	cf_ll_element   ele;
+	sindex_kv_arr * skv_arr;
+} ll_sindex_kv_element;
+
 void releaseDigArrToQueue(void *v);
+
+void release_skv_arr_to_queue(sindex_kv_arr * v);
 
 int ai_findandset_imatch(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, int idx);
 
