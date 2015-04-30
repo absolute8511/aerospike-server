@@ -27,6 +27,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "ai_btree.h"
+
 #include "aerospike/as_aerospike.h"
 #include "aerospike/as_list.h"
 #include "aerospike/as_module.h"
@@ -193,7 +195,7 @@ as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_resul
 	as_rec_init(&l_qrec, &l_qrecord, &query_record_hooks);
 
 	as_aggr_istream l_aggr_istream = {
-		.dt          = NULL,
+		.skv_arr     = NULL,
 		.rec         = &l_qrec,
 		.iter        = cf_ll_getIterator(ap_recl, true /*forward*/),
 		.ns          = ap_call->ns,
@@ -348,7 +350,7 @@ as_aggr_call_destroy(as_aggr_call * call)
 }
 
 //declaration 
-extern bool as_query_aggr_match_record(query_record * qrecord);
+extern bool as_query_aggr_match_record(query_record * qrecord, as_sindex_key * skey);
 
 // only operates on the record as_val in the stream points to
 // and updates the references ... this function has to acquire
@@ -364,20 +366,25 @@ as_aggr_istream_read(const as_stream *s)
 		return NULL;
 	}
 
-	query_record   * qrecord = (query_record *) aggr_istream->rec->data; //Sumit: taking out query_record from istream->rec->data
-	dig_arr_t      * dt      = aggr_istream->dt;
+	query_record   * qrecord      = (query_record *) aggr_istream->rec->data;
+	//Sumit: taking out query_record from istream->rec->data
+	sindex_kv_arr  * skv_arr      = aggr_istream->skv_arr;
 
-	if (!dt) {
+	if (!skv_arr) {
 		cf_ll_element * ele       = cf_ll_getNext(aggr_istream->iter);
-		if (!ele) aggr_istream->dt = NULL;
-		else      dt               = ((ll_recl_element*)ele)->dig_arr;
-		aggr_istream->dt          = dt;
-		aggr_istream->dtoffset    = 0;
+		if (!ele) {
+			aggr_istream->skv_arr = NULL;
+		}
+		else {
+			skv_arr               = ((ll_sindex_kv_element*)ele)->skv_arr;
+		}
+		aggr_istream->skv_arr     = skv_arr;
+		aggr_istream->skv_offset  = 0;
 	}
 
 	if (qrecord->read) {
-		cf_detail(AS_QUERY, "Close Record (%p,%d)", aggr_istream->dt,
-				aggr_istream->dtoffset - 1);
+		cf_detail(AS_QUERY, "Close Record (%p,%d)", aggr_istream->skv_arr,
+				aggr_istream->skv_offset - 1);
 		// Bypassing doing the direct destroy because we need to
 		// avoid reducing the ref count. This rec (query_record
 		// implementation of as_rec) is ref counted when passed from
@@ -389,27 +396,29 @@ as_aggr_istream_read(const as_stream *s)
 		qrecord->read = false;
 	}
 
-	if (!dt) return NULL;
+	if (!skv_arr) {
+		return NULL;
+	}
 
 	// Iterate through stream to get next digest and
 	// populate record with it
 	while (!qrecord->read) {
-		if (dt->num == aggr_istream->dtoffset) {
-			if (dt) {
+		if (skv_arr->num == aggr_istream->skv_offset) {
+			if (skv_arr) {
 				// Not releasing here.. will be released
 				// by the query_agg_apply_stream in the end
 			}
-			dt = NULL;
-			while (!dt) {
-				cf_ll_element * ele = cf_ll_getNext(aggr_istream->iter);
+			skv_arr = NULL;
+			while (!skv_arr) {
+				cf_ll_element * ele  = cf_ll_getNext(aggr_istream->iter);
 				if (!ele) {
 					cf_detail(AS_QUERY, "No More Nodes for this Lua Call");
 					return NULL;
 				}
-				dt                             = ((ll_recl_element*)ele)->dig_arr;
+				skv_arr              = ((ll_sindex_kv_element*)ele)->skv_arr;
 			}
-			aggr_istream->dtoffset = 0;
-			aggr_istream->dt       = dt;
+			aggr_istream->skv_offset = 0;
+			aggr_istream->skv_arr    = skv_arr;
 			cf_detail(AS_QUERY, "Moving Next List Node");
 		}
 		// NB: The offset moves forward here
@@ -418,14 +427,14 @@ as_aggr_istream_read(const as_stream *s)
 		as_index_ref   * r_ref =  qrecord->urecord->r_ref;
 
 		AS_PARTITION_RESERVATION_INIT(tr->rsv);
-		cf_detail(AS_QUERY, "Open Record (%p,%d %"PRIu64", %"PRIu64")", aggr_istream->dt, aggr_istream->dtoffset);
+		cf_detail(AS_QUERY, "Open Record (%p,%d %"PRIu64", %"PRIu64")", aggr_istream->skv_arr, aggr_istream->skv_offset);
 		
-		tr->keyd     = dt->digs[aggr_istream->dtoffset];
+		tr->keyd     = skv_arr->digs[aggr_istream->skv_offset];
 		qrecord->urecord->keyd = tr->keyd;
 		int pid = as_partition_getid(tr->keyd);
 		qrecord->rsv = as_query_reserve_qnode(ns, qrecord->caller, pid, &tr->rsv);
 		if (!qrecord->rsv){
-			aggr_istream->dtoffset++;
+			aggr_istream->skv_offset++;
 			continue;
 		}
 
@@ -450,8 +459,8 @@ as_aggr_istream_read(const as_stream *s)
 			as_query_release_qnode(qrecord->caller, qrecord->rsv);
 		} else {
 			if (aggr_istream->get_type() == AS_AGGR_QUERY) {
-				if (!as_query_aggr_match_record(qrecord)) {
-					cf_debug(AS_QUERY, "Close Record with invalid selection (%p,%d)", aggr_istream->dt, aggr_istream->dtoffset);
+				if (!as_query_aggr_match_record(qrecord, &skv_arr->skeys[aggr_istream->skv_offset])) {
+					cf_debug(AS_QUERY, "Close Record with invalid selection (%p,%d)", aggr_istream->skv_arr, aggr_istream->skv_offset);
 					udf_record_close(qrecord->urecord);
 					as_query_release_qnode(qrecord->caller, &tr->rsv);
 					qrecord->read = false;
@@ -461,7 +470,7 @@ as_aggr_istream_read(const as_stream *s)
 				}
 			} 
 		}
-		aggr_istream->dtoffset++;
+		aggr_istream->skv_offset++;
 	}
 	return (as_val *)aggr_istream->rec;
 }

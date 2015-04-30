@@ -439,6 +439,25 @@ ll_recl_destroy_fn(cf_ll_element *ele)
 	}
 }
 
+int
+ll_sindex_kv_reduce_fn(cf_ll_element *ele, void *udata)
+{
+	return CF_LL_REDUCE_DELETE;
+}
+
+void
+ll_sindex_kv_destroy_fn(cf_ll_element *ele)
+{
+	ll_sindex_kv_element * node = (ll_sindex_kv_element *) ele;
+	if (node) {
+		if (node->skv_arr) {
+			release_skv_arr_to_queue(node->skv_arr);
+			node->skv_arr = NULL;
+		}
+		cf_free(node);
+	}
+}
+
 void
 as_query_histogram_dumpall()
 {
@@ -1139,26 +1158,6 @@ as_query__netio(as_query_transaction *qtr, bool final)
 	return ret;
 }
 
-void
-as_query__recl_cleanup(cf_ll *recl) {
-	if (recl) {
-		cf_ll_iterator * iter = NULL;
-		iter                  = cf_ll_getIterator(recl, true /*forward*/);
-		if (iter) {
-			cf_ll_element *ele;
-			while ((ele = cf_ll_getNext(iter))) {
-				ll_recl_element * node;
-				node = (ll_recl_element *) ele;
-				dig_arr_t * dt = node->dig_arr;
-				node->dig_arr =  NULL;
-				if (dt) {
-					releaseDigArrToQueue((void *)dt);
-				}
-			}
-		}
-		cf_ll_releaseIterator(iter);
-	}
-}
 
 int as_aggr__process(as_aggr_call *ap_call, cf_ll *ap_recl, void *udata, as_result *ap_res);
 
@@ -1190,10 +1189,11 @@ as_query__process_aggreq(as_query_request *qagg)
     as_result_destroy(res);
 
 Cleanup:
-	as_query__recl_cleanup(qagg->recl);
 	if (qagg->recl) {
-		cf_ll_reduce(qagg->recl, true /*forward*/, ll_recl_reduce_fn, NULL);
-		if (qagg->recl ) cf_free(qagg->recl);
+		cf_ll_reduce(qagg->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		if (qagg->recl ) {
+			cf_free(qagg->recl);
+		}
 		qagg->recl = NULL;
 	}
 
@@ -1201,7 +1201,7 @@ Cleanup:
 }
 
 
-bool as_query_match_integer_fromval(as_query_transaction * qtr, as_val *v)
+bool as_query_match_integer_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key *skey)
 {
 	as_sindex_bin_data *start = &qtr->srange->start;
 	as_sindex_bin_data *end   = &qtr->srange->end;
@@ -1216,17 +1216,16 @@ bool as_query_match_integer_fromval(as_query_transaction * qtr, as_val *v)
 	}
 	as_integer * i = as_integer_fromval(v);
 	int64_t value  = as_integer_get(i);
-	if ((value >= start->u.i64) && (value <= end->u.i64)) {
-		return true;
-	} else {
-		cf_detail(AS_QUERY, "as_query_record_matches: "
-				"Integer mismatch %ld not in %ld - %ld", value, start->u.i64, end->u.i64);
+	if (skey->key.int_key != value) {
+		cf_debug(AS_QUERY, "as_query_record_matches: sindex key does " 
+			"not matches bin value in record. skey %ld bin value %ld", skey->key.int_key, value);
 		return false;
 	}
-	return false;
+
+	return true;
 }
 
-bool as_query_match_string_fromval(as_query_transaction * qtr, as_val *v)
+bool as_query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key *skey)
 {
 	as_sindex_bin_data *start = &qtr->srange->start;
 	as_sindex_bin_data *end   = &qtr->srange->end;
@@ -1244,55 +1243,57 @@ bool as_query_match_string_fromval(as_query_transaction * qtr, as_val *v)
 	cf_digest str_digest;
 	cf_digest_compute(str_val, strlen(str_val), &str_digest);
 
-	if (memcmp(&str_digest, &start->digest, AS_DIGEST_KEY_SZ)) {
-		cf_detail(AS_QUERY, "as_query_record_validation: "
-				" String mismatch |%s|  of size %d", str_val, strlen(str_val)+1);
+	if (memcmp(&str_digest, &skey->key.str_key, AS_DIGEST_KEY_SZ)) {
+		cf_debug(AS_QUERY, "as_query_record_matches: sindex key does not matches bin value in record."
+				" skey %"PRIu64" value in bin %"PRIu64"", skey->key.str_key, str_digest);
 		return false;
-	} else {
-		return true;
 	}
-	return false;
+	return true;
 }
 
+typedef struct as_sindex_qtr_skey_s {
+	as_query_transaction * qtr;
+	as_sindex_key        * skey;
+} as_sindex_qtr_skey;
 
 // If the value matches foreach should stop iterating the 
 bool as_query_match_mapkeys_foreach(const as_val * key, const as_val * val, void * udata)
 {
-	as_query_transaction * qtr = (as_query_transaction *)udata;	
+	as_sindex_qtr_skey * q_s = (as_sindex_qtr_skey *)udata;
 	if (key->type == AS_STRING) {
 		// If matches return false
-		return !as_query_match_string_fromval(qtr, (as_val *)key);
+		return !as_query_match_string_fromval(q_s->qtr, (as_val *)key, q_s->skey);
 	}
 	else if (key->type == AS_INTEGER) {
 		// If matches return false
-		return !as_query_match_integer_fromval(qtr,(as_val *) key);
+		return !as_query_match_integer_fromval(q_s->qtr,(as_val *) key, q_s->skey);
 	}
 	return true;
 }
 static bool as_query_match_mapvalues_foreach(const as_val * key, const as_val * val, void * udata)
 {
-	as_query_transaction * qtr = (as_query_transaction *)udata;	
+	as_sindex_qtr_skey * q_s = (as_sindex_qtr_skey *)udata;
 	if (val->type == AS_STRING) {
 		// If matches return false
-		return !as_query_match_string_fromval(qtr, (as_val *)val);
+		return !as_query_match_string_fromval(q_s->qtr, (as_val *)val, q_s->skey);
 	}
 	else if (val->type == AS_INTEGER) {
 		// If matches return false
-		return !as_query_match_integer_fromval(qtr, (as_val *)val);
+		return !as_query_match_integer_fromval(q_s->qtr, (as_val *)val, q_s->skey);
 	}
 	return true;
 
 }
 static bool as_query_match_listele_foreach(as_val * val, void * udata)
 {
-	as_query_transaction * qtr = (as_query_transaction *)udata;	
+	as_sindex_qtr_skey * q_s = (as_sindex_qtr_skey *)udata;
 	if (val->type == AS_STRING) {
 		// If matches return false
-		return !as_query_match_string_fromval(qtr, val);
+		return !as_query_match_string_fromval(q_s->qtr, val, q_s->skey);
 	}
 	else if (val->type == AS_INTEGER) {
 		// If matches return false
-		return !as_query_match_integer_fromval(qtr, val);
+		return !as_query_match_integer_fromval(q_s->qtr, val, q_s->skey);
 	}
 	return true;
 }
@@ -1304,7 +1305,7 @@ static bool as_query_match_listele_foreach(as_val * val, void * udata)
  * validation before returning the row.
  */
 bool
-as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
+as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_key * skey)
 {
 	// TODO: Add counters and make sure it is not a performance hit
 	as_sindex_bin_data *start = &qtr->srange->start;
@@ -1343,15 +1344,12 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 			uint32_t sz = 8;
 			as_particle_tobuf(b, (uint8_t *) &i, &sz);
 			i = __be64_to_cpu(i);
-			if ((i >= start->u.i64)
-					&& (i <= end->u.i64)) {
-				return true;
-			} else {
-				cf_detail(AS_QUERY, "as_query_record_matches: "
-						"Integer mismatch %ld not in %ld - %ld", i, start->u.i64, end->u.i64);
+			if (skey->key.int_key != i) {
+				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
+						"not matches bin value in record. bin value %ld skey value %ld", i, skey->key.int_key);
 				return false;
 			}
-			break;
+			return true;
 		}
 		case AS_PARTICLE_TYPE_STRING : {
 			if ((type != as_sindex_pktype(qtr->si->imd))
@@ -1370,14 +1368,13 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 			buf[psz]     = '\0';
 			cf_digest bin_digest;
 			cf_digest_compute( buf, psz, &bin_digest);
-			if (memcmp(&bin_digest, &start->digest, AS_DIGEST_KEY_SZ)) {
-				cf_detail(AS_QUERY, "as_query_record_validation: "
-						" String mismatch |%s|  of size %d", buf, psz);
+			if (memcmp(&skey->key.str_key, &bin_digest, AS_DIGEST_KEY_SZ)) {
+				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does not matches bin value in record."
+				" skey %"PRIu64" value in bin %"PRIu64"", skey->key.str_key, bin_digest);
+	
 				return false;
-			} else {
-				return true;
 			}
-			break;
+			return true;
 		}
 		case AS_PARTICLE_TYPE_MAP : {
 			as_val * v = as_val_frombin(b);
@@ -1406,7 +1403,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 		if (res_val->type == AS_INTEGER) {
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_DEFAULT) {
-				return as_query_match_integer_fromval(qtr, res_val);
+				return as_query_match_integer_fromval(qtr, res_val, skey);
 			}
 			else {
 				return false;
@@ -1415,29 +1412,36 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 		else if (res_val->type == AS_STRING) {
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_DEFAULT) {
-				return as_query_match_string_fromval(qtr, res_val);
+				return as_query_match_string_fromval(qtr, res_val, skey);
 			}
 			else {
 				return false;
 			}
 		}
 		else if (res_val->type == AS_MAP) {
+			as_sindex_qtr_skey q_s;
+			q_s.qtr  = qtr;
+			q_s.skey = skey;
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPKEYS) {
 				as_map * map = as_map_fromval(res_val);
-				return !as_map_foreach(map, as_query_match_mapkeys_foreach, qtr);
+				return !as_map_foreach(map, as_query_match_mapkeys_foreach, &q_s);
 			}
 			else if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPVALUES){
 				as_map * map = as_map_fromval(res_val);
-				return !as_map_foreach(map, as_query_match_mapvalues_foreach, qtr);
+				return !as_map_foreach(map, as_query_match_mapvalues_foreach, &q_s);
 			}
 			return false;
 		}
 		else if (res_val->type == AS_LIST) {
+			as_sindex_qtr_skey q_s;
+			q_s.qtr  = qtr;
+			q_s.skey = skey;
+	
 			// Defensive check
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_LIST) {
 				as_list * list = as_list_fromval(res_val);
-				return !as_list_foreach(list, as_query_match_listele_foreach, qtr);
+				return !as_list_foreach(list, as_query_match_listele_foreach, &q_s);
 			}
 			else {
 				return false;
@@ -1448,15 +1452,15 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd)
 }
 
 bool
-as_query_aggr_match_record(query_record * qrecord)
+as_query_aggr_match_record(query_record * qrecord, as_sindex_key * skey)
 {
 	as_query_transaction * qtr = qrecord->caller; 
 	qtr->read_success++;
-	return as_query_record_matches(qtr, qrecord->urecord->rd); 
+	return as_query_record_matches(qtr, qrecord->urecord->rd, skey);
 }
 
 int
-as_query__io(as_query_transaction *qtr, cf_digest *dig)
+as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 {
 	as_namespace * ns = qtr->ns;
 	as_partition_reservation rsv_stack;
@@ -1504,7 +1508,7 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig)
 		rd.bins   = as_bin_get_all(r, &rd, stack_bins);
 		rd.n_bins = as_bin_inuse_count(&rd);
 		// Call Back
-		if(!as_query_record_matches(qtr, &rd)) {
+		if(!as_query_record_matches(qtr, &rd, skey)) {
 			as_storage_record_close(r, &rd);
 			as_record_done(&r_ref, ns);
 			as_query_release_qnode(qtr, rsv);
@@ -1631,19 +1635,21 @@ as_query__process_udfreq(as_query_request *qudf)
 	}
 
 	while((ele = cf_ll_getNext(iter))) {
-		ll_recl_element * node;
-		node            = (ll_recl_element *) ele;
-		dig_arr_t *dt   =  node->dig_arr;
-		if (!dt) continue;
-		node->dig_arr   =  NULL;
-		cf_detail(AS_QUERY, "NUMBER OF DIGESTS = %d", dt->num);
-		for (int i = 0; i < dt->num; i++) {
+		ll_sindex_kv_element * node;
+		node                     = (ll_sindex_kv_element *) ele;
+		sindex_kv_arr * skv_arr  = node->skv_arr;
+		if (!skv_arr) {
+			continue;
+		}
+		node->skv_arr   =  NULL;
+		cf_detail(AS_QUERY, "NUMBER OF DIGESTS = %d", skv_arr->num);
+		for (int i = 0; i < skv_arr->num; i++) {
 			cf_detail(AS_QUERY, "LOOOPING FOR NUMBER OF DIGESTS %d", i);
 
 			// Fill the structure needed by internal transaction create
 			tr_create_data d;
 			memset(&d, 0, sizeof(tr_create_data));
-			d.digest   = dt->digs[i];
+			d.digest   = skv_arr->digs[i];
 			d.ns       = qtr->ns;
 			d.call     = &(qtr->call);
 			d.msg_type = AS_MSG_INFO2_WRITE;
@@ -1658,7 +1664,7 @@ as_query__process_udfreq(as_query_request *qudf)
 				usleep(g_config.query_sleep);
 			}
 		}
-		releaseDigArrToQueue((void *)dt);
+		release_skv_arr_to_queue(skv_arr);
 	}
 Cleanup:
 	if(iter) {
@@ -1666,11 +1672,11 @@ Cleanup:
 		iter = NULL;
 	}
 
-	as_query__recl_cleanup(qudf->recl);
-
 	if (qudf->recl) {
-		cf_ll_reduce(qudf->recl, true /*forward*/, ll_recl_reduce_fn, NULL);
-		if (qudf->recl)  cf_free(qudf->recl);
+		cf_ll_reduce(qudf->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		if (qudf->recl) {
+			cf_free(qudf->recl);
+		}
 		qudf->recl = NULL;
 	}
 	return ret;
@@ -1703,16 +1709,19 @@ as_query__process_ioreq(as_query_request *qio)
 	}
 
 	while((ele = cf_ll_getNext(iter))) {
-		ll_recl_element * node;
-		node              = (ll_recl_element *) ele;
-		dig_arr_t *dt     = node->dig_arr;
-		if (!dt) continue;
-		node->dig_arr     = NULL;
-		for (int i = 0; i < dt->num; i++) {
-			cf_digest *dig  = &dt->digs[i];
-			ret             = as_query__io(qtr, dig);
+		ll_sindex_kv_element * node;
+		node                   = (ll_sindex_kv_element *) ele;
+		sindex_kv_arr *skv_arr = node->skv_arr;
+		if (!skv_arr) {
+			continue;
+		}
+		node->skv_arr     = NULL;
+		for (int i = 0; i < skv_arr->num; i++) {
+			cf_digest *dig  = &skv_arr->digs[i];
+			as_sindex_key * skey = &skv_arr->skeys[i];
+			ret             = as_query__io(qtr, dig, skey);
 			if (ret != AS_QUERY_OK) {
-				releaseDigArrToQueue((void *)dt);
+				release_skv_arr_to_queue(skv_arr);
 				goto Cleanup;
 			}
 
@@ -1721,12 +1730,12 @@ as_query__process_ioreq(as_query_request *qio)
 				usleep(g_config.query_sleep);
 				as_query__check_timeout(qtr);
 				if (QTR_FAILED(qtr)) {
-					releaseDigArrToQueue((void *)dt);
+					release_skv_arr_to_queue(skv_arr);
 					goto Cleanup;
 				}
 			}
 		}
-		releaseDigArrToQueue((void *)dt);
+		release_skv_arr_to_queue(skv_arr);
 	}
 Cleanup:
 
@@ -1735,11 +1744,11 @@ Cleanup:
 		iter = NULL;
 	}
 
-	as_query__recl_cleanup(qio->recl);
-
 	if (qio->recl) {
-		cf_ll_reduce(qio->recl, true /*forward*/, ll_recl_reduce_fn, NULL);
-		if (qio->recl)  cf_free(qio->recl);
+		cf_ll_reduce(qio->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		if (qio->recl) {
+			cf_free(qio->recl);
+		}
 		qio->recl = NULL;
 	}
 
@@ -1847,7 +1856,7 @@ as_query__generator_get_nextbatch(as_query_transaction *qtr)
 	as_sindex_range *srange  = qtr->srange;
 	if (!qctx->recl) {
 		qctx->recl = cf_malloc(sizeof(cf_ll));
-		cf_ll_init(qctx->recl, ll_recl_destroy_fn, false /*no lock*/);
+		cf_ll_init(qctx->recl, ll_sindex_kv_destroy_fn, false /*no lock*/);
 		if (!qctx->recl) {
 			qtr->result_code = AS_SINDEX_ERR_NO_MEMORY;
 			qctx->n_bdigs        = 0;
@@ -2102,9 +2111,8 @@ as_query__generator(as_query_transaction *qtr)
 
 Cleanup:
 
-	as_query__recl_cleanup(qtr->qctx.recl);
 	if (qtr->qctx.recl) {
-		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, ll_recl_reduce_fn, NULL);
+		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
 		if (qtr->qctx.recl) cf_free(qtr->qctx.recl);
 		qtr->qctx.recl = NULL;
 	}
