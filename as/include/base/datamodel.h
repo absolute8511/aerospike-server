@@ -234,9 +234,11 @@ extern uint32_t as_bin_particle_ptr(as_bin *b, uint8_t **p_value);
 
 // wire:
 extern int32_t as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op);
-extern int as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op);
+extern int as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op);
+extern int as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op); // TODO - deprecate
 extern int32_t as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op);
-extern int as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op);
+extern int as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op);
+extern int as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op); // TODO - deprecate
 extern int as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled);
 extern int32_t as_bin_particle_stack_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op);
 extern int32_t as_bin_particle_stack_from_pickled(as_bin *b, uint8_t* stack, uint8_t **p_pickled);
@@ -456,7 +458,7 @@ extern const char* as_bin_get_name_from_id(as_namespace *ns, uint16_t id);
 extern bool as_bin_name_within_quota(as_namespace *ns, byte *buf, size_t len);
 extern uint16_t as_bin_get_n_bins(as_record *r, as_storage_rd *rd);
 extern as_bin *as_bin_get_all(as_record *r, as_storage_rd *rd, as_bin *stack_bins);
-extern bool as_bin_get_and_size_all(as_storage_rd *rd, as_bin *stack_bins);
+extern int as_storage_rd_load_bins(as_storage_rd *rd, as_bin *stack_bins);
 extern void as_bin_get_all_p(as_storage_rd *rd, as_bin **bin_ptrs);
 extern as_bin *as_bin_create(as_record *r, as_storage_rd *rd, uint8_t *name, size_t namesz, uint version);
 extern as_bin *as_bin_get(as_storage_rd *rd, uint8_t *name, size_t namesz);

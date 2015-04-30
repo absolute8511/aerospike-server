@@ -1355,6 +1355,140 @@ as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op)
 }
 
 int
+as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
+{
+	// This method does not destroy the existing particle, if any. We assume
+	// there is a copy of this bin (and particle reference) elsewhere, and that
+	// the copy will be responsible for the existing particle. Therefore it's
+	// important on failure to leave the existing particle intact.
+
+	uint8_t operation = op->op;
+	as_particle_type op_type = (as_particle_type)op->particle_type;
+	uint32_t op_value_size = as_msg_op_get_value_sz(op);
+	uint8_t *op_value = as_msg_op_get_value_p((as_msg_op *)op);
+
+	// Currently all operations become creates if there's no existing particle.
+	if (! as_bin_inuse(b)) {
+		// Memcache increment is weird - manipulate to create integer.
+		if (operation == AS_MSG_OP_MC_INCR) {
+			if (op_value_size != 2 * sizeof(uint64_t) || op_type != AS_PARTICLE_TYPE_BLOB) {
+				return -AS_PROTO_RESULT_FAIL_PARAMETER;
+			}
+
+			op_type = AS_PARTICLE_TYPE_INTEGER;
+			op_value_size = sizeof(uint64_t);
+			op_value += sizeof(uint64_t);
+		}
+
+		int32_t mem_size = g_particle_size_from_wire_table[op_type](op_value, op_value_size);
+
+		if (mem_size < 0) {
+			return (int)mem_size;
+		}
+
+		as_particle *old_particle = b->particle;
+
+		if (mem_size != 0) {
+			b->particle = cf_malloc((size_t)mem_size);
+
+			if (! b->particle) {
+				b->particle = old_particle;
+				return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+
+		// Load the new particle into the bin.
+		int result = g_particle_from_wire_table[op_type](op_type, op_value, op_value_size, &b->particle);
+
+		// Set the bin's iparticle metadata.
+		if (result == 0) {
+			as_bin_state_set_from_type(b, op_type);
+		}
+		else {
+			// TODO - what policy on the table function failures?
+			if (mem_size != 0) {
+				cf_free(b->particle);
+			}
+
+			b->particle = old_particle;
+		}
+
+		return result;
+	}
+
+	// There is an existing particle, which we will modify.
+	uint8_t existing_type = as_bin_get_particle_type(b);
+	int32_t new_mem_size = 0;
+	as_particle *new_particle = NULL;
+
+	as_particle *old_particle = b->particle;
+	int32_t result = 0;
+
+	switch (operation) {
+	case AS_MSG_OP_MC_INCR:
+		if (op_value_size != 2 * sizeof(uint64_t) || op_type != AS_PARTICLE_TYPE_BLOB) {
+			return -AS_PROTO_RESULT_FAIL_PARAMETER;
+		}
+		op_type = AS_PARTICLE_TYPE_INTEGER;
+		// op_value_size of 16 will flag operation as memcache increment...
+		// no break
+	case AS_MSG_OP_INCR:
+		result = g_particle_incr_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
+		break;
+	case AS_MSG_OP_MC_APPEND:
+		if (existing_type != AS_PARTICLE_TYPE_STRING) {
+			return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
+		}
+		// no break
+	case AS_MSG_OP_APPEND:
+		new_mem_size = g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
+		if (new_mem_size < 0) {
+			return new_mem_size;
+		}
+		if (! (new_particle = cf_malloc((size_t)new_mem_size))) {
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
+		memcpy(new_particle, b->particle, g_particle_size_table[existing_type](b->particle));
+		b->particle = new_particle;
+		result = g_particle_append_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
+		break;
+	case AS_MSG_OP_MC_PREPEND:
+		if (existing_type != AS_PARTICLE_TYPE_STRING) {
+			return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
+		}
+		// no break
+	case AS_MSG_OP_PREPEND:
+		new_mem_size = g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
+		if (new_mem_size < 0) {
+			return new_mem_size;
+		}
+		if (! (new_particle = cf_malloc((size_t)new_mem_size))) {
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
+		memcpy(new_particle, b->particle, g_particle_size_table[existing_type](b->particle));
+		b->particle = new_particle;
+		result = g_particle_prepend_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
+		break;
+	default:
+		// TODO - just crash?
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+	}
+
+	if (result < 0) {
+		// TODO - what policy on the table function failures?
+		if (new_mem_size != 0) {
+			cf_free(b->particle);
+		}
+
+		b->particle = old_particle;
+
+		return result;
+	}
+
+	return 0;
+}
+
+int
 as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op)
 {
 	uint8_t operation = op->op;
@@ -1551,6 +1685,53 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 		// TODO - just crash?
 		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
+}
+
+int
+as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op)
+{
+	// This method does not destroy the existing particle, if any. We assume
+	// there is a copy of this bin (and particle reference) elsewhere, and that
+	// the copy will be responsible for the existing particle. Therefore it's
+	// important on failure to leave the existing particle intact.
+
+	as_particle_type type = (as_particle_type)op->particle_type;
+	uint32_t value_size = as_msg_op_get_value_sz(op);
+	uint8_t *value = as_msg_op_get_value_p((as_msg_op *)op);
+	int32_t mem_size = g_particle_size_from_wire_table[type](value, value_size);
+
+	if (mem_size < 0) {
+		return (int)mem_size;
+	}
+
+	as_particle *old_particle = b->particle;
+
+	if (mem_size != 0) {
+		b->particle = cf_malloc((size_t)mem_size);
+
+		if (! b->particle) {
+			b->particle = old_particle;
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
+	}
+
+	// Load the new particle into the bin.
+	int result = g_particle_from_wire_table[type](type, value, value_size, &b->particle);
+
+	// Set the bin's iparticle metadata.
+	if (result == 0) {
+		as_bin_state_set_from_type(b, type);
+	}
+	else {
+		// TODO - what policy on the table function failures?
+		if (mem_size != 0) {
+			cf_free(b->particle);
+		}
+
+		b->particle = old_particle;
+	}
+
+	return result;
 }
 
 int

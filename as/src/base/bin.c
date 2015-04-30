@@ -216,13 +216,13 @@ as_bin_get_all(as_record *r, as_storage_rd *rd, as_bin *stack_bins)
 
 // - Seems like an as_storage_record method, but leaving it here for now.
 // - sets rd->bins!
-bool
-as_bin_get_and_size_all(as_storage_rd *rd, as_bin *stack_bins)
+int
+as_storage_rd_load_bins(as_storage_rd *rd, as_bin *stack_bins)
 {
 	if (rd->ns->storage_data_in_memory) {
 		rd->bins = rd->ns->single_bin ? as_index_get_single_bin(rd->r) :
 				safe_bins(rd->r);
-		return true;
+		return 0;
 	}
 
 	// Data NOT in-memory.
@@ -231,12 +231,14 @@ as_bin_get_and_size_all(as_storage_rd *rd, as_bin *stack_bins)
 	as_bin_set_all_empty(rd);
 
 	if (rd->record_on_device && ! rd->ignore_record_on_device) {
-		if (0 != as_storage_particle_read_all_ssd(rd)) {
-			return false;
+		int result = as_storage_particle_read_all_ssd(rd);
+
+		if (result < 0) {
+			return result;
 		}
 	}
 
-	return true;
+	return 0;
 }
 
 // utility function to convert a pointer to the bin space to an array of pointers to each (used) bin
