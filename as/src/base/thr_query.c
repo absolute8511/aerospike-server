@@ -2589,7 +2589,7 @@ as_query(as_transaction *tr)
 
 	// get optional set
 	as_msg_field *sfp = as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_SET);
-	if (sfp) {
+	if (sfp && as_msg_field_get_value_sz(sfp) > 0) {
 		setname = cf_strndup((const char *)sfp->data, as_msg_field_get_value_sz(sfp));
 	}
 
