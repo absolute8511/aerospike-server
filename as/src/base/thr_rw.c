@@ -3861,6 +3861,9 @@ write_local_dim_account_memory(as_transaction *tr, as_namespace *ns,
 // different depending on configuration.
 //
 
+//================================================
+// Data-in-memory, single-bin.
+//
 int
 write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		bool record_created, bool increment_generation,
@@ -3893,13 +3896,11 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 	jem_set_arena(arena);
 #endif
 
-
 	//------------------------------------------------------
 	// Copy existing bin into old_bin to enable unwinding.
 	//
 
 	as_bin old_bin = *rd->bins;
-
 
 	//------------------------------------------------------
 	// Loop over bin ops to affect new bin space, creating
@@ -3995,7 +3996,6 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		}
 	}
 
-
 	//------------------------------------------------------
 	// Created the new bin to write - apply changes to
 	// metadata in as_index needed for pickling and writing.
@@ -4011,7 +4011,6 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		write_local_dim_single_bin_unwind(&old_bin, rd->bins);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
-
 
 	//------------------------------------------------------
 	// Write the record to storage.
@@ -4033,7 +4032,6 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		histogram_insert_data_point(g_config.write_storage_close_hist, start_ns);
 	}
 
-
 	//------------------------------------------------------
 	// Cleanup - destroy old bin, can't unwind after.
 	//
@@ -4044,13 +4042,15 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 	}
 
 	write_local_dim_account_memory(tr, ns, rd, memory_bytes);
-
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
 }
 
 
+//================================================
+// Data-in-memory, multi-bin.
+//
 int
 write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		bool record_level_replace, bool increment_generation,
@@ -4080,7 +4080,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	jem_set_arena(arena);
 #endif
 
-
 	//------------------------------------------------------
 	// Copy existing bins to new space, and keep old bins
 	// intact for sindex adjustment and so it's possible to
@@ -4106,7 +4105,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 	rd->n_bins = (uint16_t)n_new_bins;
 	rd->bins = new_bins;
-
 
 	//------------------------------------------------------
 	// Loop over bin ops to affect new bin space, creating
@@ -4199,7 +4197,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		}
 	}
 
-
 	//------------------------------------------------------
 	// Created the new bins to write - apply changes to
 	// metadata in as_index needed for pickling and writing.
@@ -4231,7 +4228,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
-
 	//------------------------------------------------------
 	// Write the record to storage.
 	//
@@ -4253,7 +4249,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		histogram_insert_data_point(g_config.write_storage_close_hist, start_ns);
 	}
 
-
 	//------------------------------------------------------
 	// Success - adjust sindex, looking at old and new bins.
 	//
@@ -4263,7 +4258,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 					old_bins, n_old_bins, new_bins, n_new_bins)) {
 		tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
 	}
-
 
 	//------------------------------------------------------
 	// Cleanup - destroy old bins, can't unwind after.
@@ -4302,7 +4296,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		}
 	}
 
-
 	//------------------------------------------------------
 	// Final changes to record data in as_index.
 	//
@@ -4323,13 +4316,15 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	}
 
 	write_local_dim_account_memory(tr, ns, rd, memory_bytes);
-
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
 }
 
 
+//================================================
+// Data-not-in-memory, single-bin.
+//
 int
 write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		bool must_fetch_data, bool increment_generation,
@@ -4359,7 +4354,6 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		return -result;
 	}
 
-
 	//------------------------------------------------------
 	// Loop over ops to gather stack particles size info.
 	//
@@ -4372,7 +4366,6 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 	uint8_t stack_particles[sz_result];
 	uint8_t *p_stack_particles = stack_particles;
-
 
 	//------------------------------------------------------
 	// Loop over bin ops to affect new bin space, creating
@@ -4456,7 +4449,6 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		}
 	}
 
-
 	//------------------------------------------------------
 	// Created the new bin to write - apply changes to
 	// metadata in as_index needed for pickling and writing.
@@ -4471,7 +4463,6 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		write_local_index_metadata_unwind(&old_metadata, r);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
-
 
 	//------------------------------------------------------
 	// Write the record to storage.
@@ -4494,7 +4485,6 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		histogram_insert_data_point(g_config.write_storage_close_hist, start_ns);
 	}
 
-
 	//------------------------------------------------------
 	// Final changes to record data in as_index.
 	//
@@ -4510,6 +4500,9 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 }
 
 
+//================================================
+// Data-not-in-memory, multi-bin.
+//
 int
 write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		bool must_fetch_data, bool record_level_replace, bool increment_generation,
@@ -4556,7 +4549,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		return -result;
 	}
 
-
 	//------------------------------------------------------
 	// Loop over ops to gather stack particles size info.
 	//
@@ -4570,7 +4562,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	uint8_t stack_particles[sz_result];
 	uint8_t *p_stack_particles = stack_particles;
 
-
 	//------------------------------------------------------
 	// Copy old bins (if any) - which are currently in new
 	// bins array - to old bins array, for sindex purposes.
@@ -4579,7 +4570,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	if (has_sindex && n_old_bins != 0) {
 		memcpy(old_bins, new_bins, n_old_bins * sizeof(as_bin));
 	}
-
 
 	//------------------------------------------------------
 	// Loop over bin ops to affect new bin space, creating
@@ -4667,7 +4657,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		}
 	}
 
-
 	//------------------------------------------------------
 	// Created the new bins to write - apply changes to
 	// metadata in as_index needed for pickling and writing.
@@ -4686,7 +4675,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		write_local_index_metadata_unwind(&old_metadata, r);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
-
 
 	//------------------------------------------------------
 	// Write the record to storage.
@@ -4707,7 +4695,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		histogram_insert_data_point(g_config.write_storage_close_hist, start_ns);
 	}
 
-
 	//------------------------------------------------------
 	// Success - adjust sindex, looking at old and new bins.
 	//
@@ -4717,7 +4704,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 					old_bins, n_old_bins, new_bins, n_new_bins)) {
 		tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
 	}
-
 
 	//------------------------------------------------------
 	// Final changes to record data in as_index.
@@ -4759,7 +4745,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		return result;
 	}
 
-
 	//------------------------------------------------------
 	// Loop over ops to set some essential policy flags.
 	//
@@ -4774,7 +4759,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		write_local_failed(tr, 0, false, 0, 0, result);
 		return -1;
 	}
-
 
 	//------------------------------------------------------
 	// Find or create the as_index and get a reference -
@@ -4872,7 +4856,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		return -1;
 	}
 
-
 	//------------------------------------------------------
 	// Open or create the as_storage_rd, and handle record
 	// metadata.
@@ -4908,7 +4891,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	if (rec_props_data_size > 0) {
 		as_storage_record_set_rec_props(&rd, rec_props_data);
 	}
-
 
 	//------------------------------------------------------
 	// Split write_local() according to configuration to
@@ -4952,10 +4934,9 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		return -1;
 	}
 
-
 	//------------------------------------------------------
-	// Done - make changes to the record index, and release
-	// the record lock.
+	// Done - gather function's output, release the record
+	// lock, and do XDR write if appropriate.
 	//
 
 	*pickled_buf = pickle.buf;

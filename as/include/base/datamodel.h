@@ -235,12 +235,10 @@ extern uint32_t as_bin_particle_ptr(as_bin *b, uint8_t **p_value);
 // wire:
 extern int32_t as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op);
 extern int as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op);
-extern int as_bin_particle_replace_modify_from_client(as_bin *b, const as_msg_op *op); // TODO - deprecate
 extern int32_t as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op);
 extern int as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op);
-extern int as_bin_particle_replace_from_client(as_bin *b, const as_msg_op *op); // TODO - deprecate
-extern int as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled);
 extern int32_t as_bin_particle_stack_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op);
+extern int as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled);
 extern int32_t as_bin_particle_stack_from_pickled(as_bin *b, uint8_t* stack, uint8_t **p_pickled);
 extern uint32_t as_bin_particle_client_value_size(as_bin *b);
 extern uint32_t as_bin_particle_to_client(const as_bin *b, as_msg_op *op);
