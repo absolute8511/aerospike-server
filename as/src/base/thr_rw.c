@@ -5912,9 +5912,14 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 			as_bin *b_new = &new_bins[i_new];
 
 			if (b_old->id == b_new->id) {
-				// TODO - use a "dirty bit" to avoid comparing particles!
-				sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
-				sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+				if (as_bin_get_particle_type(b_old) != as_bin_get_particle_type(b_new) ||
+						b_old->particle != b_new->particle) {
+					// TODO - might want a "diff" method that takes two bins and
+					// detects the (rare) case when a particle was rewritten
+					// with the exact old value.
+					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+				}
 
 				found = true;
 				break;
@@ -6561,6 +6566,15 @@ write_local_dim(as_namespace *ns, const char *set_name, as_transaction *tr,
 	// Cleanup - destroy old bins, can't unwind after.
 	//
 
+	// Special case - record-level replace, just destroy all old bins.
+	if (record_level_replace) {
+		for (uint32_t i_old = 0; i_old < n_old_bins; i_old++) {
+			as_bin_particle_destroy(&old_bins[i_old], true);
+		}
+
+		n_old_bins = 0; // skip normal case below
+	}
+
 	// Find any old bins that need destroying.
 	for (uint32_t i_old = 0; i_old < n_old_bins; i_old++) {
 		as_bin *b_old = &old_bins[i_old];
@@ -6571,7 +6585,6 @@ write_local_dim(as_namespace *ns, const char *set_name, as_transaction *tr,
 		}
 
 		as_particle *p_old = b_old->particle;
-		bool found = false;
 
 		for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
 			as_bin *b_new = &new_bins[i_new];
@@ -6581,13 +6594,8 @@ write_local_dim(as_namespace *ns, const char *set_name, as_transaction *tr,
 					as_bin_particle_destroy(b_old, true);
 				}
 
-				found = true;
 				break;
 			}
-		}
-
-		if (! found && record_level_replace) {
-			as_bin_particle_destroy(b_old, true);
 		}
 	}
 
