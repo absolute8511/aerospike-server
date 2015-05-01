@@ -6,10 +6,8 @@ environment:
 
 dependency:
   - url: git@github.com:citrusleaf/aerospike-server-enterprise
-    ref: particle
     dir: $EEREPO
   - url: git@github.com:citrusleaf/client
-    ref: prod2.0
     dir: $CLIENTREPO_2X
 
 container:
