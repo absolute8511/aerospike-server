@@ -322,47 +322,6 @@
 //-- Note that we've tried to make the mapping somewhat cannonical where
 //-- possible.
 //
-// Here are the fields (the contents) of the Property Maps.  We've annotated
-// the fields that are used by TopRecords and SubRecords (and both).
-// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#define PM_ItemCount             'I' // (Top): Count of all items in LDT
-#define PM_Version               'V' // (Top): Code Version
-#define PM_LdtType               'T' // (Top): Type: stack, set, map, list
-#define PM_BinName               'B' // (Top): LDT Bin Name
-#define PM_Magic                 'Z' // (All): Special Sauce
-#define PM_EsrDigest             'E' // (All): Digest of ESR
-#define PM_RecType               'R' // (All): Type of Rec:Top,Ldr,Esr,CDir
-#define PM_LogInfo               'L' // (All): Log Info (currently unused)
-#define PM_ParentDigest          'P' // (Subrec): Digest of TopRec
-#define PM_SelfDigest            'D' // (Subrec): Digest of THIS Record
-
-// Here are the fields that are found in the SINGLE "Hidden" LDT Control Map.
-//-- ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//-- Record Level Property Map (RPM) Fields: One RPM per record
-//-- ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#define RPM_LdtCount             'C'  // Number of LDTs in this rec
-#define RPM_Version              'V'  // Partition Version Info (6 bytes)
-#define RPM_Magic                'Z'  // Special Sauce
-#define RPM_SelfDigest           'D'  // Digest of this record
-
-#define LF_NextPage              'N'  // Digest of Next (right) Leaf Page
-
-// Here are the fields for Tree Meta Data
-
-#define LS_StoreState            'S'  // Compact or Regular Storage
-
-#define LS_RootKeyList         	 'K'  // Root Key List, when in List Mode
-#define LS_RootDigestList        'D'  // Digest List, when in List Mode
-#define LS_CompactList           'Q'  // Simple Compact List -- before "tree mode"
-#define LS_LeftLeafDigest        'A'  // Record Ptr of Left-most leaf
-#define LS_RightLeafDigest       'Z'  // Record Ptr of Right-most leaf
-
-// Define the LDT Hidden Bin Name -- for any record that contains LDTs
-#define REC_LDT_CTRL_BIN         "LDTCONTROLBIN"
-
-// Define the Property Map Bin Name for Sub Records
-#define SUBREC_PROP_BIN          "SR_PROP_BIN"
-#define LDT_VERSION_SZ           6
 
 
 //------------------------------------------------------------------------------
@@ -1734,13 +1693,13 @@ as_bin_get_llist(as_namespace *ns, as_index_tree *sub_tree, as_val *ctrl_list, u
 {
 	as_map *propMap = as_list_get_map((as_list *)ctrl_list, 0);
 	if (!propMap) {
-		cf_debug(AS_LDT, "Control Bin Properly Map not of type map");
+		cf_debug(AS_LDT, "Control Bin Property Map not of type map");
 		return NULL;
 	}
 
 	as_map *ldtMap = as_list_get_map((as_list *)ctrl_list, 1);
 	if (!ldtMap) {
-		cf_debug(AS_LDT, "Control Bin Properly Map not of type map");
+		cf_debug(AS_LDT, "Control Bin ldt Map not of type map");
 		return NULL;
 	}
 	
@@ -1752,7 +1711,7 @@ as_bin_get_llist(as_namespace *ns, as_index_tree *sub_tree, as_val *ctrl_list, u
 	cf_debug(AS_LDT, "storestate |%s|", storestatestr);
 	if (strcmp("\"C\"", storestatestr) == 0) {
 		as_ldt_get_key((char)LS_CompactList, &key, key_buffer);
-		as_list *rl = as_hashmap_get((as_hashmap *)ldtMap, (as_val *)&key);
+		as_list *rl = (as_list *)as_hashmap_get((as_hashmap *)ldtMap, (as_val *)&key);
 		as_val_reserve(rl);
 		cf_free(storestatestr);
 		return rl;
@@ -1845,7 +1804,7 @@ as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_
 	// Not ref counted need not be destroyed...
 	as_map *prop_map = as_list_get_map(ctrl_list, 0);
 	if (!prop_map) {
-		cf_debug(AS_LDT, "Control Bin Properly Map not of type map");
+		cf_debug(AS_LDT, "Control Bin Property Map not of type map");
 		as_val_destroy(valp);
 		return NULL;
 	}

@@ -2265,8 +2265,8 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";ldt-page-size=");
 	cf_dyn_buf_append_uint64(db, ns->ldt_page_size);
 
-	cf_dyn_buf_append_string(db, ";scan_ldt_buff_max=");
-	cf_dyn_buf_append_uint64(db, ns->scan_ldt_buff_max);
+	cf_dyn_buf_append_string(db, ";ldt_scan_buff_max=");
+	cf_dyn_buf_append_uint64(db, ns->ldt_scan_buff_max);
 
 	cf_dyn_buf_append_string(db, ";enable-xdr=");
 	cf_dyn_buf_append_string(db, ns->enable_xdr ? "true" : "false");
@@ -3459,12 +3459,12 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of ldt-page-size of ns %s from %d to %d ", ns->name, ns->ldt_page_size, val);
 			ns->ldt_page_size = val;
 		}
-		else if (0 == as_info_parameter_get(params, "scan-ldt-buff-max", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "ldt-scan-buff-max", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val)) {
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of scan-ldt-buff-max of ns %s from %d to %d ", ns->name, ns->scan_ldt_buff_max, val);
-			ns->scan_ldt_buff_max = val;
+			cf_info(AS_INFO, "Changing value of ldt-scan-buff-max of ns %s from %d to %d ", ns->name, ns->ldt_scan_buff_max, val);
+			ns->ldt_scan_buff_max = val;
 		}
 		else if (0 == as_info_parameter_get(params, "ldt-gc-rate", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val)) {
