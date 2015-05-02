@@ -873,11 +873,6 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 					"write_delete_local for digest returns %d, %d digest %"PRIx64"",
 					rv, tr->result_code, *(uint64_t*)&tr->keyd);
 		} else {
-			write_local_generation wlg;
-			wlg.use_gen_check = false;
-			wlg.use_gen_set = false;
-			wlg.use_msg_gen = true;
-
 			// If the XDR is enabled and if the user configured to stop the writes if there is no XDR
 			// and if the xdr digestpipe is not opened fail the writes with appropriate return value
 			// We cannot do this check inside write_local() because that function is used for replica
@@ -926,6 +921,11 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 					}
 				} else {
 					cf_free(call);
+
+					write_local_generation wlg;
+					wlg.use_gen_check = false;
+					wlg.use_gen_set = false;
+					wlg.use_msg_gen = true;
 
 					rv = write_local(tr, &wlg, &wr->pickled_buf,
 							&wr->pickled_sz, &wr->pickled_void_time,
@@ -2714,31 +2714,10 @@ write_process(cf_node node, msg *m, bool respond)
 			}
 			if (msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
 				rv = write_delete_local(&tr, true, node, false);
-			} else if (generation == 0) {
-				write_local_generation wlg;
-				wlg.use_gen_check = false;
-				wlg.use_gen_set = false;
-				wlg.use_msg_gen = false;
-				rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
-			} else if (true == ns->single_bin) {
-				write_local_generation wlg;
-				wlg.use_gen_check = false;
-				wlg.use_gen_set = true;
-				wlg.gen_set = generation;
-				wlg.use_msg_gen = false;
-				rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
 			} else {
-				write_local_generation wlg;
-				if (generation) {
-					wlg.use_gen_check = true;
-					wlg.gen_check = generation - 1;
-				} else {
-					wlg.use_gen_check = false;
-				}
-				wlg.use_gen_set = false;
-				wlg.use_msg_gen = false;
-				rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
+				cf_crash_digest(AS_RW, keyd, "replica write trying to use write_local()");
 			}
+
 			cf_debug_digest(AS_RW, keyd, "Local RW: rv %d result code(%d)",
 					rv, tr.result_code);
 
@@ -3048,6 +3027,147 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 
 
 //==============================================================================
+// Utilities used by write_local() and UDF code.
+//
+
+int
+as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m)
+{
+	as_msg_field* f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
+
+	if (! f || as_msg_field_get_value_sz(f) == 0) {
+		return 0;
+	}
+
+	size_t msg_set_name_len = as_msg_field_get_value_sz(f);
+	char msg_set_name[msg_set_name_len + 1];
+
+	memcpy((void*)msg_set_name, (const void*)f->data, msg_set_name_len);
+	msg_set_name[msg_set_name_len] = 0;
+
+	// Given the name, find/assign the set-ID and write it in the as_index.
+	return as_index_set_set(r, ns, msg_set_name, true);
+}
+
+bool
+get_msg_key(as_msg* m, as_storage_rd* rd)
+{
+	as_msg_field* f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_KEY);
+
+	if (! f) {
+		return true;
+	}
+
+	if (rd->ns->single_bin && rd->ns->storage_data_in_memory) {
+		// For now we just ignore the key - should we fail out of write_local()?
+		cf_warning(AS_RW, "can't store key if data-in-memory & single-bin");
+		return false;
+	}
+
+	rd->key_size = as_msg_field_get_value_sz(f);
+	rd->key = f->data;
+
+	return true;
+}
+
+void
+update_metadata_in_index(as_transaction *tr, bool increment_generation,
+		as_index *r)
+{
+	// Shortcut pointers.
+	as_msg *m = &tr->msgp->msg;
+	as_namespace *ns = tr->rsv.ns;
+
+	if (m->record_ttl == 0xFFFFffff) {
+		// TTL = -1 sets record_void time to "never expires".
+		r->void_time = 0;
+	}
+	else if (m->record_ttl != 0) {
+		// Check for sizes that might be too large - limit it to 0xFFFFffff.
+		uint64_t temp_big = (uint64_t)as_record_void_time_get() + (uint64_t)m->record_ttl;
+
+		if (temp_big > 0xFFFFffff) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} ttl %u causes void-time overflow, clamping void-time to max ",
+					ns->name, m->record_ttl);
+
+			r->void_time = 0xFFFFffff;
+		}
+		else {
+			if (m->record_ttl > MAX_TTL_WARNING && ns->max_ttl == 0) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} ttl %u exceeds %u - set config value max-ttl to suppress this warning ",
+						ns->name, m->record_ttl, MAX_TTL_WARNING);
+			}
+
+			r->void_time = (uint32_t)temp_big;
+		}
+	}
+	else if (ns->default_ttl != 0) {
+		// TTL = 0 set record_void time to default ttl value.
+		r->void_time = as_record_void_time_get() + ns->default_ttl;
+	}
+	else {
+		r->void_time = 0;
+	}
+
+	if (as_ldt_record_is_sub(r)) {
+		// Sub-records never expire by themselves.
+		r->void_time = 0;
+	}
+
+	if (increment_generation) {
+		r->generation++;
+
+		// The generation might wrap - 0 is reserved as "uninitialized".
+		if (r->generation == 0) {
+			r->generation = 1;
+		}
+	}
+}
+
+bool
+pickle_all(as_storage_rd *rd, pickle_info *pickle)
+{
+	pickle->void_time = rd->r->void_time;
+
+	if (0 != as_record_pickle(rd->r, rd, &pickle->buf, &pickle->buf_size)) {
+		return false;
+	}
+
+	pickle->rec_props_data = NULL;
+
+	// TODO - we could avoid this copy (and maybe even not do this here at all)
+	// if all callers malloced rdp->rec_props.p_data upstream for hand-off...
+	if (rd->rec_props.p_data) {
+		pickle->rec_props_size = rd->rec_props.size;
+		pickle->rec_props_data = cf_malloc(pickle->rec_props_size);
+
+		if (! pickle->rec_props_data) {
+			cf_free(pickle->buf);
+			return false;
+		}
+
+		memcpy(pickle->rec_props_data, rd->rec_props.p_data,
+				pickle->rec_props_size);
+	}
+
+	return true;
+}
+
+void
+account_memory(as_transaction *tr, as_storage_rd *rd, uint64_t start_bytes)
+{
+	uint64_t end_bytes = as_storage_record_get_n_bytes_memory(rd);
+	int64_t delta_bytes = (int64_t)end_bytes - (int64_t)start_bytes;
+
+	if (delta_bytes) {
+		cf_atomic_int_add(&tr->rsv.ns->n_bytes_memory, delta_bytes);
+		cf_atomic_int_add(&tr->rsv.p->n_bytes_memory, delta_bytes);
+	}
+}
+
+
+
+//==============================================================================
 // write_local() utilities.
 //
 
@@ -3117,115 +3237,6 @@ write_local_failed(as_transaction* tr, as_index_ref* r_ref,
 	tr->result_code = result_code;
 }
 
-// TODO - ironically this is no longer called by write_local() - move & rename.
-void write_local_post_processing(as_transaction *tr, as_namespace *ns,
-		as_partition_reservation *prsv, uint8_t **pickled_buf,
-		size_t *pickled_sz, uint32_t *pickled_void_time,
-		as_rec_props *p_pickled_rec_props, bool increment_generation,
-		write_local_generation *wlg, as_index *r, as_storage_rd *rdp,
-		int64_t memory_bytes)
-{
-
-	as_msg *m = tr ? (tr->msgp ? &tr->msgp->msg : NULL) : NULL;
-
-	if (m && m->record_ttl == 0xFFFFFFFF) {
-		// TTL = -1 sets record_void time to "never expires".
-		r->void_time = 0;
-		cf_debug(AS_RW, "Msg record_ttl(-1) means Never Expire");
-	} else if (m && m->record_ttl) {
-		// Check for sizes that might be too large.  Limit it to 0xFFFFFFFF.
-		uint64_t temp_big = ((uint64_t) as_record_void_time_get()) + ((uint64_t) m->record_ttl);
-		if (temp_big > 0xFFFFFFFF) {
-			cf_warning(AS_RW, "record TTL %u causes void-time to overflow 32-bit integer, clamping void-time to max integer",
-					m->record_ttl);
-			r->void_time = 0xFFFFFFFF;
-		} else {
-			if (m->record_ttl > MAX_TTL_WARNING && ns->max_ttl == 0) {
-				cf_warning(AS_RW, "record TTL %u exceeds warning threshold %u - set config value max-ttl to suppress this warning",
-						m->record_ttl, MAX_TTL_WARNING);
-			}
-			r->void_time = (uint32_t)temp_big;
-		}
-	} else if (ns->default_ttl) {
-		// TTL = 0 set record_void time to default ttl value.
-		r->void_time = as_record_void_time_get() + ns->default_ttl;
-	} else {
-		r->void_time = 0;
-	}
-
-	if (as_ldt_record_is_sub(r)) {
-		cf_detail(AS_RW, "Set the void_time for subrecord to be infinite... they never expire by themselves");
-		r->void_time = 0;
-	}
-
-	if (r->void_time != 0) {
-		if (prsv) {
-			cf_atomic_int_setmax( &prsv->p->max_void_time, r->void_time);
-		} else {
-			cf_atomic_int_setmax( &tr->rsv.p->max_void_time, r->void_time);
-		}
-		cf_atomic_int_setmax( &ns->max_void_time, r->void_time);
-	}
-
-	if (increment_generation) {
-		if (wlg && wlg->use_gen_set) {
-			r->generation = wlg->gen_set;
-		} else {
-			r->generation++;
-
-			// The generation might wrap - 0 is reserved as "uninitialized".
-			if (r->generation == 0) {
-				r->generation = 1;
-			}
-		}
-	}
-
-	if (r->generation == 0) {
-		cf_warning_digest(AS_RW, &r->key, "unusual - setting generation 0");
-	}
-
-	cf_debug_digest(AS_RW,&r->key, "WRITE LOCAL: generation %d default_ttl %d ::",
-			r->generation, r->void_time - as_record_void_time_get());
-
-	if (tr) {
-		tr->generation = r->generation;
-	}
-
-	if (pickled_void_time)
-		*pickled_void_time = r->void_time;
-
-	if (pickled_buf) {
-		if (0 != as_record_pickle(r, rdp, pickled_buf, pickled_sz)) {
-			cf_info(AS_RW, "could not pickle on write");
-			*pickled_buf = 0;
-			*pickled_sz = 0;
-		}
-	}
-
-	// TODO - we could avoid this copy (and maybe even not do this here at all)
-	// if all callers malloced rdp->rec_props.p_data upstream for hand-off...
-	if (p_pickled_rec_props && rdp->rec_props.p_data) {
-		p_pickled_rec_props->size = rdp->rec_props.size;
-		p_pickled_rec_props->p_data = cf_malloc(p_pickled_rec_props->size);
-		memcpy(p_pickled_rec_props->p_data, rdp->rec_props.p_data,
-				p_pickled_rec_props->size);
-	}
-
-	if (rdp->ns->storage_data_in_memory) {
-		uint64_t end_memory_bytes = as_storage_record_get_n_bytes_memory(rdp);
-
-		int64_t delta_bytes = end_memory_bytes - memory_bytes;
-		if (delta_bytes) {
-			cf_atomic_int_add(&ns->n_bytes_memory, delta_bytes);
-			if (prsv) {
-				cf_atomic_int_add(&prsv->p->n_bytes_memory, delta_bytes);
-			} else {
-				cf_atomic_int_add(&tr->rsv.p->n_bytes_memory, delta_bytes);
-			}
-		}
-	}
-} // end write_local_post_processing()
-
 int write_local_preprocessing(as_transaction *tr, write_local_generation *wlg,
 		bool journal, bool *is_done)
 {
@@ -3293,26 +3304,6 @@ int write_local_preprocessing(as_transaction *tr, write_local_generation *wlg,
 	return 0;
 }
 
-// TODO - no longer just a write_local() utility - move.
-int
-as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m)
-{
-	as_msg_field* f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
-
-	if (! f || as_msg_field_get_value_sz(f) == 0) {
-		return 0;
-	}
-
-	size_t msg_set_name_len = as_msg_field_get_value_sz(f);
-	char msg_set_name[msg_set_name_len + 1];
-
-	memcpy((void*)msg_set_name, (const void*)f->data, msg_set_name_len);
-	msg_set_name[msg_set_name_len] = 0;
-
-	// Given the name, find/assign the set-ID and write it in the as_index.
-	return as_index_set_set(r, ns, msg_set_name, true);
-}
-
 static bool
 check_msg_set_name(as_msg* m, const char* set_name)
 {
@@ -3344,29 +3335,6 @@ check_msg_set_name(as_msg* m, const char* set_name)
 
 	return true;
 }
-
-// TODO - no longer just a write_local() utility - move.
-bool
-get_msg_key(as_msg* m, as_storage_rd* rd)
-{
-	as_msg_field* f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_KEY);
-
-	if (! f) {
-		return true;
-	}
-
-	if (rd->ns->single_bin && rd->ns->storage_data_in_memory) {
-		// For now we just ignore the key - should we fail out of write_local()?
-		cf_warning(AS_RW, "can't store key if data-in-memory & single-bin");
-		return false;
-	}
-
-	rd->key_size = as_msg_field_get_value_sz(f);
-	rd->key = f->data;
-
-	return true;
-}
-
 
 int
 write_local_policies(as_transaction *tr, bool *p_must_not_create,
@@ -3723,43 +3691,6 @@ write_local_dim_single_bin_unwind(as_bin* old_bin, as_bin* new_bin)
 	*new_bin = *old_bin;
 }
 
-typedef struct pickle_info_s {
-	uint32_t	void_time;
-	uint8_t*	rec_props_data;
-	uint32_t	rec_props_size;
-	uint8_t*	buf;
-	size_t		buf_size;
-} pickle_info;
-
-bool
-write_local_pickle(as_storage_rd *rd, pickle_info *pickle)
-{
-	pickle->void_time = rd->r->void_time;
-
-	if (0 != as_record_pickle(rd->r, rd, &pickle->buf, &pickle->buf_size)) {
-		return false;
-	}
-
-	pickle->rec_props_data = NULL;
-
-	// TODO - we could avoid this copy (and maybe even not do this here at all)
-	// if all callers malloced rdp->rec_props.p_data upstream for hand-off...
-	if (rd->rec_props.p_data) {
-		pickle->rec_props_size = rd->rec_props.size;
-		pickle->rec_props_data = cf_malloc(pickle->rec_props_size);
-
-		if (! pickle->rec_props_data) {
-			cf_free(pickle->buf);
-			return false;
-		}
-
-		memcpy(pickle->rec_props_data, rd->rec_props.p_data,
-				pickle->rec_props_size);
-	}
-
-	return true;
-}
-
 void
 write_local_pickle_unwind(pickle_info *pickle)
 {
@@ -3779,57 +3710,10 @@ void
 write_local_update_index_metadata(as_transaction *tr, bool increment_generation,
 		index_metadata *old, as_index *r)
 {
-	// Shortcut pointers.
-	as_msg *m = &tr->msgp->msg;
-	as_namespace *ns = tr->rsv.ns;
-
 	old->void_time = r->void_time;
 	old->generation = r->generation;
 
-	if (m->record_ttl == 0xFFFFffff) {
-		// TTL = -1 sets record_void time to "never expires".
-		r->void_time = 0;
-	}
-	else if (m->record_ttl != 0) {
-		// Check for sizes that might be too large - limit it to 0xFFFFffff.
-		uint64_t temp_big = (uint64_t)as_record_void_time_get() + (uint64_t)m->record_ttl;
-
-		if (temp_big > 0xFFFFffff) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: ttl %u causes void-time overflow, clamping void-time to max ",
-					ns->name, m->record_ttl);
-
-			r->void_time = 0xFFFFffff;
-		}
-		else {
-			if (m->record_ttl > MAX_TTL_WARNING && ns->max_ttl == 0) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: ttl %u exceeds %u - set config value max-ttl to suppress this warning ",
-						ns->name, m->record_ttl, MAX_TTL_WARNING);
-			}
-
-			r->void_time = (uint32_t)temp_big;
-		}
-	}
-	else if (ns->default_ttl != 0) {
-		// TTL = 0 set record_void time to default ttl value.
-		r->void_time = as_record_void_time_get() + ns->default_ttl;
-	}
-	else {
-		r->void_time = 0;
-	}
-
-	if (as_ldt_record_is_sub(r)) {
-		// Sub-records never expire by themselves.
-		r->void_time = 0;
-	}
-
-	if (increment_generation) {
-		r->generation++;
-
-		// The generation might wrap - 0 is reserved as "uninitialized".
-		if (r->generation == 0) {
-			r->generation = 1;
-		}
-	}
+	update_metadata_in_index(tr, increment_generation, r);
 }
 
 void
@@ -3837,19 +3721,6 @@ write_local_index_metadata_unwind(index_metadata *old, as_index *r)
 {
 	r->void_time = old->void_time;
 	r->generation = old->generation;
-}
-
-void
-write_local_dim_account_memory(as_transaction *tr, as_namespace *ns,
-		as_storage_rd *rd, uint64_t start_bytes)
-{
-	uint64_t end_bytes = as_storage_record_get_n_bytes_memory(rd);
-	int64_t delta_bytes = (int64_t)end_bytes - (int64_t)start_bytes;
-
-	if (delta_bytes) {
-		cf_atomic_int_add(&ns->n_bytes_memory, delta_bytes);
-		cf_atomic_int_add(&tr->rsv.p->n_bytes_memory, delta_bytes);
-	}
 }
 
 
@@ -4006,7 +3877,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
 
 	// Pickle before writing - can't fail after.
-	if (! write_local_pickle(rd, pickle)) {
+	if (! pickle_all(rd, pickle)) {
 		write_local_index_metadata_unwind(&old_metadata, r);
 		write_local_dim_single_bin_unwind(&old_bin, rd->bins);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -4041,7 +3912,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		as_bin_particle_destroy(&old_bin, true);
 	}
 
-	write_local_dim_account_memory(tr, ns, rd, memory_bytes);
+	account_memory(tr, rd, memory_bytes);
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
@@ -4221,7 +4092,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
 
 	// Pickle before writing - can't fail after.
-	if (! write_local_pickle(rd, pickle)) {
+	if (! pickle_all(rd, pickle)) {
 		write_local_index_metadata_unwind(&old_metadata, r);
 		cf_free(new_bin_space);
 		write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
@@ -4315,7 +4186,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		as_index_set_flags(r, AS_INDEX_FLAG_KEY_STORED);
 	}
 
-	write_local_dim_account_memory(tr, ns, rd, memory_bytes);
+	account_memory(tr, rd, memory_bytes);
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
@@ -4459,7 +4330,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
 
 	// Pickle before writing - bins may disappear on as_storage_record_close().
-	if (! write_local_pickle(rd, pickle)) {
+	if (! pickle_all(rd, pickle)) {
 		write_local_index_metadata_unwind(&old_metadata, r);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
@@ -4671,7 +4542,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
 
 	// Pickle before writing - bins may disappear on as_storage_record_close().
-	if (! write_local_pickle(rd, pickle)) {
+	if (! pickle_all(rd, pickle)) {
 		write_local_index_metadata_unwind(&old_metadata, r);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
@@ -5285,30 +5156,8 @@ write_process_op(as_namespace *ns, cf_digest *keyd, cl_msg *msgp,
 	int rv = 0;
 	if (msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
 		rv = write_delete_local(&tr, true, node, false);
-	} else if (generation == 0) {
-		write_local_generation wlg;
-		wlg.use_gen_check = false;
-		wlg.use_gen_set = false;
-		wlg.use_msg_gen = false;
-		rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
-	} else if (true == ns->single_bin) {
-		write_local_generation wlg;
-		wlg.use_gen_check = false;
-		wlg.use_gen_set = true;
-		wlg.gen_set = generation;
-		wlg.use_msg_gen = false;
-		rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
 	} else {
-		write_local_generation wlg;
-		if (generation) {
-			wlg.use_gen_check = true;
-			wlg.gen_check = generation - 1;
-		} else {
-			wlg.use_gen_check = false;
-		}
-		wlg.use_gen_set = false;
-		wlg.use_msg_gen = false;
-		rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
+		cf_crash_digest(AS_RW, keyd, "replica write trying to use write_local()");
 	}
 
 	if (rv == 0) {

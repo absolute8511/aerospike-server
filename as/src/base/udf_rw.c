@@ -676,6 +676,33 @@ udf_rw_getop(udf_record *urecord, udf_optype *urecord_op)
 	}
 }
 
+/*
+ * Helper for udf_rw_post_processing().
+ */
+void
+udf_rw_write_post_processing(as_transaction *tr, as_storage_rd *rd,
+		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
+		as_rec_props *p_pickled_rec_props, int64_t memory_bytes)
+{
+	update_metadata_in_index(tr, true, rd->r);
+
+	pickle_info pickle;
+
+	pickle_all(rd, &pickle);
+
+	*pickled_buf = pickle.buf;
+	*pickled_sz = pickle.buf_size;
+	*pickled_void_time = pickle.void_time;
+	p_pickled_rec_props->p_data = pickle.rec_props_data;
+	p_pickled_rec_props->size = pickle.rec_props_size;
+
+	tr->generation = rd->r->generation;
+
+	if (tr->rsv.ns->storage_data_in_memory) {
+		account_memory(tr, rd, memory_bytes);
+	}
+}
+
 /* Internal Function: Does the post processing for the UDF record after the
  *					  UDF execution. Does the following:
  *		1. Record is closed
@@ -723,10 +750,9 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 			as_storage_record_set_rec_props(rd, rec_props_data);
 		}
 
-		write_local_post_processing(tr, tr->rsv.ns, NULL, &urecord->pickled_buf,
+		udf_rw_write_post_processing(tr, rd, &urecord->pickled_buf,
 			&urecord->pickled_sz, &urecord->pickled_void_time,
-			&urecord->pickled_rec_props, true/*increment_generation*/,
-			NULL, r_ref->r, rd, urecord->starting_memory_bytes);
+			&urecord->pickled_rec_props, urecord->starting_memory_bytes);
 
 		// Now ok to accommodate a new stored key...
 		if (! as_index_is_flag_set(r_ref->r, AS_INDEX_FLAG_KEY_STORED) && rd->key) {
