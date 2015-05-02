@@ -145,7 +145,7 @@ void g_write_hash_delete(global_keyd *gk) {
 void rw_complete(as_transaction *tr, as_record_lock *rl, int record_get_rv);
 int write_local(as_transaction *tr, write_local_generation *wlg,
 				uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
-				as_rec_props *p_pickled_rec_props, bool journal, cf_node masternode);
+				as_rec_props *p_pickled_rec_props, bool journal);
 int write_journal(as_transaction *tr, write_local_generation *wlg); // only do write
 int write_delete_journal(as_transaction *tr);
 static void release_proto_fd_h(as_file_handle *proto_fd_h);
@@ -929,7 +929,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 
 					rv = write_local(tr, &wlg, &wr->pickled_buf,
 							&wr->pickled_sz, &wr->pickled_void_time,
-							&wr->pickled_rec_props, false, 0);
+							&wr->pickled_rec_props, false);
 					WR_TRACK_INFO(wr, "internal_rw_start: write local done ");
 				}
 				if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
@@ -4620,7 +4620,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 int
 write_local(as_transaction *tr, write_local_generation *wlg,
 		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
-		as_rec_props *p_pickled_rec_props, bool journal, cf_node masternode)
+		as_rec_props *p_pickled_rec_props, bool journal)
 {
 	//------------------------------------------------------
 	// Perform checks that don't need to loop over ops, or
@@ -4861,7 +4861,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	if ((m->info1 & AS_MSG_INFO1_XDR) != 0 ||
 			g_config.xdr_cfg.xdr_forward_xdrwrites ||
 			ns->ns_forward_xdr_writes) {
-		xdr_write(ns, tr->keyd, r->generation, masternode, is_delete, set_id);
+		xdr_write(ns, tr->keyd, r->generation, 0, is_delete, set_id);
 	}
 
 	return 0;
@@ -5126,7 +5126,7 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 		if (jqe.delete == true)
 			rv = write_delete_local(&tr, false, 0, false);
 		else
-			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, false, 0);
+			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, false);
 
 		cf_detail(AS_RW, "write journal: wrote: rv %d key %"PRIx64,
 				rv, *(uint64_t *)&tr.keyd);
