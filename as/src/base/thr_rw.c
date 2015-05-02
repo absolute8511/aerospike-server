@@ -3398,11 +3398,11 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 			break; // modify and touch shouldn't be in same command
 		}
 
-		if (op->op == AS_MSG_OP_WRITE && op->particle_type == AS_PARTICLE_TYPE_NULL) {
-			if (record_level_replace) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin delete can't have record-level replace flag ", ns->name);
-				return AS_PROTO_RESULT_FAIL_PARAMETER;
-			}
+		if (op->op == AS_MSG_OP_WRITE &&
+				op->particle_type == AS_PARTICLE_TYPE_NULL &&
+				record_level_replace) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin delete can't have record-level replace flag ", ns->name);
+			return AS_PROTO_RESULT_FAIL_PARAMETER;
 		}
 	}
 
@@ -3865,6 +3865,11 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 				return -result;
 			}
 		}
+		else {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
+			write_local_dim_single_bin_unwind(&old_bin, rd->bins);
+			return AS_PROTO_RESULT_FAIL_PARAMETER;
+		}
 	}
 
 	//------------------------------------------------------
@@ -4065,6 +4070,11 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
 				return -result;
 			}
+		}
+		else {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
+			write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+			return AS_PROTO_RESULT_FAIL_PARAMETER;
 		}
 	}
 
@@ -4318,6 +4328,10 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 			p_stack_particles += (uint32_t)sz_result;
 		}
+		else {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
+			return AS_PROTO_RESULT_FAIL_PARAMETER;
+		}
 	}
 
 	//------------------------------------------------------
@@ -4525,6 +4539,10 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 			}
 
 			p_stack_particles += (uint32_t)sz_result;
+		}
+		else {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
+			return AS_PROTO_RESULT_FAIL_PARAMETER;
 		}
 	}
 
