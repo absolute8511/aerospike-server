@@ -50,3 +50,4 @@ build:
       - make $PKG+ee USE_ASM=1
     artifact:
       - pkg/packages/*
+      - target/Linux-x86_64/gen/mallocations.h
