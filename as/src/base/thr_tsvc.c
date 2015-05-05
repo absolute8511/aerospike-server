@@ -195,13 +195,7 @@ transaction_check_msg(as_transaction *tr)
 
 	if (msgp == 0) {
 		cf_warning(AS_TSVC, " incoming transaction has no message, illegal protofd %p proxymsg %p", tr->proto_fd_h, tr->proxy_msg);
-		if (tr->proto_fd_h) {
-			as_msg_send_reply(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER,
-					0, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-			tr->proto_fd_h = 0;
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		}
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 		return -1;
 	}
 
@@ -230,13 +224,7 @@ transaction_check_msg(as_transaction *tr)
 #ifdef DUMP_SYNC_ERROR
 		dump_msg(msgp);
 #endif
-		if (tr->proto_fd_h) {
-			as_msg_send_error(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
-			tr->proto_fd_h = 0;
-			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		}
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 		return 1;
 	}
 
@@ -246,13 +234,7 @@ transaction_check_msg(as_transaction *tr)
 #ifdef DUMP_SYNC_ERROR
 		dump_msg(msgp);
 #endif
-		if (tr->proto_fd_h) {
-			as_msg_send_error(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
-			tr->proto_fd_h = 0;
-			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		}
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 		return 1;
 	}
 
@@ -262,25 +244,13 @@ transaction_check_msg(as_transaction *tr)
 #ifdef DUMP_SYNC_ERROR
 		dump_msg(msgp);
 #endif
-		if (tr->proto_fd_h) {
-			as_msg_send_error(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
-			tr->proto_fd_h = 0;
-			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		}
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 		return 1;
 	}
 
 	if ((msgp->proto.type != PROTO_TYPE_INFO) && (msgp->proto.type != PROTO_TYPE_AS_MSG)) {
 		cf_info(AS_TSVC, "received unknown message type %d, ignoring", msgp->proto.type);
-		if (tr->proto_fd_h) {
-			as_msg_send_error(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
-			tr->proto_fd_h = 0;
-			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		}
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 		return 2;
 	}
 
@@ -326,21 +296,11 @@ as_rw_process_result(int rv, as_transaction *tr, bool *free_msgp)
 					"   warning: failure should have set protocol result code");
 			tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
+
 		if (tr->proto_fd_h) {
-			if (0 != as_msg_send_reply(tr->proto_fd_h,
-						tr->result_code, 0, 0, 0, 0, 0, 0, 0, tr->trid, NULL))
-			{
-				cf_info(AS_TSVC,
-						"tsvc read: can't send error msg, fd %d",
-						tr->proto_fd_h->fd);
-			}
-			tr->proto_fd_h = 0;
-			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
+			as_transaction_error(tr, tr->result_code);
 		}
 		else if (tr->proxy_msg) {
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
 			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
 				cf_detail_digest(AS_RW, &(tr->keyd),
 						"SHIPPED_OP :: Sending ship op reply, rc %d to (%"PRIx64") ::",
@@ -353,8 +313,6 @@ as_rw_process_result(int rv, as_transaction *tr, bool *free_msgp)
 			}
 			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
 					tr->result_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-		} else {
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
 		}
 		return -1;
 	}
@@ -423,15 +381,7 @@ process_transaction(as_transaction *tr)
 		else {
 	        cf_warning(AS_TSVC, "rejecting client transaction - initial partition balance unresolved");
 		}
-
-		if (tr->proto_fd_h) {
-			as_msg_send_reply(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_UNAVAILABLE,
-								0, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-			tr->proto_fd_h = 0;
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		}
-
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_UNAVAILABLE);
 		goto Cleanup;
 	}
 
@@ -441,12 +391,7 @@ process_transaction(as_transaction *tr)
 
 		if (result != AS_PROTO_RESULT_OK) {
 			as_security_log(tr->proto_fd_h, result, PERM_NONE, NULL, NULL);
-
-			as_msg_send_error(tr->proto_fd_h, (uint32_t)result);
-			tr->proto_fd_h = 0;
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			// TODO - error statistics.
-
+			as_transaction_error(tr, (uint32_t)result);
 			goto Cleanup;
 		}
 	}
@@ -483,7 +428,7 @@ process_transaction(as_transaction *tr)
 						cf_atomic64_incr(&g_config.query_fail);
 						cf_debug(AS_TSVC, "Query failed with error %d",
 								tr->result_code);
-						as_msg_send_error(tr->proto_fd_h, tr->result_code);
+						as_transaction_error(tr, tr->result_code);
 					}
 				} else {
 					cf_debug(AS_TSVC, "Received Scan Request: TrID(%"PRIx64")", tr->trid);
@@ -504,17 +449,13 @@ process_transaction(as_transaction *tr)
 					// -5 :: unsupported feature (e.g. scans with UDF)
 					if (rr != 0) {
 						cf_info(AS_TSVC, "Scan failed with error %d", rr);
-						as_msg_send_error(tr->proto_fd_h,
+						as_transaction_error(tr,
 								 rr == -1 ? AS_PROTO_RESULT_FAIL_NAMESPACE :
 								(rr == -3 ? AS_PROTO_RESULT_FAIL_UNAVAILABLE :
 								(rr == -4 ? AS_PROTO_RESULT_FAIL_NOTFOUND :
 								(rr == -5 ? AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE :
 											AS_PROTO_RESULT_FAIL_UNKNOWN))));
 					}
-				}
-				if (rr != 0) {
-					tr->proto_fd_h = 0;
-					MICROBENCHMARK_HIST_INSERT_P(error_hist);
 				}
 			} else if (rv == -3) {
 				// Has digest array, is batch - msgp gets freed through cleanup.
@@ -523,35 +464,18 @@ process_transaction(as_transaction *tr)
 				}
 				if (0 != as_batch(tr)) {
 					cf_info(AS_TSVC, "error from batch function");
-					as_msg_send_error(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
-					tr->proto_fd_h = 0;
-					MICROBENCHMARK_HIST_INSERT_P(error_hist);
+					as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 					cf_atomic_int_incr(&g_config.batch_errors);
 				}
 			} else if (rv == -4) {
 				cf_info(AS_TSVC, "bailed due to bad protocol. Returning failure to client");
 				dump_msg(msgp);
-				if (tr->proto_fd_h) {
-					as_msg_send_reply(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER,
-							0, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-					tr->proto_fd_h = 0;
-					// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-					MICROBENCHMARK_HIST_INSERT_P(error_hist);
-					cf_atomic_int_incr(&g_config.err_tsvc_requests);
-				}
+				as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 			}
 			else {
 				// All other transaction_prepare() errors.
 				cf_info(AS_TSVC, "failed in prepare %d", rv);
-				if (tr->proto_fd_h) {
-					as_msg_send_reply(tr->proto_fd_h,
-							AS_PROTO_RESULT_FAIL_PARAMETER, 0, 0, 0, 0, 0, 0, 0,
-							tr->trid, NULL);
-					tr->proto_fd_h = 0;
-					// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-					MICROBENCHMARK_HIST_INSERT_P(error_hist);
-					cf_atomic_int_incr(&g_config.err_tsvc_requests);
-				}
+				as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 			}
 			goto Cleanup;
 		} // end transaction pre-processing
@@ -566,14 +490,7 @@ process_transaction(as_transaction *tr)
 	// until now (during the transaction prepare) so here is ok for now.
 	if (tr->end_time != 0 && cf_getns() > tr->end_time) {
 		cf_debug(AS_TSVC, "thr_tsvc: found expired transaction in queue, aborting");
-		if (tr->proto_fd_h) {
-			as_msg_send_reply(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_TIMEOUT,
-					0, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-			tr->proto_fd_h = 0;
-		}
-		// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-		MICROBENCHMARK_HIST_INSERT_P(error_hist);
-		cf_atomic_int_incr(&g_config.err_tsvc_requests);
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_TIMEOUT);
 		goto Cleanup;
 	}
 
@@ -581,14 +498,7 @@ process_transaction(as_transaction *tr)
 	as_msg_field *nsfp = as_msg_field_get(&msgp->msg, AS_MSG_FIELD_TYPE_NAMESPACE);
 	if (!nsfp) {
 		cf_warning(AS_TSVC, "no namespace in protocol request");
-		if (tr->proto_fd_h) {
-			as_msg_send_reply(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_NAMESPACE,
-					0, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-			tr->proto_fd_h = 0;
-			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		}
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_NAMESPACE);
 		goto Cleanup;
 	}
 
@@ -605,14 +515,7 @@ process_transaction(as_transaction *tr)
 		cf_warning(AS_TSVC, "unknown namespace %s %d %p %u in protocol request - check configuration file",
 				nsprint, len, nsfp, nsfp->field_sz);
 
-		if (tr->proto_fd_h) {
-			as_msg_send_reply(tr->proto_fd_h, AS_PROTO_RESULT_FAIL_NAMESPACE,
-					0, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-			tr->proto_fd_h = 0;
-			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		}
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_NAMESPACE);
 		goto Cleanup;
 	}
 
@@ -857,16 +760,8 @@ process_transaction(as_transaction *tr)
 			ns = 0;
 		}
 		if (tr->proto_fd_h) {
-			if (0 != as_msg_send_reply(tr->proto_fd_h,
-						AS_PROTO_RESULT_FAIL_PARAMETER, 0, 0, 0, 0, 0, 0, 0,
-						tr->trid, NULL)) {
-				cf_info(AS_TSVC, "tsvc read: can't send error msg, fd %d",
-						tr->proto_fd_h->fd);
-			}
-			tr->proto_fd_h = 0;
-			// histogram_insert_data_point(g_config.rt_hist, tr->start_time);
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
+			as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
+
 			if (free_msgp == true) {
 				cf_free(msgp);
 				free_msgp = false;
