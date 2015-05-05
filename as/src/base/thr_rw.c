@@ -4843,10 +4843,6 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	if (is_delete) {
 		as_index_delete(tree, &tr->keyd);
 		cf_atomic_int_incr(&g_config.stat_delete_success);
-
-		if (! g_config.xdr_cfg.xdr_delete_shipping_enabled) {
-			is_delete = false;
-		}
 	}
 	// Or (normally) adjust max void-times.
 	else if (r->void_time != 0) {
@@ -4856,9 +4852,14 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 
 	as_record_done(&r_ref, ns);
 
+	// Don't send an XDR delete if it's disallowed.
+	if (is_delete && ! g_config.xdr_cfg.xdr_delete_shipping_enabled) {
+		return 0;
+	}
+
 	// Do an XDR write if the write is a non-XDR write or is an XDR write with
 	// forwarding enabled.
-	if ((m->info1 & AS_MSG_INFO1_XDR) != 0 ||
+	if ((m->info1 & AS_MSG_INFO1_XDR) == 0 ||
 			g_config.xdr_cfg.xdr_forward_xdrwrites ||
 			ns->ns_forward_xdr_writes) {
 		xdr_write(ns, tr->keyd, r->generation, 0, is_delete, set_id);
