@@ -1680,21 +1680,23 @@ ssd_flush_swb(drv_ssd *ssd, ssd_write_buf *swb)
 	}
 
 	ssd_fd_put(ssd, fd);
+}
 
-	if (! ssd->shadow_name) {
-		return;
-	}
 
-	fd = ssd_shadow_fd_get(ssd);
+void
+ssd_shadow_flush_swb(drv_ssd *ssd, ssd_write_buf *swb)
+{
+	int fd = ssd_shadow_fd_get(ssd);
+	off_t write_offset = (off_t)WBLOCK_ID_TO_BYTES(ssd, swb->wblock_id);
 
-	start_ns = g_config.storage_benchmarks ? cf_getns() : 0;
+	uint64_t start_ns = g_config.storage_benchmarks ? cf_getns() : 0;
 
 	if (lseek(fd, write_offset, SEEK_SET) != write_offset) {
 		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED seek: offset %ld: errno %d (%s)",
 				ssd->shadow_name, write_offset, errno, cf_strerror(errno));
 	}
 
-	rv_s = write(fd, swb->buf, ssd->write_block_size);
+	ssize_t rv_s = write(fd, swb->buf, ssd->write_block_size);
 
 	if (rv_s != (ssize_t)ssd->write_block_size) {
 		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
@@ -1706,6 +1708,56 @@ ssd_flush_swb(drv_ssd *ssd, ssd_write_buf *swb)
 	}
 
 	ssd_shadow_fd_put(ssd, fd);
+}
+
+
+void
+ssd_write_sanity_checks(drv_ssd *ssd, ssd_write_buf *swb)
+{
+	ssd_wblock_state* p_wblock_state =
+			&ssd->alloc_table->wblock_state[swb->wblock_id];
+
+	if (p_wblock_state->swb != swb) {
+		cf_warning(AS_DRV_SSD, "device %s: wblock-id %u swb not consistent while writing",
+				ssd->name, swb->wblock_id);
+	}
+
+	if (p_wblock_state->state != WBLOCK_STATE_NONE) {
+		cf_warning(AS_DRV_SSD, "device %s: wblock-id %u state not NONE while writing",
+				ssd->name, swb->wblock_id);
+	}
+}
+
+
+void
+ssd_post_write(drv_ssd *ssd, ssd_write_buf *swb)
+{
+	if (cf_atomic32_get(ssd->ns->storage_post_write_queue) == 0) {
+		swb_dereference_and_release(ssd, swb->wblock_id, swb);
+	}
+	else {
+		// Transfer swb to post-write queue.
+		cf_queue_push(ssd->post_write_q, &swb);
+	}
+
+	if (ssd->post_write_q) {
+		// Release post-write queue swbs if we're over the limit.
+		while ((uint32_t)cf_queue_sz(ssd->post_write_q) >
+				cf_atomic32_get(ssd->ns->storage_post_write_queue)) {
+			ssd_write_buf* cached_swb;
+
+			if (CF_QUEUE_OK != cf_queue_pop(ssd->post_write_q, &cached_swb,
+					CF_QUEUE_NOWAIT)) {
+				// Should never happen.
+				cf_warning(AS_DRV_SSD, "device %s: post-write queue pop failed",
+						ssd->name);
+				break;
+			}
+
+			swb_dereference_and_release(ssd, cached_swb->wblock_id,
+					cached_swb);
+		}
+	}
 }
 
 
@@ -1725,53 +1777,52 @@ ssd_write_worker(void *arg)
 			continue;
 		}
 
-		ssd_wblock_state* p_wblock_state =
-				&ssd->alloc_table->wblock_state[swb->wblock_id];
-
-		// Sanity checks.
-		if (p_wblock_state->swb != swb) {
-			cf_warning(AS_DRV_SSD, "device %s: wblock-id %u swb not consistent while writing",
-					ssd->name, swb->wblock_id);
-		}
-		if (p_wblock_state->state != WBLOCK_STATE_NONE) {
-			cf_warning(AS_DRV_SSD, "device %s: wblock-id %u state not NONE while writing",
-					ssd->name, swb->wblock_id);
-		}
+		// Sanity checks (optional).
+		ssd_write_sanity_checks(ssd, swb);
 
 		// Flush to the device.
 		ssd_flush_swb(ssd, swb);
 
-		if (cf_atomic32_get(ssd->ns->storage_post_write_queue) == 0) {
-			swb_dereference_and_release(ssd, swb->wblock_id, swb);
+		if (ssd->shadow_name) {
+			// Queue for shadow device write.
+			cf_queue_push(ssd->swb_shadow_q, &swb);
 		}
 		else {
-			// Transfer swb to post-write queue.
-			cf_queue_push(ssd->post_write_q, &swb);
-		}
-
-		if (ssd->post_write_q) {
-			// Release post-write queue swbs if we're over the limit.
-			while ((uint32_t)cf_queue_sz(ssd->post_write_q) >
-					cf_atomic32_get(ssd->ns->storage_post_write_queue)) {
-				ssd_write_buf* cached_swb;
-
-				if (CF_QUEUE_OK != cf_queue_pop(ssd->post_write_q, &cached_swb,
-						CF_QUEUE_NOWAIT)) {
-					// Should never happen.
-					cf_warning(AS_DRV_SSD, "device %s: post-write queue pop failed",
-							ssd->name);
-					break;
-				}
-
-				swb_dereference_and_release(ssd, cached_swb->wblock_id,
-						cached_swb);
-			}
+			// Transfer to post-write queue, or release swb, as appropriate.
+			ssd_post_write(ssd, swb);
 		}
 
 		as_write_smoothing_fn(&awsa);
 	} // infinite event loop waiting for block to write
 
 	as_write_smoothing_arg_destroy(&awsa);
+
+	return NULL;
+}
+
+
+// Thread "run" function that flushes write buffers to shadow device.
+void *
+ssd_shadow_worker(void *arg)
+{
+	drv_ssd *ssd = (drv_ssd*)arg;
+
+	while (ssd->running) {
+		ssd_write_buf *swb;
+
+		if (CF_QUEUE_OK != cf_queue_pop(ssd->swb_shadow_q, &swb, 100)) {
+			continue;
+		}
+
+		// Sanity checks (optional).
+		ssd_write_sanity_checks(ssd, swb);
+
+		// Flush to the shadow device.
+		ssd_shadow_flush_swb(ssd, swb);
+
+		// Transfer to post-write queue, or release swb, as appropriate.
+		ssd_post_write(ssd, swb);
+	}
 
 	return NULL;
 }
@@ -1793,6 +1844,11 @@ ssd_start_write_worker_threads(drv_ssds *ssds)
 
 		for (uint32_t j = 0; j < ssds->ns->storage_write_threads; j++) {
 			pthread_create(&ssd->write_worker_thread[j], 0, ssd_write_worker,
+					(void*)ssd);
+		}
+
+		if (ssd->shadow_name) {
+			pthread_create(&ssd->shadow_worker_thread, 0, ssd_shadow_worker,
 					(void*)ssd);
 		}
 	}
@@ -2478,6 +2534,11 @@ ssd_log_stats(drv_ssd *ssd, uint64_t *p_prev_n_writes,
 			cf_atomic32_get(ssd->n_writers),
 			cf_queue_sz(ssd->swb_write_q), n_writes, write_rate,
 			cf_queue_sz(ssd->defrag_wblock_q), n_defrags, defrag_rate);
+
+	if (ssd->shadow_name) {
+		cf_info(AS_DRV_SSD, "shadow device %s: w-q %d",
+				ssd->shadow_name, cf_queue_sz(ssd->swb_shadow_q));
+	}
 
 	*p_prev_n_writes = n_writes;
 	*p_prev_n_defrags = n_defrags;
@@ -4231,6 +4292,11 @@ as_storage_namespace_init_ssd(as_namespace *ns, cf_queue *complete_q,
 			cf_crash(AS_DRV_SSD, "can't create swb-write queue");
 		}
 
+		if (ssd->shadow_name &&
+				! (ssd->swb_shadow_q = cf_queue_create(sizeof(void*), true))) {
+			cf_crash(AS_DRV_SSD, "can't create swb-shadow queue");
+		}
+
 		if (! (ssd->swb_free_q = cf_queue_create(sizeof(void*), true))) {
 			cf_crash(AS_DRV_SSD, "can't create swb-free queue");
 		}
@@ -4504,13 +4570,25 @@ as_storage_overloaded_ssd(as_namespace *ns)
 
 	// TODO - would be nice to not do this loop every single write transaction!
 	for (int i = 0; i < ssds->n_ssds; i++) {
-		int qsz = cf_queue_sz(ssds->ssds[i].swb_write_q);
+		drv_ssd *ssd = &ssds->ssds[i];
+		int qsz = cf_queue_sz(ssd->swb_write_q);
 
 		if (qsz > max_write_q) {
 			cf_atomic_int_incr(&g_config.err_storage_queue_full);
 			cf_warning(AS_DRV_SSD, "{%s} write fail: queue too deep: q %d, max %d",
 					ns->name, qsz, max_write_q);
 			return true;
+		}
+
+		if (ssd->shadow_name) {
+			qsz = cf_queue_sz(ssd->swb_shadow_q);
+
+			if (qsz > max_write_q) {
+				cf_atomic_int_incr(&g_config.err_storage_queue_full);
+				cf_warning(AS_DRV_SSD, "{%s} write fail: shadow queue too deep: q %d, max %d",
+						ns->name, qsz, max_write_q);
+				return true;
+			}
 		}
 	}
 
@@ -4781,16 +4859,25 @@ as_storage_shutdown_ssd(as_namespace *ns)
 			usleep(1000);
 		}
 
+		if (ssd->shadow_name) {
+			while (cf_queue_sz(ssd->swb_shadow_q)) {
+				usleep(1000);
+			}
+		}
+
 		ssd->running = false;
 	}
 
 	for (int i = 0; i < ssds->n_ssds; i++) {
 		drv_ssd *ssd = &ssds->ssds[i];
+		void *p_void;
 
 		for (uint32_t j = 0; j < ssds->ns->storage_write_threads; j++) {
-			void *p_void;
-
 			pthread_join(ssd->write_worker_thread[j], &p_void);
+		}
+
+		if (ssd->shadow_name) {
+			pthread_join(ssd->shadow_worker_thread, &p_void);
 		}
 	}
 }

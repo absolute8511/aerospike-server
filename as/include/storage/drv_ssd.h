@@ -152,6 +152,7 @@ typedef struct drv_ssd_s
 	cf_queue		*defrag_wblock_q;	// IDs of wblocks to defrag
 
 	cf_queue		*swb_write_q;		// pointers to swbs ready to write
+	cf_queue		*swb_shadow_q;		// pointers to swbs ready to write to shadow, if any
 	cf_queue		*swb_free_q;		// pointers to swbs free and waiting
 	cf_queue		*post_write_q;		// pointers to swbs that have been written but are cached
 
@@ -191,6 +192,7 @@ typedef struct drv_ssd_s
 
 	pthread_t		maintenance_thread;
 	pthread_t		write_worker_thread[MAX_SSD_THREADS];
+	pthread_t		shadow_worker_thread;
 	pthread_t		load_device_thread;
 	pthread_t		defrag_thread;
 
