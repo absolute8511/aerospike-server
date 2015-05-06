@@ -874,12 +874,6 @@ Exit:
 
 }
 
-int
-as_msg_send_error(as_file_handle *fd_h, uint32_t result_code)
-{
-	return as_msg_send_reply(fd_h, result_code, 0, 0, NULL, NULL, 0, NULL, NULL, 0, NULL);
-}
-
 bool
 as_msg_peek_data_in_memory(cl_msg *msgp)
 {
