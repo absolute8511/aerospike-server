@@ -641,7 +641,7 @@ info_get_stats(char *name, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";sindex_ucgarbage_found=");
 	APPEND_STAT_COUNTER(db, g_config.query_false_positives);
-	
+
 	cf_dyn_buf_append_string(db, ";sindex_gc_locktimedout=");
 	APPEND_STAT_COUNTER(db, g_config.sindex_gc_timedout);
 
@@ -656,7 +656,7 @@ info_get_stats(char *name, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";sindex_gc_list_deletion_time=");
 	APPEND_STAT_COUNTER(db, g_config.sindex_gc_list_deletion_time);
-	
+
 	cf_dyn_buf_append_string(db, ";sindex_gc_objects_validated=");
 	APPEND_STAT_COUNTER(db, g_config.sindex_gc_objects_validated);
 
@@ -1893,7 +1893,7 @@ info_command_smd_cmd(char *name, char *params, cf_dyn_buf *db)
 				cf_dyn_buf_append_string(db, "error");
 				return 0;
 			}
-		} 
+		}
 	}
 
 	if (!strcmp(cmd, "set") || !strcmp(cmd, "delete") || !strcmp(cmd, "get")) {
@@ -2261,7 +2261,7 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";ldt-enabled=");
 	cf_dyn_buf_append_string(db, ns->ldt_enabled ? "true" : "false");
-	
+
 	cf_dyn_buf_append_string(db, ";ldt-page-size=");
 	cf_dyn_buf_append_uint64(db, ns->ldt_page_size);
 
@@ -3027,7 +3027,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			if (val < 0) {
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" micro seconds to %"PRIu64" micro seconds", 
+			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" micro seconds to %"PRIu64" micro seconds",
 						g_config.query_untracked_time_ns/1000, val);
 			g_config.query_untracked_time_ns = val * 1000;
 		}
@@ -3211,27 +3211,27 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			}
 		}
 		else if (0 == as_info_parameter_get(params, "query-microbenchmark", context, &context_len)) {
-			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) { 
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
 				cf_info(AS_INFO, "Changing value of query-enable-histogram to %s", context);
 				g_config.query_enable_histogram = true;
-			}    
-			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) { 
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
 				cf_info(AS_INFO, "Changing value of query-enable-histogram to %s", context);
 				g_config.query_enable_histogram = false;
-			}    
+			}
 			else {
 				goto Error;
 			}
 		}
 		else if (0 == as_info_parameter_get(params, "pre-reserve-qnodes", context, &context_len)) {
-			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) { 
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
 				cf_info(AS_INFO, "Changing value of reserve-qnodes-upfront to %s", context);
 				g_config.qnodes_pre_reserved = true;
-			}    
-			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) { 
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
 				cf_info(AS_INFO, "Changing value of reserve-qnodes-upfront to %s", context);
 				g_config.qnodes_pre_reserved = false;
-			}    
+			}
 			else {
 				goto Error;
 			}
@@ -3832,6 +3832,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 	else
 		goto Error;
 
+	cf_info(AS_INFO, "config-set command completed: params %s",params);
 	cf_dyn_buf_append_string(db, "ok");
 	return(0);
 
@@ -5156,7 +5157,7 @@ build_service_list(cf_ifaddr * ifaddr, int ifaddr_sz, cf_dyn_buf *db) {
 			cf_dyn_buf_append_char(db, ';');
 		}
 	}
-	
+
 	// take off the last ';' if there was any string there
 	if (db->used_sz > 0)
 		cf_dyn_buf_chomp(db);
@@ -5194,7 +5195,7 @@ info_interfaces_fn(void *gcc_is_ass)
 					break;
 				}
 			}
-		} else { 
+		} else {
 			changed = true;
 		}
 
@@ -5237,7 +5238,7 @@ info_interfaces_static_fn(void *gcc_is_ass)
 
 	cf_info(AS_INFO, " static external network definition ");
 
-	// check external-address is matching with given addresses in service list 
+	// check external-address is matching with given addresses in service list
 	uint8_t buf[512];
 	cf_ifaddr *ifaddr;
 	int	ifaddr_sz;
@@ -5255,7 +5256,7 @@ info_interfaces_static_fn(void *gcc_is_ass)
 	cf_dyn_buf_free(&temp_service_db);
 	cf_free(service_str);
 
-	// For valid external-address specify the same in service-list 
+	// For valid external-address specify the same in service-list
 	cf_dyn_buf_define(service_db);
 	cf_dyn_buf_append_string(&service_db, g_config.external_address);
 	cf_dyn_buf_append_char(&service_db, ':');
@@ -5766,7 +5767,7 @@ info_get_namespace_info(as_namespace *ns, cf_dyn_buf *db)
 	// LDT operational statistics
 	//
 	// print only if LDT is enabled
-	if (ns->ldt_enabled) {	
+	if (ns->ldt_enabled) {
 		cf_dyn_buf_append_string(db, ";ldt-reads=");
 		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_read_reqs));
 		cf_dyn_buf_append_string(db, ";ldt-read-success=");
@@ -6299,7 +6300,7 @@ as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn
 		return 0;
 	}
 
-	// Get the index type. 
+	// Get the index type.
 	// It could be list, mapkeys, mapvalues, or by default none.
 	char indextype_str[128];
 	memset(indextype_str, 0, 128);
@@ -6330,7 +6331,7 @@ as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn
 		}
 	}
 
-	// Gather indexdata	
+	// Gather indexdata
 	char indexdata_str[1024];
 	int  indexdata_len = sizeof(indexdata_str);
 	if (as_info_parameter_get(params, STR_INDEXDATA, indexdata_str,
@@ -6460,7 +6461,7 @@ int info_command_sindex_create(char *name, char *params, cf_dyn_buf *db)
 		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_INDEX_FOUND,
 				"Index with the same name already exists or this bin has already been indexed.");
 		goto ERR;
-	} 
+	}
 	else if (res == AS_SINDEX_ERR_PARAM) {
 		cf_info(AS_INFO, "Index-name is too long, should be a max of: %d.", AS_ID_INAME_SZ - 1);
 		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_INDEX_NAME_MAXLEN,
@@ -7176,7 +7177,7 @@ as_info_init()
 
 	as_fabric_register_msg_fn(M_TYPE_INFO, info_mt, sizeof(info_mt), info_msg_fn, 0 /* udata */ );
 
-	// Take necessery steps if specific address is given in service address 
+	// Take necessery steps if specific address is given in service address
 	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0 ) {
 		if (g_config.external_address != NULL){
 			// check external-address is matches with service address
@@ -7185,7 +7186,7 @@ as_info_init()
 						g_config.external_address, g_config.socket.addr);
 			}
 		} else {
-			// Check if service address is any. If not any then put this adress in external address 
+			// Check if service address is any. If not any then put this adress in external address
 			// to avoid updation of service list continuosly
 			g_config.external_address = g_config.socket.addr;
 		}
