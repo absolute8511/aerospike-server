@@ -1211,15 +1211,6 @@ void
 tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 {
 	tscan_task_data *u = (tscan_task_data *) udata;
-	uint64_t buf_builder_size;
-	uint64_t resp_buf_limit;
-	if (u->ns->ldt_enabled) {
-		buf_builder_size = u->ns->ldt_scan_buff_max;
-		resp_buf_limit = buf_builder_size / 2;
-	} else {
-		buf_builder_size = INITIAL_BUFBUILDER_SIZE;
-		resp_buf_limit = SCAN_PROTO_LIMIT;
-	}
 
 	if (*u->aborted) {
 		as_record_done(r_ref, u->ns);
@@ -1296,7 +1287,7 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 	// If there is no udf call associated, go through the normal process.
 	if (u->nobindata) {
 		if (! *bb_r) {
-			*bb_r = cf_buf_builder_create_size(buf_builder_size);
+			*bb_r = cf_buf_builder_create_size(INITIAL_BUFBUILDER_SIZE);
 			cf_atomic_int_add(&u->pjob->mem_buf, (*bb_r)->alloc_sz);
 		}
 
@@ -1352,7 +1343,7 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 
 		} else {
 			if (! *bb_r) {
-				*bb_r = cf_buf_builder_create_size(buf_builder_size);
+				*bb_r = cf_buf_builder_create_size(INITIAL_BUFBUILDER_SIZE);
 				cf_atomic_int_add(&u->pjob->mem_buf, (*bb_r)->alloc_sz);
 			}
 			size_t old_allocsz = (*bb_r)->alloc_sz;
@@ -1369,7 +1360,7 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 	if (! SCAN_JOB_IS_POPULATOR(u->pjob)) {
 		// If we exceed the proto size limit, send accumulated data back to client
 		// and reset the buf-builder to start a new proto.
-		if ((*bb_r)->used_sz > resp_buf_limit) {
+		if ((*bb_r)->used_sz > SCAN_PROTO_LIMIT) {
 			pthread_mutex_lock(&u->pjob->LOCK);
 
 			if (0 != tscan_send_response_to_client(u->pjob, (*bb_r)->buf, (*bb_r)->used_sz)) {
@@ -1378,8 +1369,7 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 
 			pthread_mutex_unlock(&u->pjob->LOCK);
 
-			// Hack - didn't want to add a reset method to cf_buf_builder.
-			(*bb_r)->used_sz = 0;
+			cf_buf_builder_reset(*bb_r);
 		}
 
 		if (IS_SCAN_JOB_ABORTED(u->pjob)) {
@@ -1853,15 +1843,9 @@ tscan_partition_thr(void *q_to_wait_on)
 		uint32_t sample_obj_cnt = (uint32_t)(((uint64_t)rsv.p->vp->elements * (uint64_t)job->scan_pct) / 100);
 		cf_debug(AS_SCAN, "scan_partition: need to scan %d objects from partition %d", sample_obj_cnt, workitem.pid);
 
-		uint64_t buf_builder_size;
-		if (job->ns->ldt_enabled) {
-			buf_builder_size = job->ns->ldt_scan_buff_max;
-		} else {
-			buf_builder_size = INITIAL_BUFBUILDER_SIZE;
-		}	
 
 		if (job->fd_h) {
-			u.bb = cf_buf_builder_create_size(buf_builder_size);
+			u.bb = cf_buf_builder_create_size(INITIAL_BUFBUILDER_SIZE);
 			if (u.bb == NULL) {
 				cf_info(AS_SCAN, "scan_partition: could not create buf builder: %d {%s:%d}", workitem.tid, job->ns->name, workitem.pid);
 				as_partition_release(&rsv);

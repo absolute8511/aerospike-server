@@ -34,6 +34,8 @@
 #include "cf_str.h"
 
 
+#define MAX_BACKOFF (1024 * 256)
+
 size_t
 cf_dyn_buf_get_newsize(int alloc, int used, int requested)
 {
@@ -48,7 +50,7 @@ cf_dyn_buf_get_newsize(int alloc, int used, int requested)
 	else if (new_sz < (1024 * 128))
 		backoff = (1024 * 32);
 	else
-		backoff = (1024 * 256);
+		backoff = MAX_BACKOFF;
 	new_sz = new_sz + (backoff - (new_sz % backoff));
 	return new_sz;
 }
@@ -183,8 +185,19 @@ cf_buf_builder_reserve_internal(cf_buf_builder **bb_r, size_t sz)
 	// see if we need more space
 	size_t new_sz = cf_dyn_buf_get_newsize(bb->alloc_sz, bb->used_sz, sz);
 	if (new_sz > bb->alloc_sz) {
-		bb = cf_realloc(bb, new_sz);
-		if (!bb)	return(-1);
+		if (bb->alloc_sz - bb->used_sz < MAX_BACKOFF) {
+			bb = cf_realloc(bb, new_sz);
+			if (!bb)	return(-1);
+		}
+		else {
+			// Only possible if buffer was reset. Avoids potential expensive
+			// copy within realloc.
+			cf_buf_builder	*_t = cf_malloc(new_sz);
+			if (!_t)	return(-1);
+			memcpy(_t->buf, bb->buf, bb->used_sz);
+			cf_free(bb->buf);
+			bb = _t;
+		}
 		bb->alloc_sz = new_sz - sizeof(cf_buf_builder);
 		*bb_r = bb;
 	}
@@ -371,4 +384,10 @@ void
 cf_buf_builder_free(cf_buf_builder *bb)
 {
 	cf_free(bb);
+}
+
+void
+cf_buf_builder_reset(cf_buf_builder *bb)
+{
+	bb->used_sz = 0;
 }

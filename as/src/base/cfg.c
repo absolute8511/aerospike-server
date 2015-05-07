@@ -450,7 +450,6 @@ typedef enum {
 	CASE_NAMESPACE_LDT_ENABLED,
 	CASE_NAMESPACE_LDT_GC_RATE,
 	CASE_NAMESPACE_LDT_PAGE_SIZE,
-	CASE_NAMESPACE_LDT_SCAN_BUFF_MAX,
 	CASE_NAMESPACE_MAX_TTL,
 	CASE_NAMESPACE_OBJ_SIZE_HIST_MAX,
 	CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE,
@@ -819,7 +818,6 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "ldt-enabled",					CASE_NAMESPACE_LDT_ENABLED },
 		{ "ldt-gc-rate",                    CASE_NAMESPACE_LDT_GC_RATE },
 		{ "ldt-page-size",					CASE_NAMESPACE_LDT_PAGE_SIZE },
-		{ "ldt-scan-buff-max",				CASE_NAMESPACE_LDT_SCAN_BUFF_MAX },
 		{ "max-ttl",						CASE_NAMESPACE_MAX_TTL },
 		{ "obj-size-hist-max",				CASE_NAMESPACE_OBJ_SIZE_HIST_MAX },
 		{ "read-consistency-level-override", CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE },
@@ -2453,9 +2451,6 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_LDT_PAGE_SIZE:
 				ns->ldt_page_size = cfg_u32_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_LDT_SCAN_BUFF_MAX:
-				ns->ldt_scan_buff_max = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_MAX_TTL:
 				ns->max_ttl = cfg_seconds(&line);

@@ -122,7 +122,6 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->hwm_memory = 0.6; // default high water mark for eviction is 60%
 	ns->ldt_enabled = false; // By default ldt is not enabled
 	ns->ldt_page_size = 8192; // default ldt page size is 8192
-	ns->ldt_scan_buff_max = 200 * 1024 * 1024; //default ldt_scan_buff_max is 200MB
 	ns->ldt_gc_sleep_us = 500; // Default is sleep for .5Ms. This translates to constant 2k Subrecord
 							   // GC per second.
 	ns->obj_size_hist_max = OBJ_SIZE_HIST_NUM_BUCKETS;
