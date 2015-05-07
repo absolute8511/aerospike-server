@@ -3944,16 +3944,17 @@ check_file_size(off_t file_size, const char *tag)
 					tag, SSD_DEFAULT_HEADER_LENGTH, LOAD_BUF_SIZE);
 			file_size -= unusable_size;
 		}
+
+		if (file_size > AS_STORAGE_MAX_DEVICE_SIZE) {
+			cf_warning(AS_DRV_SSD, "%s size must be <= %"PRId64", trimming original size %"PRId64,
+					tag, AS_STORAGE_MAX_DEVICE_SIZE, file_size);
+			file_size = AS_STORAGE_MAX_DEVICE_SIZE;
+		}
 	}
 
 	if (file_size <= SSD_DEFAULT_HEADER_LENGTH) {
 		cf_crash(AS_DRV_SSD, "%s size %"PRId64" must be greater than header size %d",
 				tag, file_size, SSD_DEFAULT_HEADER_LENGTH);
-	}
-
-	if (file_size > AS_STORAGE_MAX_DEVICE_SIZE) {
-		cf_crash(AS_DRV_SSD, "%s size %"PRId64" must be less than %"PRId64,
-				tag, file_size, AS_STORAGE_MAX_DEVICE_SIZE);
 	}
 
 	return file_size;
