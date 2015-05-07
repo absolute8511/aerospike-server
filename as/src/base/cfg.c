@@ -75,7 +75,7 @@ as_config g_config;
 void cfg_add_mesh_seed_addr_port(char* addr, int port);
 as_set* cfg_add_set(as_namespace* ns);
 void cfg_add_storage_file(as_namespace* ns, char* file_name);
-void cfg_add_storage_device(as_namespace* ns, char* device_name);
+void cfg_add_storage_device(as_namespace* ns, char* device_name, char* shadow_name);
 void cfg_init_si_var(as_namespace* ns);
 uint32_t cfg_obj_size_hist_max(uint32_t hist_max);
 void cfg_create_all_histograms();
@@ -2573,7 +2573,7 @@ as_config_init(const char *config_file)
 		case NAMESPACE_STORAGE_DEVICE:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_DEVICE_OPTS, NUM_NAMESPACE_STORAGE_DEVICE_OPTS)) {
 			case CASE_NAMESPACE_STORAGE_DEVICE_DEVICE:
-				cfg_add_storage_device(ns, cfg_strdup(&line, true));
+				cfg_add_storage_device(ns, cfg_strdup(&line, true), cfg_strdup_val2(&line, false));
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_FILE:
 				cfg_add_storage_file(ns, cfg_strdup(&line, true));
@@ -3224,13 +3224,14 @@ cfg_add_storage_file(as_namespace* ns, char* file_name)
 }
 
 void
-cfg_add_storage_device(as_namespace* ns, char* device_name)
+cfg_add_storage_device(as_namespace* ns, char* device_name, char* shadow_name)
 {
 	int i;
 
 	for (i = 0; i < AS_STORAGE_MAX_DEVICES; i++) {
 		if (! ns->storage_devices[i]) {
 			ns->storage_devices[i] = device_name;
+			ns->storage_shadows[i] = shadow_name;
 			break;
 		}
 	}

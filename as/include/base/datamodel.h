@@ -961,6 +961,7 @@ struct as_namespace_s {
 	as_storage_type storage_type;
 	char *storage_path;
 	char *storage_devices[AS_STORAGE_MAX_DEVICES];
+	char *storage_shadows[AS_STORAGE_MAX_DEVICES];
 	char *storage_files[AS_STORAGE_MAX_FILES];
 	char *storage_scheduler_mode; // relevant for devices only, not files
 	off_t		storage_filesize;
