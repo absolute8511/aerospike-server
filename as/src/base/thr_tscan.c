@@ -1369,8 +1369,7 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 
 			pthread_mutex_unlock(&u->pjob->LOCK);
 
-			// Hack - didn't want to add a reset method to cf_buf_builder.
-			(*bb_r)->used_sz = 0;
+			cf_buf_builder_reset(*bb_r);
 		}
 
 		if (IS_SCAN_JOB_ABORTED(u->pjob)) {

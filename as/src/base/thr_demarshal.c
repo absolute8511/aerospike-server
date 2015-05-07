@@ -538,6 +538,11 @@ thr_demarshal(void *arg)
 					memcpy(proto_p, &proto, sizeof(as_proto));
 
 #ifdef USE_JEM
+					if (peeked_data_sz > proto_p->sz) {
+						cf_warning(AS_DEMARSHAL, "client sent more than advertised ~~ (proto size %lu recvd %lu)", proto_p->sz, peeked_data_sz);
+						goto NextEvent_FD_Cleanup;
+					}
+
 					// Jam in the peeked data.
 					if (peeked_data_sz) {
 						memcpy(proto_p->data, &peekbuf, peeked_data_sz);

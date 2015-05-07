@@ -223,7 +223,7 @@ udf_rw_get_ldt_error(void *val, size_t vlen)
 		// we are obviously not looking at an LDT error.
 		if (&charptr[9] < &valptr[vlen]) {
 			if (memcmp(&charptr[5], ":LDT-", 5) == 0) {
-				error_code = strtol(&charptr[1], NULL, 0);
+				error_code = strtol(&charptr[1], NULL, 10);
 				cf_debug(AS_UDF, "LDT Error: Code(%ld) String(%s)",
 						error_code, (char *) val);
 				return error_code;
