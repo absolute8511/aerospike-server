@@ -63,6 +63,7 @@ typedef struct cf_buf_builder_s {
 extern cf_buf_builder *cf_buf_builder_create();
 extern cf_buf_builder *cf_buf_builder_create_size(size_t sz);
 extern void cf_buf_builder_free(cf_buf_builder *bb);
+extern void cf_buf_builder_reset(cf_buf_builder *bb);
 extern int cf_buf_builder_chomp(cf_buf_builder *bb_r);
 // If you use any binary components, this strdup thing is a bad idea:
 extern char *cf_buf_builder_strdup(cf_buf_builder *bb_r);
