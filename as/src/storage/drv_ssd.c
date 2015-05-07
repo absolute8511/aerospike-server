@@ -3947,8 +3947,13 @@ check_file_size(off_t file_size, const char *tag)
 	}
 
 	if (file_size <= SSD_DEFAULT_HEADER_LENGTH) {
-		cf_crash(AS_DRV_SSD, "%s size %"PRIu64" must be greater than header size %d",
+		cf_crash(AS_DRV_SSD, "%s size %"PRId64" must be greater than header size %d",
 				tag, file_size, SSD_DEFAULT_HEADER_LENGTH);
+	}
+
+	if (file_size > AS_STORAGE_MAX_DEVICE_SIZE) {
+		cf_crash(AS_DRV_SSD, "%s size %"PRId64" must be less than %"PRId64,
+				tag, file_size, AS_STORAGE_MAX_DEVICE_SIZE);
 	}
 
 	return file_size;
