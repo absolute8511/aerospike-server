@@ -359,8 +359,6 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 	// only pickle the n_bins in use
 	uint16_t n_bins_inuse = as_bin_inuse_count(rd);
 
-//	uint32_t psz[n_bins_inuse];
-
 	for (uint16_t i = 0; i < n_bins_inuse; i++) {
 		as_bin *b = &rd->bins[i];
 
@@ -369,16 +367,6 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 		sz += 1; // version
 
 		sz += as_bin_particle_pickled_size(b);
-
-		/*
-		sz += 1; // binname-len field
-		sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, b->id)); // number of bytes in the name
-		sz += 2; // version, bintype
-		sz += 4; // datalen
-
-		as_particle_towire(b, 0, &psz[i]); // get the length
-		sz += psz[i];
-		*/
 	}
 
 	byte *buf = cf_malloc(sz);
@@ -404,15 +392,6 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 		*buf++ = as_bin_get_version(b, rd->ns->single_bin);
 
 		buf += as_bin_particle_to_pickled(b, buf);
-
-		/*
-		*buf++ = as_bin_get_particle_type(b);
-		uint32_t *psz_p = (uint32_t *) buf;    // keep a pointer to the spot you need to patch for particle sz
-		buf += sizeof(uint32_t);
-		as_particle_towire(b, buf, &psz[i]); // get the data
-		*psz_p = htonl(psz[i]);
-		buf += psz[i];
-		*/
 	}
 
 	if (buf > buf_lim)
@@ -461,66 +440,6 @@ as_record_buf_get_stack_particles_sz(uint8_t *buf) {
 	return (stack_particles_sz);
 }
 
-/*
-uint16_t
-as_record_count_unpickle_merge_bins_to_create(as_storage_rd *rd, uint8_t *buf, int sz) {
-	uint16_t bins_to_create = 0;
-
-	// create a 'version map'
-	int8_t vmap[BIN_VERSION_MAX];
-	memset(vmap, -1, sizeof(vmap));
-
-	uint8_t *buf_lim = buf + sz;
-
-	uint16_t newbins = ntohs( *(uint16_t *) buf );
-	buf += 2;
-
-	for (uint16_t i = 0; i < newbins; i++) {
-		if (buf >= buf_lim) {
-			cf_crash(AS_RECORD, "as_record_unpickle_merge_bins_to_create: bad format, bin %u of %u", i, newbins);
-		}
-
-		byte name_sz = *buf++;
-		byte *name = buf;
-		buf += name_sz;
-		buf++;
-
-		as_particle_type type = *buf++;
-		uint32_t d_sz = ntohl(*(uint32_t*)buf);
-		buf += 4;
-
-		as_bin *curr_bins[BIN_VERSION_MAX];
-		memset(curr_bins, 0, sizeof(curr_bins));
-		// get the bin from existing record. if bin exists and the value is same do not write.
-		uint16_t n_curr_bins = as_bin_get_all_versions(rd, name, name_sz, curr_bins);
-
-		uint16_t j;
-		for (j = 0; j < n_curr_bins; j++) {
-			if (! curr_bins[j]) {
-				cf_debug(AS_RECORD, " vinfo set procesing error : null bin pointer encountered %d", j);
-				continue;
-			}
-
-			if (! as_particle_compare_fromwire(curr_bins[j], type, buf, d_sz)) {
-				break; // same particle
-			}
-		}
-
-		if (j == n_curr_bins) {
-			bins_to_create++;
-		}
-
-		buf += d_sz;
-	}
-
-	if (buf > buf_lim) {
-		cf_crash(AS_RECORD, "as_record_unpickle_merge_bins_to_create: bad format, last bin of %u", newbins);
-	}
-
-	return(bins_to_create);
-}
-*/
-
 // the unpickle merge
 // takes an existing record, and lays in the incoming data
 // This code works only when allow version is true. Behaviour of sindex in that scenario is not well defined.
@@ -528,109 +447,6 @@ int
 as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t sz, uint8_t **stack_particles, bool *record_written)
 {
 	cf_crash(AS_RECORD, "as_record_unpickle_merge() should be unreachable");
-/*
-	as_namespace *ns = rd->ns;
-
-	// create a 'version map'
-	int8_t vmap[BIN_VERSION_MAX];
-	memset(vmap, -1, sizeof(vmap));
-
-	uint8_t *buf_lim = buf + sz;
-
-	uint16_t newbins = ntohs( *(uint16_t *) buf );
-	buf += 2;
-
-	if (newbins == 0)
-		cf_debug(AS_RECORD, " merge: received record with no bins, illegal");
-
-	// allocate memory for new bins, if necessary
-	if (rd->ns->storage_data_in_memory && ! rd->ns->single_bin) {
-		uint16_t bins_to_create = as_record_count_unpickle_merge_bins_to_create(rd, buf - 2, sz);
-		if (bins_to_create) {
-			as_bin_allocate_bin_space(r, rd, (int32_t)bins_to_create);
-		}
-	}
-
-	int sindex_ret = AS_SINDEX_OK;
-	bool has_sindex = as_sindex_ns_has_sindex(rd->ns);
-
-	if (has_sindex) {
-		SINDEX_GRLOCK();
-	}
-   
-	SINDEX_BINS_SETUP(sbins, ns->sindex_cnt);
-	int sindex_found = 0;
-
-	for (uint16_t i = 0; i < newbins; i++) {
-		if (buf >= buf_lim) {
-			cf_crash(AS_RECORD, "as_record_unpickle_merge: bad format, bin %u of %u", i, newbins);
-		}
-
-		byte name_sz = *buf++;
-		byte *name = buf;
-		buf += name_sz;
-		uint8_t version = *buf++;
-
-		as_particle_type type = *buf++;
-		uint32_t d_sz = ntohl(*(uint32_t*)buf);
-		buf += 4;
-
-		as_bin *curr_bins[BIN_VERSION_MAX];
-		memset(curr_bins, 0, sizeof(curr_bins));
-		// get the bin from existing record. if bin exists and the value is same do not write.
-		uint16_t n_curr_bins = as_bin_get_all_versions(rd, name, name_sz, curr_bins);
-
-		uint16_t j;
-		for (j = 0; j < n_curr_bins; j++) {
-			if (!curr_bins[j]) {
-				cf_debug(AS_RECORD, " vinfo set procesing error : null bin pointer encountered %d", j);
-				continue;
-			}
-
-			if (! as_particle_compare_fromwire(curr_bins[j], type, buf, d_sz)) {
-				break; // same particle
-			}
-		}
-
-		if (j == n_curr_bins) {
-			cf_debug(AS_RECORD, " vinfo set missing : processing bin with type %d", type);
-			if (vmap[version] == -1)
-				vmap[version] = as_record_unused_version_get(rd);
-			as_bin *b = as_bin_create(r, rd, name, name_sz, vmap[version]);
-
-			as_particle_fromwire(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
-
-			if (has_sindex) {
-				sindex_found += as_sindex_sbins_from_bin(ns, as_index_get_set_name(rd->r, ns), 
-													b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);	
-			}
-
-			if (! ns->storage_data_in_memory && type != AS_PARTICLE_TYPE_INTEGER) {
-				*stack_particles += as_particle_get_base_size(type) + d_sz;
-			}
-			rd->write_to_device = true;
-			if (record_written) {
-				*record_written = true;
-			}
-			break;
-		}
-
-		buf += d_sz;
-	}
-
-	if (has_sindex) {
-		SINDEX_GUNLOCK();
-		if (sindex_found) {
-			cf_detail(AS_RECORD, "Sindex Insert @ %s %d", __FILE__, __LINE__);
-			as_sindex_update_by_sbin(ns, as_index_get_set_name(rd->r, ns), sbins, sindex_found, &rd->keyd);
-			if (sindex_ret != AS_SINDEX_OK) cf_warning(AS_RECORD, "Failed: %s", as_sindex_err_str(sindex_ret));
-			as_sindex_sbin_freeall(sbins, sindex_found);
-		}
-	}
-	if (buf > buf_lim) {
-		cf_crash(AS_RECORD, "as_record_unpickle_merge: bad format, last bin of %u", newbins);
-	}
-*/
 	return(0);
 }
 
@@ -720,26 +536,6 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		if (has_sindex) {
 			sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
 		}
-
-		/*
-		as_particle_type type = *buf++;
-		uint32_t d_sz         = *(uint32_t *) buf;
-		buf                  += 4;
-		d_sz                  = ntohl(d_sz);
-
-		as_particle_fromwire(b, type, buf, d_sz, *stack_particles, ns->storage_data_in_memory);
-
-		if (has_sindex) {
-			sindex_found      += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
-		}
-
-
-		if (! ns->storage_data_in_memory && type != AS_PARTICLE_TYPE_INTEGER) {
-			*stack_particles += as_particle_get_base_size(type) + d_sz;
-		}
-
-		buf += d_sz;
-		*/
 	}
 
 	if (buf > buf_lim) {

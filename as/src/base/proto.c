@@ -179,15 +179,6 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 			msg_sz += ns->single_bin ? 0 :
 					  strlen(as_bin_get_name_from_id(ns, bins[i]->id));
 			msg_sz += (int)as_bin_particle_client_value_size(bins[i]);
-			/*
-			uint32_t psz;
-			if (as_bin_is_hidden(bins[i])) {
-				psz = 0;
-			} else {
-				_as_particle_towire(bins[i], 0, &psz, false); // get size
-			}
-			msg_sz += psz;
-			*/
 		}
 		else if (ops[i])  // no bin, only op, no particle size
 			msg_sz += ops[i]->name_sz;
@@ -312,27 +303,6 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 
 		buf += as_bin_particle_to_client(bins[i], op);
 
-		/*
-		if (bins[i] && as_bin_inuse(bins[i])) {
-			op->particle_type = as_particle_type_convert(as_bin_get_particle_type(bins[i]));
-
-			uint32_t psz = msg_sz - (buf - b); // size remaining in buffer, for safety
-			if (as_bin_is_hidden(bins[i])) {
-				op->particle_type = AS_PARTICLE_TYPE_NULL;
-				psz = 0; // packet of size NULL
-			} else {
-				if (0 != _as_particle_towire(bins[i], buf, &psz, false)) {
-					cf_warning(AS_PROTO, "particle to buf: could not copy data!");
-				}
-			}
-			buf += psz;
-			op->op_sz += psz;
-		}
-		else {
-			op->particle_type = AS_PARTICLE_TYPE_NULL;
-		}
-		*/
-
 		as_msg_swap_op(op);
 
 	}
@@ -408,11 +378,6 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 				msg_sz += sizeof(as_msg_op);
 				msg_sz += rd->ns->single_bin ? 0 : strlen(binname);
 				msg_sz += (int)as_bin_particle_client_value_size(p_bin);
-				/*
-				uint32_t psz;
-				as_particle_towire(p_bin, 0, &psz); // get size
-				msg_sz += psz;
-				*/
 			}
 		}
 		else {
@@ -421,11 +386,6 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 				as_bin *p_bin = &rd->bins[i];
 				msg_sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, p_bin->id));
 				msg_sz += (int)as_bin_particle_client_value_size(p_bin);
-				/*
-				uint32_t psz;
-				as_particle_towire(p_bin, 0, &psz); // get size
-				msg_sz += psz;
-				*/
 			}
 		}
 	}
@@ -517,15 +477,6 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 				msg_sz += sizeof(as_msg_op);
 				msg_sz += rd->ns->single_bin ? 0 : strlen(binname);
 				msg_sz += (int)as_bin_particle_client_value_size(p_bin);
-				/*
-				uint32_t psz;
-				if (as_bin_is_hidden(p_bin)) {
-					psz = 0;
-				} else {
-					as_particle_towire(p_bin, 0, &psz); // get size
-				}
-				msg_sz += psz;
-				*/
 			}
 
 			// Don't return an empty record.
@@ -539,15 +490,6 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 				as_bin *p_bin = &rd->bins[i];
 				msg_sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, p_bin->id));
 				msg_sz += (int)as_bin_particle_client_value_size(p_bin);
-				/*
-				uint32_t psz;
-				if (as_bin_is_hidden(p_bin)) {
-					psz = 0;
-				} else {
-					as_particle_towire(p_bin, 0, &psz); // get size
-				}
-				msg_sz += psz;
-				*/
 			}
 		}
 	}
@@ -652,29 +594,6 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 
 			buf += as_bin_particle_to_client(p_bin, op);
 
-			/*
-			if (as_bin_inuse(p_bin)) {
-				op->particle_type = as_particle_type_convert(as_bin_get_particle_type(p_bin));
-				op->version = as_bin_get_version(p_bin, rd->ns->single_bin);
-
-				uint32_t psz = msg_sz - (buf - b); // size remaining in buffer, for safety
-				if (as_bin_is_hidden(p_bin)) {
-                	op->particle_type = AS_PARTICLE_TYPE_NULL;
-					psz = 0;
-				} else {
-					if (0 != as_particle_towire(p_bin, buf, &psz)) {
-						cf_warning(AS_PROTO, "particle to buf: could not copy data!");
-					}
-				}
-				buf += psz;
-				op->op_sz += psz;
-			}
-			else {
-				cf_debug(AS_PROTO, "Whoops !! bin not in use");
-				op->particle_type = AS_PARTICLE_TYPE_NULL;
-			}
-			*/
-
 			as_msg_swap_op(op);
 		}
 	}
@@ -697,28 +616,6 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 			op->op_sz = 4 + op->name_sz;
 
 			buf += as_bin_particle_to_client(&rd->bins[i], op);
-
-			/*
-			if (as_bin_inuse(&rd->bins[i])) {
-				op->particle_type = as_particle_type_convert(as_bin_get_particle_type(&rd->bins[i]));
-				op->version = as_bin_get_version(&rd->bins[i], rd->ns->single_bin);
-
-				uint32_t psz = msg_sz - (buf - b); // size remaining in buffer, for safety
-				if (as_bin_is_hidden(&rd->bins[i])) {
-                	op->particle_type = AS_PARTICLE_TYPE_NULL;
-					psz = 0;
-				} else {
-					if (0 != as_particle_towire(&rd->bins[i], buf, &psz)) {
-						cf_warning(AS_PROTO, "particle to buf: could not copy data!");
-					}
-				}
-				buf += psz;
-				op->op_sz += psz;
-			}
-			else {
-				op->particle_type = AS_PARTICLE_TYPE_NULL;
-			}
-			*/
 
 			as_msg_swap_op(op);
 		}

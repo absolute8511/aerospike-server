@@ -83,7 +83,6 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 	uint8_t     *sp_p = *sp_pp;
 
 	uint32_t tsz = as_particle_size_from_mem((as_particle_type)vtype, (uint8_t *)val, (uint32_t)vlen);
-//	uint32_t tsz = vlen + as_particle_get_base_size(vtype);
 
 	if (tsz > sp_sz) {
 		sp_p = cf_malloc(tsz);
@@ -124,7 +123,7 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 	}
 
 	as_bin_particle_stack_from_mem(bin, sp_p, vtype, v, vlen);
-//	as_particle_frommem(bin, vtype, v, vlen, sp_p, ns->storage_data_in_memory);
+
 	*sp_pp = sp_p;
 	return 0;
 }
@@ -1556,16 +1555,12 @@ as_val_frombin(as_bin *bb)
 		{
 			int64_t     i = 0;
 			as_bin_particle_to_mem(bb, (uint8_t *) &i);
-//			uint32_t    sz = 8;
-//			as_particle_tomem(bb, (uint8_t *) &i, &sz);
 			value = (as_val *) as_integer_new(i);
 			break;
 		}
 		case AS_PARTICLE_TYPE_STRING:
 		{
 			uint32_t psz = as_bin_particle_mem_size(bb);
-//			uint32_t psz = 32;
-//			as_particle_tomem(bb, NULL, &psz);
 
 			char * buf = cf_malloc(psz + 1);
 			if (!buf) {
@@ -1573,7 +1568,6 @@ as_val_frombin(as_bin *bb)
 			}
 
 			as_bin_particle_to_mem(bb, (uint8_t *) buf);
-//			as_particle_tomem(bb, (uint8_t *) buf, &psz);
 
 			buf[psz] = '\0';
 
@@ -1585,7 +1579,6 @@ as_val_frombin(as_bin *bb)
 
 			uint8_t *pbuf;
 			uint32_t psz = as_bin_particle_ptr(bb, &pbuf);
-//			as_bin_particle_ptr(bb, &pbuf, &psz);
 
 			uint8_t *buf = cf_malloc(psz);
 			if (!buf) {
@@ -1607,7 +1600,6 @@ as_val_frombin(as_bin *bb)
 			as_msgpack_init(&s);
 
 			uint32_t sz = as_bin_particle_ptr(bb, (uint8_t **) &buf.data);
-//			as_bin_particle_ptr(bb, (uint8_t **) &buf.data, &sz);
 			buf.capacity = sz;
 			buf.size = sz;
 
