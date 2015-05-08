@@ -438,6 +438,8 @@ typedef enum {
 	CASE_NAMESPACE_SETS_ENABLE_XDR,
 	CASE_NAMESPACE_XDR_REMOTE_DATACENTER,
 	CASE_NAMESPACE_FORWARD_XDR_WRITES,
+	CASE_NAMESPACE_ALLOW_NONXDR_WRITES,
+	CASE_NAMESPACE_ALLOW_XDR_WRITES,
 	// Normally hidden:
 	CASE_NAMESPACE_ALLOW_VERSIONS,
 	CASE_NAMESPACE_COLD_START_EVICT_TTL,
@@ -807,6 +809,8 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "sets-enable-xdr",				CASE_NAMESPACE_SETS_ENABLE_XDR },
 		{ "xdr-remote-datacenter",			CASE_NAMESPACE_XDR_REMOTE_DATACENTER },
 		{ "ns-forward-xdr-writes",			CASE_NAMESPACE_FORWARD_XDR_WRITES },
+		{ "allow-nonxdr-writes",			CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
+		{ "allow-xdr-writes",				CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
 		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
 		{ "cold-start-evict-ttl",			CASE_NAMESPACE_COLD_START_EVICT_TTL },
 		{ "conflict-resolution-policy",		CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY },
@@ -2402,6 +2406,18 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_FORWARD_XDR_WRITES:
 				ns->ns_forward_xdr_writes = cfg_bool(&line);
 				if (ns->ns_forward_xdr_writes && ! c->xdr_cfg.xdr_supported) {
+					cfg_not_supported(&line, "XDR");
+				}
+				break;
+			case CASE_NAMESPACE_ALLOW_NONXDR_WRITES:
+				ns->ns_allow_nonxdr_writes = cfg_bool(&line);
+				if (ns->ns_allow_nonxdr_writes && ! c->xdr_cfg.xdr_supported) {
+					cfg_not_supported(&line, "XDR");
+				}
+				break;
+			case CASE_NAMESPACE_ALLOW_XDR_WRITES:
+				ns->ns_allow_xdr_writes = cfg_bool(&line);
+				if (ns->ns_allow_xdr_writes && ! c->xdr_cfg.xdr_supported) {
 					cfg_not_supported(&line, "XDR");
 				}
 				break;

@@ -2274,6 +2274,12 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";ns-forward-xdr-writes=");
 	cf_dyn_buf_append_string(db, ns->ns_forward_xdr_writes ? "true" : "false");
 
+	cf_dyn_buf_append_string(db, ";allow-nonxdr-writes=");
+	cf_dyn_buf_append_string(db, ns->ns_allow_nonxdr_writes ? "true" : "false");
+
+	cf_dyn_buf_append_string(db, ";allow-xdr-writes=");
+	cf_dyn_buf_append_string(db, ns->ns_allow_xdr_writes ? "true" : "false");
+
 	cf_dyn_buf_append_string(db, ";disallow-null-setname=");
 	cf_dyn_buf_append_string(db, ns->disallow_null_setname ? "true" : "false");
 
@@ -3539,12 +3545,38 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 		}
 		else if (0 == as_info_parameter_get(params, "ns-forward-xdr-writes", context, &context_len)) {
 			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
-				cf_info(AS_INFO, "Changing value of sets-enable-xdr of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
+				cf_info(AS_INFO, "Changing value of ns-forward-xdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
 				ns->ns_forward_xdr_writes = true;
 			}
 			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
-				cf_info(AS_INFO, "Changing value of sets-enable-xdr of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
+				cf_info(AS_INFO, "Changing value of ns-forward-xdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
 				ns->ns_forward_xdr_writes = false;
+			}
+			else {
+				goto Error;
+			}
+		}
+		else if (0 == as_info_parameter_get(params, "allow-nonxdr-writes", context, &context_len)) {
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
+				cf_info(AS_INFO, "Changing value of allow-nonxdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_allow_nonxdr_writes], context);
+				ns->ns_allow_nonxdr_writes = true;
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
+				cf_info(AS_INFO, "Changing value of allow-nonxdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_allow_nonxdr_writes], context);
+				ns->ns_allow_nonxdr_writes = false;
+			}
+			else {
+				goto Error;
+			}
+		}
+		else if (0 == as_info_parameter_get(params, "allow-xdr-writes", context, &context_len)) {
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
+				cf_info(AS_INFO, "Changing value of allow-xdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_allow_xdr_writes], context);
+				ns->ns_allow_xdr_writes = true;
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
+				cf_info(AS_INFO, "Changing value of allow-xdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_allow_xdr_writes], context);
+				ns->ns_allow_xdr_writes = false;
 			}
 			else {
 				goto Error;

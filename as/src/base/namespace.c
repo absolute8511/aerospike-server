@@ -113,6 +113,8 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->enable_xdr = false;
 	ns->sets_enable_xdr = true; // ship all the sets by default
 	ns->ns_forward_xdr_writes = false; // forwarding of xdr writes is disabled by default
+	ns->ns_allow_nonxdr_writes = true; // allow nonxdr writes by default
+	ns->ns_allow_xdr_writes = true; // allow xdr writes by default
 	ns->allow_versions = false;
 	ns->cold_start_evict_ttl = 0xFFFFffff; // unless this is specified via config file, use evict void-time saved in device header
 	ns->conflict_resolution_policy = AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION;
