@@ -941,6 +941,8 @@ struct as_namespace_s {
 	bool						enable_xdr;
 	bool 						sets_enable_xdr; // namespace-level flag to enable set-based xdr shipping.
 	bool 						ns_forward_xdr_writes; // namespace-level flag to enable forwarding of xdr writes
+	bool 						ns_allow_nonxdr_writes; // namespace-level flag to allow nonxdr writes or not
+	bool 						ns_allow_xdr_writes; // namespace-level flag to allow xdr writes or not
 
 	/* The server default read consistency level for this namespace. */
 	as_policy_consistency_level read_consistency_level;
