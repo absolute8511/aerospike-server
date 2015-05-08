@@ -1182,20 +1182,37 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 
 int as_rw_start(as_transaction *tr, bool is_read) {
 	int rv;
+	as_namespace *ns = tr->rsv.ns;
 
 	cf_assert(tr, AS_RW, CF_CRITICAL, "invalid transaction");
 	cf_assert(tr->rsv.p, AS_RW, CF_CRITICAL, "invalid reservation");
-	cf_assert(tr->rsv.ns, AS_RW, CF_CRITICAL,
+	cf_assert(ns, AS_RW, CF_CRITICAL,
 			"invalid reservation");
-	cf_assert(tr->rsv.ns->name, AS_RW, CF_CRITICAL,
+	cf_assert(ns->name, AS_RW, CF_CRITICAL,
 			"invalid reservation");
 
 	if (! is_read) {
 		// If we're doing a "real" write, check that we aren't backed up.
 		if ((tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) == 0 &&
-				as_storage_overloaded(tr->rsv.ns)) {
+				as_storage_overloaded(ns)) {
 			tr->result_code = AS_PROTO_RESULT_FAIL_DEVICE_OVERLOAD;
 			return -1;
+		}
+
+		if ((tr->msgp->msg.info1 & AS_MSG_INFO1_XDR)) {
+			if (ns->ns_allow_xdr_writes == false) {
+				tr->result_code = AS_PROTO_RESULT_FAIL_FORBIDDEN;
+				cf_atomic_int_incr(&g_config.err_write_fail_forbidden);
+				cf_debug(AS_RW, "Disallowing xdr write in namespace %s", ns->name);
+				return -1;
+			}
+		} else {
+			if (ns->ns_allow_nonxdr_writes == false) {
+				tr->result_code = AS_PROTO_RESULT_FAIL_FORBIDDEN;
+				cf_atomic_int_incr(&g_config.err_write_fail_forbidden);
+				cf_debug(AS_RW, "Disallowing non-xdr write in namespace %s", ns->name);
+				return -1;
+			}
 		}
 	}
 
@@ -1207,7 +1224,7 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 	wr->dupl_trans_complete = (tr->rsv.n_dupl > 0) ? 0 : 1;
 
 	cf_debug_digest(AS_RW, &(tr->keyd), "[PROCESS KEY] {%s:%u} Self(%"PRIx64") Read(%d):",
-			tr->rsv. ns->name, tr->rsv.p->partition_id, g_config.self_node, is_read );
+			ns->name, tr->rsv.p->partition_id, g_config.self_node, is_read );
 
 	wr->keyd = tr->keyd;
 
@@ -1219,7 +1236,7 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 
 	// Fetching the write_request out of the hash table
 	global_keyd gk;
-	gk.ns_id = tr->rsv.ns->id;
+	gk.ns_id = ns->id;
 	gk.keyd = tr->keyd;
 
 	cf_rc_reserve(wr); // need to keep an extra reference count in case it inserts
@@ -1237,7 +1254,7 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 
 					cf_debug(AS_RW,
 							"proxy_write_start: duplicate, ignoring {%s:%d} %"PRIx64"",
-							tr->rsv.ns->name, tr->rsv.pid, *(uint64_t*)&tr->keyd);
+							ns->name, tr->rsv.pid, *(uint64_t*)&tr->keyd);
 					cf_rc_release(wr);
 					WR_TRACK_INFO(wr, "as_rw_start: proxy - ignored");
 					WR_RELEASE(wr);
@@ -1263,7 +1280,7 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 				if (wq_depth > g_config.transaction_pending_limit) {
 					cf_debug(AS_RW,
 							"as_rw_start: pending limit, ignoring {%s:%d} %"PRIx64"",
-							tr->rsv.ns->name, tr->rsv.pid, *(uint64_t*)&tr->keyd);
+							ns->name, tr->rsv.pid, *(uint64_t*)&tr->keyd);
 					cf_rc_release(wr);
 					WR_TRACK_INFO(wr, "as_rw_start: pending - limit");
 					WR_RELEASE(wr);
@@ -1324,7 +1341,7 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			WR_TRACK_INFO(wr, "as_rw_start: not found: return -2");
 			cf_detail(AS_RW,
 					"as rw start:  could not find request in hash table! returning -2 {%s.%d} (%d:%p) %"PRIx64"",
-					tr->rsv.ns->name, tr->rsv.pid, tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, *(uint64_t*)&tr->keyd);
+					ns->name, tr->rsv.pid, tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, *(uint64_t*)&tr->keyd);
 		}
 		cf_rc_release(wr);
 		WR_TRACK_INFO(wr, "as_rw_start: 694");
@@ -1334,7 +1351,7 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 	else if (rv != 0) {
 		cf_info(AS_RW,
 				"as_write_start:  unknown reason %d can't put unique? {%s.%d} (%d:%p) %"PRIx64"",
-				rv, tr->rsv.ns->name, tr->rsv.pid, tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, *(uint64_t*)&tr->keyd);
+				rv, ns->name, tr->rsv.pid, tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, *(uint64_t*)&tr->keyd);
 		WR_TRACK_INFO(wr, "as_rw_start: 701");
 		udf_rw_complete(tr, -2, __FILE__, __LINE__);
 		UREQ_DATA_RESET(&tr->udata);
@@ -1356,13 +1373,13 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 	}
 
 	cf_detail(AS_RW, "{%s:%d} as_rw_start: CREATING request %"PRIx64" %s",
-			tr->rsv.ns->name, tr->rsv.pid, *(uint64_t *) & (wr->keyd), wr->is_read ? "READ" : "WRITE");
+			ns->name, tr->rsv.pid, *(uint64_t *) & (wr->keyd), wr->is_read ? "READ" : "WRITE");
 
 	// this is debug print code --- stash a copy of the ns name + pid allowing
 	// printing after we've sent the wr on its way
 	char str[6];
 	memset(str, 0, 6);
-	strncpy(str, tr->rsv.ns->name, 5);
+	strncpy(str, ns->name, 5);
 	int pid = tr->rsv.pid;
 
 	pthread_mutex_lock(&wr->lock);
