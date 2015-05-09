@@ -38,6 +38,7 @@
 
 #include "aerospike/as_val.h"
 #include "citrusleaf/alloc.h"
+#include "citrusleaf/cf_byte_order.h"
 #include "citrusleaf/cf_digest.h"
 #include "citrusleaf/cf_vector.h"
 
@@ -309,6 +310,170 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 
 	return((cl_msg *) b);
 }
+
+
+//------------------------------------------------
+// Build a response to ordered ops or read ops
+// processed by write_local().
+//
+
+cf_buf_builder *
+as_msg_init_response_msg(uint64_t trid)
+{
+	cf_buf_builder *bb = cf_buf_builder_create_size(8 * 1024);
+
+	if (! bb) {
+		return NULL;
+	}
+
+	cl_msg *msgp = (cl_msg *)bb->buf;
+
+	msgp->proto.version = PROTO_VERSION;
+	msgp->proto.type = PROTO_TYPE_AS_MSG;
+	msgp->proto.sz = 0; // will set this on completion
+
+	as_msg *m = &msgp->msg;
+
+	m->header_sz = sizeof(as_msg);
+	m->info1 = 0;
+	m->info2 = 0;
+	m->info3 = 0;
+	m->unused = 0;
+	m->result_code = AS_PROTO_RESULT_OK;
+	m->generation = 0; // will set this on completion
+	m->record_ttl = 0; // will set this on completion
+	m->transaction_ttl = 0;
+	m->n_ops = 0; // will increment as we go
+	m->n_fields = 0;
+
+	uint8_t *buf = bb->buf + sizeof(cl_msg);
+
+	if (trid != 0) {
+		m->n_fields++;
+
+		as_msg_field *trfield = (as_msg_field *)buf;
+
+		trfield->field_sz = 1 + sizeof(uint64_t);
+		trfield->type = AS_MSG_FIELD_TYPE_TRID;
+		*(uint64_t *)trfield->data = cf_swap_to_be64(trid);
+
+		buf += sizeof(as_msg_field) + sizeof(uint64_t);
+		as_msg_swap_field(trfield);
+	}
+
+	// Trust that this can't fail, since there's 8K allocated.
+	cf_buf_builder_reserve(&bb, (int)(buf - bb->buf), NULL);
+
+	return bb;
+}
+
+void
+as_msg_finish_response_msg(cf_buf_builder *bb, uint32_t generation, uint32_t void_time)
+{
+	cl_msg *msgp = (cl_msg *)bb->buf;
+
+	msgp->proto.sz = bb->used_sz - sizeof(as_proto);
+	as_proto_swap(&msgp->proto);
+
+	as_msg *m = &msgp->msg;
+
+	m->generation = generation;
+	m->record_ttl = void_time;
+	as_msg_swap_header(m);
+}
+
+bool
+as_msg_append_to_response_msg(cf_buf_builder **bb_r, as_msg_op *req_op, as_bin *bin, as_namespace *ns)
+{
+	uint32_t append_sz = sizeof(as_msg_op);
+	uint32_t req_op_name_sz = ns->single_bin ? 0 : (uint32_t)req_op->name_sz;
+
+	append_sz += req_op_name_sz;
+
+	if (bin) {
+		append_sz += as_bin_particle_client_value_size(bin);
+	}
+
+	uint8_t *buf = NULL;
+
+	if (0 != cf_buf_builder_reserve(bb_r, (int)append_sz, &buf)) {
+		return false;
+	}
+
+	as_msg_op *opw = (as_msg_op *)buf;
+
+	opw->op = req_op->op; // echo - can be read, write, or modify
+	opw->version = 0;
+	opw->name_sz = req_op_name_sz;
+
+	memcpy(opw->name, req_op->name, opw->name_sz);
+
+	opw->op_sz = 4 + opw->name_sz;
+
+	buf += sizeof(as_msg_op) + opw->name_sz + as_bin_particle_to_client(bin, opw);
+
+	as_msg_swap_op(opw);
+
+	cl_msg *msgp = (cl_msg *)(*bb_r)->buf;
+	as_msg *m = &msgp->msg;
+
+	m->n_ops++;
+
+	return true;
+}
+
+// TODO - refactor and share with as_msg_send_reply().
+int
+as_msg_send_ops_reply(as_file_handle *fd_h, cf_buf_builder *bb)
+{
+	int rv = 0;
+
+	if (fd_h->fd == 0) {
+		cf_crash(AS_PROTO, "fd is 0");
+	}
+
+	uint8_t *msgp = bb->buf;
+	size_t msg_sz = bb->used_sz;
+	size_t pos = 0;
+
+	cf_warning_binary(AS_PROTO, msgp, msg_sz, CF_DISPLAY_HEX_COLUMNS, "response: ");
+
+	while (pos < msg_sz) {
+		int result = send(fd_h->fd, msgp + pos, msg_sz - pos, MSG_NOSIGNAL);
+
+		if (result > 0) {
+			pos += result;
+		}
+		else if (result < 0) {
+			if (errno != EWOULDBLOCK) {
+				// Common when a client aborts.
+				cf_debug(AS_PROTO, "protocol write fail: fd %d sz %zd pos %zd rv %d errno %d", fd_h->fd, msg_sz, pos, rv, errno);
+				shutdown(fd_h->fd, SHUT_RDWR);
+				rv = -1;
+				goto Exit;
+			}
+
+			usleep(1); // yield
+		}
+		else {
+			cf_info(AS_PROTO, "protocol write fail zero return: fd %d sz %d pos %d ", fd_h->fd, msg_sz, pos);
+			shutdown(fd_h->fd, SHUT_RDWR);
+			rv = -1;
+			goto Exit;
+		}
+	}
+
+Exit:
+
+	fd_h->t_inprogress = false;
+	AS_RELEASE_FILE_HANDLE(fd_h);
+
+	return rv;
+}
+
+//
+// END - build response to ops in write_local().
+//------------------------------------------------
 
 
 // NB: this uses the same logic as the bufbuild function

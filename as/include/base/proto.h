@@ -370,7 +370,7 @@ typedef struct cl_msg_s {
 #define AS_MSG_INFO2_GENERATION_DUP		(1 << 4) // if a generation collision, create a duplicate
 #define AS_MSG_INFO2_CREATE_ONLY		(1 << 5) // write record only if it doesn't exist
 #define AS_MSG_INFO2_BIN_CREATE_ONLY	(1 << 6) // write bin only if it doesn't exist
-#define AS_MSG_INFO2_WRITE_MERGE		(1 << 7) // merge this with current
+#define AS_MSG_INFO2_ORDERED_OPS		(1 << 7) // bin ops (read, write, or modify) that require an ordered response
 
 #define AS_MSG_INFO3_LAST				(1 << 0) // this is the last of a multi-part message
 #define AS_MSG_INFO3_COMMIT_LEVEL_B0  	(1 << 1) // write commit level - bit 0
@@ -483,11 +483,15 @@ extern int as_msg_send_reply(struct as_file_handle_s *fd_h, uint32_t result_code
 		uint32_t generation, uint32_t void_time, as_msg_op **ops,
 		struct as_bin_s **bins, uint16_t bin_count, struct as_namespace_s *ns,
 		uint *written_sz, uint64_t trid, const char *setname);
+extern int as_msg_send_ops_reply(struct as_file_handle_s *fd_h, cf_buf_builder *bb);
 
 extern cl_msg *as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 		uint32_t void_time, as_msg_op **ops, struct as_bin_s **bins,
 		uint16_t bin_count, struct as_namespace_s *ns, cl_msg *msgp_in,
 		size_t *msg_sz_in, uint64_t trid, const char *setname);
+extern cf_buf_builder *as_msg_init_response_msg(uint64_t trid);
+extern void as_msg_finish_response_msg(cf_buf_builder *bb, uint32_t generation, uint32_t void_time);
+extern bool as_msg_append_to_response_msg(cf_buf_builder **bb_r, as_msg_op *req_op, struct as_bin_s *bin, struct as_namespace_s *ns);
 extern int as_msg_make_response_bufbuilder(struct as_index_s *r, struct as_storage_rd_s *rd,
 		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets, bool include_key, bool skip_empty_records, cf_vector *);
 extern int as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code,

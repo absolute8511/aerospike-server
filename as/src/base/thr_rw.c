@@ -142,10 +142,11 @@ void g_write_hash_delete(global_keyd *gk) {
 }
 
 // forward references internal to the file
+void ops_complete(as_transaction *tr, cf_buf_builder *bb);
 void rw_complete(as_transaction *tr, as_record_lock *rl, int record_get_rv);
 int write_local(as_transaction *tr, write_local_generation *wlg,
 				uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
-				as_rec_props *p_pickled_rec_props, bool journal);
+				as_rec_props *p_pickled_rec_props, cf_buf_builder **bb_r, bool journal);
 int write_journal(as_transaction *tr, write_local_generation *wlg); // only do write
 int write_delete_journal(as_transaction *tr);
 static void release_proto_fd_h(as_file_handle *proto_fd_h);
@@ -322,6 +323,9 @@ void write_request_destructor(void *object) {
 		cf_free(wr->pickled_buf);
 	if (wr->pickled_rec_props.p_data)
 		cf_free(wr->pickled_rec_props.p_data);
+	if (wr->bb) {
+		cf_buf_builder_free(wr->bb);
+	}
 	if (wr->rsv_valid) {
 		as_partition_release(&wr->rsv);
 		cf_atomic_int_decr(&g_config.rw_tree_count);
@@ -929,7 +933,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 
 					rv = write_local(tr, &wlg, &wr->pickled_buf,
 							&wr->pickled_sz, &wr->pickled_void_time,
-							&wr->pickled_rec_props, false);
+							&wr->pickled_rec_props, &wr->bb, false);
 					WR_TRACK_INFO(wr, "internal_rw_start: write local done ");
 				}
 				if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
@@ -1033,7 +1037,12 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						tr->rsv.ns->name, tr->rsv.pid, *(uint64_t *) & (wr->keyd), is_delete ? "DELETE" : "UPDATE", tr->result_code);
 
 			WR_TRACK_INFO(wr, "internal_rw_start: Short Circuit for Single Replica Writes");
-			rw_complete(tr, NULL, 0);
+			if (wr->bb) {
+				ops_complete(tr, wr->bb);
+			}
+			else {
+				rw_complete(tr, NULL, 0);
+			}
 			rw_cleanup(wr, tr, first_time, false, __LINE__);
 			as_rw_set_stat_counters(false, 0, tr);
 			*delete = true;
@@ -1086,7 +1095,12 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 		// signal back to client
 		cf_debug(AS_RW, "respond_client_on_master_completion");
 		wr->respond_client_on_master_completion = true;
-		rw_complete(tr, NULL, 0);
+		if (wr->bb) {
+			ops_complete(tr, wr->bb);
+		}
+		else {
+			rw_complete(tr, NULL, 0);
+		}
 		tr->proto_fd_h = NULL;
 		tr->proxy_msg = NULL;
 		UREQ_DATA_RESET(&wr->udata);
@@ -1542,7 +1556,12 @@ finish_rw_process_prole_ack(write_request *wr, uint32_t result_code)
 	tr.microbenchmark_is_resolve = false;
 
 	if (!wr->respond_client_on_master_completion) {
-		rw_complete(&tr, NULL, 0);
+		if (wr->bb) {
+			ops_complete(&tr, wr->bb);
+		}
+		else {
+			rw_complete(&tr, NULL, 0);
+		}
 		rw_cleanup(wr, &tr, false, false, __LINE__);
 	}
 
@@ -2011,11 +2030,46 @@ Out:
 } // end rw_process_ack()
 
 /*
- * Complete the request. Respond back to the requester, which is either 
+ * Complete an ops request. Respond back to the requester, which is either
  * client or proxy source node. Also free the proto. This is done to avoid
  * any futher communication. 
  */
-void 
+void
+ops_complete(as_transaction *tr, cf_buf_builder *bb)
+{
+	if (tr->proto_fd_h) {
+		if (0 != as_msg_send_ops_reply(tr->proto_fd_h, bb)) {
+			cf_warning(AS_RW, "can't send ops reply, fd %d", tr->proto_fd_h->fd);
+		}
+
+		tr->proto_fd_h = 0;
+	}
+	else if (tr->proxy_msg) {
+		// It was a proxy request - hand it back to the proxy.
+		if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
+			cf_detail(AS_RW,
+					"[Digest %"PRIx64" Shipped OP] sending reply, rc %d to %"PRIx64"",
+					*(uint64_t *)&tr->keyd, tr->result_code, tr->proxy_node);
+		}
+		else {
+			cf_detail(AS_RW, "sending proxy reply, rc %d to %"PRIx64"",
+					tr->result_code, tr->proxy_node);
+		}
+
+		as_proxy_send_ops_response(tr->proxy_node, tr->proxy_msg, bb);
+		tr->proxy_msg = 0;
+	}
+	else {
+		cf_warning(AS_RW, "ops_complete with no proto_fd_h or proxy_msg");
+	}
+}
+
+/*
+ * Complete the request. Respond back to the requester, which is either
+ * client or proxy source node. Also free the proto. This is done to avoid
+ * any futher communication.
+ */
+void
 rw_complete(as_transaction *tr, as_record_lock *rl, int record_get_rv) 
 {
 	int rv;
@@ -2669,8 +2723,7 @@ write_process(cf_node node, msg *m, bool respond)
 	}
 
 	if (msgp) {
-		msgp->msg.info2 &= (AS_MSG_INFO2_WRITE | AS_MSG_INFO2_DELETE
-				| AS_MSG_INFO2_WRITE_MERGE);
+		msgp->msg.info2 &= (AS_MSG_INFO2_WRITE | AS_MSG_INFO2_DELETE);
 		// INIT_TR
 		as_transaction tr;
 		as_transaction_init(&tr, keyd, msgp);
@@ -3356,7 +3409,7 @@ check_msg_set_name(as_msg* m, const char* set_name)
 int
 write_local_policies(as_transaction *tr, bool *p_must_not_create,
 		bool *p_record_level_replace, bool *p_must_fetch_data,
-		bool *p_increment_generation)
+		bool *p_increment_generation, cf_buf_builder **bb_r)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -3375,21 +3428,15 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 
 	bool increment_generation = false;
 
-	bool has_write_op = false;
+	bool build_response = (m->info2 & AS_MSG_INFO2_ORDERED_OPS);
 
 	// Loop over ops to check and modify flags.
 	as_msg_op *op = NULL;
 	int i = 0;
 
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (op->op == AS_MSG_OP_READ) {
-			// The client can send read and write operations in one command,
-			// e.g. increment & get. Here, skip such read operations.
-			continue;
-		}
 
-		has_write_op = true;
-
+		// TODO - what about all read ops?
 		if (op->op != AS_MSG_OP_MC_TOUCH) {
 			increment_generation = true;
 		}
@@ -3402,30 +3449,25 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 
 			must_not_create = true;
 			must_fetch_data = true;
-			break;
 		}
-
-		if (OP_IS_MODIFY(op->op)) {
+		else if (op->op == AS_MSG_OP_WRITE) {
+			if (op->particle_type == AS_PARTICLE_TYPE_NULL && record_level_replace) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin delete can't have record-level replace flag ", ns->name);
+				return AS_PROTO_RESULT_FAIL_PARAMETER;
+			}
+		}
+		else if (OP_IS_MODIFY(op->op)) {
 			if (record_level_replace) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: modify op can't have record-level replace flag ", ns->name);
 				return AS_PROTO_RESULT_FAIL_PARAMETER;
 			}
 
 			must_fetch_data = true;
-			break; // modify and touch shouldn't be in same command
 		}
-
-		if (op->op == AS_MSG_OP_WRITE &&
-				op->particle_type == AS_PARTICLE_TYPE_NULL &&
-				record_level_replace) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin delete can't have record-level replace flag ", ns->name);
-			return AS_PROTO_RESULT_FAIL_PARAMETER;
+		else if (op->op == AS_MSG_OP_READ) {
+			must_fetch_data = true;
+			build_response = true;
 		}
-	}
-
-	if (! has_write_op) {
-		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: transaction has no write op ", ns->name);
-		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	if (p_must_not_create) {
@@ -3442,6 +3484,15 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 
 	if (p_increment_generation) {
 		*p_increment_generation = increment_generation;
+	}
+
+	if (build_response) {
+		*bb_r = as_msg_init_response_msg(tr->trid);
+
+		if (! *bb_r) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response buffer alloc ", ns->name);
+			return AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
 	}
 
 	return 0;
@@ -3755,7 +3806,7 @@ write_local_index_metadata_unwind(index_metadata *old, as_index *r)
 int
 write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		bool record_created, bool increment_generation,
-		pickle_info *pickle, bool *is_delete)
+		pickle_info *pickle, cf_buf_builder **bb_r, bool *is_delete)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -3801,12 +3852,6 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 	int i = 0;
 
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (op->op == AS_MSG_OP_READ) {
-			// The client can send read and write operations in one command,
-			// e.g. increment & get. Here, skip such read operations.
-			continue;
-		}
-
 		if (OP_IS_TOUCH(op->op)) {
 			continue;
 		}
@@ -3882,6 +3927,20 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 				return -result;
 			}
 		}
+		else if (op->op == AS_MSG_OP_READ) {
+			as_bin *b = as_bin_get(rd, NULL, 0);
+
+			if ((result = write_local_single_bin_check(tr, b)) != 0) {
+				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
+				return result;
+			}
+
+			if (! as_msg_append_to_response_msg(bb_r, op, b, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
 		else {
 			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
 			write_local_dim_single_bin_unwind(&old_bin, rd->bins);
@@ -3947,7 +4006,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 int
 write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		bool record_level_replace, bool increment_generation,
-		pickle_info *pickle, bool *is_delete)
+		pickle_info *pickle, cf_buf_builder **bb_r, bool *is_delete)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4010,12 +4069,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	int i = 0;
 
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (op->op == AS_MSG_OP_READ) {
-			// The client can send read and write operations in one command,
-			// e.g. increment & get. Here, skip such read operations.
-			continue;
-		}
-
 		if (OP_IS_TOUCH(op->op)) {
 			continue;
 		}
@@ -4086,6 +4139,20 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_modify_from_client() ", ns->name);
 				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
 				return -result;
+			}
+		}
+		else if (op->op == AS_MSG_OP_READ) {
+			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return result;
+			}
+
+			if (! as_msg_append_to_response_msg(bb_r, op, b, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
 		}
 		else {
@@ -4226,7 +4293,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 int
 write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		bool must_fetch_data, bool increment_generation,
-		pickle_info *pickle, bool *is_delete)
+		pickle_info *pickle, cf_buf_builder **bb_r, bool *is_delete)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4274,12 +4341,6 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	int i = 0;
 
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (op->op == AS_MSG_OP_READ) {
-			// The client can send read and write operations in one command,
-			// e.g. increment & get. Here, skip such read operations.
-			continue;
-		}
-
 		if (OP_IS_TOUCH(op->op)) {
 			continue;
 		}
@@ -4345,6 +4406,18 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 			p_stack_particles += (uint32_t)sz_result;
 		}
+		else if (op->op == AS_MSG_OP_READ) {
+			as_bin *b = as_bin_get(rd, NULL, 0);
+
+			if ((result = write_local_single_bin_check(tr, b)) != 0) {
+				return result;
+			}
+
+			if (! as_msg_append_to_response_msg(bb_r, op, b, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
 		else {
 			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
 			return AS_PROTO_RESULT_FAIL_PARAMETER;
@@ -4408,7 +4481,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 int
 write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		bool must_fetch_data, bool record_level_replace, bool increment_generation,
-		pickle_info *pickle, bool *is_delete)
+		pickle_info *pickle, cf_buf_builder **bb_r, bool *is_delete)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4482,12 +4555,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	int i = 0;
 
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (op->op == AS_MSG_OP_READ) {
-			// The client can send read and write operations in one command,
-			// e.g. increment & get. Here, skip such read operations.
-			continue;
-		}
-
 		if (OP_IS_TOUCH(op->op)) {
 			continue;
 		}
@@ -4556,6 +4623,18 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 			}
 
 			p_stack_particles += (uint32_t)sz_result;
+		}
+		else if (op->op == AS_MSG_OP_READ) {
+			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				return result;
+			}
+
+			if (! as_msg_append_to_response_msg(bb_r, op, b, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
 		}
 		else {
 			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
@@ -4637,7 +4716,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 int
 write_local(as_transaction *tr, write_local_generation *wlg,
 		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
-		as_rec_props *p_pickled_rec_props, bool journal)
+		as_rec_props *p_pickled_rec_props, cf_buf_builder **bb_r, bool journal)
 {
 	//------------------------------------------------------
 	// Perform checks that don't need to loop over ops, or
@@ -4661,7 +4740,8 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	bool increment_generation;
 
 	if (0 != (result = write_local_policies(tr, &must_not_create,
-			&record_level_replace, &must_fetch_data, &increment_generation))) {
+			&record_level_replace, &must_fetch_data, &increment_generation,
+			bb_r))) {
 		write_local_failed(tr, 0, false, 0, 0, result);
 		return -1;
 	}
@@ -4810,24 +4890,24 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		if (ns->single_bin) {
 			result = write_local_dim_single_bin(tr, &rd,
 					record_created, increment_generation,
-					&pickle, &is_delete);
+					&pickle, bb_r, &is_delete);
 		}
 		else {
 			result = write_local_dim(tr, set_name, &rd,
 					record_level_replace, increment_generation,
-					&pickle, &is_delete);
+					&pickle, bb_r, &is_delete);
 		}
 	}
 	else {
 		if (ns->single_bin) {
 			result = write_local_ssd_single_bin(tr, &rd,
 					must_fetch_data, increment_generation,
-					&pickle, &is_delete);
+					&pickle, bb_r, &is_delete);
 		}
 		else {
 			result = write_local_ssd(tr, set_name, &rd,
 					must_fetch_data, record_level_replace, increment_generation,
-					&pickle, &is_delete);
+					&pickle, bb_r, &is_delete);
 		}
 	}
 
@@ -4850,6 +4930,10 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	*pickled_void_time = pickle.void_time;
 	p_pickled_rec_props->p_data = pickle.rec_props_data;
 	p_pickled_rec_props->size = pickle.rec_props_size;
+
+	if (*bb_r) {
+		as_msg_finish_response_msg(*bb_r, r->generation, r->void_time);
+	}
 
 	tr->generation = r->generation;
 
@@ -5144,7 +5228,7 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 		if (jqe.delete == true)
 			rv = write_delete_local(&tr, false, 0, false);
 		else
-			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, false);
+			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, 0, false);
 
 		cf_detail(AS_RW, "write journal: wrote: rv %d key %"PRIx64,
 				rv, *(uint64_t *)&tr.keyd);
