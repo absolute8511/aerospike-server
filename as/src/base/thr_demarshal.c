@@ -194,6 +194,15 @@ thr_demarshal_reaper_fn(void *arg)
 	return NULL;
 }
 
+// Log information about a suspicious incoming transaction.
+static void
+log_as_proto_and_peeked_data(as_proto *proto, uint8_t *peekbuf, size_t peeked_data_sz)
+{
+	cf_warning(AS_DEMARSHAL, "Received unexpected extra data from client when peeking as_proto!");
+	cf_warning(AS_DEMARSHAL, "as_proto {version = %d ; type = %d ; sz = %zu (0x%x)}", proto->version, proto->type, proto->sz, proto->sz);
+	cf_warning(AS_DEMARSHAL, "peeked_data_sz = %ld (0x%x)", peeked_data_sz, peeked_data_sz);
+	cf_warning_binary(AS_DEMARSHAL, peekbuf, peeked_data_sz, CF_DISPLAY_HEX_SPACED, "peekbuf");
+}
 
 // Set of threads which talk to client over the connection for doing the needful
 // processing. Note that once fd is assigned to a thread all the work on that fd
@@ -491,8 +500,13 @@ thr_demarshal(void *arg)
 						size_t offset = sizeof(as_msg);
 						if (!(peeked_data_sz = cf_socket_recv(fd, peekbuf, peekbuf_sz, 0))) {
 							cf_warning(AS_DEMARSHAL, "could not peek the as_msg header");
+
 						} else if (peeked_data_sz > min_as_msg_sz) {
 //							cf_debug(AS_DEMARSHAL, "(Peeked %zu bytes.)", peeked_data_sz);
+							if (peeked_data_sz > proto.sz) {
+								log_as_proto_and_peeked_data(&proto, peekbuf, peeked_data_sz);
+								goto NextEvent_FD_Cleanup;
+							}
 							uint16_t n_fields = ntohs(((as_msg *) peekbuf)->n_fields), field_num = 0;
 //							cf_debug(AS_DEMARSHAL, "Found %d AS_MSG fields", n_fields);
 							while (!found && (field_num < n_fields)) {
@@ -538,11 +552,6 @@ thr_demarshal(void *arg)
 					memcpy(proto_p, &proto, sizeof(as_proto));
 
 #ifdef USE_JEM
-					if (peeked_data_sz > proto_p->sz) {
-						cf_warning(AS_DEMARSHAL, "client sent more than advertised ~~ (proto size %lu recvd %lu)", proto_p->sz, peeked_data_sz);
-						goto NextEvent_FD_Cleanup;
-					}
-
 					// Jam in the peeked data.
 					if (peeked_data_sz) {
 						memcpy(proto_p->data, &peekbuf, peeked_data_sz);
@@ -606,7 +615,10 @@ thr_demarshal(void *arg)
 						// packet.
 						uint8_t *decompressed_buf;
 						uint8_t *tmp_decompressed_buf = (uint8_t *)&decompressed_buf;
-						if (as_packet_decompression((uint8_t *)proto_p, tmp_decompressed_buf)) {
+						int rv = 0;
+						if ((rv = as_packet_decompression((uint8_t *)proto_p, tmp_decompressed_buf))) {
+							cf_warning(AS_DEMARSHAL, "as_proto decompression failed! (rv %d)", rv);
+							cf_warning_binary(AS_DEMARSHAL, proto_p, sizeof(as_proto) + proto_p->sz, CF_DISPLAY_HEX_SPACED, "compressed proto_p");
 							goto NextEvent_FD_Cleanup;
 						}
 						// Count the packets.
