@@ -500,7 +500,6 @@ thr_demarshal(void *arg)
 						size_t offset = sizeof(as_msg);
 						if (!(peeked_data_sz = cf_socket_recv(fd, peekbuf, peekbuf_sz, 0))) {
 							cf_warning(AS_DEMARSHAL, "could not peek the as_msg header");
-
 						} else if (peeked_data_sz > min_as_msg_sz) {
 //							cf_debug(AS_DEMARSHAL, "(Peeked %zu bytes.)", peeked_data_sz);
 							if (peeked_data_sz > proto.sz) {
