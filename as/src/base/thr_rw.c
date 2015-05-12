@@ -142,8 +142,7 @@ void g_write_hash_delete(global_keyd *gk) {
 }
 
 // forward references internal to the file
-void ops_complete(as_transaction *tr, cf_buf_builder *bb);
-void rw_complete(as_transaction *tr, as_record_lock *rl, int record_get_rv);
+void rw_complete(write_request *wr, as_transaction *tr, as_record_lock *rl, int record_get_rv);
 int write_local(as_transaction *tr, write_local_generation *wlg,
 				uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
 				as_rec_props *p_pickled_rec_props, cf_buf_builder **bb_r, bool journal);
@@ -806,7 +805,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 					&tr->keyd);
 			MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_open_hist);
 			WR_TRACK_INFO(wr, "internal_rw_start: Short Circuit For Reads");
-			rw_complete(tr, &rl, rec_rv);
+			rw_complete(wr, tr, &rl, rec_rv);
 			rw_cleanup(wr, tr, first_time, false, __LINE__);
 			as_rw_set_stat_counters(true, 0, tr);
 			*delete = true;
@@ -817,7 +816,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 			//     - If duplicate are resolved
 			// send the response to requester (consumes the tr, basically)
 			WR_TRACK_INFO(wr, "internal_rw_start: Short Circuit For Reads");
-			rw_complete(tr, NULL, rec_rv);
+			rw_complete(wr, tr, NULL, rec_rv);
 			rw_cleanup(wr, tr, first_time, false, __LINE__);
 			as_rw_set_stat_counters(true, 0, tr);
 			*delete = true;
@@ -859,7 +858,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 				|| (wr->read_consistency_level == AS_POLICY_CONSISTENCY_LEVEL_ALL))) {
 			MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_internal_hist);
 			WR_TRACK_INFO(wr, "internal_rw_start: Short Circuit for Read After Duplicate Resolution");
-			rw_complete(tr, NULL, 0);
+			rw_complete(wr, tr, NULL, 0);
 			rw_cleanup(wr, tr, first_time, false, __LINE__);
 			as_rw_set_stat_counters(true, 0, tr);
 			*delete = true;
@@ -963,7 +962,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 				// send data back to the client and don't leak a connection
 				if (rv == -1) {
 					MICROBENCHMARK_RESET_P();
-					rw_complete(tr, NULL, 0);
+					rw_complete(wr, tr, NULL, 0);
 					rw_cleanup(wr, tr, false, false, __LINE__);
 					rv = 0;
 				}
@@ -1037,12 +1036,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						tr->rsv.ns->name, tr->rsv.pid, *(uint64_t *) & (wr->keyd), is_delete ? "DELETE" : "UPDATE", tr->result_code);
 
 			WR_TRACK_INFO(wr, "internal_rw_start: Short Circuit for Single Replica Writes");
-			if (wr->bb) {
-				ops_complete(tr, wr->bb);
-			}
-			else {
-				rw_complete(tr, NULL, 0);
-			}
+			rw_complete(wr, tr, NULL, 0);
 			rw_cleanup(wr, tr, first_time, false, __LINE__);
 			as_rw_set_stat_counters(false, 0, tr);
 			*delete = true;
@@ -1095,12 +1089,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 		// signal back to client
 		cf_debug(AS_RW, "respond_client_on_master_completion");
 		wr->respond_client_on_master_completion = true;
-		if (wr->bb) {
-			ops_complete(tr, wr->bb);
-		}
-		else {
-			rw_complete(tr, NULL, 0);
-		}
+		rw_complete(wr, tr, NULL, 0);
 		tr->proto_fd_h = NULL;
 		tr->proxy_msg = NULL;
 		UREQ_DATA_RESET(&wr->udata);
@@ -1449,7 +1438,7 @@ int as_read_start(as_transaction *tr) {
 			cf_atomic_int_incr(&g_config.stat_read_reqs_xdr);
 		}
 
-		rw_complete(tr, NULL, 0);
+		rw_complete(NULL, tr, NULL, 0);
 
 		// This code does task of rw_cleanup ... like releasing
 		// reservation cleaning up msgp etc ...
@@ -1556,12 +1545,7 @@ finish_rw_process_prole_ack(write_request *wr, uint32_t result_code)
 	tr.microbenchmark_is_resolve = false;
 
 	if (!wr->respond_client_on_master_completion) {
-		if (wr->bb) {
-			ops_complete(&tr, wr->bb);
-		}
-		else {
-			rw_complete(&tr, NULL, 0);
-		}
+		rw_complete(wr, &tr, NULL, 0);
 		rw_cleanup(wr, &tr, false, false, __LINE__);
 	}
 
@@ -2029,39 +2013,59 @@ Out:
 
 } // end rw_process_ack()
 
-/*
- * Complete an ops request. Respond back to the requester, which is either
- * client or proxy source node. Also free the proto. This is done to avoid
- * any futher communication. 
- */
 void
 ops_complete(as_transaction *tr, cf_buf_builder *bb)
 {
 	if (tr->proto_fd_h) {
 		if (0 != as_msg_send_ops_reply(tr->proto_fd_h, bb)) {
-			cf_warning(AS_RW, "can't send ops reply, fd %d", tr->proto_fd_h->fd);
+			cf_warning(AS_RW, "can't send ops reply, fd %d",
+					tr->proto_fd_h->fd);
 		}
+
+		cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
 
 		tr->proto_fd_h = 0;
 	}
 	else if (tr->proxy_msg) {
-		// It was a proxy request - hand it back to the proxy.
-		if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
-			cf_detail(AS_RW,
-					"[Digest %"PRIx64" Shipped OP] sending reply, rc %d to %"PRIx64"",
-					*(uint64_t *)&tr->keyd, tr->result_code, tr->proxy_node);
-		}
-		else {
-			cf_detail(AS_RW, "sending proxy reply, rc %d to %"PRIx64"",
-					tr->result_code, tr->proxy_node);
-		}
-
 		as_proxy_send_ops_response(tr->proxy_node, tr->proxy_msg, bb);
 		tr->proxy_msg = 0;
 	}
 	else {
 		cf_warning(AS_RW, "ops_complete with no proto_fd_h or proxy_msg");
 	}
+
+	MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
+}
+
+void
+write_complete(write_request *wr, as_transaction *tr)
+{
+	if (wr->bb) {
+		ops_complete(tr, wr->bb);
+		return;
+	}
+
+	if (udf_rw_needcomplete(tr)) {
+		udf_rw_complete(tr, tr->result_code, __FILE__, __LINE__);
+	}
+	else if (tr->proto_fd_h) {
+		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
+				tr->generation, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL)) {
+			cf_warning(AS_RW, "can't send reply to client, fd %d",
+					tr->proto_fd_h->fd);
+		}
+
+		cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
+
+		tr->proto_fd_h = 0;
+	}
+	else if (tr->proxy_msg) {
+		as_proxy_send_response(tr->proxy_node, tr->proxy_msg, tr->result_code,
+				0, 0, NULL, NULL, 0, NULL, tr->trid, NULL);
+	}
+	// else something is really wrong ...
+
+	MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
 }
 
 /*
@@ -2070,13 +2074,17 @@ ops_complete(as_transaction *tr, cf_buf_builder *bb)
  * any futher communication.
  */
 void
-rw_complete(as_transaction *tr, as_record_lock *rl, int record_get_rv) 
+rw_complete(write_request *wr, as_transaction *tr, as_record_lock *rl, int record_get_rv)
 {
-	int rv;
-	cf_detail(AS_RW, "write complete!");
+	as_msg *m = &tr->msgp->msg;
 
-	if (0 != (rv = thr_tsvc_read(tr, rl, record_get_rv)))
-		cf_crash(AS_RW, "committed write can't respond: rv %d", rv);
+	if (m->info1 & AS_MSG_INFO1_READ) {
+		thr_tsvc_read(tr, rl, record_get_rv);
+	}
+	else {
+		write_complete(wr, tr);
+	}
+
 	if (tr->proto_fd_h != 0) {
 		AS_RELEASE_FILE_HANDLE(tr->proto_fd_h);
 		tr->proto_fd_h = 0;
@@ -6096,188 +6104,149 @@ thr_tsvc_read(as_transaction *tr, as_record_lock *rl, int record_get_rv)
 
 	int rv = record_get_rv;
 
-	// Writes and deletes, which don't need reading, come
-	// in here sometimes. Just try to read when the read bit is set
-	if (m->info1 & AS_MSG_INFO1_READ) {
-		cf_detail(AS_RW, "as_record_get: seeking key %"PRIx64,
-				*(uint64_t *)&tr->keyd);
+	cf_detail(AS_RW, "as_record_get: seeking key %"PRIx64,
+			*(uint64_t *)&tr->keyd);
 
-		if (!r) {
-			if (rv == 0) // we haven't tried to traverse the tree yet
-				rv = as_record_get(tr->rsv.tree, &tr->keyd, r_ref, ns);
+	if (!r) {
+		if (rv == 0) // we haven't tried to traverse the tree yet
+			rv = as_record_get(tr->rsv.tree, &tr->keyd, r_ref, ns);
 
-			MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_tree_hist);
+		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_tree_hist);
 
-			if (-2 == rv || -3 == rv) {
-				cf_info(AS_RW, "as_record_get failure %d - will retry", rv);
-				return (-1);
-			} else if (-1 == rv) {
-				cf_debug_digest(AS_RW, &(tr->keyd), "[REC NOT FOUND:4]<%s>PID(%u) Pstate(%d):",
-								"thr_tsvc_read()", tr->rsv.pid, tr->rsv.p->state);
-				tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
-			} else { /*0*/
-				r = r_ref->r;
-				as_storage_record_open(ns, r, rd, &tr->keyd);
-				MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_open_hist);
-			}
+		if (-2 == rv || -3 == rv) {
+			cf_info(AS_RW, "as_record_get failure %d - will retry", rv);
+			return (-1);
+		} else if (-1 == rv) {
+			cf_debug_digest(AS_RW, &(tr->keyd), "[REC NOT FOUND:4]<%s>PID(%u) Pstate(%d):",
+							"thr_tsvc_read()", tr->rsv.pid, tr->rsv.p->state);
+			tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
+		} else { /*0*/
+			r = r_ref->r;
+			as_storage_record_open(ns, r, rd, &tr->keyd);
+			MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_open_hist);
 		}
+	}
 
-		// check to see this isn't an expired record waiting to die
-		if (r && r->void_time && r->void_time < as_record_void_time_get()) {
-			cf_debug_digest(AS_RW, &(tr->keyd),
-							"[REC NOT FOUND AND EXPIRED] PartID(%u): expired record still in system, no read",
-							tr->rsv.pid);
+	// check to see this isn't an expired record waiting to die
+	if (r && r->void_time && r->void_time < as_record_void_time_get()) {
+		cf_debug_digest(AS_RW, &(tr->keyd),
+						"[REC NOT FOUND AND EXPIRED] PartID(%u): expired record still in system, no read",
+						tr->rsv.pid);
+		tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
+		as_storage_record_close(r, rd);
+		as_record_done(r_ref, ns);
+		r_ref = 0;
+		r = 0;
+	}
+
+	// Check the key if required.
+	// Note - for data-not-in-memory "exists" ops, key check is expensive!
+	if (r && msg_has_key(m) &&
+			as_storage_record_get_key(rd) && ! check_msg_key(m, rd)) {
+		tr->result_code = AS_PROTO_RESULT_FAIL_KEY_MISMATCH;
+		as_storage_record_close(r, rd);
+		as_record_done(r_ref, ns);
+		r_ref = 0;
+		r = 0;
+	}
+
+	if (r && (m->info1 & AS_MSG_INFO1_GET_NOBINDATA)) {
+		cf_detail(AS_RW, "as_record_get: record exists");
+		tr->result_code = AS_PROTO_RESULT_OK;
+		generation = r->generation;
+		void_time = r->void_time;
+		as_storage_record_close(r, rd);
+		as_record_done(r_ref, ns);
+		r_ref = 0;
+		r = 0;
+	}
+
+	// Build up the response, which is pairs of
+	// as_msg_bin and as_bin.
+	if (r) {
+		rd->n_bins = as_bin_get_n_bins(r, rd);
+
+		if ((m->info1 & AS_MSG_INFO1_GET_ALL)
+				|| (m->info1 & AS_MSG_INFO1_GET_ALL_NODATA))
+			bin_count = rd->n_bins;
+		else
+			bin_count = m->n_ops;
+	}
+
+	as_msg_op *ops[bin_count];
+	as_bin stack_bins[(r && !ns->storage_data_in_memory) ? rd->n_bins : 0];
+
+	if (r) {
+		rd->bins = as_bin_get_all(r, rd, stack_bins);
+
+		if (!as_bin_inuse_has(rd)) {
+			cf_warning(AS_RW, "as_record_get: expired record still in system, no read: n_bins(%d)", rd->n_bins);
+			cf_debug_digest(AS_RW, &(tr->keyd), "[REC NOT FOUND:5] PID(%u) Pstate(%d):",
+							tr->rsv.pid, tr->rsv.p->state);
 			tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
 			as_storage_record_close(r, rd);
 			as_record_done(r_ref, ns);
 			r_ref = 0;
 			r = 0;
 		}
+	}
 
-		// Check the key if required.
-		// Note - for data-not-in-memory "exists" ops, key check is expensive!
-		if (r && msg_has_key(m) &&
-				as_storage_record_get_key(rd) && ! check_msg_key(m, rd)) {
-			tr->result_code = AS_PROTO_RESULT_FAIL_KEY_MISMATCH;
-			as_storage_record_close(r, rd);
-			as_record_done(r_ref, ns);
-			r_ref = 0;
-			r = 0;
+	as_bin *response_bins[bin_count];
+	uint16_t n_bins = 0;
+
+	if (r) {
+		// 'get all' fundamentally different from 'get some'
+		if ((m->info1 & AS_MSG_INFO1_GET_ALL)
+				|| (m->info1 & AS_MSG_INFO1_GET_ALL_NODATA)) {
+			memset(ops, 0, sizeof(as_msg_op *) * rd->n_bins);
+
+			n_bins = as_bin_inuse_count(rd);
+
+			as_bin_get_all_p(rd, response_bins);
 		}
+		// now do the get-some case:
+		// todo: this is an N squared algorithm! Can improve by:
+		// (1) keeping the bins in a sorted list so you can use a binary search
+		// (2) keeping both the bins and the input list sorted, so you can do a simple
+		//     linear scan.
+		// As a reminder; what's happening here is we are filling the output
+		// bins[] array with the pointers from the record.
+		else {
+			as_msg_op *op = 0;
+			int n = 0;
 
-		if (r && (m->info1 & AS_MSG_INFO1_GET_NOBINDATA)) {
-			cf_detail(AS_RW, "as_record_get: record exists");
-			tr->result_code = AS_PROTO_RESULT_OK;
-			generation = r->generation;
-			void_time = r->void_time;
-			as_storage_record_close(r, rd);
-			as_record_done(r_ref, ns);
-			r_ref = 0;
-			r = 0;
-		}
-
-		// Build up the response, which is pairs of
-		// as_msg_bin and as_bin.
-		if (r) {
-			rd->n_bins = as_bin_get_n_bins(r, rd);
-
-			if ((m->info1 & AS_MSG_INFO1_GET_ALL)
-					|| (m->info1 & AS_MSG_INFO1_GET_ALL_NODATA))
-				bin_count = rd->n_bins;
-			else
-				bin_count = m->n_ops;
-		}
-
-		as_msg_op *ops[bin_count];
-		as_bin stack_bins[(r && !ns->storage_data_in_memory) ? rd->n_bins : 0];
-
-		if (r) {
-			rd->bins = as_bin_get_all(r, rd, stack_bins);
-
-			if (!as_bin_inuse_has(rd)) {
-				cf_warning(AS_RW, "as_record_get: expired record still in system, no read: n_bins(%d)", rd->n_bins);
-				cf_debug_digest(AS_RW, &(tr->keyd), "[REC NOT FOUND:5] PID(%u) Pstate(%d):",
-								tr->rsv.pid, tr->rsv.p->state);
-				tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
-				as_storage_record_close(r, rd);
-				as_record_done(r_ref, ns);
-				r_ref = 0;
-				r = 0;
-			}
-		}
-
-		as_bin *response_bins[bin_count];
-		uint16_t n_bins = 0;
-
-		if (r) {
-			// 'get all' fundamentally different from 'get some'
-			if ((m->info1 & AS_MSG_INFO1_GET_ALL)
-					|| (m->info1 & AS_MSG_INFO1_GET_ALL_NODATA)) {
-				memset(ops, 0, sizeof(as_msg_op *) * rd->n_bins);
-
-				n_bins = as_bin_inuse_count(rd);
-
-				as_bin_get_all_p(rd, response_bins);
-			}
-			// now do the get-some case:
-			// todo: this is an N squared algorithm! Can improve by:
-			// (1) keeping the bins in a sorted list so you can use a binary search
-			// (2) keeping both the bins and the input list sorted, so you can do a simple
-			//     linear scan.
-			// As a reminder; what's happening here is we are filling the output
-			// bins[] array with the pointers from the record.
-			else {
-				as_msg_op *op = 0;
-				int n = 0;
-
-				while ((op = as_msg_op_iterate(m, op, &n))) {
-					if (op->op == AS_MSG_OP_READ) {
-						ops[n_bins] = op;
-						response_bins[n_bins] = as_bin_get(rd, op->name, op->name_sz);
-						n_bins++;
-					}
+			while ((op = as_msg_op_iterate(m, op, &n))) {
+				if (op->op == AS_MSG_OP_READ) {
+					ops[n_bins] = op;
+					response_bins[n_bins] = as_bin_get(rd, op->name, op->name_sz);
+					n_bins++;
 				}
 			}
+		}
 
-			MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
+		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
 
 #ifdef DEBUG
-			if (bin_counter == 0) {
-				cf_debug(AS_RW, "read: returning no bins, why would a person want that? info %02x r %p", m->info1, r);
-			}
+		if (bin_counter == 0) {
+			cf_debug(AS_RW, "read: returning no bins, why would a person want that? info %02x r %p", m->info1, r);
+		}
 #endif
 
-			generation = r->generation;
-			void_time = r->void_time;
-			set_name = as_index_get_set_name(r, ns);
-		} else {
-			cf_detail(AS_RW, "no value found at this key");
-		}
-
-		cf_debug(AS_RW, "as_record_get: key %"PRIx64" generation %d",
-						*(uint64_t *)&tr->keyd, generation);
-
-		single_transaction_response(tr, ns, ops, response_bins, n_bins,
-				generation, void_time, &written_sz,
-				(m->info1 & AS_MSG_INFO1_XDR) ? (char *) set_name : NULL);
-
-		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
+		generation = r->generation;
+		void_time = r->void_time;
+		set_name = as_index_get_set_name(r, ns);
+	} else {
+		cf_detail(AS_RW, "no value found at this key");
 	}
-	else {
-		// In case of write request has UDF udf_rw_complete
-		// would reply accordingly
-		if (udf_rw_needcomplete(tr)) {
-			udf_rw_complete(tr, tr->result_code, __FILE__, __LINE__);
-		} else if (tr->proto_fd_h) {
-			cf_debug(AS_RW, "sending reply, fd %d rc %d",
-					tr->proto_fd_h->fd, tr->result_code);
 
-			if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-					generation, 0, 0, 0, 0, 0, &written_sz, tr->trid,
-					NULL)) {
+	cf_debug(AS_RW, "as_record_get: key %"PRIx64" generation %d",
+					*(uint64_t *)&tr->keyd, generation);
 
-				cf_debug(AS_RW,
-						"tsvc read: can't send short reply, fd %d rc %d",
-						tr->proto_fd_h->fd, tr->result_code);
-			}
-			cf_hist_track_insert_data_point(g_config.wt_reply_hist,
-					tr->start_time);
-			tr->proto_fd_h = 0;
-		} else if (tr->proxy_msg) {
-			// it was a proxy request - hand it back to the proxy for responding
-			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP)
-				cf_detail(AS_RW,
-						"[Digest %"PRIx64" Shipped OP] sending reply, rc %d to %"PRIx64"",
-						*(uint64_t *)&tr->keyd, tr->result_code, tr->proxy_node);
-			else
-				cf_detail(AS_RW, "sending proxy reply, rc %d to %"PRIx64"",
-						tr->result_code, tr->proxy_node);
-			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
-					tr->result_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-		}
+	single_transaction_response(tr, ns, ops, response_bins, n_bins,
+			generation, void_time, &written_sz,
+			(m->info1 & AS_MSG_INFO1_XDR) ? (char *) set_name : NULL);
 
-		MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
-	}
+	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
 
 	if (tr->result_code != 0)
 		cf_detail(AS_RW, " response with result code %d", tr->result_code);
