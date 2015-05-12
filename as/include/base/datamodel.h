@@ -246,6 +246,11 @@ extern uint32_t as_bin_particle_to_client(const as_bin *b, as_msg_op *op);
 extern uint32_t as_bin_particle_pickled_size(as_bin *b);
 extern uint32_t as_bin_particle_to_pickled(const as_bin *b, uint8_t *pickled);
 
+// Different for LDTs - an LDT's as_list is expensive to generate, so we return
+// it from the sizing method, and cache it for later use by the packing method:
+extern uint32_t as_ldt_particle_client_value_size(as_storage_rd *rd, as_bin *b, as_val **p_val);
+extern uint32_t as_ldt_particle_to_client(const as_val *val, as_msg_op *op);
+
 // mem: TODO - replace with as_val family.
 extern int as_bin_particle_replace_from_mem(as_bin *b, as_particle_type type, const uint8_t *value, uint32_t value_size);
 extern uint32_t as_bin_particle_stack_from_mem(as_bin *b, uint8_t* stack, as_particle_type type, const uint8_t *value, uint32_t value_size);

@@ -29,13 +29,19 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "aerospike/as_buffer.h"
+#include "aerospike/as_msgpack.h"
+#include "aerospike/as_serializer.h"
+#include "aerospike/as_val.h"
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_byte_order.h"
 
 #include "fault.h"
 
 #include "base/datamodel.h"
+#include "base/ldt.h"
 #include "base/proto.h"
+#include "storage/storage.h"
 
 
 //==========================================================
@@ -1836,6 +1842,59 @@ as_bin_particle_to_pickled(const as_bin *b, uint8_t *pickled)
 	uint8_t *value = (uint8_t *)p32;
 
 	return 1 + 4 + g_particle_to_wire_table[type](b->particle, value);
+}
+
+//
+// LDTs are special.
+//
+
+uint32_t
+as_ldt_particle_client_value_size(as_storage_rd *rd, as_bin *b, as_val **p_val)
+{
+	*p_val = as_llist_scan(rd->ns, rd->ns->partitions[as_partition_getid(rd->keyd)].sub_vp, rd, b);
+
+	if (! *p_val) {
+		return 0;
+	}
+
+	as_serializer s;
+	as_msgpack_init(&s);
+
+	uint32_t added_size = as_serializer_serialize_getsize(&s, *p_val);
+
+	as_serializer_destroy(&s);
+
+	return added_size;
+}
+
+uint32_t
+as_ldt_particle_to_client(const as_val *val, as_msg_op *op)
+{
+	if (! val) {
+		op->particle_type = AS_PARTICLE_TYPE_NULL;
+		return 0;
+	}
+
+	op->particle_type = AS_PARTICLE_TYPE_HIDDEN_LIST;
+
+	uint8_t *value = (uint8_t *)op + sizeof(as_msg_op) + op->name_sz;
+
+	as_buffer abuf;
+	as_buffer_init(&abuf);
+
+	as_serializer s;
+	as_msgpack_init(&s);
+	as_serializer_serialize(&s, (as_val *)val, &abuf);
+
+	uint32_t added_size = abuf.size;
+
+	memcpy(value, abuf.data, abuf.size);
+
+	as_serializer_destroy(&s);
+	as_buffer_destroy(&abuf);
+	as_val_destroy(val);
+
+	return added_size;
 }
 
 //------------------------------------------------
