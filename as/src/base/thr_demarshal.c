@@ -615,7 +615,10 @@ thr_demarshal(void *arg)
 						// packet.
 						uint8_t *decompressed_buf;
 						uint8_t *tmp_decompressed_buf = (uint8_t *)&decompressed_buf;
-						if (as_packet_decompression((uint8_t *)proto_p, tmp_decompressed_buf)) {
+						int rv = 0;
+						if ((rv = as_packet_decompression((uint8_t *)proto_p, tmp_decompressed_buf))) {
+							cf_warning(AS_DEMARSHAL, "as_proto decompression failed! (rv %d)", rv);
+							cf_warning_binary(AS_DEMARSHAL, proto_p, sizeof(as_proto) + proto_p->sz, CF_DISPLAY_HEX_SPACED, "compressed proto_p");
 							goto NextEvent_FD_Cleanup;
 						}
 						// Count the packets.

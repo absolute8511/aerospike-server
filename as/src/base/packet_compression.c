@@ -52,9 +52,9 @@ as_decompress(int argc, uint8_t **argv)
 	uint8_t *buf;
 	size_t *out_buf_len;
 	uint8_t *out_buf;
-	int ret_value = 0;
+	int ret_value = -1;
 
-	cf_debug (AS_COMPRESSION, "In as_decompress");
+	cf_debug(AS_COMPRESSION, "In as_decompress");
 
 	compression_type = *argv[0];
 	buf_len = (size_t *)argv[1];
@@ -68,8 +68,11 @@ as_decompress(int argc, uint8_t **argv)
 			// zlib api to decompress the data
 			ret_value = uncompress(out_buf, out_buf_len, buf, *buf_len);
 			break;
+		default:
+			cf_warning(AS_COMPRESSION, "Unknown as_proto compression type: %d", compression_type);
+			break;
 	}
-	cf_debug (AS_COMPRESSION, "Returned as_decompress : %d", ret_value);
+	cf_debug(AS_COMPRESSION, "Returned as_decompress : %d", ret_value);
 	return ret_value;
 }
 
@@ -82,19 +85,20 @@ as_decompress(int argc, uint8_t **argv)
 int
 as_packet_decompression(uint8_t *buf, uint8_t **decompressed_packet)
 {
-	int ret_value;
+	int ret_value = -1;
 	size_t decompressed_as_packet_sz;
 	size_t buf_sz;
 
 	as_comp_proto *as_comp_protop = (as_comp_proto *) buf;
 
-	cf_debug (AS_COMPRESSION, "In as_packet_decompression");
+	cf_debug(AS_COMPRESSION, "In as_packet_decompression");
 
 	if (as_comp_protop->proto.type != PROTO_TYPE_AS_MSG_COMPRESSED)
 	{
-		cf_debug (AS_COMPRESSION, "as_packet_decompression : Invalid input data");
-		cf_debug (AS_COMPRESSION, "Returned as_packet_decompression : -1");
-		return -1;
+		cf_warning(AS_COMPRESSION, "as_packet_decompression : Invalid input data : type received %d != PROTO_TYPE_AS_MSG_COMPRESSED (%d)",
+				   as_comp_protop->proto.type, PROTO_TYPE_AS_MSG_COMPRESSED);
+		cf_warning(AS_COMPRESSION, "Returned as_packet_decompression : %d", ret_value);
+		return ret_value;
 	}
 
 	decompressed_as_packet_sz = as_comp_protop->org_sz;
@@ -128,7 +132,7 @@ as_packet_decompression(uint8_t *buf, uint8_t **decompressed_packet)
 		cf_free(decompressed_packet);
 		decompressed_packet = NULL;
 	}
-	cf_debug (AS_COMPRESSION, "Returned as_packet_decompression : %d", ret_value);
+	cf_debug(AS_COMPRESSION, "Returned as_packet_decompression : %d", ret_value);
 	return (ret_value);
 }
 
@@ -247,7 +251,7 @@ as_packet_compression(uint8_t *buf, size_t buf_sz, uint8_t **compressed_packet, 
 	as_comp_protop->org_sz = buf_sz;
 
 	tmp_buf = *compressed_packet +  sizeof(as_comp_proto);
-	memcpy (tmp_buf, wr_buf, wr_buf_sz);
+	memcpy(tmp_buf, wr_buf, wr_buf_sz);
 
 	cf_debug(AS_COMPRESSION, "Returned as_packet_compression : 0");
 	return 0;
