@@ -238,14 +238,6 @@ extern int as_transaction_prepare(as_transaction *tr);
 extern void as_transaction_init(as_transaction *tr, cf_digest *, cl_msg *);
 extern int as_transaction_digest_validate(as_transaction *tr);
 
-// When you hold an as_record, you should also hold its vlock. So keep them all
-// in one bundle.
-typedef struct as_record_lock_s {
-	as_partition 	*part;
-	as_index_ref  	r_ref;
-	as_storage_rd	store_rd;
-} as_record_lock;
-
 struct udf_call_s; // forward declaration for udf_call, defined in udf_rw.h
 
 // Data needed for creation of a transaction, add more fields here later.
