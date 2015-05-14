@@ -167,57 +167,60 @@ as_msg_swap_fields_and_ops(as_msg *m, void *limit)
 //
 
 cl_msg *
-as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t void_time,
-		as_msg_op **ops, as_bin **bins, uint16_t bin_count, as_namespace *ns,
+as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
+		uint32_t void_time, as_bin **bins, uint16_t bin_count, as_namespace *ns,
 		cl_msg *msgp_in, size_t *msg_sz_in, uint64_t trid, const char *setname)
 {
-	int setname_len = 0;
-	// figure out the size of the entire buffer
-	int msg_sz = sizeof(cl_msg);
-	msg_sz += sizeof(as_msg_op) * bin_count; // the bin headers
+	size_t msg_sz = sizeof(cl_msg);
+
+	msg_sz += sizeof(as_msg_op) * bin_count;
+
 	for (uint16_t i = 0; i < bin_count; i++) {
-		if (bins[i]) {
-			msg_sz += ns->single_bin ? 0 :
-					  strlen(as_bin_get_name_from_id(ns, bins[i]->id));
-			msg_sz += (int)as_bin_particle_client_value_size(bins[i]);
+		if (! bins[i]) {
+			continue;
 		}
-		else if (ops[i])  // no bin, only op, no particle size
-			msg_sz += ops[i]->name_sz;
-		else
-			cf_warning(AS_PROTO, "internal error!");
+
+		msg_sz += ns->single_bin ? 0 :
+				  strlen(as_bin_get_name_from_id(ns, bins[i]->id));
+		msg_sz += as_bin_particle_client_value_size(bins[i]);
 	}
 
-	//If a transaction-id is sent by the client, we should send it back in a field
 	if (trid != 0) {
-		msg_sz += (sizeof(as_msg_field) + sizeof(trid));
+		msg_sz += sizeof(as_msg_field) + sizeof(trid);
 	}
 
-	// If setname is present, we will send it as a field. Account for its space overhead.
-	if (setname != 0) {
+	uint32_t setname_len = 0;
+
+	if (setname) {
 		setname_len = strlen(setname);
-		msg_sz += (sizeof(as_msg_field) + setname_len);
+		msg_sz += sizeof(as_msg_field) + setname_len;
 	}
 
-	// most cases are small messages - try to stack alloc if we can
-	byte *b;
-	if ((0 == msgp_in) || (*msg_sz_in < msg_sz)) {
+	uint8_t *b;
+
+	if (! msgp_in || *msg_sz_in < msg_sz) {
 		b = cf_malloc(msg_sz);
-		if (!b)	return(0);
+
+		if (! b) {
+			return NULL;
+		}
 	}
 	else {
-		b = (byte *) msgp_in;
+		b = (uint8_t *)msgp_in;
 	}
+
 	*msg_sz_in = msg_sz;
 
-	// set up the header
-	byte *buf = b; // current buffer pointer
-	cl_msg *msgp = (cl_msg *) buf;
+	uint8_t *buf = b;
+	cl_msg *msgp = (cl_msg *)buf;
+
 	msgp->proto.version = PROTO_VERSION;
 	msgp->proto.type = PROTO_TYPE_AS_MSG;
 	msgp->proto.sz = msg_sz - sizeof(as_proto);
 	as_proto_swap(&msgp->proto);
 
 	as_msg *m = &msgp->msg;
+
 	m->header_sz = sizeof(as_msg);
 	m->info1 = 0;
 	m->info2 = 0;
@@ -230,85 +233,55 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 	m->n_ops = bin_count;
 	m->n_fields = 0;
 
-	// Count the number of fields that we are going to send back
-	if (trid != 0) {
-		m->n_fields++;
-	}
-	if (setname != NULL) {
-		m->n_fields++;
-	}
-	as_msg_swap_header(m);
-
 	buf += sizeof(cl_msg);
 
-	//If we have to send back the transaction-id, we have fields to send back
 	if (trid != 0) {
-		as_msg_field *trfield = (as_msg_field *) buf;
-		//Allow space for the message field header
-		buf += sizeof(as_msg_field);
+		m->n_fields++;
 
-		//Fill the field header
+		as_msg_field *trfield = (as_msg_field *)buf;
+
+		trfield->field_sz = 1 + sizeof(uint64_t);
 		trfield->type = AS_MSG_FIELD_TYPE_TRID;
-		//Copy the transaction-id as field data in network byte order (big-endian)
-		uint64_t trid_nbo = __cpu_to_be64(trid);
-		trfield->field_sz = sizeof(trid_nbo);
-		memcpy(trfield->data, &trid_nbo, sizeof(trid_nbo));
-		as_msg_swap_field(trfield);
+		*(uint64_t *)trfield->data = cf_swap_to_be64(trid);
 
-		//Allow space for the message field data
-		buf += sizeof(trid_nbo);
+		buf += sizeof(as_msg_field) + sizeof(uint64_t);
+		as_msg_swap_field(trfield);
 	}
 
-	// If we have to send back the setname, we have fields to send back
-	if (setname != NULL) {
-		as_msg_field *trfield = (as_msg_field *) buf;
-		// Allow space for the message field header
-		buf += sizeof(as_msg_field);
+	if (setname) {
+		m->n_fields++;
 
-		// Fill the field header
+		as_msg_field *trfield = (as_msg_field *)buf;
+
+		trfield->field_sz = 1 + setname_len;
 		trfield->type = AS_MSG_FIELD_TYPE_SET;
-		trfield->field_sz = setname_len + 1;
 		memcpy(trfield->data, setname, setname_len);
-		as_msg_swap_field(trfield);
 
-		// Allow space for the message field data
-		buf += setname_len;
+		buf += sizeof(as_msg_field) + setname_len;
+		as_msg_swap_field(trfield);
 	}
 
-	// over all bins, copy into the buffer
+	as_msg_swap_header(m);
+
 	for (uint16_t i = 0; i < bin_count; i++) {
+		if (! bins[i]) {
+			continue;
+		}
 
 		as_msg_op *op = (as_msg_op *)buf;
-		buf += sizeof(as_msg_op);
 
 		op->op = AS_MSG_OP_READ;
-
-		if (bins[i]) {
-			op->version = as_bin_get_version(bins[i], ns->single_bin);
-			op->name_sz = as_bin_memcpy_name(ns, op->name, bins[i]);
-		}
-		else {
-			op->version = 0;
-			memcpy(op->name, ops[i]->name, ops[i]->name_sz);
-			op->name_sz = ops[i]->name_sz;
-		}
-
-		buf += op->name_sz;
-
-		// cf_detail(AS_PROTO, "make response: bin %d %s : version %d",i,bins[i]->name,op->version);
-
-		// Since there are two variable bits, the size is everything after the
-		// data bytes - and this is only the head, we're patching up the rest
-		// in a minute.
+		op->version = as_bin_get_version(bins[i], ns->single_bin);
+		op->name_sz = as_bin_memcpy_name(ns, op->name, bins[i]);
 		op->op_sz = 4 + op->name_sz;
 
+		buf += sizeof(as_msg_op) + op->name_sz;
 		buf += as_bin_particle_to_client(bins[i], op);
 
 		as_msg_swap_op(op);
-
 	}
 
-	return((cl_msg *) b);
+	return (cl_msg *)b;
 }
 
 
@@ -868,8 +841,8 @@ as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code, cf_buf_b
 
 int
 as_msg_send_reply(as_file_handle *fd_h, uint32_t result_code, uint32_t generation,
-		uint32_t void_time, as_msg_op **ops, as_bin **bins, uint16_t bin_count,
-		as_namespace *ns, uint *written_sz, uint64_t trid, const char *setname)
+		uint32_t void_time, as_bin **bins, uint16_t bin_count, as_namespace *ns,
+		uint *written_sz, uint64_t trid, const char *setname)
 {
 	int rv = 0;
 
@@ -879,7 +852,7 @@ as_msg_send_reply(as_file_handle *fd_h, uint32_t result_code, uint32_t generatio
 //	memset(fb,0xff,msg_sz);  // helpful to see what you might not be setting
 
 	uint8_t *msgp = (uint8_t *) as_msg_make_response_msg( result_code, generation,
-					void_time, ops, bins, bin_count, ns,
+					void_time, bins, bin_count, ns,
 					(cl_msg *)fb, &msg_sz, trid, setname);
 
 	if (!msgp)	return(-1);
@@ -926,12 +899,6 @@ Exit:
 
 	return(rv);
 
-}
-
-int
-as_msg_send_error(as_file_handle *fd_h, uint32_t result_code)
-{
-	return as_msg_send_reply(fd_h, result_code, 0, 0, NULL, NULL, 0, NULL, NULL, 0, NULL);
 }
 
 bool

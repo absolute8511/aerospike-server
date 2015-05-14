@@ -2047,7 +2047,7 @@ write_complete(write_request *wr, as_transaction *tr)
 	}
 	else if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-				tr->generation, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL)) {
+				tr->generation, 0, NULL, 0, NULL, NULL, tr->trid, NULL)) {
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
 		}
@@ -2058,7 +2058,7 @@ write_complete(write_request *wr, as_transaction *tr)
 	}
 	else if (tr->proxy_msg) {
 		as_proxy_send_response(tr->proxy_node, tr->proxy_msg, tr->result_code,
-				0, 0, NULL, NULL, 0, NULL, tr->trid, NULL);
+				0, 0, NULL, 0, NULL, tr->trid, NULL);
 	}
 	// else something is really wrong ...
 
@@ -2075,11 +2075,11 @@ rw_complete(write_request *wr, as_transaction *tr, as_index_ref *r_ref)
 {
 	as_msg *m = &tr->msgp->msg;
 
-	if (m->info1 & AS_MSG_INFO1_READ) {
-		read_local(tr, r_ref);
+	if (m->info2 & AS_MSG_INFO2_WRITE) {
+		write_complete(wr, tr);
 	}
 	else {
-		write_complete(wr, tr);
+		read_local(tr, r_ref);
 	}
 
 	if (tr->proto_fd_h != 0) {
@@ -5962,16 +5962,15 @@ as_write_init()
 
 void
 single_transaction_response(as_transaction *tr, as_namespace *ns,
-		as_msg_op **ops, as_bin **response_bins, uint16_t n_bins,
-		uint32_t generation, uint32_t void_time, uint *written_sz,
-		char *setname)
+		as_bin **response_bins, uint16_t n_bins, uint32_t generation,
+		uint32_t void_time, uint *written_sz, char *setname)
 {
 
 	cf_detail_digest(AS_RW, NULL, "[ENTER] NS(%s)", ns->name );
 
 	if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-				generation, void_time, ops, response_bins, n_bins, ns,
+				generation, void_time, response_bins, n_bins, ns,
 				written_sz, tr->trid, setname)) {
 			cf_info(AS_RW, "rw: can't send reply, fd %d rc %d",
 					tr->proto_fd_h->fd, tr->result_code);
@@ -5988,7 +5987,7 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 					tr->result_code, tr->proxy_node);
 
 		as_proxy_send_response(tr->proxy_node, tr->proxy_msg, tr->result_code,
-				generation, void_time, ops, response_bins, n_bins, ns, tr->trid,
+				generation, void_time, response_bins, n_bins, ns, tr->trid,
 				setname);
 		tr->proxy_msg = 0;
 	} else {
@@ -5998,7 +5997,7 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 		if (! tr->msgp) {
 			size_t msg_sz = 0;
 			tr->msgp = as_msg_make_response_msg(tr->result_code, generation,
-					void_time, ops, response_bins, n_bins, ns, (cl_msg *) NULL,
+					void_time, response_bins, n_bins, ns, (cl_msg *) NULL,
 					&msg_sz, tr->trid, setname);
 			// TODO - if it turns out this is normal, demote to debug:
 			cf_warning_digest(AS_RW, &tr->keyd,
@@ -6093,8 +6092,8 @@ read_local_done(as_transaction* tr, as_index_ref* r_ref, as_storage_rd* rd,
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_cleanup_hist);
 
-	single_transaction_response(tr, tr->rsv.ns, NULL, NULL, 0, generation,
-			void_time, NULL, NULL);
+	single_transaction_response(tr, tr->rsv.ns, NULL, 0, generation, void_time,
+			NULL, NULL);
 
 	MICROBENCHMARK_HIST_INSERT_P(rt_net_hist);
 }
@@ -6154,25 +6153,20 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 
 	rd.n_bins = as_bin_get_n_bins(r, &rd);
 
-	uint16_t bin_count = (m->info1 & AS_MSG_INFO1_GET_ALL) != 0 ? rd.n_bins : m->n_ops;
-
-	as_msg_op *ops[bin_count];
 	as_bin stack_bins[ns->storage_data_in_memory ? 0 : rd.n_bins];
 
 	rd.bins = as_bin_get_all(r, &rd, stack_bins);
 
 	if (! as_bin_inuse_has(&rd)) {
-		cf_warning_digest(AS_RW, &tr->keyd, "as_record_get: found record with no bins ");
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: found record with no bins ", ns->name);
 		read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_NOTFOUND);
 		return;
 	}
 
-	as_bin *response_bins[bin_count];
+	as_bin *response_bins[(m->info1 & AS_MSG_INFO1_GET_ALL) != 0 ? rd.n_bins : m->n_ops];
 	uint16_t n_bins = 0;
 
-	// 'Get all' fundamentally different from 'get some'.
 	if ((m->info1 & AS_MSG_INFO1_GET_ALL) != 0) {
-		memset(ops, 0, sizeof(as_msg_op *) * rd.n_bins);
 		n_bins = as_bin_inuse_count(&rd);
 		as_bin_get_all_p(&rd, response_bins);
 	}
@@ -6180,11 +6174,18 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 		as_msg_op *op = 0;
 		int n = 0;
 
-		while ((op = as_msg_op_iterate(m, op, &n))) {
+		while ((op = as_msg_op_iterate(m, op, &n)) != NULL) {
 			if (op->op == AS_MSG_OP_READ) {
-				ops[n_bins] = op;
-				response_bins[n_bins] = as_bin_get(&rd, op->name, op->name_sz);
-				n_bins++;
+				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+
+				if (b) {
+					response_bins[n_bins++] = b;
+				}
+			}
+			else {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: unexpected bin op %u ", ns->name, op->op);
+				read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_PARAMETER);
+				return;
 			}
 		}
 	}
@@ -6194,7 +6195,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
 
-	single_transaction_response(tr, ns, ops, response_bins, n_bins,
+	single_transaction_response(tr, ns, response_bins, n_bins,
 			r->generation, r->void_time, &written_sz,
 			(m->info1 & AS_MSG_INFO1_XDR) != 0 ? (char *)set_name : NULL);
 

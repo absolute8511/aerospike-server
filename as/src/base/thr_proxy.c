@@ -746,7 +746,7 @@ as_proxy_send_redirect(cf_node dst, msg *m, cf_node rdst)
 // keep a reference, then keep the reference yourself.
 int
 as_proxy_send_response(cf_node dst, msg *m, uint32_t result_code, uint32_t generation,
-		uint32_t void_time, as_msg_op **ops, as_bin **bins, uint16_t bin_count,
+		uint32_t void_time, as_bin **bins, uint16_t bin_count,
 		as_namespace *ns, uint64_t trid, const char *setname)
 {
 	uint32_t tid;
@@ -762,7 +762,7 @@ as_proxy_send_response(cf_node dst, msg *m, uint32_t result_code, uint32_t gener
 	msg_set_uint32(m, PROXY_FIELD_TID, tid);
 
 	size_t msg_sz = 0;
-	cl_msg * msgp = as_msg_make_response_msg(result_code, generation, void_time, ops,
+	cl_msg * msgp = as_msg_make_response_msg(result_code, generation, void_time,
 			bins, bin_count, ns, 0, &msg_sz, trid, setname);
 
 	msg_set_buf(m, PROXY_FIELD_AS_PROTO, (byte *) msgp, msg_sz, MSG_SET_HANDOFF_MALLOC);
