@@ -6778,6 +6778,16 @@ int info_command_abort_scan(char *name, char *params, cf_dyn_buf *db) {
 	return 0;
 }
 
+int info_command_abort_all_scans(char *name, char *params, cf_dyn_buf *db) {
+
+	int n_scans_killed = as_tscan_abort_all();
+
+	cf_dyn_buf_append_string(db, "OK - number of scans killed: ");
+	cf_dyn_buf_append_int(db, n_scans_killed);
+
+	return 0;
+}
+
 int info_command_query_kill(char *name, char *params, cf_dyn_buf *db) {
 	char context[100];
 	int  context_len = sizeof(context);
@@ -7188,8 +7198,9 @@ as_info_init()
 	as_info_set_dynamic("query-list", as_query_list, false);
 	as_info_set_command("query-kill", info_command_query_kill, PERM_QUERY_MANAGE);
 	as_info_set_dynamic("query-stat", as_query_stat, false);
-	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SCAN_MANAGE);   // Abort a tscan with a given id.
-	as_info_set_dynamic("scan-list", as_tscan_list, false);                         // List job ids of all scans.
+	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SCAN_MANAGE);            // Abort a scan with a given id.
+	as_info_set_command("scan-abort-all", info_command_abort_all_scans, PERM_SCAN_MANAGE);   // Abort all scans.
+	as_info_set_dynamic("scan-list", as_tscan_list, false);                                  // List job ids of all scans.
 	as_info_set_command("sindex-describe", info_command_sindex_describe, PERM_NONE);
 	as_info_set_command("sindex-stat", info_command_sindex_stat, PERM_NONE);
 	as_info_set_command("sindex-list", info_command_sindex_list, PERM_NONE);
