@@ -3817,6 +3817,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
+	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	rd->n_bins = 1;
 
@@ -3904,6 +3905,12 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 					return -result;
 				}
 			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
 		}
 		// Modify an existing bin value.
 		else if (OP_IS_MODIFY(op->op)) {
@@ -3930,6 +3937,12 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_modify_from_client() ", ns->name);
 				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
 				return -result;
+			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
 		}
 		else if (op->op == AS_MSG_OP_READ) {
@@ -4017,6 +4030,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
+	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	// For data-in-memory - number of bins in existing record.
 	rd->n_bins = as_bin_get_n_bins(r, rd);
@@ -4118,6 +4132,12 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 					return -result;
 				}
 			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
 		}
 		// Modify an existing bin value.
 		else if (OP_IS_MODIFY(op->op)) {
@@ -4144,6 +4164,12 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_modify_from_client() ", ns->name);
 				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
 				return -result;
+			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
 		}
 		else if (op->op == AS_MSG_OP_READ) {
@@ -4304,6 +4330,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
+	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	rd->ignore_record_on_device = ! must_fetch_data;
 	rd->n_bins = 1;
@@ -4384,6 +4411,11 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 				p_stack_particles += (uint32_t)sz_result;
 			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
 		}
 		// Modify an existing bin value.
 		else if (OP_IS_MODIFY(op->op)) {
@@ -4410,6 +4442,11 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 			}
 
 			p_stack_particles += (uint32_t)sz_result;
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
 		}
 		else if (op->op == AS_MSG_OP_READ) {
 			as_bin *b = as_bin_get(rd, NULL, 0);
@@ -4493,6 +4530,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
 	bool has_sindex = as_sindex_ns_has_sindex(ns);
+	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	// If it's not touch or modify, determine if we must read existing record.
 	if (! must_fetch_data) {
@@ -4602,6 +4640,11 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 				p_stack_particles += (uint32_t)sz_result;
 			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
 		}
 		// Modify an existing bin value.
 		else if (OP_IS_MODIFY(op->op)) {
@@ -4628,6 +4671,11 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 			}
 
 			p_stack_particles += (uint32_t)sz_result;
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
 		}
 		else if (op->op == AS_MSG_OP_READ) {
 			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
