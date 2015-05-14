@@ -1632,6 +1632,28 @@ as_tscan_abort(uint64_t trid)
 	return 0;
 }
 
+int
+abort_all_reduce_fn(void *key, uint32_t keylen, void *object, void *udata)
+{
+	tscan_job *job = (tscan_job*)object;
+	cf_info(AS_SCAN, "scan job %lu for '%s' - aborted by scan-abort-all info command",
+			job->tid, job->ns->name);
+	pthread_mutex_lock(&job->LOCK);
+	SCAN_JOB_ABORTED_ON(job);
+	pthread_mutex_unlock(&job->LOCK);
+	(*(int*)udata)++;
+
+	return CF_RCHASH_OK;
+}
+
+int
+as_tscan_abort_all()
+{
+	int num_jobs_killed = 0;
+	rchash_reduce(g_scan_job_hash, abort_all_reduce_fn, (void*)&num_jobs_killed);
+	return num_jobs_killed;
+}
+
 // For every job in the g_scan_job_hash, print the statistics.
 int
 as_tscan_list_job_reduce_fn (void *key, uint32_t keylen, void *object, void *udata)

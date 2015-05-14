@@ -74,12 +74,6 @@
 #define RW_OP_MULTI 5
 #define RW_OP_MULTI_ACK 6
 
-#define OP_IS_MODIFY(op) ((op) == AS_MSG_OP_APPEND_SEGMENT || (op) == AS_MSG_OP_APPEND_SEGMENT_EXT \
-    || (op) == AS_MSG_OP_APPEND_SEGMENT_QUERY || (op) == AS_MSG_OP_INCR || (op) == AS_MSG_OP_MC_INCR \
-    || (op) == AS_MSG_OP_MC_APPEND || (op) == AS_MSG_OP_MC_PREPEND || (op) == AS_MSG_OP_APPEND \
-    || (op) == AS_MSG_OP_PREPEND)
-
-#define OP_IS_TOUCH(op) ((op) == AS_MSG_OP_TOUCH || (op) == AS_MSG_OP_MC_TOUCH)
 #define RW_RESULT_OK 0 // write completed
 #define RW_RESULT_NOT_FOUND 1  // a real valid "yo there's no data at this key"
 #define RW_RESULT_RETRY 2 // a "yo, that's not my partition beeeeyotch

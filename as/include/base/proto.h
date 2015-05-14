@@ -251,15 +251,12 @@ typedef struct index_metadata_t {
 
 #define AS_MSG_OP_READ 1			// read the value in question
 #define AS_MSG_OP_WRITE 2			// write the value in question
-#define AS_MSG_OP_WRITE_UNIQUE 3	// write a namespace-wide unique value - not currently used
-#define AS_MSG_OP_WRITE_NOW 4		// write the server-current time - not currently used
+// Unused - 3
+// Unused - 4
 #define AS_MSG_OP_INCR 5			// arithmetically add a value to an existing value, works only on integers
-
-// Deprecated RTA ops - ignore.
-#define AS_MSG_OP_APPEND_SEGMENT 6			// append segment to a particle
-#define AS_MSG_OP_APPEND_SEGMENT_EXT 7		// extended append - with parameters
-#define AS_MSG_OP_APPEND_SEGMENT_QUERY 8	// query to return subset of segments
-
+// Unused - 6
+// Unused - 7
+// Unused - 8
 #define AS_MSG_OP_APPEND 9			// append a value to an existing value, works on strings and blobs
 #define AS_MSG_OP_PREPEND 10		// prepend a value to an existing value, works on strings and blobs
 #define AS_MSG_OP_TOUCH 11			// touch a value without doing anything else to it - will increment the generation
@@ -268,6 +265,17 @@ typedef struct index_metadata_t {
 #define AS_MSG_OP_MC_APPEND 130		// append the value to an existing value, works only strings for now
 #define AS_MSG_OP_MC_PREPEND 131	// prepend a value to an existing value, works only strings for now
 #define AS_MSG_OP_MC_TOUCH 132		// Memcache-compatible touch - does not change generation
+
+#define OP_IS_MODIFY(op) ( \
+	   (op) == AS_MSG_OP_INCR \
+	|| (op) == AS_MSG_OP_APPEND \
+	|| (op) == AS_MSG_OP_PREPEND \
+	|| (op) == AS_MSG_OP_MC_INCR \
+    || (op) == AS_MSG_OP_MC_APPEND \
+    || (op) == AS_MSG_OP_MC_PREPEND \
+    )
+
+#define OP_IS_TOUCH(op) ((op) == AS_MSG_OP_TOUCH || (op) == AS_MSG_OP_MC_TOUCH)
 
 typedef struct as_msg_op_s {
 	uint32_t op_sz;
