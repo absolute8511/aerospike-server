@@ -2017,8 +2017,6 @@ ops_complete(as_transaction *tr, cf_dyn_buf *db)
 					tr->proto_fd_h->fd);
 		}
 
-		cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
-
 		tr->proto_fd_h = 0;
 	}
 	else if (tr->proxy_msg) {
@@ -2028,8 +2026,6 @@ ops_complete(as_transaction *tr, cf_dyn_buf *db)
 	else {
 		cf_warning(AS_RW, "ops_complete with no proto_fd_h or proxy_msg");
 	}
-
-	MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
 }
 
 void
@@ -2037,6 +2033,13 @@ write_complete(write_request *wr, as_transaction *tr)
 {
 	if (wr->response_db.buf) {
 		ops_complete(tr, &wr->response_db);
+
+		if (tr->proto_fd_h) {
+			cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
+		}
+
+		MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
+
 		return;
 	}
 
@@ -6209,6 +6212,68 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 		return;
 	}
 
+	uint32_t written_sz = 0;
+
+	if ((m->info1 & AS_MSG_INFO1_GET_ALL) != 0) {
+		as_bin *response_bins[(m->info1 & AS_MSG_INFO1_GET_ALL) != 0 ?
+				rd.n_bins : m->n_ops];
+
+		as_bin_get_all_p(&rd, response_bins);
+
+		uint16_t n_bins = as_bin_inuse_count(&rd);
+		const char *set_name = as_index_get_set_name(r, ns);
+
+		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
+
+		single_transaction_response(tr, ns, response_bins, n_bins,
+				r->generation, r->void_time, &written_sz,
+				(m->info1 & AS_MSG_INFO1_XDR) != 0 ? (char *)set_name : NULL);
+
+		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
+	}
+	else {
+		cf_dyn_buf_define_size(response_db, 1024 * 128);
+		cf_dyn_buf *db = &response_db;
+
+		as_msg_init_response_msg(0, db);
+
+		bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
+		as_msg_op *op = 0;
+		int n = 0;
+
+		while ((op = as_msg_op_iterate(m, op, &n)) != NULL) {
+			if (op->op == AS_MSG_OP_READ) {
+				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+
+				if ((b || ordered_ops) &&
+						! as_msg_append_to_response_msg(db, op, b, ns)) {
+					cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: failed response append ", ns->name);
+					cf_dyn_buf_free(db);
+					read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+					return;
+				}
+			}
+			else {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: unexpected bin op %u ", ns->name, op->op);
+				cf_dyn_buf_free(db);
+				read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_PARAMETER);
+				return;
+			}
+		}
+
+		as_msg_finish_response_msg(db, r->generation, r->void_time);
+
+		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
+
+		ops_complete(tr, db);
+
+		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
+
+		written_sz = db->used_sz;
+		cf_dyn_buf_free(db);
+	}
+
+/*
 	as_bin *response_bins[(m->info1 & AS_MSG_INFO1_GET_ALL) != 0 ? rd.n_bins : m->n_ops];
 	uint16_t n_bins = 0;
 
@@ -6246,6 +6311,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 			(m->info1 & AS_MSG_INFO1_XDR) != 0 ? (char *)set_name : NULL);
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
+*/
 
 	as_storage_record_close(r, &rd);
 	as_record_done(r_ref, ns);

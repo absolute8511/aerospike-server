@@ -794,9 +794,13 @@ as_proxy_send_ops_response(cf_node dst, msg *m, cf_dyn_buf *db)
 	uint8_t *msgp = db->buf;
 	size_t msg_sz = db->used_sz;
 
-	msg_set_buf(m, PROXY_FIELD_AS_PROTO, msgp, msg_sz, MSG_SET_HANDOFF_MALLOC);
-
-	db->buf = NULL; // the fabric owns the buffer now
+	if (db->is_stack) {
+		msg_set_buf(m, PROXY_FIELD_AS_PROTO, msgp, msg_sz, MSG_SET_COPY);
+	}
+	else {
+		msg_set_buf(m, PROXY_FIELD_AS_PROTO, msgp, msg_sz, MSG_SET_HANDOFF_MALLOC);
+		db->buf = NULL; // the fabric owns the buffer now
+	}
 
 	int rv = as_fabric_send(dst, m, AS_FABRIC_PRIORITY_MEDIUM);
 	if (rv != 0) {

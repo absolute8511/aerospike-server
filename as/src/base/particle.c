@@ -1796,8 +1796,7 @@ uint32_t
 as_bin_particle_to_client(const as_bin *b, as_msg_op *op)
 {
 	if (! (b && as_bin_inuse(b))) {
-		// Currently, 'select' transactions that don't find a bin get here.
-		// TODO - consider not returning the bin? (Like scans, etc.)
+		// Ordered ops that find no bin will get here.
 		op->particle_type = AS_PARTICLE_TYPE_NULL;
 		return 0;
 	}
