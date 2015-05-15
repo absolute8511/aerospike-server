@@ -497,7 +497,7 @@ extern cl_msg *as_msg_make_response_msg(uint32_t result_code,
 		uint32_t generation, uint32_t void_time, struct as_bin_s **bins,
 		uint16_t bin_count, struct as_namespace_s *ns, cl_msg *msgp_in,
 		size_t *msg_sz_in, uint64_t trid, const char *setname);
-extern bool as_msg_init_response_msg(uint64_t trid, cf_dyn_buf *db);
+extern void as_msg_init_response_msg(uint64_t trid, cf_dyn_buf *db);
 extern void as_msg_finish_response_msg(cf_dyn_buf *db, uint32_t generation, uint32_t void_time);
 extern bool as_msg_append_to_response_msg(cf_dyn_buf *db, as_msg_op *req_op, struct as_bin_s *bin, struct as_namespace_s *ns);
 extern int as_msg_make_response_bufbuilder(struct as_index_s *r, struct as_storage_rd_s *rd,

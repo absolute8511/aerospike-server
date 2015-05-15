@@ -3489,9 +3489,13 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 		*p_increment_generation = increment_generation;
 	}
 
-	if (build_response && ! as_msg_init_response_msg(tr->trid, db)) {
-		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response buffer alloc ", ns->name);
-		return AS_PROTO_RESULT_FAIL_UNKNOWN;
+	if (build_response) {
+		if (cf_dyn_buf_init_heap(db, 8 * 1024) != 0) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response buffer alloc ", ns->name);
+			return AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
+
+		as_msg_init_response_msg(tr->trid, db);
 	}
 
 	return 0;

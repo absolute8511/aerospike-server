@@ -290,13 +290,9 @@ as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 // processed by write_local().
 //
 
-bool
+void
 as_msg_init_response_msg(uint64_t trid, cf_dyn_buf *db)
 {
-	if (cf_dyn_buf_init_heap(db, 32 * 1024) != 0) {
-		return false;
-	}
-
 	cl_msg *msgp = (cl_msg *)db->buf;
 
 	msgp->proto.version = PROTO_VERSION;
@@ -332,10 +328,8 @@ as_msg_init_response_msg(uint64_t trid, cf_dyn_buf *db)
 		as_msg_swap_field(trfield);
 	}
 
-	// Trust that this can't fail, since there's 32K allocated.
+	// Trust that this can't fail - i.e. the caller set up enough capacity.
 	cf_dyn_buf_reserve(db, buf - db->buf, NULL);
-
-	return true;
 }
 
 void
