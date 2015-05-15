@@ -3954,7 +3954,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 				return result;
 			}
 
-			if (! as_msg_append_to_response_msg(db, op, b, ns)) {
+			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -4181,12 +4181,94 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				return result;
 			}
 
-			if (! as_msg_append_to_response_msg(db, op, b, ns)) {
+			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
 		}
+		/*
+		else if (op->op == AS_MSG_OP_CDT_MODIFY) {
+			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return result;
+			}
+
+			// Do CDT modify operations always become creates if there's no
+			// existing particle?
+			if (! b) {
+				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
+			}
+
+			if (! b) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+
+			as_bin result_bin;
+			as_bin_set_empty(&result_bin);
+
+			if ((result = as_bin_cdt_alloc_modify_from_client(b, op, &result_bin)) < 0) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_cdt_alloc_modify_from_client() ", ns->name);
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return -result;
+			}
+
+			// TODO - make this handle non-null empty bin:
+			bool append_ok = as_msg_append_to_response_msg(db, op, &result_bin, ns);
+
+			if (as_bin_inuse(&result_bin)) {
+				as_bin_particle_destroy(&result_bin, true);
+			}
+
+			if (! append_ok) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		else if (op->op == AS_MSG_OP_CDT_READ) {
+			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return result;
+			}
+
+			bool append_ok;
+
+			if (b) {
+				as_bin result_bin;
+				as_bin_set_empty(&result_bin);
+
+				if ((result = as_bin_cdt_read_from_client(b, op, &result_bin)) < 0) {
+					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_cdt_read_from_client() ", ns->name);
+					write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+					return -result;
+				}
+
+				// TODO - make this handle non-null empty bin:
+				append_ok = as_msg_append_to_response_msg(db, op, &result_bin, ns);
+
+				if (as_bin_inuse(&result_bin)) {
+					as_bin_particle_destroy(&result_bin, true);
+				}
+			}
+			else if (ordered_ops) {
+				// TODO - make this handle non-null empty bin:
+				append_ok = as_msg_append_to_response_msg(db, op, NULL, ns);
+			}
+
+			if (! append_ok) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		*/
 		else {
 			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
 			write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
@@ -4456,7 +4538,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 				return result;
 			}
 
-			if (! as_msg_append_to_response_msg(db, op, b, ns)) {
+			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
@@ -4685,7 +4767,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				return result;
 			}
 
-			if (! as_msg_append_to_response_msg(db, op, b, ns)) {
+			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
@@ -6148,6 +6230,14 @@ read_local_done(as_transaction* tr, as_index_ref* r_ref, as_storage_rd* rd,
 	MICROBENCHMARK_HIST_INSERT_P(rt_net_hist);
 }
 
+static inline void
+destroy_stack_bins(as_bin *stack_bins, uint32_t num_bins)
+{
+	for (uint32_t i = 0; i < num_bins; i++) {
+		as_bin_particle_destroy(&stack_bins[i], true);
+	}
+}
+
 void
 read_local(as_transaction *tr, as_index_ref *r_ref)
 {
@@ -6213,69 +6303,6 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 		return;
 	}
 
-/*
-	uint32_t written_sz = 0;
-
-	if ((m->info1 & AS_MSG_INFO1_GET_ALL) != 0) {
-		as_bin *response_bins[(m->info1 & AS_MSG_INFO1_GET_ALL) != 0 ?
-				rd.n_bins : m->n_ops];
-
-		as_bin_get_all_p(&rd, response_bins);
-
-		uint16_t n_bins = as_bin_inuse_count(&rd);
-		const char *set_name = as_index_get_set_name(r, ns);
-
-		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
-
-		single_transaction_response(tr, ns, response_bins, n_bins,
-				r->generation, r->void_time, &written_sz,
-				(m->info1 & AS_MSG_INFO1_XDR) != 0 ? (char *)set_name : NULL);
-
-		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
-	}
-	else {
-		cf_dyn_buf_define_size(response_db, 1024 * 128);
-		cf_dyn_buf *db = &response_db;
-
-		as_msg_init_response_msg(0, db);
-
-		bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
-		as_msg_op *op = 0;
-		int n = 0;
-
-		while ((op = as_msg_op_iterate(m, op, &n)) != NULL) {
-			if (op->op == AS_MSG_OP_READ) {
-				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
-
-				if ((b || ordered_ops) &&
-						! as_msg_append_to_response_msg(db, op, b, ns)) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: failed response append ", ns->name);
-					cf_dyn_buf_free(db);
-					read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
-					return;
-				}
-			}
-			else {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: unexpected bin op %u ", ns->name, op->op);
-				cf_dyn_buf_free(db);
-				read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_PARAMETER);
-				return;
-			}
-		}
-
-		as_msg_finish_response_msg(db, r->generation, r->void_time);
-
-		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
-
-		ops_complete(tr, db);
-
-		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
-
-		written_sz = db->used_sz;
-		cf_dyn_buf_free(db);
-	}
-*/
-
 	uint32_t bin_count = (m->info1 & AS_MSG_INFO1_GET_ALL) != 0 ?
 			rd.n_bins : m->n_ops;
 
@@ -6283,8 +6310,8 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 	as_bin *response_bins[bin_count];
 	uint16_t n_bins = 0;
 
-//	as_bin result_bins[bin_count];
-//	uint32_t n_result_bins = 0;
+	as_bin result_bins[bin_count];
+	uint32_t n_result_bins = 0;
 
 	if ((m->info1 & AS_MSG_INFO1_GET_ALL) != 0) {
 		memset(ops, 0, sizeof(ops));
@@ -6293,6 +6320,8 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 	}
 	else {
 		bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
+//		int result;
+
 		as_msg_op *op = 0;
 		int n = 0;
 
@@ -6310,9 +6339,18 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
 
 				if (b) {
-					b = as_bin_cdt_read(b, op, &result_bins[n_result_bins]);
+					as_bin *rb = &result_bins[n_result_bins];
+					as_bin_set_empty(rb);
 
-					if (b) {
+					if ((result = as_bin_cdt_read_from_client(b, op, rb)) < 0) {
+						cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: failed as_bin_cdt_read_from_client() ", ns->name);
+						destroy_stack_bins(result_bins, n_result_bins);
+						read_local_done(tr, r_ref, &rd, -result);
+						return;
+					}
+
+					if (as_bin_inuse(rb)) {
+						b = rb;
 						n_result_bins++;
 					}
 				}
@@ -6325,6 +6363,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 			*/
 			else {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: unexpected bin op %u ", ns->name, op->op);
+				destroy_stack_bins(result_bins, n_result_bins);
 				read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_PARAMETER);
 				return;
 			}
@@ -6342,10 +6381,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
 
-//	for (uint32_t j = 0; j < n_result_bins; j++) {
-//		as_bin_particle_destroy(&result_bins[j], true);
-//	}
-
+	destroy_stack_bins(result_bins, n_result_bins);
 	as_storage_record_close(r, &rd);
 	as_record_done(r_ref, ns);
 
