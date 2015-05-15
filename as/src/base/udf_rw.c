@@ -187,7 +187,7 @@ send_response(udf_call *call, const char *key, size_t klen, int vtype, void *val
 	if (keep_fd && tr->proto_fd_h) cf_rc_reserve(tr->proto_fd_h);
 
 	single_transaction_response(
-		tr, ns, &bin, 1,
+		tr, ns, NULL/*ops*/, &bin, 1,
 		generation, void_time, &written_sz, NULL);
 
 	if (sp_p != stack_particle_buf) {
@@ -399,7 +399,7 @@ send_udf_failure(udf_call *call, int vtype, void *val, size_t vlen)
 			call->transaction->result_code = error_code;
 			// Send an "empty" response, with no failure bin.
 			as_transaction *    tr          = call->transaction;
-			single_transaction_response(tr, tr->rsv.ns,
+			single_transaction_response(tr, tr->rsv.ns, NULL/*ops*/,
 					NULL /*bin*/, 0 /*nbins*/, 0, 0, NULL, NULL);
 			return 0;
 		}

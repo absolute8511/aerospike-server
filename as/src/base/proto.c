@@ -168,21 +168,29 @@ as_msg_swap_fields_and_ops(as_msg *m, void *limit)
 
 cl_msg *
 as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
-		uint32_t void_time, as_bin **bins, uint16_t bin_count, as_namespace *ns,
-		cl_msg *msgp_in, size_t *msg_sz_in, uint64_t trid, const char *setname)
+		uint32_t void_time, as_msg_op **ops, as_bin **bins, uint16_t bin_count,
+		as_namespace *ns, cl_msg *msgp_in, size_t *msg_sz_in, uint64_t trid,
+		const char *setname)
 {
 	size_t msg_sz = sizeof(cl_msg);
 
 	msg_sz += sizeof(as_msg_op) * bin_count;
 
 	for (uint16_t i = 0; i < bin_count; i++) {
-		if (! bins[i]) {
-			continue;
+		if (ops[i]) {
+			msg_sz += ops[i]->name_sz;
+		}
+		else if (bins[i]) {
+			msg_sz += ns->single_bin ?
+					0 : strlen(as_bin_get_name_from_id(ns, bins[i]->id));
+		}
+		else {
+			cf_crash(AS_PROTO, "making response message with null bin and op");
 		}
 
-		msg_sz += ns->single_bin ? 0 :
-				  strlen(as_bin_get_name_from_id(ns, bins[i]->id));
-		msg_sz += as_bin_particle_client_value_size(bins[i]);
+		if (bins[i]) {
+			msg_sz += as_bin_particle_client_value_size(bins[i]);
+		}
 	}
 
 	if (trid != 0) {
@@ -264,15 +272,20 @@ as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 	as_msg_swap_header(m);
 
 	for (uint16_t i = 0; i < bin_count; i++) {
-		if (! bins[i]) {
-			continue;
-		}
-
 		as_msg_op *op = (as_msg_op *)buf;
 
-		op->op = AS_MSG_OP_READ;
-		op->version = as_bin_get_version(bins[i], ns->single_bin);
-		op->name_sz = as_bin_memcpy_name(ns, op->name, bins[i]);
+		op->version = 0;
+
+		if (ops[i]) {
+			op->op = ops[i]->op;
+			memcpy(op->name, ops[i]->name, ops[i]->name_sz);
+			op->name_sz = ops[i]->name_sz;
+		}
+		else {
+			op->op = AS_MSG_OP_READ;
+			op->name_sz = as_bin_memcpy_name(ns, op->name, bins[i]);
+		}
+
 		op->op_sz = 4 + op->name_sz;
 
 		buf += sizeof(as_msg_op) + op->name_sz;
@@ -831,8 +844,8 @@ as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code, cf_buf_b
 
 int
 as_msg_send_reply(as_file_handle *fd_h, uint32_t result_code, uint32_t generation,
-		uint32_t void_time, as_bin **bins, uint16_t bin_count, as_namespace *ns,
-		uint *written_sz, uint64_t trid, const char *setname)
+		uint32_t void_time, as_msg_op **ops, as_bin **bins, uint16_t bin_count,
+		as_namespace *ns, uint *written_sz, uint64_t trid, const char *setname)
 {
 	int rv = 0;
 
@@ -842,7 +855,7 @@ as_msg_send_reply(as_file_handle *fd_h, uint32_t result_code, uint32_t generatio
 //	memset(fb,0xff,msg_sz);  // helpful to see what you might not be setting
 
 	uint8_t *msgp = (uint8_t *) as_msg_make_response_msg( result_code, generation,
-					void_time, bins, bin_count, ns,
+					void_time, ops, bins, bin_count, ns,
 					(cl_msg *)fb, &msg_sz, trid, setname);
 
 	if (!msgp)	return(-1);

@@ -42,7 +42,7 @@ extern int as_proxy_divert(cf_node dst, as_transaction *tr, as_namespace *ns,
 		uint64_t cluster_key);
 extern int as_proxy_shipop(cf_node dst, write_request *wr);
 extern int as_proxy_send_response(cf_node dst, msg *m, uint32_t result_code,
-		uint32_t generation, uint32_t void_time, as_bin **bins,
+		uint32_t generation, uint32_t void_time, as_msg_op **ops, as_bin **bins,
 		uint16_t bin_count, as_namespace *ns, uint64_t trid,
 		const char *setname);
 extern int as_proxy_send_ops_response(cf_node dst, msg *m, cf_dyn_buf *db);

@@ -312,7 +312,7 @@ as_rw_process_result(int rv, as_transaction *tr, bool *free_msgp)
 						tr->result_code, tr->proxy_node);
 			}
 			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
-					tr->result_code, 0, 0, 0, 0, 0, tr->trid, NULL);
+					tr->result_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
 		}
 		return -1;
 	}
@@ -714,7 +714,7 @@ process_transaction(as_transaction *tr)
 				}
 
 				as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
-						ret_code, 0, 0, 0, 0, 0, tr->trid, NULL);
+						ret_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
 
 			} else if (tr->proto_fd_h) {
 				// Divert the transaction into the proxy system; in this case, no
@@ -778,7 +778,7 @@ process_transaction(as_transaction *tr)
 						tr->proxy_node);
 			}
 			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
-					AS_PROTO_RESULT_FAIL_PARAMETER, 0, 0, 0, 0, 0, tr->trid, NULL);
+					AS_PROTO_RESULT_FAIL_PARAMETER, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
 			if (free_msgp == true) {
 				cf_free(msgp);
 				free_msgp = false;
