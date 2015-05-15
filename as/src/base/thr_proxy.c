@@ -776,9 +776,8 @@ as_proxy_send_response(cf_node dst, msg *m, uint32_t result_code, uint32_t gener
 	return 0;
 } // end as_proxy_send_response()
 
-// TODO - bummer about the copy, maybe a different type of buf-builder?
 int
-as_proxy_send_ops_response(cf_node dst, msg *m, cf_buf_builder *bb)
+as_proxy_send_ops_response(cf_node dst, msg *m, cf_dyn_buf *db)
 {
 	uint32_t tid;
 	msg_get_uint32(m, PROXY_FIELD_TID, &tid);
@@ -792,10 +791,12 @@ as_proxy_send_ops_response(cf_node dst, msg *m, cf_buf_builder *bb)
 	msg_set_uint32(m, PROXY_FIELD_OP, PROXY_OP_RESPONSE);
 	msg_set_uint32(m, PROXY_FIELD_TID, tid);
 
-	uint8_t *msgp = bb->buf;
-	size_t msg_sz = bb->used_sz;
+	uint8_t *msgp = db->buf;
+	size_t msg_sz = db->used_sz;
 
-	msg_set_buf(m, PROXY_FIELD_AS_PROTO, msgp, msg_sz, MSG_SET_COPY);
+	msg_set_buf(m, PROXY_FIELD_AS_PROTO, msgp, msg_sz, MSG_SET_HANDOFF_MALLOC);
+
+	db->buf = NULL; // the fabric owns the buffer now
 
 	int rv = as_fabric_send(dst, m, AS_FABRIC_PRIORITY_MEDIUM);
 	if (rv != 0) {

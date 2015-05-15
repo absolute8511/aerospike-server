@@ -58,7 +58,7 @@ cf_dyn_buf_get_newsize(int alloc, int used, int requested)
 //
 // Make sure the buf has enough bytes for whatever you're up to.
 int
-cf_dyn_buf_reserve(cf_dyn_buf *db, size_t sz)
+cf_dyn_buf_reserve_internal(cf_dyn_buf *db, size_t sz)
 {
 	// see if we need more space
 	size_t new_sz = cf_dyn_buf_get_newsize(db->alloc_sz, db->used_sz, sz);
@@ -83,9 +83,33 @@ cf_dyn_buf_reserve(cf_dyn_buf *db, size_t sz)
 
 #define DB_RESERVE(_n) \
 	if ( db->alloc_sz - db->used_sz < _n ) { \
-		if (0 != cf_dyn_buf_reserve(db, _n)) \
+		if (0 != cf_dyn_buf_reserve_internal(db, _n)) \
 			return(-1); \
 	}
+
+int
+cf_dyn_buf_init_heap(cf_dyn_buf *db, size_t sz)
+{
+	db->buf = cf_malloc(sz);
+	if (! db->buf) {
+		return -1;
+	}
+	db->is_stack = false;
+	db->alloc_sz = sz;
+	db->used_sz = 0;
+	return 0;
+}
+
+int
+cf_dyn_buf_reserve(cf_dyn_buf *db, size_t sz, uint8_t **from)
+{
+	DB_RESERVE(sz);
+	if (from) {
+		*from = &db->buf[db->used_sz];
+	}
+	db->used_sz += sz;
+	return 0;
+}
 
 int
 cf_dyn_buf_append_buf(cf_dyn_buf *db, uint8_t *buf, size_t sz)
@@ -171,8 +195,9 @@ cf_dyn_buf_strdup(cf_dyn_buf *db)
 void
 cf_dyn_buf_free(cf_dyn_buf *db)
 {
-	if (db->is_stack == false)
+	if (! db->is_stack && db->buf) {
 		cf_free(db->buf);
+	}
 }
 
 //

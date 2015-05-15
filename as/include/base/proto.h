@@ -491,15 +491,15 @@ extern int as_msg_send_reply(struct as_file_handle_s *fd_h,
 		uint32_t result_code, uint32_t generation, uint32_t void_time,
 		struct as_bin_s **bins, uint16_t bin_count, struct as_namespace_s *ns,
 		uint *written_sz, uint64_t trid, const char *setname);
-extern int as_msg_send_ops_reply(struct as_file_handle_s *fd_h, cf_buf_builder *bb);
+extern int as_msg_send_ops_reply(struct as_file_handle_s *fd_h, cf_dyn_buf *db);
 
 extern cl_msg *as_msg_make_response_msg(uint32_t result_code,
 		uint32_t generation, uint32_t void_time, struct as_bin_s **bins,
 		uint16_t bin_count, struct as_namespace_s *ns, cl_msg *msgp_in,
 		size_t *msg_sz_in, uint64_t trid, const char *setname);
-extern cf_buf_builder *as_msg_init_response_msg(uint64_t trid);
-extern void as_msg_finish_response_msg(cf_buf_builder *bb, uint32_t generation, uint32_t void_time);
-extern bool as_msg_append_to_response_msg(cf_buf_builder **bb_r, as_msg_op *req_op, struct as_bin_s *bin, struct as_namespace_s *ns);
+extern bool as_msg_init_response_msg(uint64_t trid, cf_dyn_buf *db);
+extern void as_msg_finish_response_msg(cf_dyn_buf *db, uint32_t generation, uint32_t void_time);
+extern bool as_msg_append_to_response_msg(cf_dyn_buf *db, as_msg_op *req_op, struct as_bin_s *bin, struct as_namespace_s *ns);
 extern int as_msg_make_response_bufbuilder(struct as_index_s *r, struct as_storage_rd_s *rd,
 		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets, bool include_key, bool skip_empty_records, cf_vector *);
 extern int as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code,

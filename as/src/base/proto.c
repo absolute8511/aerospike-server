@@ -290,16 +290,14 @@ as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 // processed by write_local().
 //
 
-cf_buf_builder *
-as_msg_init_response_msg(uint64_t trid)
+bool
+as_msg_init_response_msg(uint64_t trid, cf_dyn_buf *db)
 {
-	cf_buf_builder *bb = cf_buf_builder_create_size(8 * 1024);
-
-	if (! bb) {
-		return NULL;
+	if (cf_dyn_buf_init_heap(db, 32 * 1024) != 0) {
+		return false;
 	}
 
-	cl_msg *msgp = (cl_msg *)bb->buf;
+	cl_msg *msgp = (cl_msg *)db->buf;
 
 	msgp->proto.version = PROTO_VERSION;
 	msgp->proto.type = PROTO_TYPE_AS_MSG;
@@ -319,7 +317,7 @@ as_msg_init_response_msg(uint64_t trid)
 	m->n_ops = 0; // will increment as we go
 	m->n_fields = 0;
 
-	uint8_t *buf = bb->buf + sizeof(cl_msg);
+	uint8_t *buf = db->buf + sizeof(cl_msg);
 
 	if (trid != 0) {
 		m->n_fields++;
@@ -334,18 +332,18 @@ as_msg_init_response_msg(uint64_t trid)
 		as_msg_swap_field(trfield);
 	}
 
-	// Trust that this can't fail, since there's 8K allocated.
-	cf_buf_builder_reserve(&bb, (int)(buf - bb->buf), NULL);
+	// Trust that this can't fail, since there's 32K allocated.
+	cf_dyn_buf_reserve(db, buf - db->buf, NULL);
 
-	return bb;
+	return true;
 }
 
 void
-as_msg_finish_response_msg(cf_buf_builder *bb, uint32_t generation, uint32_t void_time)
+as_msg_finish_response_msg(cf_dyn_buf *db, uint32_t generation, uint32_t void_time)
 {
-	cl_msg *msgp = (cl_msg *)bb->buf;
+	cl_msg *msgp = (cl_msg *)db->buf;
 
-	msgp->proto.sz = bb->used_sz - sizeof(as_proto);
+	msgp->proto.sz = db->used_sz - sizeof(as_proto);
 	as_proto_swap(&msgp->proto);
 
 	as_msg *m = &msgp->msg;
@@ -356,7 +354,7 @@ as_msg_finish_response_msg(cf_buf_builder *bb, uint32_t generation, uint32_t voi
 }
 
 bool
-as_msg_append_to_response_msg(cf_buf_builder **bb_r, as_msg_op *req_op, as_bin *bin, as_namespace *ns)
+as_msg_append_to_response_msg(cf_dyn_buf *db, as_msg_op *req_op, as_bin *bin, as_namespace *ns)
 {
 	uint32_t append_sz = sizeof(as_msg_op);
 	uint32_t req_op_name_sz = ns->single_bin ? 0 : (uint32_t)req_op->name_sz;
@@ -369,7 +367,7 @@ as_msg_append_to_response_msg(cf_buf_builder **bb_r, as_msg_op *req_op, as_bin *
 
 	uint8_t *buf = NULL;
 
-	if (0 != cf_buf_builder_reserve(bb_r, (int)append_sz, &buf)) {
+	if (0 != cf_dyn_buf_reserve(db, append_sz, &buf)) {
 		return false;
 	}
 
@@ -387,7 +385,7 @@ as_msg_append_to_response_msg(cf_buf_builder **bb_r, as_msg_op *req_op, as_bin *
 
 	as_msg_swap_op(opw);
 
-	cl_msg *msgp = (cl_msg *)(*bb_r)->buf;
+	cl_msg *msgp = (cl_msg *)db->buf;
 	as_msg *m = &msgp->msg;
 
 	m->n_ops++;
@@ -397,7 +395,7 @@ as_msg_append_to_response_msg(cf_buf_builder **bb_r, as_msg_op *req_op, as_bin *
 
 // TODO - refactor and share with as_msg_send_reply().
 int
-as_msg_send_ops_reply(as_file_handle *fd_h, cf_buf_builder *bb)
+as_msg_send_ops_reply(as_file_handle *fd_h, cf_dyn_buf *db)
 {
 	int rv = 0;
 
@@ -405,11 +403,9 @@ as_msg_send_ops_reply(as_file_handle *fd_h, cf_buf_builder *bb)
 		cf_crash(AS_PROTO, "fd is 0");
 	}
 
-	uint8_t *msgp = bb->buf;
-	size_t msg_sz = bb->used_sz;
+	uint8_t *msgp = db->buf;
+	size_t msg_sz = db->used_sz;
 	size_t pos = 0;
-
-	cf_warning_binary(AS_PROTO, msgp, msg_sz, CF_DISPLAY_HEX_COLUMNS, "response: ");
 
 	while (pos < msg_sz) {
 		int result = send(fd_h->fd, msgp + pos, msg_sz - pos, MSG_NOSIGNAL);

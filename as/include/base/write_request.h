@@ -98,7 +98,7 @@ typedef struct write_request_s {
 	as_rec_props         pickled_rec_props;
 
 	// Store ops' responses here.
-	cf_buf_builder     * bb;
+	cf_dyn_buf           response_db;
 
 	cf_atomic32          trans_complete; // make sure transaction gets processed only once
 	cf_atomic32          dupl_trans_complete; // if 0, we are in 'dup' phase (and use atomic to only-once

@@ -146,7 +146,7 @@ void rw_complete(write_request *wr, as_transaction *tr, as_index_ref *r_ref);
 void read_local(as_transaction *tr, as_index_ref *r_ref);
 int write_local(as_transaction *tr, write_local_generation *wlg,
 				uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
-				as_rec_props *p_pickled_rec_props, cf_buf_builder **bb_r, bool journal);
+				as_rec_props *p_pickled_rec_props, cf_dyn_buf *db, bool journal);
 int write_journal(as_transaction *tr, write_local_generation *wlg); // only do write
 int write_delete_journal(as_transaction *tr);
 static void release_proto_fd_h(as_file_handle *proto_fd_h);
@@ -323,9 +323,7 @@ void write_request_destructor(void *object) {
 		cf_free(wr->pickled_buf);
 	if (wr->pickled_rec_props.p_data)
 		cf_free(wr->pickled_rec_props.p_data);
-	if (wr->bb) {
-		cf_buf_builder_free(wr->bb);
-	}
+	cf_dyn_buf_free(&wr->response_db);
 	if (wr->rsv_valid) {
 		as_partition_release(&wr->rsv);
 		cf_atomic_int_decr(&g_config.rw_tree_count);
@@ -929,7 +927,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 
 					rv = write_local(tr, &wlg, &wr->pickled_buf,
 							&wr->pickled_sz, &wr->pickled_void_time,
-							&wr->pickled_rec_props, &wr->bb, false);
+							&wr->pickled_rec_props, &wr->response_db, false);
 					WR_TRACK_INFO(wr, "internal_rw_start: write local done ");
 				}
 				if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
@@ -2011,10 +2009,10 @@ Out:
 } // end rw_process_ack()
 
 void
-ops_complete(as_transaction *tr, cf_buf_builder *bb)
+ops_complete(as_transaction *tr, cf_dyn_buf *db)
 {
 	if (tr->proto_fd_h) {
-		if (0 != as_msg_send_ops_reply(tr->proto_fd_h, bb)) {
+		if (0 != as_msg_send_ops_reply(tr->proto_fd_h, db)) {
 			cf_warning(AS_RW, "can't send ops reply, fd %d",
 					tr->proto_fd_h->fd);
 		}
@@ -2024,7 +2022,7 @@ ops_complete(as_transaction *tr, cf_buf_builder *bb)
 		tr->proto_fd_h = 0;
 	}
 	else if (tr->proxy_msg) {
-		as_proxy_send_ops_response(tr->proxy_node, tr->proxy_msg, bb);
+		as_proxy_send_ops_response(tr->proxy_node, tr->proxy_msg, db);
 		tr->proxy_msg = 0;
 	}
 	else {
@@ -2037,8 +2035,8 @@ ops_complete(as_transaction *tr, cf_buf_builder *bb)
 void
 write_complete(write_request *wr, as_transaction *tr)
 {
-	if (wr->bb) {
-		ops_complete(tr, wr->bb);
+	if (wr->response_db.buf) {
+		ops_complete(tr, &wr->response_db);
 		return;
 	}
 
@@ -3414,7 +3412,7 @@ check_msg_set_name(as_msg* m, const char* set_name)
 int
 write_local_policies(as_transaction *tr, bool *p_must_not_create,
 		bool *p_record_level_replace, bool *p_must_fetch_data,
-		bool *p_increment_generation, cf_buf_builder **bb_r)
+		bool *p_increment_generation, cf_dyn_buf *db)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -3491,13 +3489,9 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 		*p_increment_generation = increment_generation;
 	}
 
-	if (build_response) {
-		*bb_r = as_msg_init_response_msg(tr->trid);
-
-		if (! *bb_r) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response buffer alloc ", ns->name);
-			return AS_PROTO_RESULT_FAIL_UNKNOWN;
-		}
+	if (build_response && ! as_msg_init_response_msg(tr->trid, db)) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response buffer alloc ", ns->name);
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	return 0;
@@ -3811,7 +3805,7 @@ write_local_index_metadata_unwind(index_metadata *old, as_index *r)
 int
 write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		bool record_created, bool increment_generation,
-		pickle_info *pickle, cf_buf_builder **bb_r, bool *is_delete)
+		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -3906,7 +3900,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 				}
 			}
 
-			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -3939,7 +3933,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 				return -result;
 			}
 
-			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -3953,7 +3947,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 				return result;
 			}
 
-			if (! as_msg_append_to_response_msg(bb_r, op, b, ns)) {
+			if (! as_msg_append_to_response_msg(db, op, b, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -4024,7 +4018,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 int
 write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		bool record_level_replace, bool increment_generation,
-		pickle_info *pickle, cf_buf_builder **bb_r, bool *is_delete)
+		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4133,7 +4127,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				}
 			}
 
-			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -4166,7 +4160,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				return -result;
 			}
 
-			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -4180,7 +4174,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				return result;
 			}
 
-			if (! as_msg_append_to_response_msg(bb_r, op, b, ns)) {
+			if (! as_msg_append_to_response_msg(db, op, b, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -4324,7 +4318,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 int
 write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		bool must_fetch_data, bool increment_generation,
-		pickle_info *pickle, cf_buf_builder **bb_r, bool *is_delete)
+		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4412,7 +4406,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 				p_stack_particles += (uint32_t)sz_result;
 			}
 
-			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
@@ -4443,7 +4437,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 			p_stack_particles += (uint32_t)sz_result;
 
-			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
@@ -4455,7 +4449,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 				return result;
 			}
 
-			if (! as_msg_append_to_response_msg(bb_r, op, b, ns)) {
+			if (! as_msg_append_to_response_msg(db, op, b, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
@@ -4523,7 +4517,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 int
 write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		bool must_fetch_data, bool record_level_replace, bool increment_generation,
-		pickle_info *pickle, cf_buf_builder **bb_r, bool *is_delete)
+		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4641,7 +4635,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				p_stack_particles += (uint32_t)sz_result;
 			}
 
-			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
@@ -4672,7 +4666,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 			p_stack_particles += (uint32_t)sz_result;
 
-			if (ordered_ops && ! as_msg_append_to_response_msg(bb_r, op, NULL, ns)) {
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
@@ -4684,7 +4678,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 				return result;
 			}
 
-			if (! as_msg_append_to_response_msg(bb_r, op, b, ns)) {
+			if (! as_msg_append_to_response_msg(db, op, b, ns)) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
 				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
@@ -4769,7 +4763,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 int
 write_local(as_transaction *tr, write_local_generation *wlg,
 		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
-		as_rec_props *p_pickled_rec_props, cf_buf_builder **bb_r, bool journal)
+		as_rec_props *p_pickled_rec_props, cf_dyn_buf *db, bool journal)
 {
 	//------------------------------------------------------
 	// Perform checks that don't need to loop over ops, or
@@ -4794,7 +4788,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 
 	if (0 != (result = write_local_policies(tr, &must_not_create,
 			&record_level_replace, &must_fetch_data, &increment_generation,
-			bb_r))) {
+			db))) {
 		write_local_failed(tr, 0, false, 0, 0, result);
 		return -1;
 	}
@@ -4943,24 +4937,24 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		if (ns->single_bin) {
 			result = write_local_dim_single_bin(tr, &rd,
 					record_created, increment_generation,
-					&pickle, bb_r, &is_delete);
+					&pickle, db, &is_delete);
 		}
 		else {
 			result = write_local_dim(tr, set_name, &rd,
 					record_level_replace, increment_generation,
-					&pickle, bb_r, &is_delete);
+					&pickle, db, &is_delete);
 		}
 	}
 	else {
 		if (ns->single_bin) {
 			result = write_local_ssd_single_bin(tr, &rd,
 					must_fetch_data, increment_generation,
-					&pickle, bb_r, &is_delete);
+					&pickle, db, &is_delete);
 		}
 		else {
 			result = write_local_ssd(tr, set_name, &rd,
 					must_fetch_data, record_level_replace, increment_generation,
-					&pickle, bb_r, &is_delete);
+					&pickle, db, &is_delete);
 		}
 	}
 
@@ -4984,8 +4978,8 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	p_pickled_rec_props->p_data = pickle.rec_props_data;
 	p_pickled_rec_props->size = pickle.rec_props_size;
 
-	if (*bb_r) {
-		as_msg_finish_response_msg(*bb_r, r->generation, r->void_time);
+	if (db->buf) {
+		as_msg_finish_response_msg(db, r->generation, r->void_time);
 	}
 
 	tr->generation = r->generation;
