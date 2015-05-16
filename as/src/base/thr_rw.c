@@ -908,7 +908,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						tr->msgp->msg.info2 |= AS_MSG_INFO2_DELETE;
 						tr->msgp->msg.info2 &= ~AS_MSG_INFO2_WRITE;
 						is_delete = true;
-					} else if (UDF_OP_IS_READ(op)) {
+					} else if (UDF_OP_IS_READ(op) || op == UDF_OPTYPE_NONE) {
 						// update stats to move from normal to uDF requests
 						as_rw_update_stat(wr);
 						// return early if the record was not updated
