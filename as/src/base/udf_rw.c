@@ -1154,6 +1154,8 @@ int udf_rw_addresponse(as_transaction *tr, void *udata)
 int
 udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 {
+	*op = UDF_OPTYPE_NONE;
+
 	// Step 1: Setup UDF Record and LDT record
 	as_transaction *tr = call->transaction;
 	as_index_ref    r_ref;
@@ -1272,7 +1274,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 
 		udf_rw_update_ldt_err_stats(ns, res);
 
-		if (UDF_OP_IS_READ(*op)) {
+		if (UDF_OP_IS_READ(*op) || *op == UDF_OPTYPE_NONE) {
 			send_result(res, call, NULL);
 			as_result_destroy(res);
 		} else {
