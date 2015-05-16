@@ -3596,31 +3596,6 @@ write_local_stack_particles_size(as_transaction *tr, as_storage_rd *rd)
 }
 
 int
-write_local_single_bin_check(as_transaction *tr, as_bin *bin)
-{
-	// Shortcut pointers.
-	as_msg *m = &tr->msgp->msg;
-	as_namespace *ns = tr->rsv.ns;
-
-	if (bin && as_bin_is_hidden(bin)) {
-		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bad bin state ", ns->name);
-		return AS_PROTO_RESULT_FAIL_UNKNOWN;
-	}
-
-	// TODO - should we just disallow these policies for single bin?
-
-	if ((m->info2 & AS_MSG_INFO2_BIN_CREATE_ONLY) && bin) {
-		return AS_PROTO_RESULT_FAIL_BIN_EXISTS;
-	}
-
-	if ((m->info3 & AS_MSG_INFO3_BIN_REPLACE_ONLY) && ! bin) {
-		return AS_PROTO_RESULT_FAIL_BIN_NOT_FOUND;
-	}
-
-	return 0;
-}
-
-int
 write_local_bin_check(as_transaction *tr, as_bin *bin)
 {
 	// Shortcut pointers.
@@ -3628,9 +3603,12 @@ write_local_bin_check(as_transaction *tr, as_bin *bin)
 	as_namespace *ns = tr->rsv.ns;
 
 	if (bin && as_bin_is_hidden(bin)) {
+		// Note - if single-bin, this likely means the bin state is corrupt.
 		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: cannot manipulate hidden bin directly ", ns->name);
 		return AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 	}
+
+	// TODO - should we just disallow these policies for single-bin?
 
 	if ((m->info2 & AS_MSG_INFO2_BIN_CREATE_ONLY) && bin) {
 		return AS_PROTO_RESULT_FAIL_BIN_EXISTS;
@@ -3800,6 +3778,331 @@ write_local_index_metadata_unwind(index_metadata *old, as_index *r)
 
 
 //==============================================================================
+// write_local() bin operations split based on configuration - data-in-memory.
+//
+
+//================================================
+// Data-in-memory.
+//
+int
+write_local_dim_bin_ops(as_transaction *tr, as_storage_rd *rd, cf_dyn_buf *db)
+{
+	// Shortcut pointers.
+	as_msg *m = &tr->msgp->msg;
+	as_namespace *ns = tr->rsv.ns;
+	as_index *r = rd->r;
+	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
+
+	int result;
+
+	as_msg_op *op = NULL;
+	int i = 0;
+
+	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
+		if (OP_IS_TOUCH(op->op)) {
+			continue;
+		}
+
+		if (ns->data_in_index && ! is_embedded_particle_type(op->particle_type) &&
+				// Allow AS_PARTICLE_TYPE_NULL, although bin-delete operations
+				// are not likely in single-bin configuration.
+				op->particle_type != AS_PARTICLE_TYPE_NULL) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: can't write non-integer in data-in-index configuration ", ns->name);
+			return AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
+		}
+
+		if (op->name_sz >= AS_ID_BIN_SZ) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin name too long (%d) ", ns->name, op->name_sz);
+			return AS_PROTO_RESULT_FAIL_BIN_NAME;
+		}
+
+		if (op->op == AS_MSG_OP_WRITE) {
+			// AS_PARTICLE_TYPE_NULL means delete the bin.
+			// TODO - should this even be allowed for single-bin?
+			if (op->particle_type == AS_PARTICLE_TYPE_NULL) {
+				int32_t j = as_bin_get_index(rd, op->name, op->name_sz);
+
+				if (j != -1) {
+					as_bin_destroy(rd, j);
+				}
+			}
+			// It's a regular bin write.
+			else {
+				as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+
+				if ((result = write_local_bin_check(tr, b)) != 0) {
+					return result;
+				}
+
+				if (! b) {
+					b = as_bin_create(r, rd, op->name, op->name_sz, 0);
+				}
+
+				if (! b) {
+					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
+					return AS_PROTO_RESULT_FAIL_UNKNOWN;
+				}
+
+				if ((result = as_bin_particle_alloc_from_client(b, op)) < 0) {
+					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_from_client() ", ns->name);
+					return -result;
+				}
+			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		// Modify an existing bin value.
+		else if (OP_IS_MODIFY(op->op)) {
+			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				return result;
+			}
+
+			// Currently all modify operations become creates if there's no
+			// existing particle.
+			if (! b) {
+				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
+			}
+
+			if (! b) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+
+			if ((result = as_bin_particle_alloc_modify_from_client(b, op)) < 0) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_modify_from_client() ", ns->name);
+				return -result;
+			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		else if (op->op == AS_MSG_OP_READ) {
+			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				return result;
+			}
+
+			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		/*
+		else if (op->op == AS_MSG_OP_CDT_MODIFY) {
+			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				return result;
+			}
+
+			// Do CDT modify operations always become creates if there's no
+			// existing particle?
+			if (! b) {
+				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
+			}
+
+			if (! b) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+
+			as_bin result_bin;
+			as_bin_set_empty(&result_bin);
+
+			if ((result = as_bin_cdt_alloc_modify_from_client(b, op, &result_bin)) < 0) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_cdt_alloc_modify_from_client() ", ns->name);
+				return -result;
+			}
+
+			// TODO - make this handle non-null empty bin:
+			bool append_ok = as_msg_append_to_response_msg(db, op, &result_bin, ns);
+
+			if (as_bin_inuse(&result_bin)) {
+				as_bin_particle_destroy(&result_bin, true);
+			}
+
+			if (! append_ok) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		else if (op->op == AS_MSG_OP_CDT_READ) {
+			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				return result;
+			}
+
+			bool append_ok;
+
+			if (b) {
+				as_bin result_bin;
+				as_bin_set_empty(&result_bin);
+
+				if ((result = as_bin_cdt_read_from_client(b, op, &result_bin)) < 0) {
+					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_cdt_read_from_client() ", ns->name);
+					return -result;
+				}
+
+				// TODO - make this handle non-null empty bin:
+				append_ok = as_msg_append_to_response_msg(db, op, &result_bin, ns);
+
+				if (as_bin_inuse(&result_bin)) {
+					as_bin_particle_destroy(&result_bin, true);
+				}
+			}
+			else if (ordered_ops) {
+				// TODO - make this handle non-null empty bin:
+				append_ok = as_msg_append_to_response_msg(db, op, NULL, ns);
+			}
+
+			if (! append_ok) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		*/
+		else {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
+			return AS_PROTO_RESULT_FAIL_PARAMETER;
+		}
+	}
+
+	return 0;
+}
+
+//================================================
+// Data-not-in-memory.
+//
+int
+write_local_stack_bin_ops(as_transaction *tr, as_storage_rd *rd,
+		uint8_t *p_stack_particles, cf_dyn_buf *db)
+{
+	// Shortcut pointers.
+	as_msg *m = &tr->msgp->msg;
+	as_namespace *ns = tr->rsv.ns;
+	as_index *r = rd->r;
+	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
+
+	int result;
+	int32_t sz_result;
+
+	as_msg_op *op = NULL;
+	int i = 0;
+
+	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
+		if (OP_IS_TOUCH(op->op)) {
+			continue;
+		}
+
+		if (op->name_sz >= AS_ID_BIN_SZ) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin name too long (%d) ", ns->name, op->name_sz);
+			return AS_PROTO_RESULT_FAIL_BIN_NAME;
+		}
+
+		if (op->op == AS_MSG_OP_WRITE) {
+			// AS_PARTICLE_TYPE_NULL means delete the bin.
+			// TODO - should this even be allowed for single-bin?
+			if (op->particle_type == AS_PARTICLE_TYPE_NULL) {
+				int32_t j = as_bin_get_index(rd, op->name, op->name_sz);
+
+				if (j != -1) {
+					as_bin_destroy(rd, j);
+				}
+			}
+			// It's a regular bin write.
+			else {
+				as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+
+				if ((result = write_local_bin_check(tr, b)) != 0) {
+					return result;
+				}
+
+				if (! b) {
+					b = as_bin_create(r, rd, op->name, op->name_sz, 0);
+				}
+
+				if (! b) {
+					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
+					return AS_PROTO_RESULT_FAIL_UNKNOWN;
+				}
+
+				if ((sz_result = as_bin_particle_stack_from_client(b, p_stack_particles, op)) < 0) {
+					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_stack_from_client() ", ns->name);
+					return -sz_result;
+				}
+
+				p_stack_particles += (uint32_t)sz_result;
+			}
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		// Modify an existing bin value.
+		else if (OP_IS_MODIFY(op->op)) {
+			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				return result;
+			}
+
+			// Currently all modify operations become creates if there's no
+			// existing particle.
+			if (! b) {
+				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
+			}
+
+			if (! b) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+
+			if ((sz_result = as_bin_particle_stack_modify_from_client(b, p_stack_particles, op)) < 0) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_stack_modify_from_client() ", ns->name);
+				return -sz_result;
+			}
+
+			p_stack_particles += (uint32_t)sz_result;
+
+			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		else if (op->op == AS_MSG_OP_READ) {
+			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+
+			if ((result = write_local_bin_check(tr, b)) != 0) {
+				return result;
+			}
+
+			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
+				return AS_PROTO_RESULT_FAIL_UNKNOWN;
+			}
+		}
+		else {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
+			return AS_PROTO_RESULT_FAIL_PARAMETER;
+		}
+	}
+
+	return 0;
+}
+
+
+
+//==============================================================================
 // write_local() splits based on configuration - data-in-memory & single-bin.
 //
 // These splits handle the bin operations part of write_local() which are very
@@ -3815,10 +4118,8 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
 {
 	// Shortcut pointers.
-	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
-	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	rd->n_bins = 1;
 
@@ -3853,118 +4154,11 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 	// the new record bins to write.
 	//
 
-	int result;
+	int result = write_local_dim_bin_ops(tr, rd, db);
 
-	as_msg_op *op = NULL;
-	int i = 0;
-
-	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (OP_IS_TOUCH(op->op)) {
-			continue;
-		}
-
-		if (ns->data_in_index && ! is_embedded_particle_type(op->particle_type) &&
-				// Allow AS_PARTICLE_TYPE_NULL, although bin-delete operations
-				// are not likely in single-bin configuration.
-				op->particle_type != AS_PARTICLE_TYPE_NULL) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: can't write non-integer in data-in-index configuration ", ns->name);
-			return AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
-		}
-
-		if (op->op == AS_MSG_OP_WRITE) {
-			// AS_PARTICLE_TYPE_NULL means delete the bin.
-			// TODO - should this even be allowed for single-bin?
-			if (op->particle_type == AS_PARTICLE_TYPE_NULL) {
-				int32_t j = as_bin_get_index(rd, NULL, 0);
-
-				if (j != -1) {
-					as_bin_destroy(rd, j);
-				}
-			}
-			// It's a regular bin write.
-			else {
-				as_bin *b = as_bin_get(rd, NULL, 0);
-
-				if ((result = write_local_single_bin_check(tr, b)) != 0) {
-					write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-					return result;
-				}
-
-				if (! b) {
-					b = as_bin_create(r, rd, NULL, 0, 0);
-				}
-
-				if (! b) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-					write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-					return AS_PROTO_RESULT_FAIL_UNKNOWN;
-				}
-
-				if ((result = as_bin_particle_alloc_from_client(b, op)) < 0) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_from_client() ", ns->name);
-					write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-					return -result;
-				}
-			}
-
-			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		// Modify an existing bin value.
-		else if (OP_IS_MODIFY(op->op)) {
-			as_bin *b = as_bin_get(rd, NULL, 0);
-
-			if ((result = write_local_single_bin_check(tr, b)) != 0) {
-				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-				return result;
-			}
-
-			// Currently all modify operations become creates if there's no
-			// existing particle.
-			if (! b) {
-				b = as_bin_create(r, rd, NULL, 0, 0);
-			}
-
-			if (! b) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-
-			if ((result = as_bin_particle_alloc_modify_from_client(b, op)) < 0) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_modify_from_client() ", ns->name);
-				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-				return -result;
-			}
-
-			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		else if (op->op == AS_MSG_OP_READ) {
-			as_bin *b = as_bin_get(rd, NULL, 0);
-
-			if ((result = write_local_single_bin_check(tr, b)) != 0) {
-				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-				return result;
-			}
-
-			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		else {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
-			write_local_dim_single_bin_unwind(&old_bin, rd->bins);
-			return AS_PROTO_RESULT_FAIL_PARAMETER;
-		}
+	if (result != 0) {
+		write_local_dim_single_bin_unwind(&old_bin, rd->bins);
+		return result;
 	}
 
 	//------------------------------------------------------
@@ -4031,7 +4225,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
-	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	// For data-in-memory - number of bins in existing record.
 	rd->n_bins = as_bin_get_n_bins(r, rd);
@@ -4083,197 +4276,11 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	// the new record bins to write.
 	//
 
-	int result;
+	int result = write_local_dim_bin_ops(tr, rd, db);
 
-	as_msg_op *op = NULL;
-	int i = 0;
-
-	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (OP_IS_TOUCH(op->op)) {
-			continue;
-		}
-
-		if (op->name_sz >= AS_ID_BIN_SZ) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin name too long (%d) ", ns->name, op->name_sz);
-			write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-			return AS_PROTO_RESULT_FAIL_BIN_NAME;
-		}
-
-		if (op->op == AS_MSG_OP_WRITE) {
-			// AS_PARTICLE_TYPE_NULL means delete the bin.
-			if (op->particle_type == AS_PARTICLE_TYPE_NULL) {
-				int32_t j = as_bin_get_index(rd, op->name, op->name_sz);
-
-				if (j != -1) {
-					as_bin_destroy(rd, j);
-				}
-			}
-			// It's a regular bin write.
-			else {
-				as_bin *b = as_bin_get(rd, op->name, op->name_sz);
-
-				if ((result = write_local_bin_check(tr, b)) != 0) {
-					write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-					return result;
-				}
-
-				if (! b) {
-					b = as_bin_create(r, rd, op->name, op->name_sz, 0);
-				}
-
-				if (! b) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-					write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-					return AS_PROTO_RESULT_FAIL_UNKNOWN;
-				}
-
-				if ((result = as_bin_particle_alloc_from_client(b, op)) < 0) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_from_client() ", ns->name);
-					write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-					return -result;
-				}
-			}
-
-			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		// Modify an existing bin value.
-		else if (OP_IS_MODIFY(op->op)) {
-			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
-
-			if ((result = write_local_bin_check(tr, b)) != 0) {
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return result;
-			}
-
-			// Currently all modify operations become creates if there's no
-			// existing particle.
-			if (! b) {
-				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
-			}
-
-			if (! b) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-
-			if ((result = as_bin_particle_alloc_modify_from_client(b, op)) < 0) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_alloc_modify_from_client() ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return -result;
-			}
-
-			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		else if (op->op == AS_MSG_OP_READ) {
-			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
-
-			if ((result = write_local_bin_check(tr, b)) != 0) {
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return result;
-			}
-
-			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		/*
-		else if (op->op == AS_MSG_OP_CDT_MODIFY) {
-			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
-
-			if ((result = write_local_bin_check(tr, b)) != 0) {
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return result;
-			}
-
-			// Do CDT modify operations always become creates if there's no
-			// existing particle?
-			if (! b) {
-				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
-			}
-
-			if (! b) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-
-			as_bin result_bin;
-			as_bin_set_empty(&result_bin);
-
-			if ((result = as_bin_cdt_alloc_modify_from_client(b, op, &result_bin)) < 0) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_cdt_alloc_modify_from_client() ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return -result;
-			}
-
-			// TODO - make this handle non-null empty bin:
-			bool append_ok = as_msg_append_to_response_msg(db, op, &result_bin, ns);
-
-			if (as_bin_inuse(&result_bin)) {
-				as_bin_particle_destroy(&result_bin, true);
-			}
-
-			if (! append_ok) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		else if (op->op == AS_MSG_OP_CDT_READ) {
-			as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
-
-			if ((result = write_local_bin_check(tr, b)) != 0) {
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return result;
-			}
-
-			bool append_ok;
-
-			if (b) {
-				as_bin result_bin;
-				as_bin_set_empty(&result_bin);
-
-				if ((result = as_bin_cdt_read_from_client(b, op, &result_bin)) < 0) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_cdt_read_from_client() ", ns->name);
-					write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-					return -result;
-				}
-
-				// TODO - make this handle non-null empty bin:
-				append_ok = as_msg_append_to_response_msg(db, op, &result_bin, ns);
-
-				if (as_bin_inuse(&result_bin)) {
-					as_bin_particle_destroy(&result_bin, true);
-				}
-			}
-			else if (ordered_ops) {
-				// TODO - make this handle non-null empty bin:
-				append_ok = as_msg_append_to_response_msg(db, op, NULL, ns);
-			}
-
-			if (! append_ok) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		*/
-		else {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
-			write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
-			return AS_PROTO_RESULT_FAIL_PARAMETER;
-		}
+	if (result != 0) {
+		write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins);
+		return result;
 	}
 
 	//------------------------------------------------------
@@ -4410,10 +4417,8 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
 {
 	// Shortcut pointers.
-	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
-	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	rd->ignore_record_on_device = ! must_fetch_data;
 	rd->n_bins = 1;
@@ -4452,101 +4457,8 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	// the new record bins to write.
 	//
 
-	as_msg_op *op = NULL;
-	int i = 0;
-
-	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (OP_IS_TOUCH(op->op)) {
-			continue;
-		}
-
-		if (op->op == AS_MSG_OP_WRITE) {
-			// AS_PARTICLE_TYPE_NULL means delete the bin.
-			// TODO - should this even be allowed for single-bin?
-			if (op->particle_type == AS_PARTICLE_TYPE_NULL) {
-				int32_t j = as_bin_get_index(rd, NULL, 0);
-
-				if (j != -1) {
-					as_bin_destroy(rd, j);
-				}
-			}
-			// It's a regular bin write.
-			else {
-				as_bin *b = as_bin_get(rd, NULL, 0);
-
-				if ((result = write_local_single_bin_check(tr, b)) != 0) {
-					return result;
-				}
-
-				if (! b) {
-					b = as_bin_create(r, rd, NULL, 0, 0);
-				}
-
-				if (! b) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-					return AS_PROTO_RESULT_FAIL_UNKNOWN;
-				}
-
-				if ((sz_result = as_bin_particle_stack_from_client(b, p_stack_particles, op)) < 0) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_stack_from_client() ", ns->name);
-					return -sz_result;
-				}
-
-				p_stack_particles += (uint32_t)sz_result;
-			}
-
-			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		// Modify an existing bin value.
-		else if (OP_IS_MODIFY(op->op)) {
-			as_bin *b = as_bin_get(rd, NULL, 0);
-
-			if ((result = write_local_single_bin_check(tr, b)) != 0) {
-				return result;
-			}
-
-			// Currently all modify operations become creates if there's no
-			// existing particle.
-			if (! b) {
-				b = as_bin_create(r, rd, NULL, 0, 0);
-			}
-
-			if (! b) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-
-			if ((sz_result = as_bin_particle_stack_modify_from_client(b, p_stack_particles, op)) < 0) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_stack_modify_from_client() ", ns->name);
-				return -sz_result;
-			}
-
-			p_stack_particles += (uint32_t)sz_result;
-
-			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		else if (op->op == AS_MSG_OP_READ) {
-			as_bin *b = as_bin_get(rd, NULL, 0);
-
-			if ((result = write_local_single_bin_check(tr, b)) != 0) {
-				return result;
-			}
-
-			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		else {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
-			return AS_PROTO_RESULT_FAIL_PARAMETER;
-		}
+	if ((result = write_local_stack_bin_ops(tr, rd, p_stack_particles, db)) != 0) {
+		return result;
 	}
 
 	//------------------------------------------------------
@@ -4613,7 +4525,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
 	bool has_sindex = as_sindex_ns_has_sindex(ns);
-	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	// If it's not touch or modify, determine if we must read existing record.
 	if (! must_fetch_data) {
@@ -4677,105 +4588,8 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	// the new record bins to write.
 	//
 
-	as_msg_op *op = NULL;
-	int i = 0;
-
-	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (OP_IS_TOUCH(op->op)) {
-			continue;
-		}
-
-		if (op->name_sz >= AS_ID_BIN_SZ) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin name too long (%d) ", ns->name, op->name_sz);
-			return AS_PROTO_RESULT_FAIL_BIN_NAME;
-		}
-
-		if (op->op == AS_MSG_OP_WRITE) {
-			// AS_PARTICLE_TYPE_NULL means delete the bin.
-			if (op->particle_type == AS_PARTICLE_TYPE_NULL) {
-				int32_t j = as_bin_get_index(rd, op->name, op->name_sz);
-
-				if (j != -1) {
-					as_bin_destroy(rd, j);
-				}
-			}
-			// It's a regular bin write.
-			else {
-				as_bin *b = as_bin_get(rd, op->name, op->name_sz);
-
-				if ((result = write_local_bin_check(tr, b)) != 0) {
-					return result;
-				}
-
-				if (! b) {
-					b = as_bin_create(r, rd, op->name, op->name_sz, 0);
-				}
-
-				if (! b) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-					return AS_PROTO_RESULT_FAIL_UNKNOWN;
-				}
-
-				if ((sz_result = as_bin_particle_stack_from_client(b, p_stack_particles, op)) < 0) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_stack_from_client() ", ns->name);
-					return -sz_result;
-				}
-
-				p_stack_particles += (uint32_t)sz_result;
-			}
-
-			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		// Modify an existing bin value.
-		else if (OP_IS_MODIFY(op->op)) {
-			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
-
-			if ((result = write_local_bin_check(tr, b)) != 0) {
-				return result;
-			}
-
-			// Currently all modify operations become creates if there's no
-			// existing particle.
-			if (! b) {
-				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
-			}
-
-			if (! b) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-
-			if ((sz_result = as_bin_particle_stack_modify_from_client(b, p_stack_particles, op)) < 0) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_stack_modify_from_client() ", ns->name);
-				return -sz_result;
-			}
-
-			p_stack_particles += (uint32_t)sz_result;
-
-			if (ordered_ops && ! as_msg_append_to_response_msg(db, op, NULL, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		else if (op->op == AS_MSG_OP_READ) {
-			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
-
-			if ((result = write_local_bin_check(tr, b)) != 0) {
-				return result;
-			}
-
-			if ((b || ordered_ops) && ! as_msg_append_to_response_msg(db, op, b, ns)) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed response append ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
-			}
-		}
-		else {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
-			return AS_PROTO_RESULT_FAIL_PARAMETER;
-		}
+	if ((result = write_local_stack_bin_ops(tr, rd, p_stack_particles, db)) != 0) {
+		return result;
 	}
 
 	//------------------------------------------------------
