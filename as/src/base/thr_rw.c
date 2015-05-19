@@ -3439,8 +3439,6 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 	int i = 0;
 
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-
-		// TODO - what about all read ops?
 		if (op->op != AS_MSG_OP_MC_TOUCH) {
 			increment_generation = true;
 		}
@@ -3453,8 +3451,23 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 
 			must_not_create = true;
 			must_fetch_data = true;
+			continue;
 		}
-		else if (op->op == AS_MSG_OP_WRITE) {
+
+		if (ns->data_in_index && ! is_embedded_particle_type(op->particle_type) &&
+				// Allow AS_PARTICLE_TYPE_NULL, although bin-delete operations
+				// are not likely in single-bin configuration.
+				op->particle_type != AS_PARTICLE_TYPE_NULL) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: can't write non-integer in data-in-index configuration ", ns->name);
+			return AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
+		}
+
+		if (op->name_sz >= AS_ID_BIN_SZ) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin name too long (%d) ", ns->name, op->name_sz);
+			return AS_PROTO_RESULT_FAIL_BIN_NAME;
+		}
+
+		if (op->op == AS_MSG_OP_WRITE) {
 			if (op->particle_type == AS_PARTICLE_TYPE_NULL && record_level_replace) {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin delete can't have record-level replace flag ", ns->name);
 				return AS_PROTO_RESULT_FAIL_PARAMETER;
@@ -3836,19 +3849,6 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
 		if (OP_IS_TOUCH(op->op)) {
 			continue;
-		}
-
-		if (ns->data_in_index && ! is_embedded_particle_type(op->particle_type) &&
-				// Allow AS_PARTICLE_TYPE_NULL, although bin-delete operations
-				// are not likely in single-bin configuration.
-				op->particle_type != AS_PARTICLE_TYPE_NULL) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: can't write non-integer in data-in-index configuration ", ns->name);
-			return AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
-		}
-
-		if (op->name_sz >= AS_ID_BIN_SZ) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin name too long (%d) ", ns->name, op->name_sz);
-			return AS_PROTO_RESULT_FAIL_BIN_NAME;
 		}
 
 		if (op->op == AS_MSG_OP_WRITE) {
