@@ -455,9 +455,6 @@ as_particle_incr_from_wire_float(as_particle_type wire_type, const uint8_t *wire
 	case 8:
 		x = (double)cf_swap_from_be64(*(uint64_t *)wire_value);
 		break;
-	case 4:
-		x = (double)cf_swap_from_be32(*(uint64_t *)wire_value);
-		break;
 	default:
 		cf_warning(AS_PARTICLE, "unexpected value size %u", value_size);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
@@ -471,7 +468,7 @@ as_particle_incr_from_wire_float(as_particle_type wire_type, const uint8_t *wire
 int
 as_particle_from_wire_float(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
-	if (! (value_size == 8 || value_size == 4)) {
+	if (value_size != 8) {
 		cf_warning(AS_PARTICLE, "unexpected value size %u", value_size);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
