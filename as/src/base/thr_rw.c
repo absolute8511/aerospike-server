@@ -4120,7 +4120,7 @@ write_local_bin_ops(as_transaction *tr, as_storage_rd *rd,
 int
 write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 		bool record_created, bool increment_generation,
-		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
+		pickle_info *pickle, cf_dyn_buf *db)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4214,7 +4214,6 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 	destroy_stack_bins(cleanup_bins, n_cleanup_bins);
 
 	account_memory(tr, rd, memory_bytes);
-	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
 }
@@ -4226,7 +4225,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 int
 write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		bool record_level_replace, bool increment_generation,
-		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
+		pickle_info *pickle, cf_dyn_buf *db)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4387,7 +4386,6 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	}
 
 	account_memory(tr, rd, memory_bytes);
-	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
 }
@@ -4399,7 +4397,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 int
 write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		bool must_fetch_data, bool increment_generation,
-		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
+		pickle_info *pickle, cf_dyn_buf *db)
 {
 	// Shortcut pointers.
 	as_namespace *ns = tr->rsv.ns;
@@ -4491,8 +4489,6 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		as_index_set_flags(r, AS_INDEX_FLAG_KEY_STORED);
 	}
 
-	*is_delete = ! as_bin_inuse_has(rd);
-
 	return 0;
 }
 
@@ -4503,7 +4499,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 int
 write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		bool must_fetch_data, bool record_level_replace, bool increment_generation,
-		pickle_info *pickle, cf_dyn_buf *db, bool *is_delete)
+		pickle_info *pickle, cf_dyn_buf *db)
 {
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
@@ -4633,8 +4629,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	if (! as_index_is_flag_set(r, AS_INDEX_FLAG_KEY_STORED) && rd->key) {
 		as_index_set_flags(r, AS_INDEX_FLAG_KEY_STORED);
 	}
-
-	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
 }
@@ -4818,30 +4812,29 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	//
 
 	pickle_info pickle;
-	bool is_delete;
 
 	if (ns->storage_data_in_memory) {
 		if (ns->single_bin) {
 			result = write_local_dim_single_bin(tr, &rd,
 					record_created, increment_generation,
-					&pickle, db, &is_delete);
+					&pickle, db);
 		}
 		else {
 			result = write_local_dim(tr, set_name, &rd,
 					record_level_replace, increment_generation,
-					&pickle, db, &is_delete);
+					&pickle, db);
 		}
 	}
 	else {
 		if (ns->single_bin) {
 			result = write_local_ssd_single_bin(tr, &rd,
 					must_fetch_data, increment_generation,
-					&pickle, db, &is_delete);
+					&pickle, db);
 		}
 		else {
 			result = write_local_ssd(tr, set_name, &rd,
 					must_fetch_data, record_level_replace, increment_generation,
-					&pickle, db, &is_delete);
+					&pickle, db);
 		}
 	}
 
@@ -4871,6 +4864,8 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	uint16_t set_id = as_index_get_set_id(r_ref.r);
 
 	// If we ended up with no bins, delete the record.
+	bool is_delete = ! as_bin_inuse_has(&rd);
+
 	if (is_delete) {
 		as_index_delete(tree, &tr->keyd);
 		cf_atomic_int_incr(&g_config.stat_delete_success);
