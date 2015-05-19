@@ -4009,6 +4009,11 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				response_bins[(*p_n_response_bins)++] = result_bin;
 				append_bin_to_destroy(&result_bin, result_bins, p_n_result_bins);
 			}
+
+			if (! as_bin_inuse(b)) {
+				// TODO - could do better than finding index from name.
+				as_bin_set_empty_shift(rd, as_bin_get_index(rd, op->name, op->name_sz));
+			}
 		}
 		else if (op->op == AS_MSG_OP_CDT_READ) {
 			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
