@@ -298,108 +298,7 @@ as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 }
 
 
-//------------------------------------------------
-// Build a response to ordered ops or read ops
-// processed by write_local().
-//
-
-void
-as_msg_init_response_msg(uint64_t trid, cf_dyn_buf *db)
-{
-	cl_msg *msgp = (cl_msg *)db->buf;
-
-	msgp->proto.version = PROTO_VERSION;
-	msgp->proto.type = PROTO_TYPE_AS_MSG;
-	msgp->proto.sz = 0; // will set this on completion
-
-	as_msg *m = &msgp->msg;
-
-	m->header_sz = sizeof(as_msg);
-	m->info1 = 0;
-	m->info2 = 0;
-	m->info3 = 0;
-	m->unused = 0;
-	m->result_code = AS_PROTO_RESULT_OK;
-	m->generation = 0; // will set this on completion
-	m->record_ttl = 0; // will set this on completion
-	m->transaction_ttl = 0;
-	m->n_ops = 0; // will increment as we go
-	m->n_fields = 0;
-
-	uint8_t *buf = db->buf + sizeof(cl_msg);
-
-	if (trid != 0) {
-		m->n_fields++;
-
-		as_msg_field *trfield = (as_msg_field *)buf;
-
-		trfield->field_sz = 1 + sizeof(uint64_t);
-		trfield->type = AS_MSG_FIELD_TYPE_TRID;
-		*(uint64_t *)trfield->data = cf_swap_to_be64(trid);
-
-		buf += sizeof(as_msg_field) + sizeof(uint64_t);
-		as_msg_swap_field(trfield);
-	}
-
-	// Trust that this can't fail - i.e. the caller set up enough capacity.
-	cf_dyn_buf_reserve(db, buf - db->buf, NULL);
-}
-
-void
-as_msg_finish_response_msg(cf_dyn_buf *db, uint32_t generation, uint32_t void_time)
-{
-	cl_msg *msgp = (cl_msg *)db->buf;
-
-	msgp->proto.sz = db->used_sz - sizeof(as_proto);
-	as_proto_swap(&msgp->proto);
-
-	as_msg *m = &msgp->msg;
-
-	m->generation = generation;
-	m->record_ttl = void_time;
-	as_msg_swap_header(m);
-}
-
-bool
-as_msg_append_to_response_msg(cf_dyn_buf *db, as_msg_op *req_op, as_bin *bin, as_namespace *ns)
-{
-	uint32_t append_sz = sizeof(as_msg_op);
-	uint32_t req_op_name_sz = ns->single_bin ? 0 : (uint32_t)req_op->name_sz;
-
-	append_sz += req_op_name_sz;
-
-	if (bin) {
-		append_sz += as_bin_particle_client_value_size(bin);
-	}
-
-	uint8_t *buf = NULL;
-
-	if (0 != cf_dyn_buf_reserve(db, append_sz, &buf)) {
-		return false;
-	}
-
-	as_msg_op *opw = (as_msg_op *)buf;
-
-	opw->op = req_op->op; // echo - can be read, write, or modify
-	opw->version = 0;
-	opw->name_sz = req_op_name_sz;
-
-	memcpy(opw->name, req_op->name, opw->name_sz);
-
-	opw->op_sz = 4 + opw->name_sz;
-
-	buf += sizeof(as_msg_op) + opw->name_sz + as_bin_particle_to_client(bin, opw);
-
-	as_msg_swap_op(opw);
-
-	cl_msg *msgp = (cl_msg *)db->buf;
-	as_msg *m = &msgp->msg;
-
-	m->n_ops++;
-
-	return true;
-}
-
+// Send a response made by write_local().
 // TODO - refactor and share with as_msg_send_reply().
 int
 as_msg_send_ops_reply(as_file_handle *fd_h, cf_dyn_buf *db)
@@ -446,10 +345,6 @@ Exit:
 
 	return rv;
 }
-
-//
-// END - build response to ops in write_local().
-//------------------------------------------------
 
 
 // NB: this uses the same logic as the bufbuild function
