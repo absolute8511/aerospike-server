@@ -3483,6 +3483,17 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 		else if (op->op == AS_MSG_OP_READ) {
 			must_fetch_data = true;
 		}
+		else if (op->op == AS_MSG_OP_CDT_MODIFY) {
+			if (record_level_replace) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: cdt modify op can't have record-level replace flag ", ns->name);
+				return AS_PROTO_RESULT_FAIL_PARAMETER;
+			}
+
+			must_fetch_data = true;
+		}
+		else if (op->op == AS_MSG_OP_CDT_READ) {
+			must_fetch_data = true;
+		}
 	}
 
 	if (p_must_not_create) {
@@ -3823,6 +3834,30 @@ destroy_stack_bins(as_bin *stack_bins, uint32_t n_bins)
 
 
 //==============================================================================
+// Temporary, to be moved and implemented:
+//
+
+int
+as_bin_cdt_read_from_client(const as_bin *b, as_msg_op *op, as_bin *result)
+{
+	return -1;
+}
+
+int
+as_bin_cdt_alloc_modify_from_client(const as_bin *b, as_msg_op *op, as_bin *result)
+{
+	return -1;
+}
+
+int32_t
+as_bin_cdt_stack_modify_from_client(const as_bin *b, uint8_t *p_stack_particles, as_msg_op *op, as_bin *result)
+{
+	return -1;
+}
+
+
+
+//==============================================================================
 // write_local() bin operations, for all configurations.
 //
 
@@ -3962,7 +3997,6 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
 			}
 		}
-		/*
 		else if (op->op == AS_MSG_OP_CDT_MODIFY) {
 			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
 
@@ -4038,7 +4072,6 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
 			}
 		}
-		*/
 		else {
 			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: unknown bin op %u ", ns->name, op->op);
 			return AS_PROTO_RESULT_FAIL_PARAMETER;
@@ -6111,7 +6144,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 	}
 	else {
 		bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
-//		int result;
+		int result;
 
 		as_msg_op *op = 0;
 		int n = 0;
@@ -6125,7 +6158,6 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 					response_bins[n_bins++] = b;
 				}
 			}
-			/*
 			else if (op->op == AS_MSG_OP_CDT_READ) {
 				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
 
@@ -6151,7 +6183,6 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 					response_bins[n_bins++] = b;
 				}
 			}
-			*/
 			else {
 				cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: unexpected bin op %u ", ns->name, op->op);
 				destroy_stack_bins(result_bins, n_result_bins);

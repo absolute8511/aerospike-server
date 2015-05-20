@@ -251,8 +251,11 @@ typedef struct index_metadata_t {
 
 #define AS_MSG_OP_READ 1			// read the value in question
 #define AS_MSG_OP_WRITE 2			// write the value in question
-// Unused - 3
-// Unused - 4
+
+// Prospective CDT top-level ops:
+#define AS_MSG_OP_CDT_READ 3
+#define AS_MSG_OP_CDT_MODIFY 4
+
 #define AS_MSG_OP_INCR 5			// arithmetically add a value to an existing value, works only on integers
 // Unused - 6
 // Unused - 7
