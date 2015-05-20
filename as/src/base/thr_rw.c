@@ -6098,6 +6098,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 			rd.n_bins : m->n_ops;
 
 	as_msg_op *ops[bin_count];
+	as_msg_op **p_ops = ops;
 	as_bin *response_bins[bin_count];
 	uint16_t n_bins = 0;
 
@@ -6105,7 +6106,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 	uint32_t n_result_bins = 0;
 
 	if ((m->info1 & AS_MSG_INFO1_GET_ALL) != 0) {
-		memset(ops, 0, sizeof(ops));
+		p_ops = NULL;
 		n_bins = as_bin_inuse_count(&rd);
 		as_bin_get_all_p(&rd, response_bins);
 	}
@@ -6162,13 +6163,13 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 	}
 
 	uint32_t written_sz = 0;
-	const char *set_name = as_index_get_set_name(r, ns);
+	const char *set_name = (m->info1 & AS_MSG_INFO1_XDR) != 0 ?
+			as_index_get_set_name(r, ns) : NULL;
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
 
-	single_transaction_response(tr, ns, ops, response_bins, n_bins,
-			r->generation, r->void_time, &written_sz,
-			(m->info1 & AS_MSG_INFO1_XDR) != 0 ? (char *)set_name : NULL);
+	single_transaction_response(tr, ns, p_ops, response_bins, n_bins,
+			r->generation, r->void_time, &written_sz, (char *)set_name);
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
 

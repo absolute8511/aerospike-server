@@ -177,7 +177,7 @@ as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 	msg_sz += sizeof(as_msg_op) * bin_count;
 
 	for (uint16_t i = 0; i < bin_count; i++) {
-		if (ops[i]) {
+		if (ops) {
 			msg_sz += ops[i]->name_sz;
 		}
 		else if (bins[i]) {
@@ -276,7 +276,7 @@ as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 
 		op->version = 0;
 
-		if (ops[i]) {
+		if (ops) {
 			op->op = ops[i]->op;
 			memcpy(op->name, ops[i]->name, ops[i]->name_sz);
 			op->name_sz = ops[i]->name_sz;
