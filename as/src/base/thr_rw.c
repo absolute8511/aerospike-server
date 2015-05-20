@@ -4367,9 +4367,9 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	if (record_level_replace) {
 		destroy_stack_bins(old_bins, n_old_bins);
 	}
-	else {
-		destroy_stack_bins(cleanup_bins, n_cleanup_bins);
-	}
+
+	destroy_stack_bins(cleanup_bins, n_cleanup_bins);
+
 
 	//------------------------------------------------------
 	// Final changes to record data in as_index.
