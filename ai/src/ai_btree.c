@@ -50,6 +50,7 @@
 #include "util.h"
 
 #define DIG_ARRAY_QUEUE_HIGHWATER 512
+#define SKV_ARRAY_QUEUE_HIGHWATER 512
 
 #define AI_ARR_MAX_USED 32
 
@@ -64,7 +65,9 @@
 bool g_use_arr = true;
 
 // AI_BTREE GLOBALS
-static cf_queue *g_q_dig_arr        = NULL;
+static cf_queue *g_q_dig_arr       = NULL;
+static cf_queue *g_q_sindex_kv_arr = NULL;
+
 extern pthread_rwlock_t g_ai_rwlock;
 
 #define AI_GRLOCK()													\
@@ -103,9 +106,13 @@ ai_btree_init(void) {
 	if (!g_q_dig_arr) {
 		g_q_dig_arr = cf_queue_create(sizeof(void *), true);
 	}
+
+	if (!g_q_sindex_kv_arr) {
+		g_q_sindex_kv_arr = cf_queue_create(sizeof(void *), true);
+	}
 }
 
-static dig_arr_t *
+dig_arr_t *
 getDigestArray(void)
 {
 	dig_arr_t *dt;
@@ -123,6 +130,29 @@ releaseDigArrToQueue(void *v)
 	if (cf_queue_sz(g_q_dig_arr) < DIG_ARRAY_QUEUE_HIGHWATER) {
 		cf_queue_push(g_q_dig_arr, &dt);
 	} else cf_free(dt);
+}
+
+sindex_kv_arr *
+get_skv_arr(void)
+{
+	sindex_kv_arr *skv_arr;
+	if (cf_queue_pop(g_q_sindex_kv_arr, &skv_arr, CF_QUEUE_NOWAIT) == CF_QUEUE_EMPTY) {
+		skv_arr = cf_malloc(sizeof(sindex_kv_arr));
+	}
+	skv_arr->num = 0;
+	return skv_arr;
+}
+
+void
+release_skv_arr_to_queue(sindex_kv_arr *v)
+{
+	sindex_kv_arr * skv_arr = (sindex_kv_arr *)v;
+	if (cf_queue_sz(g_q_sindex_kv_arr) < SKV_ARRAY_QUEUE_HIGHWATER) {
+		cf_queue_push(g_q_sindex_kv_arr, &skv_arr);
+	} 
+	else {
+		cf_free(skv_arr);
+	}
 }
 
 const byte INIT_CAPACITY = 1;
@@ -541,20 +571,19 @@ create_tname_from_imd(const as_sindex_metadata *imd)
 }
 
 static char *
-create_cname(char *bin_name, int bin_type)
+create_cname(char *bin_path, int bin_type, int index_type)
 {
-	char bin_type_str[NAME_STR_LEN];
+	char type_str[2 * AS_SINDEX_TYPE_STR_SIZE];
 
-	if (0 > snprintf(bin_type_str, sizeof(bin_type_str), "%d", bin_type)) {
+	if (0 > snprintf(type_str, sizeof(type_str), "%d_%d", bin_type, index_type)) {
 		return NULL;
 	}
-
-	return str_concat(bin_name, '_', bin_type_str);
+	return str_concat(bin_path, '_', type_str);
 }
 
 static char *
 create_cname_from_imd(const as_sindex_metadata *imd) {
-	return create_cname(imd->bnames[0], imd->btype[0]);
+	return create_cname(imd->path_str, imd->btype[0], imd->itype);
 }
 
 static char *
@@ -589,7 +618,7 @@ ai_set_simatch_by_name(char *ns, char *iname, int *imatch, int *simatch)
 }
 
 int
-ai_btree_key_hash(as_sindex_metadata *imd, as_sindex_bin *b)
+ai_btree_key_hash_from_sbin(as_sindex_metadata *imd, as_sindex_bin_data *b)
 {
 	uint64_t u;
 
@@ -598,6 +627,21 @@ ai_btree_key_hash(as_sindex_metadata *imd, as_sindex_bin *b)
 		u = ((* (uint128 *) x) % imd->nprts);
 	} else {
 		u = (((uint64_t) b->u.i64) % imd->nprts);
+	}
+
+	return (int) u;
+}
+
+int
+ai_btree_key_hash(as_sindex_metadata *imd, void *skey)
+{
+	uint64_t u;
+
+	if (C_IS_Y(imd->dtype)) {
+		char *x = (char *) ((cf_digest *)skey); // x += 4;
+		u = ((* (uint128 *) x) % imd->nprts);
+	} else {
+		u = ((*(uint64_t*)skey) % imd->nprts);
 	}
 
 	return (int) u;
@@ -647,7 +691,7 @@ ai_findandset_imatch(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, int idx
 		pimd->imatch = find_partial_index(tmatch, ic);
 	}
 	if (pimd->imatch == -1) {
-		SITRACE(imd->si, META, debug, "Index%s: %s not found", imd->iname ? "" : "column-name", imd->iname ? iname : cname);
+		cf_debug(AS_SINDEX, "Index%s: %s not found", imd->iname ? "" : "column-name", imd->iname ? iname : cname);
 		goto END;
 	}
 
@@ -669,32 +713,53 @@ END:
  *        -1 in case of failure
  */
 static int
-btree_addsinglerec(as_sindex_metadata *imd, cf_digest *dig, cf_ll *recl, uint64_t *n_bdigs)
+btree_addsinglerec(as_sindex_metadata *imd, ai_obj * key, cf_digest *dig, cf_ll *recl, uint64_t *n_bdigs, 
+								bool * is_partition_qnode, bool qnodes_pre_reserved)
 {
-	if (!as_sindex_partition_isactive(imd->si->ns, dig)) {
-		return 0;
+	// The digests which belongs to one of the qnode are elligible to go into recl
+	as_partition_id pid =  as_partition_getid(*dig);
+	if (qnodes_pre_reserved) {
+		if (!is_partition_qnode[pid]) {
+			return 0;
+		}
 	}
-	bool create   = (cf_ll_size(recl) == 0) ? true : false;
-	dig_arr_t *dt;
+	else {
+		if (!as_sindex_partition_isqnode(imd->si->ns, dig)) {
+			return 0;
+		} 
+	}
+
+	bool create                     = (cf_ll_size(recl) == 0) ? true : false;
+	sindex_kv_arr * skv_arr         = NULL;
 	if (!create) {
-		cf_ll_element * ele = cf_ll_get_tail(recl);
-		dt = ((ll_recl_element*)ele)->dig_arr;
-		if (dt->num == NUM_DIGS_PER_ARR) {
+		cf_ll_element * ele         = cf_ll_get_tail(recl);
+		skv_arr                     = ((ll_sindex_kv_element*)ele)->skv_arr;
+		if (skv_arr->num == NUM_SINDEX_KV_PER_ARR) {
 			create = true;
 		}
 	}
 	if (create) {
-		dt = getDigestArray();
-		if (!dt) {
+		skv_arr                     = get_skv_arr();
+		if (!skv_arr) {
+			cf_warning(AS_SINDEX, "Fail to allocate sindex key value array");
 			return -1;
 		}
-		ll_recl_element * node;
-		node = cf_malloc(sizeof(ll_recl_element));
-		node->dig_arr = dt;
+		ll_sindex_kv_element * node =  cf_malloc(sizeof(ll_sindex_kv_element));
+		node->skv_arr               = skv_arr;
 		cf_ll_append(recl, (cf_ll_element *)node);
 	}
-	memcpy(&dt->digs[dt->num], dig, CF_DIGEST_KEY_SZ);
-	dt->num++;
+	// Copy the digest (value)
+	memcpy(&skv_arr->digs[skv_arr->num], dig, CF_DIGEST_KEY_SZ);
+
+	// Copy the key
+	if (C_IS_Y(imd->dtype)) {
+		memcpy(&skv_arr->skeys[skv_arr->num].key.str_key, &key->y, CF_DIGEST_KEY_SZ);
+	}
+	else {
+		skv_arr->skeys[skv_arr->num].key.int_key = key->l;
+	}
+
+	skv_arr->num++;
 	*n_bdigs = *n_bdigs + 1;
 	return 0;
 }
@@ -721,14 +786,15 @@ add_recs_from_nbtr(as_sindex_metadata *imd, ai_obj *ikey, bt *nbtr, as_sindex_qc
 		assignMaxKey(nbtr, &efk);
 		nbi = btSetRangeIter(&stack_nbi, nbtr, &sfk, &efk, 1);
 	}
-	if (nbi) {
+ 	if (nbi) {
 		while ((nbe = btRangeNext(nbi, 1))) {
 			ai_obj *akey = nbe->key;
 			// FIRST can be REPEAT (last batch)
 			if (!fullrng && ai_objEQ(&sfk, akey)) {
 				continue;
 			}
-			if (btree_addsinglerec(imd, (cf_digest *)&akey->y, qctx->recl, &qctx->n_bdigs)) {
+			if (btree_addsinglerec(imd, ikey, (cf_digest *)&akey->y, qctx->recl, &qctx->n_bdigs,
+									qctx->is_partition_qnode, qctx->qnodes_pre_reserved)) {
 				ret = -1;
 				break;
 			}
@@ -753,7 +819,8 @@ add_recs_from_arr(as_sindex_metadata *imd, ai_obj *ikey, ai_arr *arr, as_sindex_
 	bool ret = 0;
 
 	for (int i = 0; i < arr->used; i++) {
-		if (btree_addsinglerec(imd, (cf_digest *)&arr->data[i * CF_DIGEST_KEY_SZ], qctx->recl, &qctx->n_bdigs)) {
+		if (btree_addsinglerec(imd, ikey, (cf_digest *)&arr->data[i * CF_DIGEST_KEY_SZ], qctx->recl, 
+					&qctx->n_bdigs, qctx->is_partition_qnode, qctx->qnodes_pre_reserved)) {
 			ret = -1;
 			break;
 		}
@@ -786,7 +853,7 @@ get_recl(as_sindex_metadata *imd, ai_obj *afk, as_sindex_qctx *qctx)
 	}
 
 	if (anbtr->is_btree) {
-		if (add_recs_from_nbtr(imd, NULL, anbtr->u.nbtr, qctx, qctx->new_ibtr)) {
+		if (add_recs_from_nbtr(imd, afk, anbtr->u.nbtr, qctx, qctx->new_ibtr)) {
 			return -1;
 		}
 	} else {
@@ -794,7 +861,7 @@ get_recl(as_sindex_metadata *imd, ai_obj *afk, as_sindex_qctx *qctx)
 		if (qctx->nbtr_done) {
 			return 0;
 		}
-		if (add_recs_from_arr(imd, NULL, anbtr->u.arr, qctx)) {
+		if (add_recs_from_arr(imd, afk, anbtr->u.arr, qctx)) {
 			return -1;
 		}
 	}
@@ -879,6 +946,7 @@ ai_btree_query(as_sindex_metadata *imd, as_sindex_range *srange, as_sindex_qctx 
 	bool err = 1;
 	if (!srange->isrange) { // EQUALITY LOOKUP
 		ai_obj afk;
+		init_ai_obj(&afk);
 		if (C_IS_Y(imd->dtype)) {
 			init_ai_objFromDigest(&afk, &srange->start.digest);
 		}
@@ -894,23 +962,21 @@ ai_btree_query(as_sindex_metadata *imd, as_sindex_range *srange, as_sindex_qctx 
 }
 
 int
-ai_btree_put(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, as_sindex_key *skey, void *value)
+ai_btree_put(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, void *skey, cf_digest *value)
 {
 	int ret = AS_SINDEX_OK;
-	uint64_t uk = *(uint64_t *)value;
-	cf_digest *keyd = (cf_digest *)value;
 
 	ai_obj ncol;
 	if (C_IS_Y(imd->dtype)) {
-		init_ai_objFromDigest(&ncol, &skey->b[0].digest);
+		init_ai_objFromDigest(&ncol, (cf_digest*)skey);
 	}
 	else {
-		init_ai_objLong(&ncol, skey->b[0].u.i64);
+		init_ai_objLong(&ncol, *(ulong *)skey);
 	}
-	ai_obj apk;
-	init_ai_objFromDigest(&apk, keyd);
 
-	cf_detail(AS_SINDEX, "Insert: %ld %ld %ld", *(uint64_t *) &ncol.y, *(uint64_t *) &skey->b[0].digest, *((uint64_t *) &apk.y));
+	ai_obj apk;
+	init_ai_objFromDigest(&apk, value);
+
 
 	ulong bb = pimd->ibtr->msize + pimd->ibtr->nsize;
 	ret = reduced_iAdd(pimd->ibtr, &ncol, &apk, COL_TYPE_U160);
@@ -927,7 +993,6 @@ ai_btree_put(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, as_sindex_key *
 		ret = AS_SINDEX_ERR_NO_MEMORY;
 		goto END;
 	}
-	SITRACE(imd->si, DML, debug, "ai__btree_insert(N): %s key: %d val %lu", imd->iname, skey->b[0].u.i64, uk);
 
 END:
 
@@ -935,31 +1000,28 @@ END:
 }
 
 int
-ai_btree_delete(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, as_sindex_key *skey, void *val)
+ai_btree_delete(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, void * skey, cf_digest * value)
 {
 	int ret = AS_SINDEX_OK;
-	uint64_t uk = * (uint64_t *) val;
-	uint64_t bv = skey->b[0].u.i64;
 
 	if (!pimd->ibtr) {
-		SITRACE(imd->si, DML, debug, "AI_BTREE_FAIL: Delete failed no ibtr %d %lu", bv, uk);
 		return AS_SINDEX_KEY_NOTFOUND;
 	}
+
 	ai_obj ncol;
 	if (C_IS_Y(imd->dtype)) {
-		init_ai_objFromDigest(&ncol, &skey->b[0].digest);
+		init_ai_objFromDigest(&ncol, (cf_digest *)skey);
 	}
 	else {
-		init_ai_objLong(&ncol, skey->b[0].u.i64);
+		init_ai_objLong(&ncol, *(ulong *)skey);
 	}
 
 	ai_obj apk;
-	init_ai_objFromDigest(&apk, (cf_digest *)val);
+	init_ai_objFromDigest(&apk, value);
 	ulong bb = pimd->ibtr->msize + pimd->ibtr->nsize;
 	ret = reduced_iRem(pimd->ibtr, &ncol, &apk);
 	ulong ab = pimd->ibtr->msize + pimd->ibtr->nsize;
 	as_sindex_release_data_memory(imd, (bb - ab));
-	SITRACE(imd->si, DML, debug, "ai__btree_delete(N): key: %d - %lu", bv, uk);
 	return ret;
 }
 
@@ -1284,7 +1346,7 @@ ai_btree_create(as_sindex_metadata *imd, int simatch, int *bimatch, int nprts)
 			goto END;
 		}
 		// Add (cmatch+1) always non-zero
-		SITRACE(imd->si, META, debug, "Added Mapping [BINNAME=%s: BINID=%d: COLID%d] [IMATCH=%d: SIMATCH=%d: INAME=%s]",
+		cf_debug(AS_SINDEX, "Added Mapping [BINNAME=%s: BINID=%d: COLID%d] [IMATCH=%d: SIMATCH=%d: INAME=%s]",
 				imd->bnames[0], imd->binid[0], rt->col_count, Num_indx - 1, simatch, imd->iname);
 	}
 
@@ -1300,7 +1362,7 @@ ai_btree_create(as_sindex_metadata *imd, int simatch, int *bimatch, int nprts)
 	}
 
 	*bimatch = match_partial_index_name(iname);
-	GTRACE(META, debug, "cr8SecIndex: iname: %s bname: %s type: %d ns: %s set: %s tmatch: %d bimatch: %d",
+	cf_debug(AS_SINDEX, "cr8SecIndex: iname: %s bname: %s type: %d ns: %s set: %s tmatch: %d bimatch: %d",
 		   imd->iname, imd->bnames[0], imd->btype[0], imd->ns_name, imd->set, tmatch, *bimatch);
 
 	ret = AS_SINDEX_OK;

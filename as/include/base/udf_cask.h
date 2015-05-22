@@ -45,6 +45,8 @@ int udf_cask_init();
 // and called directly from there.
 // therefore they have the same calling convention
 
+int udf_cask_info_clear_cache(char * name, char * params, cf_dyn_buf * out);
+
 int udf_cask_info_get(char * name, char * params, cf_dyn_buf * out);
 
 int udf_cask_info_put(char * name, char * params, cf_dyn_buf * out);

@@ -20,7 +20,11 @@ endif
 .PHONY:dist
 dist:
 	install -d $(BUILD_ROOT)/etc/aerospike
+ifeq ($(OS), el7)
+	install -d $(BUILD_ROOT)/usr/lib/systemd/system
+endif
 	install -d $(BUILD_ROOT)/etc/init.d
+
 	install -d $(BUILD_ROOT)/etc/logrotate.d
 	install -d $(BUILD_ROOT)/usr/bin
 	install -d $(BUILD_ROOT)/var/log/aerospike
@@ -32,8 +36,16 @@ dist:
 
 	install -pm 644 $(DEPTH)/as/etc/aerospike.conf $(BUILD_ROOT)/etc/aerospike
 	install -pm 644 $(DEPTH)/as/etc/aerospike_ssd.conf $(BUILD_ROOT)/etc/aerospike
+	install -pm 644 $(DEPTH)/as/etc/aerospike_mesh.conf $(BUILD_ROOT)/etc/aerospike
 
+ifeq ($(OS), el7)
+	install -p -D -m 644 $(DEPTH)/as/etc/aerospike-server.service $(BUILD_ROOT)/usr/lib/systemd/system/aerospike.service
+	install -p -D -m 644 $(DEPTH)/as/etc/aerospike-server.tmpfiles $(BUILD_ROOT)/etc/tmpfiles.d/aerospike.conf
+	install -p -D -m 644 $(DEPTH)/as/etc/aerospike-server.sysconfig $(BUILD_ROOT)/etc/sysconfig/aerospike
+	install -p -D -m 755 $(DEPTH)/as/etc/asd-systemd-helper $(BUILD_ROOT)/usr/bin/asd-systemd-helper
+else
 	install -pm 755 $(DEPTH)/as/etc/init-script $(BUILD_ROOT)/etc/init.d/aerospike
+endif
 	install -pm 644 $(DEPTH)/as/etc/logrotate_asd $(BUILD_ROOT)/etc/logrotate.d/aerospike
 
 ifeq ($(USE_ASM),1)
@@ -60,16 +72,24 @@ package:
 	install -d $(SOURCE_ROOT)/RPMS/x86_64
 
 	sed 's/@VERSION@/'$(REV)'/g' < $(PKG)/rpm/server-spec-base > $(PKG)/rpm/aerospike.spec
+ifeq ($(OS), el7)
+	cat $(PKG)/rpm/server-spec-system-el7 >> $(PKG)/rpm/aerospike.spec
+else
+	cat $(PKG)/rpm/server-spec-system >> $(PKG)/rpm/aerospike.spec
+endif
+
 ifeq ($(USE_ASM),1)
 	cat $(PKG)/rpm/asm-files >> $(PKG)/rpm/aerospike.spec
 endif
 ifeq ($(USE_XDR),1)
 	cat $(EEREPO)/pkg/rpm/xdr-files >> $(PKG)/rpm/aerospike.spec
 endif
+	cat $(PKG)/rpm/server-spec-config >> $(PKG)/rpm/aerospike.spec
 	cat $(PKG)/rpm/server-spec-scripts >> $(PKG)/rpm/aerospike.spec
 
 	sed -i 's/@RELEASE@/'$(OS)'/g' $(PKG)/rpm/aerospike.spec
 	sed -i 's/@EDITION@/'$(EDITION)'/g' $(PKG)/rpm/aerospike.spec
+
 	cd $(DEPTH); rpmbuild -bb -vv --buildroot $(BUILD_ROOT) $(PKG)/rpm/aerospike.spec
 
 	find $(SOURCE_ROOT)/RPMS -type f -exec mv {} $(PKG)/packages \;

@@ -9,7 +9,6 @@ HEADERS = ai.h ai_btree.h ai_globals.h ai_types.h ai_obj.h bt.h bt_iterator.h bt
 SOURCES = ai.c ai_btree.c ai_obj.c bt.c bt_code.c bt_iterator.c bt_output.c find.c stream.c
 
 INCLUDES += $(INCLUDE_DIR:%=-I%)
-INCLUDES += -I/usr/local/include
 INCLUDES += -I$(CF)/include -I$(AS)/include
 INCLUDES += -I$(AS)/include
 INCLUDES += -I$(XDR_INCLUDE_DIR)

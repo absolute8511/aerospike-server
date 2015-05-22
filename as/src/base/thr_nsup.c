@@ -94,7 +94,7 @@ void_time_to_ttl(uint32_t void_time, uint32_t now)
 // for convenient comparison to run-time eviction.
 //
 
-#define NUM_EVICT_THREADS 16
+#define NUM_EVICT_THREADS 24
 #define EVAL_WRITE_STATE_FREQUENCY 1024
 
 
@@ -499,6 +499,99 @@ garbage_collect_next_prole_partition(as_namespace* ns, int pid)
 
 //
 // END - Temporary dangling prole garbage collection.
+//==========================================================
+
+//==========================================================
+// Temporary dangling prole (or other) sets deletion.
+//
+
+typedef struct non_master_sets_delete_info_s {
+	as_namespace*	ns;
+	bool*			sets_deleting;
+	as_index_tree*	p_tree;
+	uint32_t		num_deleted;
+} non_master_sets_delete_info;
+
+static void
+non_master_sets_delete_reduce_cb(as_index_ref* r_ref, void* udata)
+{
+	non_master_sets_delete_info* p_info = (non_master_sets_delete_info*)udata;
+	uint32_t set_id = as_index_get_set_id(r_ref->r);
+
+	if (p_info->sets_deleting[set_id]) {
+		as_index_delete(p_info->p_tree, &r_ref->r->key);
+		p_info->num_deleted++;
+	}
+
+	as_record_done(r_ref, p_info->ns);
+}
+
+static void
+non_master_sets_delete(as_namespace* ns, bool* sets_deleting)
+{
+	cf_info(AS_NSUP, "namespace %s: deleting non-master records in sets being emptied",
+			ns->name);
+
+	as_partition_reservation rsv;
+
+	// Look at all non-master partitions.
+	for (int n = 0; n < AS_PARTITIONS; n++) {
+		AS_PARTITION_RESERVATION_INIT(rsv);
+
+		if (0 == as_partition_reserve_write(ns, n, &rsv, 0, 0)) {
+			// This is a master partition - continue.
+			as_partition_release(&rsv);
+		}
+		else if (0 == as_partition_reserve_read(ns, n, &rsv, 0, 0)) {
+			// This is a prole partition - check it.
+			cf_atomic_int_incr(&g_config.nsup_tree_count);
+
+			non_master_sets_delete_info cb_info;
+
+			cb_info.ns = ns;
+			cb_info.sets_deleting = sets_deleting;
+			cb_info.p_tree = rsv.p->vp;
+			cb_info.num_deleted = 0;
+
+			// Reduce the partition, checking and deleting records.
+			as_index_reduce(rsv.p->vp, non_master_sets_delete_reduce_cb, &cb_info);
+
+			if (cb_info.num_deleted != 0) {
+				cf_info(AS_NSUP, "namespace %s pid %d: %u deleted proles",
+						ns->name, n, cb_info.num_deleted);
+			}
+
+			as_partition_release(&rsv);
+			cf_atomic_int_decr(&g_config.nsup_tree_count);
+		}
+		else {
+			// We don't own this partition - check anyway.
+			as_partition_reserve_migrate(ns, n, &rsv, 0);
+			cf_atomic_int_incr(&g_config.nsup_tree_count);
+
+			non_master_sets_delete_info cb_info;
+
+			cb_info.ns = ns;
+			cb_info.sets_deleting = sets_deleting;
+			cb_info.p_tree = rsv.p->vp;
+			cb_info.num_deleted = 0;
+
+			// Reduce the partition, checking and deleting records.
+			as_index_reduce(rsv.p->vp, non_master_sets_delete_reduce_cb, &cb_info);
+
+			if (cb_info.num_deleted != 0) {
+				cf_info(AS_NSUP, "namespace %s pid %d: %u deleted from dangling partition, state %d, %u records remaining",
+						ns->name, n, cb_info.num_deleted, rsv.state, rsv.p->vp->elements);
+			}
+
+			as_partition_release(&rsv);
+			cf_atomic_int_decr(&g_config.nsup_tree_count);
+		}
+	}
+}
+
+//
+// END - Temporary dangling prole (or other) sets deletion.
 //==========================================================
 
 
@@ -1129,6 +1222,11 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 
 	ns->non_expirable_objects = n_0_void_time;
 
+	uint64_t total_duration_ms = cf_getms() - start_ms;
+
+	ns->nsup_cycle_duration = (uint32_t)(total_duration_ms / 1000);
+	ns->nsup_cycle_sleep_pct = total_duration_ms == 0 ? 0 : (uint32_t)((n_general_waits * 100) / total_duration_ms);
+
 	cf_info(AS_NSUP, "{%s} Records: %"PRIu64", %"PRIu64" 0-vt, %"
 			PRIu64"(%"PRIu64") expired, %"PRIu64"(%"PRIu64") evicted, %"
 			PRIu64"(%"PRIu64") set deletes, %"PRIu64"(%"PRIu64") set evicted. "
@@ -1136,7 +1234,7 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 			ns->name, n_master, n_0_void_time,
 			n_expired_records, ns->n_expired_objects, n_evicted_records, ns->n_evicted_objects,
 			n_deleted_set_records, ns->n_deleted_set_objects, n_evicted_set_records, ns->n_evicted_set_objects,
-			evict_ttl_low, evict_ttl_high, evict_mid_tenths_pct, n_set_waits, n_clear_waits, n_general_waits, cf_getms() - start_ms);
+			evict_ttl_low, evict_ttl_high, evict_mid_tenths_pct, n_set_waits, n_clear_waits, n_general_waits, total_duration_ms);
 }
 
 //------------------------------------------------
@@ -1446,6 +1544,11 @@ thr_nsup(void *arg)
 					n_deleted_set_records, n_evicted_set_records,
 					evict_ttl_low, evict_ttl_high, evict_mid_tenths_pct,
 					n_set_waits, n_clear_waits, n_general_waits, start_ms);
+
+			// Delete non-master records from set(s) being deleted.
+			if (do_set_deletion && g_config.non_master_sets_delete) {
+				non_master_sets_delete(ns, sets_deleting);
+			}
 
 			// Garbage-collect long-expired proles, one partition per loop.
 			if (g_config.prole_extra_ttl != 0) {

@@ -22,9 +22,11 @@
 
 #pragma once
 
+#include <execinfo.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include "dynbuf.h"
 
 /* SYNOPSIS
@@ -100,7 +102,8 @@ typedef enum {
 	AS_LDT = 54,
 	CF_JEM = 55,
 	AS_SECURITY = 56,
-	CF_FAULT_CONTEXT_UNDEF = 57
+	AS_AGGR = 57,
+	CF_FAULT_CONTEXT_UNDEF = 58
 } cf_fault_context;
 
 extern char *cf_fault_context_strings[];
@@ -200,6 +203,27 @@ extern void cf_fault_event_nostack(const cf_fault_context,
 #define cf_assert(a, context, severity, __msg, ...) \
 	((void)((a) ? (void)0 : cf_fault_event((context), (severity), __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__)))
 
+#define MAX_BACKTRACE_DEPTH 50
+
+// This must literally be the direct clib "free()", because "strings" is
+// allocated by "backtrace_symbols()".
+#define PRINT_STACK() \
+do { \
+	void *bt[MAX_BACKTRACE_DEPTH]; \
+	int sz = backtrace(bt, MAX_BACKTRACE_DEPTH); \
+	cf_warning(AS_AS, "stacktrace: found %d frames", sz); \
+	char **strings = backtrace_symbols(bt, sz); \
+	if (strings) { \
+		for (int i = 0; i < sz; i++) { \
+			cf_warning(AS_AS, "stacktrace: frame %d: %s", i, strings[i]); \
+		} \
+		free(strings); \
+	} \
+	else { \
+		cf_warning(AS_AS, "stacktrace: found no symbols"); \
+	} \
+} while (0);
+
 // The "regular" versions.
 // Note that we use the function name ONLY in crash(), debug() and detail(),
 // as this information is relevant mostly to the Aerospike software engineers.
@@ -222,27 +246,27 @@ extern void cf_fault_event_nostack(const cf_fault_context,
 // in either Hex format or Base64 format.
 #define cf_crash_binary(context, ptr, len, DT, __msg, ...) \
 	(cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_warning_binary(context, ptr, len, DT, __msg, ...)\
+#define cf_warning_binary(context, ptr, len, DT, __msg, ...) \
 	(cf_fault_event2((context), CF_WARNING, __FILENAME__, NULL, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_info_binary(context, ptr, len, DT, __msg, ...)\
+#define cf_info_binary(context, ptr, len, DT, __msg, ...) \
 	(cf_fault_event2((context), CF_INFO, __FILENAME__, NULL, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
 #define cf_debug_binary(context, ptr, len, DT, __msg, ...) \
 	(cf_fault_event2((context), CF_DEBUG, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_detail_binary(context, ptr, len, DT, __msg, ...)\
+#define cf_detail_binary(context, ptr, len, DT, __msg, ...) \
 	(cf_fault_event2((context), CF_DETAIL, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
 
 // This set of log calls specifically handles DIGEST values.
 // Note that we use the function name ONLY in crash(), debug() and detail(),
 // as this information is relevant mostly to the Aerospike software engineers.
-#define cf_crash_digest(context, ptr,__msg, ...)\
+#define cf_crash_digest(context, ptr,__msg, ...) \
 	(cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_warning_digest(context, ptr, __msg, ...)\
+#define cf_warning_digest(context, ptr, __msg, ...) \
 	(cf_fault_event2((context), CF_WARNING, __FILENAME__, NULL,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_info_digest(context, ptr, __msg, ...)\
+#define cf_info_digest(context, ptr, __msg, ...) \
 	(cf_fault_event2((context), CF_INFO, __FILENAME__, NULL,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
 #define cf_debug_digest(context, ptr, __msg, ...) \
 	(cf_fault_event2((context), CF_DEBUG, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_detail_digest(context, ptr, __msg, ...)\
+#define cf_detail_digest(context, ptr, __msg, ...) \
 	(cf_fault_event2((context), CF_DETAIL, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
 
 

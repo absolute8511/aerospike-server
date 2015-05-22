@@ -221,6 +221,8 @@ typedef struct as_paxos_t {
 	bool alive[AS_CLUSTER_SZ];
 	bool partition_sync_state[AS_CLUSTER_SZ];
 
+	cf_node principal_pro_tempore; // Node with greatest ID currently vying to become Paxos principal (or 0 if there is none.)
+
 	int num_incoming_migrations;   // For receiver-side migration flow control.
 
 	int n_callbacks;

@@ -57,12 +57,12 @@ ifeq ($(USE_JEM),1)
 	$(MAKE) -C $(JEMALLOC)
 endif
 ifeq ($(USE_LUAJIT),1)
-	$(MAKE) -C $(LUAJIT) Q= TARGET_SONAME=libluajit.so
+	$(MAKE) -C $(LUAJIT) Q= TARGET_SONAME=libluajit.so CCDEBUG=-g
 endif
 	$(MAKE) -C $(JANSSON)
 	$(MAKE) -C $(COMMON) CF=$(CF) EXT_CFLAGS="$(EXT_CFLAGS)"
 	$(MAKE) -C $(CF)
-	$(MAKE) -C $(MOD_LUA) CF=$(CF) COMMON=$(COMMON) LUA_CORE=$(LUA_CORE) EXT_CFLAGS="$(EXT_CFLAGS)"
+	$(MAKE) -C $(MOD_LUA) CF=$(CF) COMMON=$(COMMON) LUA_CORE=$(LUA_CORE) EXT_CFLAGS="$(EXT_CFLAGS)" USE_LUAJIT=$(USE_LUAJIT) LUAJIT=$(LUAJIT)
 	$(MAKE) -C xdr
 	$(MAKE) -C ai
 	$(MAKE) -C as
@@ -111,7 +111,7 @@ cleanmodules:
 	if [ -e "$(LUAJIT)/Makefile" ]; then \
 		$(MAKE) -C $(LUAJIT) clean; \
 	fi
-	$(MAKE) -C $(MOD_LUA) COMMON=$(COMMON) LUA_CORE=$(LUA_CORE) clean
+	$(MAKE) -C $(MOD_LUA) COMMON=$(COMMON) LUA_CORE=$(LUA_CORE) USE_LUAJIT=$(USE_LUAJIT) LUAJIT=$(LUAJIT) clean
 
 .PHONY: cleandist
 cleandist:
@@ -138,7 +138,7 @@ cleangit:
 	$(GIT_CLEAN)
 
 .PHONY: rpm deb tar
-rpm deb tar:
+rpm deb tar src:
 	$(MAKE) -C pkg/$@ EDITION=$(EDITION)
 
 $(VERSION_SRC):	targetdirs
@@ -177,27 +177,22 @@ $(JANSSON)/configure:
 	cd $(JANSSON) && autoreconf -i
 
 $(JANSSON)/Makefile: $(JANSSON)/configure
-	cd $(JANSSON) && ./configure
+	cd $(JANSSON) && ./configure $(JANSSON_CONFIG_OPT)
 
 $(JEMALLOC)/configure:
 	cd $(JEMALLOC) && autoconf
 
 $(JEMALLOC)/Makefile: $(JEMALLOC)/configure
-	cd $(JEMALLOC) && ./configure
+	cd $(JEMALLOC) && ./configure $(JEM_CONFIG_OPT)
 
 $(LUAJIT)/src/luaconf.h: $(LUAJIT)/src/luaconf.h.orig
 	ln -s $(notdir $<) $@
 
+
+
 .PHONY: source
-source:
-	$(eval EDITION := community)
-	$(RM) $(VERSION_SRC)
-	$(MAKE) $(VERSION_SRC) EDITION=$(EDITION)
-	cp -p $(VERSION_SRC) $(DEPTH)
-	tar cvfj $(SRCTAR) \
-            -C .. `git ls-files | sed 's|^|aerospike-server/|'` \
-                  "aerospike-server/version.c"
-	$(RM) $(DEPTH)/version.c
+source: src
+
 
 tags etags:
 	etags `find ai as cf modules xdr $(EEREPO) -name "*.[ch]" | egrep -v '(target/Linux|m4)'` `find /usr/include -name "*.h"`

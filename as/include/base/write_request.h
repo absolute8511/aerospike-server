@@ -113,6 +113,7 @@ typedef struct write_request_s {
 	// udf request data
 	ureq_data            udata;
 	bool                 shipped_op;
+	bool                 shipped_op_initiator;
 	uint8_t              ldt_rectype_bits;
 	bool                 has_udf;
 
@@ -180,6 +181,7 @@ void wr_track_init()
 
 #endif
 
+void 			g_write_hash_delete(global_keyd *gk);
 write_request * write_request_create(void);
 int             write_request_init_tr(as_transaction *tr, void *wreq);
 bool            finish_rw_process_ack(write_request *wr, uint32_t result_code);

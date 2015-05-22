@@ -75,11 +75,11 @@ extern udf_call *as_query_get_udf_call(void *ptr);
  *                    used to send result after the UDF execution.
  */
 static bool
-make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint sp_sz,
+make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 			  const char *key, size_t klen, int  vtype,  void *val, size_t vlen)
 {
-	uint        sz          = 0;
-	int         tsz         = sz + vlen + as_particle_get_base_size(vtype);
+	uint32_t        sz          = 0;
+	uint32_t        tsz         = sz + vlen + as_particle_get_base_size(vtype);
 	uint8_t *   v           = NULL;
 	int64_t     swapped_int = 0;
 	uint8_t     *sp_p = *sp_pp;
@@ -148,9 +148,9 @@ send_response(udf_call *call, const char *key, size_t klen, int vtype, void *val
 	as_transaction *    tr          = call->transaction;
 	as_namespace *      ns          = tr->rsv.ns;
 	uint32_t            generation  = tr->generation;
-	uint                sp_sz       = 1024 * 16;
+	uint32_t            sp_sz       = 1024 * 16;
 	uint32_t            void_time   = 0;
-	uint                written_sz  = 0;
+	uint32_t            written_sz  = 0;
 	bool                keep_fd     = false;
 	as_bin              stack_bin;
 	as_bin            * bin         = &stack_bin;
@@ -161,15 +161,17 @@ send_response(udf_call *call, const char *key, size_t klen, int vtype, void *val
 
 	if (call->udf_type == AS_SCAN_UDF_OP_BACKGROUND) {
 		// If we are doing a background UDF scan, do not send any result back
-		cf_detail(AS_UDF, "UDF: Background transaction, send no result back. "
-				  "Parent job id [%"PRIu64"]", ((tscan_job*)(tr->udata.req_udata))->tid);
-		if(strncmp(key, "FAILURE", 8) == 0)  {
-			cf_atomic_int_incr(&((tscan_job*)(tr->udata.req_udata))->n_obj_udf_failed);
-		} else if(strncmp(key, "SUCCESS", 8) == 0) {
-			cf_atomic_int_incr(&((tscan_job*)(tr->udata.req_udata))->n_obj_udf_success);
+		if (tr->udata.req_type == UDF_SCAN_REQUEST) {
+			cf_detail(AS_UDF, "UDF: Background transaction, send no result back. "
+					"Parent job id [%"PRIu64"]", ((tscan_job*)(tr->udata.req_udata))->tid);
+			if (strncmp(key, "FAILURE", 8) == 0) {
+				cf_atomic_int_incr(&((tscan_job*)(tr->udata.req_udata))->n_obj_udf_failed);
+			} else if (strncmp(key, "SUCCESS", 8) == 0) {
+				cf_atomic_int_incr(&((tscan_job*)(tr->udata.req_udata))->n_obj_udf_success);
+			}
 		}
 		return 0;
-	} else if(call->udf_type == AS_SCAN_UDF_OP_UDF) {
+	} else if (call->udf_type == AS_SCAN_UDF_OP_UDF) {
 		// Do not release fd now, scan will do it at the end of all internal
 		// 	udf transactions
 		cf_detail(AS_UDF, "UDF: Internal udf transaction, do not release fd");
@@ -210,6 +212,164 @@ send_cdt_failure(udf_call *call, int vtype, void *val, size_t vlen)
 	return send_response(call, "FAILURE", 7, vtype, val, vlen);
 }
 
+int
+udf_rw_get_ldt_error(void *val, size_t vlen) 
+{
+	// We need to do a quick look to see if this is an LDT error string.  If it
+	// is, then we'll look deeper.  We start looking after the first space.
+	char * charptr;
+	char * valptr = (char *) val;
+	long   error_code;
+
+	// Start with the space, if it exists, as the marker for where we start
+	// looking for the LDT error contents.
+	if ((charptr = strchr((const char *) val, ' ')) != NULL) {
+		// We must be at least 10 chars from the end, so if we're less than that
+		// we are obviously not looking at an LDT error.
+		if (&charptr[9] < &valptr[vlen]) {
+			if (memcmp(&charptr[5], ":LDT-", 5) == 0) {
+				error_code = strtol(&charptr[1], NULL, 10);
+				cf_debug(AS_UDF, "LDT Error: Code(%ld) String(%s)",
+						error_code, (char *) val);
+				return error_code;
+			}
+		}
+	}
+	return 0;
+}
+
+// Parses the error message coming from lua world. This parsing matches the error
+// codes in ldt_error.lua.
+//
+// Currently this parsing happens at
+// 1. Lua world
+// 2. Server world (This funtion and associated #define)
+// 3. All the clients.
+//
+// TODO: Should probably be part of common. Or some sort of error database so
+// this can scale.
+void 
+udf_rw_update_ldt_err_stats(as_namespace *ns, as_result *res)
+{
+	if (!ns->ldt_enabled || !res) {
+		return;
+	}
+
+	if (res->is_success) {
+		return;
+	}
+
+	as_string * s   = as_string_fromval(res->value);
+	char *      rs  = (char *) as_string_tostring(s);
+
+    if ( s ) {
+		long code = udf_rw_get_ldt_error(rs, as_string_len(s));
+		switch (code) {
+			case ERR_TOP_REC_NOT_FOUND: 
+				cf_atomic_int_incr(&ns->lstats.ldt_err_toprec_not_found);
+				break;
+			case ERR_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_item_not_found);
+				break;
+			case ERR_INTERNAL:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_internal);
+				break;
+			case ERR_UNIQUE_KEY:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_unique_key_violation);
+				break;
+			case ERR_INSERT:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_insert_fail);
+				break;
+			case ERR_SEARCH:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_search_fail);
+				break;
+			case ERR_DELETE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_delete_fail);
+				break;
+			case ERR_VERSION:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_version_mismatch);
+				break;
+
+			case ERR_CAPACITY_EXCEEDED:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_capacity_exceeded);
+				break;
+			case ERR_INPUT_PARM:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_param);
+				break;
+
+			case ERR_TYPE_MISMATCH:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_op_bintype_mismatch);
+				break;
+
+			case ERR_NULL_BIN_NAME:
+			case ERR_BIN_NAME_NOT_STRING:
+			case ERR_BIN_NAME_TOO_LONG:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_param);
+				break;
+
+			case ERR_TOO_MANY_OPEN_SUBRECS:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_too_many_open_subrec);
+				break;
+			case ERR_SUB_REC_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_subrec_not_found);
+				break;
+			case ERR_BIN_DOES_NOT_EXIST:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_bin_does_not_exist);
+				break;
+			case ERR_BIN_ALREADY_EXISTS:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_bin_exits);
+				break;
+			case ERR_BIN_DAMAGED:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_bin_damaged);
+				break;
+
+			case ERR_SUBREC_POOL_DAMAGED:
+			case ERR_SUBREC_DAMAGED:
+			case ERR_SUBREC_OPEN:
+			case ERR_SUBREC_UPDATE:
+			case ERR_SUBREC_CREATE:
+			case ERR_SUBREC_DELETE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_subrec_internal);
+				break;
+
+			case ERR_SUBREC_CLOSE:
+			case ERR_TOPREC_UPDATE:
+			case ERR_TOPREC_CREATE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_toprec_internal);
+				break;
+
+
+			case ERR_FILTER_BAD:
+			case ERR_FILTER_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_filter);
+				break;
+			case ERR_KEY_BAD:
+			case ERR_KEY_FIELD_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_key);
+				break;
+			case ERR_INPUT_CREATESPEC:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_createspec);
+				break;
+			case ERR_INPUT_USER_MODULE_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_usermodule);
+				break;
+
+			case ERR_INPUT_TOO_LARGE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_input_too_large);
+				break;
+			case ERR_NS_LDT_NOT_ENABLED:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_ldt_not_enabled);
+				break;
+			
+			default:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_unknown);
+		}
+    } else {
+		cf_atomic_int_incr(&ns->lstats.ldt_err_unknown);
+	}
+	return;
+}
+
 /**
  * Send failure notification of general UDF execution, but check for special
  * LDT errors and return specific Wire Protocol error codes for these cases:
@@ -235,33 +395,19 @@ send_cdt_failure(udf_call *call, int vtype, void *val, size_t vlen)
 static inline int
 send_udf_failure(udf_call *call, int vtype, void *val, size_t vlen)
 {
-	// We need to do a quick look to see if this is an LDT error string.  If it
-	// is, then we'll look deeper.  We start looking after the first space.
-	char * charptr;
-	char * valptr = (char *) val;
-	long error_code;
+	long error_code = udf_rw_get_ldt_error(val, vlen);
 
-	// Start with the space, if it exists, as the marker for where we start
-	// looking for the LDT error contents.
-	if ((charptr = strchr((const char *) val, ' ')) != NULL) {
-		// We must be at least 10 chars from the end, so if we're less than that
-		// we are obviously not looking at an LDT error.
-		if (&charptr[9] < &valptr[vlen]) {
-			if (memcmp(&charptr[5], ":LDT-", 5) == 0) {
-				error_code = strtol(&charptr[1], NULL, 10);
-				if (error_code == AS_PROTO_RESULT_FAIL_NOTFOUND ||
-					error_code == AS_PROTO_RESULT_FAIL_COLLECTION_ITEM_NOT_FOUND)
-				{
-					call->transaction->result_code = error_code;
-					cf_debug(AS_UDF, "LDT Error: Code(%ld) String(%s)",
-							error_code, (char *) val);
-					// Send an "empty" response, with no failure bin.
-					as_transaction *    tr          = call->transaction;
-					single_transaction_response(tr, tr->rsv.ns, NULL/*ops*/,
-							NULL /*bin*/, 0 /*nbins*/, 0, 0, NULL, NULL);
-					return 0;
-				}
-			}
+	if (error_code) {
+
+		if (error_code == AS_PROTO_RESULT_FAIL_NOTFOUND ||
+			error_code == AS_PROTO_RESULT_FAIL_COLLECTION_ITEM_NOT_FOUND) {
+
+			call->transaction->result_code = error_code;
+			// Send an "empty" response, with no failure bin.
+			as_transaction *    tr          = call->transaction;
+			single_transaction_response(tr, tr->rsv.ns, NULL/*ops*/,
+					NULL /*bin*/, 0 /*nbins*/, 0, 0, NULL, NULL);
+			return 0;
 		}
 	}
 
@@ -489,6 +635,52 @@ udf_call_destroy(udf_call * call)
 	call->arglist = NULL;
 }
 
+/*
+ * Looks at the flags set in udf_record and determines if it is
+ * read / write or delete operation
+ */
+void 
+udf_rw_getop(udf_record *urecord, udf_optype *urecord_op)
+{ 
+	if (urecord->flag & UDF_RECORD_FLAG_HAS_UPDATES) {
+		// Check if the record is not deleted after an update
+		if ( urecord->flag & UDF_RECORD_FLAG_OPEN) {
+			*urecord_op = UDF_OPTYPE_WRITE;
+		} 
+		else {
+			// If the record has updates and it is not open, 
+			// and if it pre-existed it's an update followed by a delete.
+			if ( urecord->flag & UDF_RECORD_FLAG_PREEXISTS) {
+				*urecord_op = UDF_OPTYPE_DELETE;
+			} 
+			// If the record did not pre-exist and is updated
+			// and it is not open, then it is create followed by
+			// delete essentially no_op.
+			else {
+				*urecord_op = UDF_OPTYPE_NONE;
+			}
+		}
+	} else if ((urecord->flag & UDF_RECORD_FLAG_PREEXISTS)
+			   && !(urecord->flag & UDF_RECORD_FLAG_OPEN)) {
+		*urecord_op  = UDF_OPTYPE_DELETE;
+	} else {
+		*urecord_op  = UDF_OPTYPE_READ;
+	}
+
+	// If there exists a record reference but no bin of the record is in use,
+	// delete the record. remove from the tree. Only LDT_RECORD here not needed
+	// for LDT_SUBRECORD (only do it if requested by UDF). All the SUBRECORD of
+	// removed LDT_RECORD will be lazily cleaned up by defrag.
+	if (!(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD)
+			&& (urecord->flag & UDF_RECORD_FLAG_OPEN)
+			&& !as_bin_inuse_has(urecord->rd)) {
+		as_transaction *tr = urecord->tr;
+		as_index_delete(tr->rsv.tree, &tr->keyd);
+		urecord->starting_memory_bytes = 0;
+		*urecord_op                    = UDF_OPTYPE_DELETE;
+	}
+}
+
 /* Internal Function: Does the post processing for the UDF record after the
  *					  UDF execution. Does the following:
  *		1. Record is closed
@@ -516,54 +708,19 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 	as_rec_props_clear(&urecord->pickled_rec_props);
 	bool udf_xdr_ship_op = false;
 
-	// TODO: optimize not to allocate buffer if it is single
-	// node cluster. No remote to send data to
-	// Check if UDF has updates.
-	if (urecord->flag & UDF_RECORD_FLAG_HAS_UPDATES) {
-		// Check if the record is not deleted after an update
-		if ( urecord->flag & UDF_RECORD_FLAG_OPEN) {
-			*urecord_op = UDF_OPTYPE_WRITE;
-			udf_xdr_ship_op = true;
-		} 
-		else {
-			// If the record has updates and it is not open, 
-			// and if it pre-existed it's an update followed by a delete.
-			if ( urecord->flag & UDF_RECORD_FLAG_PREEXISTS) {
-				*urecord_op = UDF_OPTYPE_DELETE;
-				udf_xdr_ship_op = true;
-			} 
-			// If the record did not pre-exist and is updated
-			// and it is not open, then it is create followed by
-			// delete essentially no_op.
-			else {
-				*urecord_op = UDF_OPTYPE_NONE;
-			}
-		}
-	} else if ((urecord->flag & UDF_RECORD_FLAG_PREEXISTS)
-			   && !(urecord->flag & UDF_RECORD_FLAG_OPEN)) {
-		*urecord_op  = UDF_OPTYPE_DELETE;
+	udf_rw_getop(urecord, urecord_op);
+
+	if (UDF_OP_IS_DELETE(*urecord_op)
+			|| UDF_OP_IS_WRITE(*urecord_op)) {
 		udf_xdr_ship_op = true;
-	} else {
-		*urecord_op  = UDF_OPTYPE_READ;
 	}
 
 	cf_detail(AS_UDF, "FINISH working with LDT Record %p %p %p %p %d", &urecord,
 			urecord->tr, urecord->r_ref, urecord->rd,
 			(urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN));
 
-	// If there exists a record reference but no bin of the record is in use,
-	// delete the record. remove from the tree. Only LDT_RECORD here not needed
-	// for LDT_SUBRECORD (only do it if requested by UDF). All the SUBRECORD of
-	// removed LDT_RECORD will be lazily cleaned up by defrag.
-	if (!(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD)
-			&& (urecord->flag & UDF_RECORD_FLAG_OPEN)
-			&& !as_bin_inuse_has(rd)) {
-		as_index_delete(tr->rsv.tree, &tr->keyd);
-		urecord->starting_memory_bytes = 0;
-		*urecord_op                    = UDF_OPTYPE_DELETE;
-		udf_xdr_ship_op = true;
-	} else if (*urecord_op == UDF_OPTYPE_WRITE)	{
-		cf_detail(AS_UDF, "Committing Changes %"PRIx64" n_bins %d", rd->keyd, as_bin_get_n_bins(r_ref->r, rd));
+	if (*urecord_op == UDF_OPTYPE_WRITE)	{
+		cf_detail_digest(AS_UDF, &rd->keyd, "Committing Changes n_bins %d", as_bin_get_n_bins(r_ref->r, rd));
 
 		size_t  rec_props_data_size = as_storage_record_rec_props_size(rd);
 		uint8_t rec_props_data[rec_props_data_size];
@@ -601,7 +758,7 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 		set_id = as_index_get_set_id(r_ref->r);
 	}
 	// Close the record for all the cases
-	udf_record_close(urecord, false);
+	udf_record_close(urecord);
 
 	// Write to XDR pipe after closing the record, in order to release the record lock as
 	// early as possible.
@@ -614,13 +771,6 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 			xdr_write(tr->rsv.ns, tr->keyd, generation, 0, true, set_id);
 		}
 	}
-
-	// Replication happens when the main record replicates
-	if (urecord->particle_data) {
-		cf_free(urecord->particle_data);
-		urecord->particle_data = 0;
-	}
-	udf_record_cache_free(urecord);
 }
 
 /*
@@ -635,43 +785,43 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
  *  Returns: nothing
 */
 void
-udf_rw_update_stats(as_namespace *ns, udf_optype op, int ret, bool is_success)
+udf_rw_update_stats(as_namespace *ns, udf_optype op, int ret, bool is_success, bool is_ldt)
 {
-	if (UDF_OP_IS_LDT(op)) {
-		if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&ns->ldt_read_reqs);
-		else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&ns->ldt_delete_reqs);
-		else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&ns->ldt_write_reqs);
+	if (is_ldt) {
+		if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&ns->lstats.ldt_read_reqs);
+		else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&ns->lstats.ldt_delete_reqs);
+		else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&ns->lstats.ldt_write_reqs);
 
 		if (ret == 0) {
 			if (is_success) {
-				if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&ns->ldt_read_success);
-				else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&ns->ldt_delete_success);
-				else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&ns->ldt_write_success);
+				if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&ns->lstats.ldt_read_success);
+				else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&ns->lstats.ldt_delete_success);
+				else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&ns->lstats.ldt_write_success);
 			} else {
-				cf_atomic_int_incr(&ns->ldt_errs);
+				cf_atomic_int_incr(&ns->lstats.ldt_errs);
 			}
 		} else {
 			cf_atomic_int_incr(&g_config.udf_lua_errs);
+		}
+	} 
+
+	if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&g_config.udf_read_reqs);
+	else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&g_config.udf_delete_reqs);
+	else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&g_config.udf_write_reqs);
+
+	if (ret == 0) {
+		if (is_success) {
+			if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&g_config.udf_read_success);
+			else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&g_config.udf_delete_success);
+			else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&g_config.udf_write_success);
+		} else {
+			if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&g_config.udf_read_errs_other);
+			else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&g_config.udf_delete_errs_other);
+			else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&g_config.udf_write_errs_other);
 		}
 	} else {
-		if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&g_config.udf_read_reqs);
-		else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&g_config.udf_delete_reqs);
-		else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&g_config.udf_write_reqs);
-
-		if (ret == 0) {
-			if (is_success) {
-				if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&g_config.udf_read_success);
-				else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&g_config.udf_delete_success);
-				else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&g_config.udf_write_success);
-			} else {
-				if (UDF_OP_IS_READ(op))        cf_atomic_int_incr(&g_config.udf_read_errs_other);
-				else if (UDF_OP_IS_DELETE(op)) cf_atomic_int_incr(&g_config.udf_delete_errs_other);
-				else if (UDF_OP_IS_WRITE (op)) cf_atomic_int_incr(&g_config.udf_write_errs_other);
-			}
-		} else {
-            cf_info(AS_UDF,"lua error, ret:%d",ret);
-			cf_atomic_int_incr(&g_config.udf_lua_errs);
-		}
+		cf_info(AS_UDF,"lua error, ret:%d",ret);
+		cf_atomic_int_incr(&g_config.udf_lua_errs);
 	}
 }
 
@@ -689,9 +839,11 @@ udf_rw_update_stats(as_namespace *ns, udf_optype op, int ret, bool is_success)
  *
  *  Returns: true always
  */
+extern uint32_t as_storage_record_size(as_storage_rd *rd);
 bool
 udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, uint16_t set_id)
 {
+	int subrec_count = 0;
 	// LDT: Commit all the changes being done to the all records.
 	// TODO: remove limit of 6 (note -- it's temporarily up to 20)
 	udf_optype urecord_op = UDF_OPTYPE_READ;
@@ -699,13 +851,16 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 	udf_record *h_urecord = as_rec_source(lrecord->h_urec);
 	bool is_ldt           = false;
 	int  ret              = 0;
+	uint32_t total_flat_size = 0; 
 
-	udf_rw_post_processing(h_urecord, &urecord_op, set_id);
+	udf_rw_getop(h_urecord, &urecord_op);
+	// In case required 
+	// wr->pickled_ldt_version = lrecord->version;
 
 	if (urecord_op == UDF_OPTYPE_DELETE) {
 		wr->pickled_buf      = NULL;
 		wr->pickled_sz       = 0;
-		wr->pickled_void_time      = 0;
+		wr->pickled_void_time   = 0;
 		as_rec_props_clear(&wr->pickled_rec_props);
 		wr->ldt_rectype_bits = h_urecord->ldt_rectype_bits;
 		*lrecord_op  = UDF_OPTYPE_DELETE;
@@ -715,21 +870,44 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 			*lrecord_op = UDF_OPTYPE_WRITE;
 		}
 
-		FOR_EACH_SUBRECORD(i, lrecord) {
+		FOR_EACH_SUBRECORD(i, j, lrecord) {
+			urecord_op = UDF_OPTYPE_READ;
 			is_ldt = true;
-			udf_record *c_urecord = &lrecord->chunk[i].c_urecord;
+			subrec_count++;
+			udf_record *c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
+			if (g_config.ldt_benchmarks) {
+				udf_rw_getop(c_urecord, &urecord_op);
+				if (UDF_OP_IS_WRITE(urecord_op)) {
+					if (c_urecord->tr->rsv.ns
+						&& NAMESPACE_HAS_PERSISTENCE(c_urecord->tr->rsv.ns)
+						&& c_urecord->rd) {
+						total_flat_size += as_storage_record_size(c_urecord->rd);
+					}
+				}
+			}
 			udf_rw_post_processing(c_urecord, &urecord_op, set_id);
-			if (urecord_op == UDF_OPTYPE_WRITE) {
-				*lrecord_op = UDF_OPTYPE_LDT_WRITE;
+		}
+
+		// Process the parent record in the end .. this is to make sure
+		// the lock is held till the end. 
+		if (g_config.ldt_benchmarks) {
+			udf_rw_getop(h_urecord, &urecord_op);
+			if (UDF_OP_IS_WRITE(urecord_op)) { 
+				if (h_urecord->tr->rsv.ns
+					&& NAMESPACE_HAS_PERSISTENCE(h_urecord->tr->rsv.ns)
+					&& h_urecord->rd) {
+					total_flat_size += as_storage_record_size(h_urecord->rd);
+				}
 			}
 		}
+		udf_rw_post_processing(h_urecord, &urecord_op, set_id);
 
 		if (is_ldt) {
 			// Create the multiop pickled buf for thr_rw.c
-			ret = ldt_record_pickle(lrecord, &wr->pickled_buf, &wr->pickled_sz, &wr->pickled_void_time);
-			FOR_EACH_SUBRECORD(i, lrecord) {
-				udf_record *c_urecord = &lrecord->chunk[i].c_urecord;
-				// Cleanup in case pickle code bailed out	
+			ret = as_ldt_record_pickle(lrecord, &wr->pickled_buf, &wr->pickled_sz, &wr->pickled_void_time);
+			FOR_EACH_SUBRECORD(i, j, lrecord) {
+				udf_record *c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
+				// Cleanup in case pickle code bailed out
 				// 1. either because this single node run no replica
 				// 2. failed to pack stuff up.
 				udf_record_cleanup(c_urecord, true);
@@ -745,13 +923,29 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 		}
 	}
 	udf_record_cleanup(h_urecord, true);
+	if (UDF_OP_IS_WRITE(*lrecord_op) && (lrecord->udf_context & UDF_CONTEXT_LDT)) {
+		// When showing in histogram the record which touch 0 subrecord and 1 subrecord 
+		// will show up in same bucket. +1 for record as well. So all the request which 
+		// touch subrecord as well show up in 2nd bucket
+		histogram_insert_raw(g_config.ldt_update_io_bytes_hist, total_flat_size);
+		histogram_insert_raw(g_config.ldt_update_record_cnt_hist, subrec_count + 1);
+	}
+
+	if (is_ldt) {
+		if (UDF_OP_IS_WRITE(*lrecord_op)) {
+			*lrecord_op = UDF_OPTYPE_LDT_WRITE;
+		} else if (UDF_OP_IS_DELETE(*lrecord_op)) {
+			*lrecord_op = UDF_OPTYPE_LDT_DELETE;
+		} else if (UDF_OP_IS_READ(*lrecord_op)) {
+			*lrecord_op = UDF_OPTYPE_LDT_READ;
+		}
+	}
+
 	if (ret) {
 		cf_warning(AS_LDT, "Pickeling failed with %d", ret);
 		return false;
-	
 	} else {
-	return true;
-
+		return true;
 	}
 }
 
@@ -860,6 +1054,12 @@ udf_apply_record(udf_call * call, as_rec *rec, as_result *res)
 	int ret_value = as_module_apply_record(&mod_lua, &ctx,
 			call->filename, call->function, rec, &arglist, res);
 	cf_hist_track_insert_data_point(g_config.ut_hist, now);
+	if (g_config.ldt_benchmarks) {
+		ldt_record *lrecord = (ldt_record *)as_rec_source(rec);
+		if (lrecord->udf_context & UDF_CONTEXT_LDT) {
+			histogram_insert_data_point(g_config.ldt_hist, now);
+		}
+	}
 	udf_memtracker_cleanup();
 	udf_timer_cleanup();
 	as_list_destroy(&arglist);
@@ -934,6 +1134,8 @@ int udf_rw_addresponse(as_transaction *tr, void *udata)
 int
 udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 {
+	*op = UDF_OPTYPE_NONE;
+
 	// Step 1: Setup UDF Record and LDT record
 	as_transaction *tr = call->transaction;
 	as_index_ref    r_ref;
@@ -959,10 +1161,6 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 	// to avoid attempting any garbage collection. For ldt_record clean up
 	// and post processing has to be in process context under transactional
 	// protection.
-#if 0
-	as_rec          lrec;
-	as_rec_init(&lrec, &lrecord, &ldt_record_hooks);
-#endif
 	as_rec  *lrec = as_rec_new(&lrecord, &ldt_record_hooks);
 
 	// Link lrecord and urecord
@@ -986,7 +1184,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		// If both the record and the message have keys, check them.
 		if (rd.key) {
 			if (msg_has_key(m) && ! check_msg_key(m, &rd)) {
-				udf_record_close(&urecord, false);
+				udf_record_close(&urecord);
 				call->transaction->result_code = AS_PROTO_RESULT_FAIL_KEY_MISMATCH;
 				// Necessary to complete transaction, but error string would be
 				// ignored by client, so don't bother sending one.
@@ -1008,9 +1206,15 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		// map is created from LUA world. The version can only be get in case
 		// the property map bin is there. If not there the record is normal
 		// record
-		int rv = as_ldt_parent_storage_get_version(&rd, &lrecord.version);
-		cf_detail(AS_LDT, "LDT_VERSION Read Version From Storage %p:%ld rv=%d",
-				  *(uint64_t *)&urecord.keyd, lrecord.version, rv);
+		uint64_t lversion;
+		int rv = as_ldt_parent_storage_get_version(&rd, &lversion, false,__FILE__, __LINE__);
+		if (rv == 0) {
+			lrecord.version = lversion;
+		} else {
+			lrecord.version = as_ldt_generate_version();
+		}
+		cf_detail_digest(AS_LDT, &urecord.keyd, "LDT_VERSION Read Version From Storage %ld rv=%d",
+				  lrecord.version, rv);
 
 		// Save the set-ID for XDR.
 		// In case of deletion, this information will not be available later.
@@ -1039,12 +1243,18 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 
 	if (ret_value == 0) {
 
+		if (lrecord.udf_context & UDF_CONTEXT_LDT) {
+			histogram_insert_raw(g_config.ldt_io_record_cnt_hist, lrecord.subrec_io + 1);
+		}
+
 		if (udf_rw_finish(&lrecord, wr, op, set_id) == false) {
 			// replication did not happen what to do now ??
 			cf_warning(AS_UDF, "Investigate udf_rw_finish() result");
 		}
 
-		if (UDF_OP_IS_READ(*op)) {
+		udf_rw_update_ldt_err_stats(ns, res);
+
+		if (UDF_OP_IS_READ(*op) || *op == UDF_OPTYPE_NONE) {
 			send_result(res, call, NULL);
 			as_result_destroy(res);
 		} else {
@@ -1056,12 +1266,12 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		}
 
 		// TODO this is not the right place for counter, put it at proper place
-		if(tr->udata.req_udata) {
+		if(tr->udata.req_udata && tr->udata.req_type == UDF_SCAN_REQUEST) {
 			cf_atomic_int_add(&((tscan_job*)(tr->udata.req_udata))->n_obj_udf_updated, (*op == UDF_OPTYPE_WRITE));
 		}
 
 	} else {
-		udf_record_close(&urecord, false);
+		udf_record_close(&urecord);
 		char *rs = as_module_err_string(ret_value);
 		call->transaction->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
 		send_response(call, "FAILURE", 7, AS_PARTICLE_TYPE_STRING, rs, strlen(rs));
@@ -1069,7 +1279,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		as_result_destroy(res);
 	}
 
-	udf_rw_update_stats(ns, *op, ret_value, success);
+	udf_rw_update_stats(ns, *op, ret_value, success, (lrecord.udf_context & UDF_CONTEXT_LDT));
 
 	// free everything we created - the rec destroy with ldt_record hooks
 	// destroys the ldt components and the attached "base_rec"

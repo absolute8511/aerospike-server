@@ -79,6 +79,7 @@
 
 #define AS_STORAGE_MAX_DEVICES 32 // maximum devices per namespace
 #define AS_STORAGE_MAX_FILES 32 // maximum files per namespace
+#define AS_STORAGE_MAX_DEVICE_SIZE (2L * 1024L * 1024L * 1024L * 1024L) // 2Tb, due to rblock_id in as_index
 
 #define OBJ_SIZE_HIST_NUM_BUCKETS 100
 #define EVICTION_HIST_NUM_BUCKETS 100
@@ -181,12 +182,6 @@ typedef enum {
 	AS_PARTICLE_TYPE_RUBY_BLOB = 10,
 	AS_PARTICLE_TYPE_PHP_BLOB = 11,
 	AS_PARTICLE_TYPE_ERLANG_BLOB = 12,
-	AS_PARTICLE_TYPE_APPEND = 13,
-	AS_PARTICLE_TYPE_RTA_LIST = 14,
-	AS_PARTICLE_TYPE_RTA_DICT = 15,
-	AS_PARTICLE_TYPE_RTA_APPEND_DICT = 16,
-	AS_PARTICLE_TYPE_RTA_APPEND_LIST = 17,
-	AS_PARTICLE_TYPE_LUA_BLOB = 18,
 	AS_PARTICLE_TYPE_MAP = 19,
 	AS_PARTICLE_TYPE_LIST = 20,
 	AS_PARTICLE_TYPE_HIDDEN_LIST = 21,
@@ -481,7 +476,7 @@ as_partition_vinfo_different(as_partition_vinfo *v1, as_partition_vinfo *v2) {
 
 /* Record function declarations */
 // special - get_create returns 1 if created, 0 if just gotten, -1 if fail
-extern int as_record_get_create(struct as_index_tree_s *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns);
+extern int as_record_get_create(struct as_index_tree_s *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns, bool);
 extern int as_record_get(struct as_index_tree_s *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns);
 extern int as_record_exists(struct as_index_tree_s *tree, cf_digest *keyd, as_namespace *ns);
 // initialize as_record
@@ -503,11 +498,12 @@ extern int as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *
 extern int as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t bufsz, uint8_t **stack_particles, bool *record_written);
 extern int as_record_unused_version_get(as_storage_rd *rd);
 extern void as_record_apply_properties(as_record *r, as_namespace *ns, const as_rec_props *p_rec_props);
+extern void as_record_clear_properties(as_record *r, as_namespace *ns);
 extern void as_record_set_properties(as_storage_rd *rd, const as_rec_props *rec_props);
 extern int as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m);
 
 // Set in component if it is dummy (no data). This in
-// conjuction with LDT_REC is used to determine if merge
+// conjunction with LDT_REC is used to determine if merge
 // can be done or not. If this flag is not set then it is
 // normal record
 #define AS_COMPONENT_FLAG_LDT_DUMMY       0x01
@@ -546,7 +542,7 @@ extern int as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m)
 		|| COMPONENT_IS_LDT_SUB((c))
 
 typedef struct {
-	as_partition_vinfoset   vinfoset; // entire descripton of versions
+	as_partition_vinfoset   vinfoset; // entire description of versions
 	uint8_t					*record_buf;
 	size_t					record_buf_sz;
 	uint32_t				generation;
@@ -614,21 +610,14 @@ typedef uint16_t as_partition_id;
 #define AS_PARTITION_STATE_DESYNC  2
 #define AS_PARTITION_STATE_ZOMBIE  3
 #define AS_PARTITION_STATE_WAIT 4
-#define AS_PARTITION_STATE_LIFESUPPORT 5
-#define AS_PARTITION_STATE_ABSENT 6
-#define AS_PARTITION_STATE_JOURNAL_APPLY 7 // used in faked reservations
+#define AS_PARTITION_STATE_ABSENT 5
+#define AS_PARTITION_STATE_JOURNAL_APPLY 6 // used in faked reservations
 typedef uint8_t as_partition_state;
 
 #define AS_PARTITION_MIG_TX_STATE_NONE  0
 #define AS_PARTITION_MIG_TX_STATE_SUBRECORD 1
 #define AS_PARTITION_MIG_TX_STATE_RECORD 2
 typedef uint8_t as_partition_mig_tx_state;
-
-#define AS_PARTITION_MIG_RX_STATE_NONE 0
-#define AS_PARTITION_MIG_RX_STATE_INIT 1
-#define AS_PARTITION_MIG_RX_STATE_SUBRECORD 2
-#define AS_PARTITION_MIG_RX_STATE_RECORD 3
-typedef uint8_t as_partition_mig_rx_state;
 
 /* as_partition_getid
  * A brief utility function to derive the partition ID from a digest */
@@ -653,15 +642,12 @@ struct as_partition_s {
 	 * target: an actual master that we're migrating to */
 	cf_node origin, target;
 	as_partition_state state;  // used to be consistency
-	as_partition_mig_rx_state rxstate;
-	as_partition_mig_tx_state txstate;
 	int pending_writes;  // one thread polls on this going to 0
 	int pending_migrate_tx, pending_migrate_rx;
 	bool replica_tx_onsync[AS_CLUSTER_SZ];
 
 	size_t n_dupl;
 	cf_node  dupl_nodes[AS_CLUSTER_SZ];
-	as_partition_vinfo  dupl_pvinfo[AS_CLUSTER_SZ];
 	bool reject_writes;
 	bool waiting_for_master;
 	cf_node  qnode; 	// point to the node which serves the query at the moment
@@ -684,7 +670,10 @@ struct as_partition_s {
 	struct as_index_tree_s *sub_vp;
 	as_partition_id partition_id;
 	uint p_repl_factor;
-	uint64_t last_outgoing_ldt_version;
+
+	// Track ldt version in transit currently
+	uint64_t current_outgoing_ldt_version;
+	uint64_t current_incoming_ldt_version;
 };
 
 #define AS_PARTITION_HAS_DATA(p)  ((p)->vp->elements || (p)->sub_vp->elements)
@@ -733,7 +722,6 @@ typedef struct as_partition_states_s {
 	int		desync;
 	int		zombie;
 	int 	wait;
-	int		lifesupport;
 	int		absent;
 	int		undef;
 	int     n_objects;
@@ -754,6 +742,7 @@ extern cf_node as_partition_getreplica_write(as_namespace *ns, as_partition_id p
 
 // reserve_qnode - *consumes* the ns reservation if success
 extern int as_partition_reserve_qnode(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv);
+extern void as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_partition_reservation rsv[]);
 // reserve_write - *consumes* the ns reservation if success
 extern int as_partition_reserve_write(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv, cf_node *node, uint64_t *cluster_key);
 // reserve_migrate - *consumes* the ns reservation if success
@@ -776,15 +765,24 @@ extern void as_partition_getreplica_read_str(cf_dyn_buf *db);
 extern void as_partition_getreplica_prole_str(cf_dyn_buf *db);
 extern void as_partition_getreplica_write_str(cf_dyn_buf *db);
 extern void as_partition_getreplica_master_str(cf_dyn_buf *db);
+extern void as_partition_get_replicas_all_str(cf_dyn_buf *db);
 extern void as_partition_getinfo_str(cf_dyn_buf *db);
 extern void as_partition_getstates(as_partition_states *ps);
 
 extern void as_partition_getreplica_write_node(as_namespace *ns, cf_node *node_a);
 
+extern void as_partition_balance();
+extern void as_partition_balance_init();
+extern void as_partition_balance_init_multi_node_cluster();
+extern void as_partition_balance_init_single_node_cluster();
+extern bool as_partition_balance_is_init_resolved();
+extern bool as_partition_balance_is_multi_node_cluster();
+
 typedef struct as_master_prole_stats_s {
 	uint64_t n_master_records;
 	uint64_t n_prole_records;
-	// Add sub-record counts if/when we get interested.
+	uint64_t n_master_sub_records;
+	uint64_t n_prole_sub_records;
 } as_master_prole_stats;
 
 extern void as_partition_get_master_prole_stats(as_namespace* ns, as_master_prole_stats* p_stats);
@@ -846,6 +844,63 @@ typedef enum {
  * A namespace container */
 typedef int32_t as_namespace_id; // signed to denote -1 bad namespace id
 
+typedef struct ns_ldt_stats_s {
+
+	/* LDT Operational Statistics */
+	cf_atomic_int	ldt_write_reqs;
+	cf_atomic_int	ldt_write_success;
+
+	cf_atomic_int	ldt_read_reqs;
+	cf_atomic_int	ldt_read_success;
+
+	cf_atomic_int	ldt_delete_reqs;
+	cf_atomic_int	ldt_delete_success;
+
+	cf_atomic_int	ldt_update_reqs;
+
+	cf_atomic_int	ldt_errs;
+	cf_atomic_int   ldt_err_unknown;
+	cf_atomic_int	ldt_err_toprec_not_found;
+	cf_atomic_int	ldt_err_item_not_found;
+	cf_atomic_int	ldt_err_internal;
+	cf_atomic_int	ldt_err_unique_key_violation;
+
+	cf_atomic_int	ldt_err_insert_fail;
+	cf_atomic_int	ldt_err_search_fail;
+	cf_atomic_int	ldt_err_delete_fail;
+	cf_atomic_int	ldt_err_version_mismatch;
+
+	cf_atomic_int	ldt_err_capacity_exceeded;
+	cf_atomic_int	ldt_err_param;
+
+	cf_atomic_int	ldt_err_op_bintype_mismatch;
+	cf_atomic_int	ldt_err_too_many_open_subrec;
+	cf_atomic_int	ldt_err_subrec_not_found;
+
+	cf_atomic_int	ldt_err_bin_does_not_exist;
+	cf_atomic_int	ldt_err_bin_exits;
+	cf_atomic_int	ldt_err_bin_damaged;
+
+	cf_atomic_int	ldt_err_subrec_internal;
+	cf_atomic_int	ldt_err_toprec_internal;
+	cf_atomic_int   ldt_err_filter;
+	cf_atomic_int	ldt_err_key;
+	cf_atomic_int	ldt_err_createspec;
+	cf_atomic_int	ldt_err_usermodule;
+	cf_atomic_int	ldt_err_input_too_large;
+	cf_atomic_int	ldt_err_ldt_not_enabled;
+
+	cf_atomic_int   ldt_gc_io;
+	cf_atomic_int   ldt_gc_cnt;
+	cf_atomic_int   ldt_gc_no_esr_cnt;
+	cf_atomic_int   ldt_gc_no_parent_cnt;
+	cf_atomic_int   ldt_gc_parent_version_mismatch_cnt;
+	cf_atomic_int   ldt_gc_processed;
+
+	cf_atomic_int	ldt_randomizer_retry;
+
+} ns_ldt_stats;
+
 struct as_namespace_s {
 	/* Namespaces are internally assigned monotonic identifiers, but these
 	 * are not portable across node boundaries; to identify a namespace
@@ -880,11 +935,15 @@ struct as_namespace_s {
 	bool						data_in_index;	// with single-bin, allows warm restart for data-in-memory (with storage-engine device)
 	bool 						disallow_null_setname;
 	bool                        ldt_enabled;
+	uint32_t                    ldt_page_size;
+	uint32_t					ldt_gc_sleep_us;
 
 	/* XDR */
 	bool						enable_xdr;
 	bool 						sets_enable_xdr; // namespace-level flag to enable set-based xdr shipping.
 	bool 						ns_forward_xdr_writes; // namespace-level flag to enable forwarding of xdr writes
+	bool 						ns_allow_nonxdr_writes; // namespace-level flag to allow nonxdr writes or not
+	bool 						ns_allow_xdr_writes; // namespace-level flag to allow xdr writes or not
 
 	/* The server default read consistency level for this namespace. */
 	as_policy_consistency_level read_consistency_level;
@@ -905,6 +964,7 @@ struct as_namespace_s {
 	as_storage_type storage_type;
 	char *storage_path;
 	char *storage_devices[AS_STORAGE_MAX_DEVICES];
+	char *storage_shadows[AS_STORAGE_MAX_DEVICES];
 	char *storage_files[AS_STORAGE_MAX_FILES];
 	char *storage_scheduler_mode; // relevant for devices only, not files
 	off_t		storage_filesize;
@@ -960,6 +1020,7 @@ struct as_namespace_s {
 
 	/* very interesting counters */
 	cf_atomic_int	n_objects;
+	cf_atomic_int	n_sub_objects;
 	cf_atomic_int	n_bytes_memory;
 	cf_atomic_int	n_absent_partitions;
 	cf_atomic_int	n_actual_partitions;
@@ -973,6 +1034,9 @@ struct as_namespace_s {
 
 	// Number of 0-void-time objects. TODO - should be atomic.
 	uint64_t non_expirable_objects;
+
+	uint32_t	nsup_cycle_duration; // seconds taken for most recent nsup cycle
+	uint32_t	nsup_cycle_sleep_pct; // fraction of most recent nsup cycle that was spent sleeping
 
 	// Pointer to bin name vmap in persistent memory.
 	cf_vmapx		*p_bin_name_vmap;
@@ -993,7 +1057,7 @@ struct as_namespace_s {
 	struct as_sindex_s	*sindex;  // array with AS_MAX_SINDEX meta data
 	uint64_t			sindex_data_max_memory;
 	cf_atomic_int		sindex_data_memory_used;
-	shash				*sindex_property_hash;  // set_binid_type
+	shash               *sindex_set_binid_hash;
 	shash				*sindex_iname_hash;
 	uint32_t             binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];
 
@@ -1026,19 +1090,7 @@ struct as_namespace_s {
 
 	as_partition partitions[AS_PARTITIONS];
 
-	/* LDT Operational Statistics */
-	cf_atomic_int	ldt_write_reqs;
-	cf_atomic_int	ldt_write_success;
-
-	cf_atomic_int	ldt_read_reqs;
-	cf_atomic_int	ldt_read_success;
-
-	cf_atomic_int	ldt_delete_reqs;
-	cf_atomic_int	ldt_delete_success;
-
-	cf_atomic_int	ldt_update_reqs;
-
-	cf_atomic_int	ldt_errs;
+	ns_ldt_stats        lstats;
 };
 
 #define AS_SET_NAME_MAX_SIZE	64		// includes space for null-terminator
@@ -1126,7 +1178,8 @@ extern void as_namespace_bless(as_namespace *ns);
 extern int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool check_threshold);
 extern as_set * as_namespace_init_set(as_namespace *ns, const char *set_name);
 extern const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id);
-extern uint16_t    as_namespace_get_set_id(  as_namespace *ns, const char *set_name);
+extern uint16_t as_namespace_get_set_id(as_namespace *ns, const char *set_name);
+extern uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name);
 extern void as_namespace_get_set_info(as_namespace *ns, const char *set_name, cf_dyn_buf *db);
 extern void as_namespace_release_set_id(as_namespace *ns, uint16_t set_id);
 extern void as_namespace_get_bins_info(as_namespace *ns, cf_dyn_buf *db, bool show_ns);
@@ -1158,7 +1211,3 @@ uint32_t as_mem_check();
 extern void as_paxos_set_cluster_key(uint64_t cluster_key);
 // Get the cluster key
 extern uint64_t as_paxos_get_cluster_key();
-/* PRINT */
-extern int printd(cf_digest *d, char *fname, int lineno);
-
-#define PRINTD(d) printd((d), __FILE__, __LINE__);

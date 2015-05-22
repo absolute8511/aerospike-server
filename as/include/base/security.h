@@ -22,7 +22,10 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
+#include "base/datamodel.h"
+#include "base/proto.h"
 #include "base/transaction.h"
 
 
@@ -30,33 +33,37 @@
 // Typedefs & constants.
 //
 
-// Security privileges.
+// Security permissions.
 typedef enum {
-	PRIV_NONE			= 0,
+	PERM_NONE			= 0,
 
 	// Data transactions.
-	PRIV_READ			= 0x0001,
-	PRIV_SCAN			= 0x0002,
-	PRIV_QUERY			= 0x0004,
-	PRIV_WRITE			= 0x0008,
-	PRIV_UDF_APPLY		= 0x0010,
-	PRIV_UDF_SCAN		= 0x0020,
-	PRIV_UDF_QUERY		= 0x0040,
-	// ... 9 unused bits ...
+	PERM_READ			= 0x0001,
+	PERM_SCAN			= 0x0002,
+	PERM_QUERY			= 0x0004,
+	PERM_WRITE			= 0x0008,
+	PERM_DELETE			= 0x0010,
+	PERM_UDF_APPLY		= 0x0020,
+	PERM_UDF_SCAN		= 0x0040,
+	PERM_UDF_QUERY		= 0x0080,
+	// ... 8 unused bits ...
 
 	// Data transactions' system metadata management.
-	PRIV_INDEX_MANAGE	= 0x00010000,
-	PRIV_UDF_MANAGE		= 0x00020000,
-	// ... 6 unused bits ...
+	PERM_INDEX_MANAGE	= 0x00010000,
+	PERM_UDF_MANAGE		= 0x00020000,
+	PERM_SCAN_MANAGE	= 0x00040000,
+	PERM_QUERY_MANAGE	= 0x00080000,
+	PERM_JOB_MONITOR	= 0x00100000,
+	// ... 3 unused bits ...
 
 	// Deployment operations management.
-	PRIV_SET_CONFIG		= 0x01000000,
-	PRIV_LOGGING_CTRL	= 0x02000000,
-	PRIV_SERVICE_CTRL	= 0x04000000,
+	PERM_SET_CONFIG		= 0x01000000,
+	PERM_LOGGING_CTRL	= 0x02000000,
+	PERM_SERVICE_CTRL	= 0x04000000,
 
-	// Database users and permissions management.
-	PRIV_USER_ADMIN		= 0x100000000000
-} as_sec_priv;
+	// Database users and roles management.
+	PERM_USER_ADMIN		= 0x100000000000
+} as_sec_perm;
 
 // Current security message version.
 #define AS_SEC_MSG_SCHEME 0
@@ -79,10 +86,12 @@ typedef struct as_sec_msg_s {
 //
 
 void as_security_init();
-uint8_t as_security_check(const as_file_handle* fd_h, as_sec_priv priv);
+uint8_t as_security_check(const as_file_handle* fd_h, as_sec_perm perm);
+bool as_security_check_data_op(as_transaction *tr, as_msg *m, as_namespace *ns,
+		as_sec_perm perm);
 void* as_security_filter_create();
 void as_security_filter_destroy(void* pv_filter);
 void as_security_log(const as_file_handle* fd_h, uint8_t result,
-		as_sec_priv priv, const char* action, const char* detail);
+		as_sec_perm perm, const char* action, const char* detail);
 void as_security_refresh(as_file_handle* fd_h);
 void as_security_transact(as_transaction *tr);

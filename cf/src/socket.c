@@ -79,16 +79,18 @@ cf_sockaddr_setport(cf_sockaddr *so, unsigned short port)
 int
 cf_socket_set_nonblocking(int s)
 {
-	int flags;
+	int flags = 0;
 
-	if (-1 == (flags = fcntl(s, F_GETFL, 0)))
-		flags = 0;
+	if (-1 == (flags = fcntl(s, F_GETFL, 0))) {
+		cf_warning(CF_SOCKET, "fcntl(): failed to get socket %d flags - %s", s, cf_strerror(errno));
+		return(-1);
+	}
 	if (-1 == fcntl(s, F_SETFL, flags | O_NONBLOCK)) {
-		cf_crash(CF_SOCKET, "fcntl(): %s", cf_strerror(errno));
-		return(0);
+		cf_warning(CF_SOCKET, "fcntl(): failed to set socket %d O_NONBLOCK flag - %s", s, cf_strerror(errno));
+		return(-1);
 	}
 
-	return(1);
+	return(0);
 }
 
 void
@@ -210,12 +212,12 @@ cf_socket_init_svc(cf_socket_cfg *s)
 	/* Create the socket */
 	if (0 > (s->sock = socket(AF_INET, s->proto, 0))) {
 		cf_warning(CF_SOCKET, "socket: %s", cf_strerror(errno));
-		return(errno);
+		return(-1);
 	}
 	s->saddr.sin_family = AF_INET;
 	if (1 != inet_pton(AF_INET, s->addr, &s->saddr.sin_addr.s_addr)) {
 		cf_warning(CF_SOCKET, "inet_pton: %s", cf_strerror(errno));
-		return(errno);
+		return(-1);
 	}
 	s->saddr.sin_port = htons(s->port);
 
@@ -241,7 +243,7 @@ cf_socket_init_svc(cf_socket_cfg *s)
 	while (0 > (bind(s->sock, (struct sockaddr *)&s->saddr, sizeof(struct sockaddr)))) {
 		if (EADDRINUSE != errno) {
 			cf_warning(CF_SOCKET, "bind: %s", cf_strerror(errno));
-			return(errno);
+			return(-1);
 		}
 
 		cf_warning(CF_SOCKET, "bind: socket in use, waiting (port:%d)",s->port);
@@ -252,14 +254,11 @@ cf_socket_init_svc(cf_socket_cfg *s)
 	/* Listen for connections */
 	if ((SOCK_STREAM == s->proto) && (0 > listen(s->sock, 512))) {
 		cf_warning(CF_SOCKET, "listen: %s", cf_strerror(errno));
-		return(errno);
+		return(-1);
 	}
 
 	return(0);
 }
-
-
-#define CONNECT_TIMEOUT 1000
 
 /* cf_socket_init_client
  * Connect a socket to a remote endpoint
@@ -272,7 +271,7 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 
 	if (0 > (s->sock = socket(AF_INET, s->proto, 0))) {
 		cf_warning(CF_SOCKET, "socket: %s", cf_strerror(errno));
-		return(errno);
+		return(-1);
 	}
 
 	fcntl(s->sock, F_SETFD, FD_CLOEXEC);  /* close on exec */
@@ -283,17 +282,21 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 //	setsockopt(s->sock, SOL_SOCKET, SO_SNDBUF, &flag, sizeof(flag) );
 //	setsockopt(s->sock, SOL_SOCKET, SO_RCVBUF, &flag, sizeof(flag) );
 
-
 	memset(&s->saddr,0,sizeof(s->saddr));
 	s->saddr.sin_family = AF_INET;
-	if (0 >= inet_pton(AF_INET, s->addr, &s->saddr.sin_addr.s_addr)) {
+	int rv = inet_pton(AF_INET, s->addr, &s->saddr.sin_addr.s_addr);
+	if (rv < 0) {
 		cf_warning(CF_SOCKET, "inet_pton: %s", cf_strerror(errno));
 		close(s->sock);
-		return(errno);
+		return(-1);
+	} else if (rv == 0) {
+		cf_warning(CF_SOCKET, "inet_pton: invalid ip %s", s->addr);
+		close(s->sock);
+		return(-1);
 	}
 	s->saddr.sin_port = htons(s->port);
 
-	int rv = connect(s->sock, (struct sockaddr *)&s->saddr, sizeof(s->saddr));
+	rv = connect(s->sock, (struct sockaddr *)&s->saddr, sizeof(s->saddr));
 	cf_debug(CF_SOCKET, "connect: rv %d errno %s",rv,cf_strerror(errno));
 
 	if (rv < 0) {
@@ -365,15 +368,14 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 Retry:
 				cf_debug(CF_SOCKET, "Connect epoll loop:  Retry #%d", tries++);
 				if (start + timeout < cf_getms()) {
-					cf_warning(CF_SOCKET, "Error in delayed connect(): timed out");
+					cf_warning(CF_SOCKET, "Error in delayed connect() to %s:%d: timed out", s->addr, s->port);
 					errno = ETIMEDOUT;
 					goto Fail;
 				}
 			} while (1);
 		}
 Fail:
-		cf_debug(CF_SOCKET, "connect fail: %s", cf_strerror(errno));
-
+		cf_debug(CF_SOCKET, "connect failed to %s:%d : %s", s->addr, s->port, cf_strerror(errno));
 
 		if (epoll_fd > 0) {
 			close(epoll_fd);
@@ -381,12 +383,11 @@ Fail:
 
 		close(s->sock);
 		s->sock = -1;
-		return(errno);
+		return(-1);
 	} else {
-		cf_debug(CF_SOCKET, "client socket connect() in 1 try!");
+		cf_debug(CF_SOCKET, "client socket connect() to %s:%d in 1 try!", s->addr, s->port);
 	}
 Success:	;
-
 	// regarding this: calling here doesn't seem terribly effective.
 	// on the fabric threads, it seems important to set no-delay much later
 	int flag = 1;
@@ -396,7 +397,6 @@ Success:	;
 
 	return(0);
 }
-
 
 /* cf_socket_close
  * Close a socket originally opened listening
@@ -428,7 +428,7 @@ cf_socket_connect_nb(cf_sockaddr so, int *fd_r)
 	int fd;
 	if (0 > (fd = socket(AF_INET, SOCK_STREAM, 0))) {
 		cf_warning(CF_SOCKET, "socket connect error: %d %s", errno, cf_strerror(errno));
-		return(errno);
+		return(-1);
 	}
 
 	/* Set close-on-exec */
@@ -440,7 +440,7 @@ cf_socket_connect_nb(cf_sockaddr so, int *fd_r)
 		if (errno != EINPROGRESS) {
 			cf_warning(CF_SOCKET, "socket connect error: %d %s", errno, cf_strerror(errno));
 			close(fd);
-			return(errno);
+			return(-1);
 		}
 	}
 
@@ -464,7 +464,7 @@ cf_mcastsocket_init(cf_mcastsocket_cfg *ms)
 
 	if (0 > (s->sock = socket(AF_INET, SOCK_DGRAM, 0))) {
 		cf_warning(CF_SOCKET, "multicast socket open error: %d %s", errno, cf_strerror(errno));
-		return(errno);
+		return(-1);
 	}
 
 	cf_debug(CF_SOCKET, "mcast_socket init: socket %d",s->sock);
@@ -473,7 +473,7 @@ cf_mcastsocket_init(cf_mcastsocket_cfg *ms)
 	uint yes=1;
  	if (setsockopt(s->sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
 		cf_warning(CF_SOCKET, "multicast socket reuse failed: %d %s", errno, cf_strerror(errno));
-		return(errno);
+		return(-1);
 	}
 
 	/* Set close-on-exec */
@@ -491,7 +491,7 @@ cf_mcastsocket_init(cf_mcastsocket_cfg *ms)
 
 		if(setsockopt(s->sock, IPPROTO_IP, IP_MULTICAST_IF, (const char*)&iface_in, sizeof(iface_in)) == -1) {
 			cf_warning(CF_SOCKET, "IP_MULTICAST_IF: %d %s", errno, cf_strerror(errno));
-			return(errno);
+			return(-1);
 		}
 	}
 	unsigned char ttlvar = ms->mcast_ttl;

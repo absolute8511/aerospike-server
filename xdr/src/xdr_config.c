@@ -45,6 +45,7 @@ const xdr_cfg_opt XDR_NS_OPTS[] = {
 		{ "default-ttl",					XDR_CASE_NS_DEFAULT_TTL },
 		{ "max-ttl",						XDR_CASE_NS_MAX_TTL },
 		{ "storage-engine",					XDR_CASE_NS_STORAGE_ENGINE_BEGIN },
+		{ "set",							XDR_CASE_NS_SET_BEGIN },
 		{ "}",								XDR_CASE_CONTEXT_END }
 };
 
@@ -54,6 +55,11 @@ const xdr_cfg_opt XDR_NS_STORAGE_OPTS[] = {
 		{ "device",							XDR_CASE_NS_STORAGE_DEVICE },
 		{ "kv",								XDR_CASE_NS_STORAGE_KV },
 		{ "}",								XDR_CASE_CONTEXT_END }
+};
+
+const xdr_cfg_opt XDR_NS_SET_OPTS[] = {
+		{ "}",								XDR_CASE_CONTEXT_END }	// only thing that is of interest for
+																	// XDR to skip over the set subsection
 };
 
 const xdr_cfg_opt XDR_OPTS[] = {
@@ -82,6 +88,7 @@ const xdr_cfg_opt XDR_OPTS[] = {
 		{ "xdr-batch-retry-sleep",			XDR_CASE_XDR_BATCH_RETRY_SLEEP },
 		{ "xdr-delete-shipping-enabled",	XDR_CASE_XDR_DELETE_SHIPPING_ENABLED },
 		{ "xdr-forward-with-gencheck",		XDR_CASE_XDR_FORWARD_WITH_GENCHECK },
+		{ "xdr-conflict-digestdump",		XDR_CASE_XDR_CONFLICT_DIGESTDUMP },
 		{ "xdr-hotkey-maxskip",				XDR_CASE_XDR_HOTKEY_MAXSKIP },
 		{ "xdr-nsup-deletes-enabled",		XDR_CASE_XDR_NSUP_DELETES_ENABLED },
 		{ "xdr-shipping-enabled",			XDR_CASE_XDR_SHIPPING_ENABLED },
@@ -109,6 +116,7 @@ const int NUM_XDR_GLOBAL_OPTS		= sizeof(XDR_GLOBAL_OPTS) / sizeof(xdr_cfg_opt);
 const int NUM_XDR_SERVICE_OPTS		= sizeof(XDR_SERVICE_OPTS) / sizeof(xdr_cfg_opt);
 const int NUM_XDR_NS_OPTS			= sizeof(XDR_NS_OPTS) / sizeof(xdr_cfg_opt);
 const int NUM_XDR_NS_STORAGE_OPTS	= sizeof(XDR_NS_STORAGE_OPTS) / sizeof(xdr_cfg_opt);
+const int NUM_XDR_NS_SET_OPTS		= sizeof(XDR_NS_SET_OPTS) / sizeof(xdr_cfg_opt);
 const int NUM_XDR_OPTS				= sizeof(XDR_OPTS) / sizeof(xdr_cfg_opt);
 const int NUM_XDR_DC_OPTS			= sizeof(XDR_DC_OPTS) / sizeof(xdr_cfg_opt);
 
@@ -161,6 +169,7 @@ void xdr_config_defaults(xdr_config *c)
 	c->xdr_batch_num_retry = 0;
 	c->xdr_batch_retry_sleep = 0;
 	c->xdr_fwd_with_gencheck = false;
+	c->xdr_conflict_digestdump_file = NULL;
 	c->xdr_info_request_timeout_ms = 500;
 	c->xdr_compression_threshold = 0; //0 = Disabled compressed shipping, > 0 minimum size of packet for compression
 	c->xdr_pidfile = NULL;

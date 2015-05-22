@@ -47,10 +47,8 @@ NCORES=$NUM_TOT_CPU_CORES
 num_tsvc_q=$NCORES
 num_tsvc=3
 num_dm=$NCORES
-num_fb=$[$NCORES*$num_tsvc]
 
 sed -i 's/service-threads .*/service-threads '$num_dm'/' $CONF
-sed -i 's/fabric-workers .*/fabric-workers '$num_fb'/' $CONF
 sed -i 's/transaction-queues .*/transaction-queues '$num_tsvc_q'/' $CONF
 sed -i 's/transaction-threads-per-queue .*/transaction-threads-per-queue '$num_tsvc'/' $CONF
 sed -i 's/client-fd-max .* #/client-fd-max 15000 #/' $CONF

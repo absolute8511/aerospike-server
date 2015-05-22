@@ -2378,7 +2378,7 @@ static int as_smd_delete_external_metadata_reduce_fn(void *key, uint32_t keylen,
 	as_smd_module_t *module_obj = (as_smd_module_t *) object;
 	as_smd_t *smd = (as_smd_t *) udata;
 
-	rchash_reduce_delete(module_obj->external_metadata, as_smd_reduce_delete_fn, smd);
+	rchash_reduce(module_obj->external_metadata, as_smd_reduce_delete_fn, smd);
 	cf_debug(AS_SMD, "All the entries in the scoreboard has been deleted");
 
 	return 0;
@@ -2919,7 +2919,7 @@ static int as_smd_accept_metadata(as_smd_t *smd, as_smd_module_t *module_obj, as
 	// In case of merge (after cluster state change) drop the existing local metadata definitions
 	// This is done to clean up some metadata, which could have been dropped during the merge
 	if (smd_msg->options & AS_SMD_ACCEPT_OPT_MERGE) {
-		rchash_reduce_delete(module_obj->my_metadata, metadata_local_deleteall_fn, NULL);
+		rchash_reduce(module_obj->my_metadata, metadata_local_deleteall_fn, NULL);
 	}
 
 	for (int i = 0; i < smd_msg->items->num_items; i++) {

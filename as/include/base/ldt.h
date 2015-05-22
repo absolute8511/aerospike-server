@@ -46,6 +46,50 @@
 #include "base/write_request.h"
 #include "storage/storage.h"
 
+#define LDT_SUB_GC_MAX_RATE         100000 // Do not allow more than 100,000 subrecord GC per second
+
+// Here are the fields (the contents) of the Property Maps.  We've annotated
+// the fields that are used by TopRecords and SubRecords (and both).
+// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#define PM_ItemCount             'I' // (Top): Count of all items in LDT
+#define PM_Version               'V' // (Top): Code Version
+#define PM_LdtType               'T' // (Top): Type: stack, set, map, list
+#define PM_BinName               'B' // (Top): LDT Bin Name
+#define PM_Magic                 'Z' // (All): Special Sauce
+#define PM_EsrDigest             'E' // (All): Digest of ESR
+#define PM_RecType               'R' // (All): Type of Rec:Top,Ldr,Esr,CDir
+#define PM_LogInfo               'L' // (All): Log Info (currently unused)
+#define PM_ParentDigest          'P' // (Subrec): Digest of TopRec
+#define PM_SelfDigest            'D' // (Subrec): Digest of THIS Record
+
+// Here are the fields that are found in the SINGLE "Hidden" LDT Control Map.
+//-- ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//-- Record Level Property Map (RPM) Fields: One RPM per record
+//-- ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#define RPM_LdtCount             'C'  // Number of LDTs in this rec
+#define RPM_Version              'V'  // Partition Version Info (6 bytes)
+#define RPM_Magic                'Z'  // Special Sauce
+#define RPM_SelfDigest           'D'  // Digest of this record
+
+#define LF_NextPage              'N'  // Digest of Next (right) Leaf Page
+
+// Here are the fields for Tree Meta Data
+
+#define LS_StoreState            'S'  // Compact or Regular Storage
+
+#define LS_RootKeyList         	 'K'  // Root Key List, when in List Mode
+#define LS_RootDigestList        'D'  // Digest List, when in List Mode
+#define LS_CompactList           'Q'  // Simple Compact List -- before "tree mode"
+#define LS_LeftLeafDigest        'A'  // Record Ptr of Left-most leaf
+#define LS_RightLeafDigest       'Z'  // Record Ptr of Right-most leaf
+
+// Define the LDT Hidden Bin Name -- for any record that contains LDTs
+#define REC_LDT_CTRL_BIN         "LDTCONTROLBIN"
+
+// Define the Property Map Bin Name for Sub Records
+#define SUBREC_PROP_BIN          "SR_PROP_BIN"
+#define LDT_VERSION_SZ           6
+
 
 // Use these flags to designate various LDT bin types -- but they are all
 // HIDDEN BINS.
@@ -55,10 +99,51 @@
 
 extern cf_clock cf_clock_getabsoluteus();
 
+#define ERR_TOP_REC_NOT_FOUND    2
+#define ERR_NOT_FOUND            125
+#define ERR_INTERNAL             1400
+#define ERR_UNIQUE_KEY           1402
+#define ERR_INSERT               1403
+#define ERR_SEARCH               1404
+#define ERR_DELETE               1405
+#define ERR_VERSION              1406
+
+#define ERR_CAPACITY_EXCEEDED    1408
+#define ERR_INPUT_PARM           1409
+
+#define ERR_TYPE_MISMATCH        1410
+#define ERR_NULL_BIN_NAME        1411
+#define ERR_BIN_NAME_NOT_STRING  1412
+#define ERR_BIN_NAME_TOO_LONG    1413
+#define ERR_TOO_MANY_OPEN_SUBRECS 1414
+#define ERR_SUB_REC_NOT_FOUND    1416
+#define ERR_BIN_DOES_NOT_EXIST   1417
+#define ERR_BIN_ALREADY_EXISTS   1418
+#define ERR_BIN_DAMAGED          1419
+
+#define ERR_SUBREC_POOL_DAMAGED  1420
+#define ERR_SUBREC_DAMAGED       1421
+#define ERR_SUBREC_OPEN          1422
+#define ERR_SUBREC_UPDATE        1423
+#define ERR_SUBREC_CREATE        1424
+#define ERR_SUBREC_DELETE        1425
+#define ERR_SUBREC_CLOSE         1426
+#define ERR_TOPREC_UPDATE        1427
+#define ERR_TOPREC_CREATE        1428
+
+#define ERR_FILTER_BAD           1430
+#define ERR_FILTER_NOT_FOUND     1431
+#define ERR_KEY_BAD              1432
+#define ERR_KEY_FIELD_NOT_FOUND  1433
+#define ERR_INPUT_USER_MODULE_NOT_FOUND 1439
+#define ERR_INPUT_CREATESPEC     1442
+#define ERR_INPUT_TOO_LARGE      1443
+#define ERR_NS_LDT_NOT_ENABLED   1500
+
+
 typedef struct ldt_sub_gc_info_s {
 	as_namespace	*ns;
 	uint32_t		num_gc;
-	uint32_t		num_version_mismatch_gc;
 } ldt_sub_gc_info;
 
 
@@ -68,7 +153,7 @@ typedef struct ldt_sub_gc_info_s {
 extern int		as_ldt_package_index(const char *package_name);
 extern int		as_ldt_op_type(int package_index, const char *op_name);
 
-extern int      as_ldt_flatten_component   (as_partition_reservation *rsv, as_storage_rd *rd, as_index_ref *r_ref, as_record_merge_component *c);
+extern int      as_ldt_flatten_component   (as_partition_reservation *rsv, as_storage_rd *rd, as_index_ref *r_ref, as_record_merge_component *c, bool *);
 
 extern bool     as_ldt_set_flag            (uint16_t flag);
 extern bool     as_ldt_flag_has_parent     (uint16_t flag);
@@ -79,16 +164,16 @@ extern bool     as_ldt_flag_has_esr        (uint16_t flag);
 extern void     as_ldt_sub_gc_fn           (as_index_ref *r_ref, void *udata);
 extern int      as_ldt_shipop              (write_request *wr, cf_node dest_node);
 
-extern int      as_ldt_parent_storage_set_version (as_storage_rd *rd, uint64_t, uint8_t *);
-extern int      as_ldt_parent_storage_get_version (as_storage_rd *rd, uint64_t *);
-extern int      as_ldt_subrec_storage_get_pdigest (as_storage_rd *rd, cf_digest *keyd);
-extern int      as_ldt_subrec_storage_get_edigest (as_storage_rd *rd, cf_digest *keyd);
+extern int      as_ldt_parent_storage_set_version (as_storage_rd *rd, uint64_t, uint8_t *, char *fname, int lineno);
+extern int      as_ldt_parent_storage_get_version (as_storage_rd *rd, uint64_t *, bool, char *fname, int lineno);
+extern int      as_ldt_subrec_storage_get_digests (as_storage_rd *rd, cf_digest *edigest, cf_digest *pdigest);
 extern void     as_ldt_subrec_storage_validate    (as_storage_rd *rd, char *op);
 
-extern void     as_ldt_digest_randomizer   (as_namespace *ns, cf_digest *dig);
+extern void     as_ldt_digest_randomizer           (cf_digest *dig);
 extern bool     as_ldt_merge_component_is_candidate(as_partition_reservation *rsv, as_record_merge_component *c);
 
 extern void     as_ldt_record_set_rectype_bits    (as_record *r, const as_rec_props *props);
+extern int      as_ldt_record_pickle              (ldt_record *lrecord, uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time);
 
 // Version related functions
 extern uint64_t as_ldt_generate_version();
@@ -158,21 +243,8 @@ as_ldt_record_is_esr(as_record *r)
 static inline uint16_t
 as_ldt_record_get_rectype_bits(as_record *r)
 {
-	// TODO: may be optimized
-	uint16_t flag = 0;
-	if (as_index_is_flag_set(r, AS_INDEX_FLAG_CHILD_ESR))
-		flag |= AS_INDEX_FLAG_CHILD_ESR;
-	if (as_index_is_flag_set(r, AS_INDEX_FLAG_CHILD_REC))
-		flag |= AS_INDEX_FLAG_CHILD_REC;
-	if (as_index_is_flag_set(r, AS_INDEX_FLAG_SPECIAL_BINS))
-		flag |= AS_INDEX_FLAG_SPECIAL_BINS;
-
-	cf_detail(AS_LDT, "Property field has Parent=%d ESR=%d REC=%d",
-			flag & AS_INDEX_FLAG_SPECIAL_BINS,
-			flag & AS_INDEX_FLAG_CHILD_ESR,
-			flag & AS_INDEX_FLAG_CHILD_REC);
-
-	return flag;
+	return (as_index_get_flags(r) & 
+		(AS_INDEX_FLAG_CHILD_ESR | AS_INDEX_FLAG_CHILD_REC | AS_INDEX_FLAG_SPECIAL_BINS));
 }
 
 static inline int
@@ -209,7 +281,7 @@ as_ldt_string_todigest(const char *bdig, cf_digest *keyd)
 	// start at 1 and at every byte shift three positions
 	int j = 0;
 	for (int i = 0; ; i++) {
-		char val[2];
+		char val[3];
 		val[0] = bdig[i++];
 		val[1] = bdig[i++];
 		val[2] = '\0';
@@ -221,3 +293,5 @@ as_ldt_string_todigest(const char *bdig, cf_digest *keyd)
 	cf_detail(AS_LDT, "Convert %s to %"PRIx64"", bdig, keyd);
 	return 0;
 }
+
+as_val * as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_bin *binp); 

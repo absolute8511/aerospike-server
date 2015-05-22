@@ -24,11 +24,3 @@ This package contains all of the code for running the Aerospike server.
 /usr/bin/asd
 /usr/bin/asmigrate2to3
 /usr/bin/asfixownership
-/etc/init.d/aerospike
-/etc/aerospike/aerospike_ssd.conf
-%config(noreplace) /etc/logrotate.d/aerospike
-%config(noreplace) /etc/aerospike/aerospike.conf
-%defattr(-,aerospike,aerospike)
-%dir /var/log/aerospike
-%dir /var/run/aerospike
-/opt/aerospike

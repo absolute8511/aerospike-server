@@ -232,7 +232,7 @@ typedef struct as_transaction_s {
 } as_transaction;
 
 typedef struct as_query_transaction_s as_query_transaction;
-extern int write_delete_local(as_transaction *tr, bool journal, cf_node masternode);
+extern int write_delete_local(as_transaction *tr, bool journal, cf_node masternode, bool check_gen);
 
 extern int as_transaction_prepare(as_transaction *tr);
 extern void as_transaction_init(as_transaction *tr, cf_digest *, cl_msg *);
@@ -262,3 +262,5 @@ typedef struct tr_create_data {
 
 extern int   as_internal_udf_txn_setup(tr_create_data * d);
 extern int   as_transaction_create(as_transaction *tr, tr_create_data * data);
+
+void as_transaction_error(as_transaction* tr, uint32_t error_code);

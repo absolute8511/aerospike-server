@@ -26,6 +26,10 @@
 #include <stdint.h>
 
 
+//==========================================================
+// Typedefs & constants.
+//
+
 // Syslog "local" facilities.
 typedef enum {
 	AS_SYSLOG_NONE		= -1,
@@ -50,6 +54,7 @@ typedef enum {
 // Security-related reporting sinks as bit-fields.
 typedef struct as_sec_report_s {
 	uint32_t	authentication;
+	uint32_t	data_op;
 	uint32_t	sys_admin;
 	uint32_t	user_admin;
 	uint32_t	violation;
@@ -62,3 +67,12 @@ typedef struct as_sec_config_s {
 	as_sec_report		report;						// reporting sinks
 	as_sec_syslog_local	syslog_local;				// syslog local facility
 } as_sec_config;
+
+
+//==========================================================
+// Public API.
+//
+
+void as_security_config_check();
+void as_security_config_log_scope(uint32_t sink, const char* ns_name,
+		const char* set_name);

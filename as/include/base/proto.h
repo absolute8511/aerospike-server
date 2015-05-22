@@ -70,6 +70,7 @@ struct as_file_handle_s;
 #define AS_PROTO_RESULT_FAIL_KEY_MISMATCH 19
 #define AS_PROTO_RESULT_FAIL_NAMESPACE 20
 #define AS_PROTO_RESULT_FAIL_BIN_NAME 21
+#define AS_PROTO_RESULT_FAIL_FORBIDDEN 22 // operation (perhaps temporarily) not possible
 
 // Security result codes. Must be <= 255, to fit in one byte. Defined here to
 // ensure no overlap with other result codes.
@@ -90,7 +91,8 @@ struct as_file_handle_s;
 #define AS_SEC_ERR_CREDENTIAL			65	// no credential or bad credential
 	// ... room for more ...
 #define AS_SEC_ERR_ROLE					70	// no role(s) or unknown role(s)
-#define AS_SEC_ERR_PRIVILEGE			71	// no privileges or unknown privileges
+#define AS_SEC_ERR_ROLE_EXISTS			71	// role already exists
+#define AS_SEC_ERR_PRIVILEGE			72	// no privileges or unknown privileges
 	// Permission errors.
 #define AS_SEC_ERR_NOT_AUTHENTICATED	80	// socket not authenticated
 #define AS_SEC_ERR_ROLE_VIOLATION		81	// role (privilege) violation
@@ -114,6 +116,7 @@ struct as_file_handle_s;
 #define AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL   211
 #define AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT     212
 #define AS_PROTO_RESULT_FAIL_QUERY_CBERROR     213
+#define AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR   214
 
 
 /* SYNOPSIS
@@ -199,6 +202,7 @@ typedef struct as_msg_field_s {
 #define AS_MSG_FIELD_TYPE_INDEX_FILTER			23
 #define AS_MSG_FIELD_TYPE_INDEX_LIMIT			24
 #define AS_MSG_FIELD_TYPE_INDEX_ORDER_BY		25
+#define AS_MSG_FIELD_TYPE_INDEX_TYPE  			26
 
 // UDF RANGE: 30-39
 #define AS_MSG_FIELD_TYPE_UDF_FILENAME			30
@@ -247,15 +251,12 @@ typedef struct index_metadata_t {
 
 #define AS_MSG_OP_READ 1			// read the value in question
 #define AS_MSG_OP_WRITE 2			// write the value in question
-#define AS_MSG_OP_WRITE_UNIQUE 3	// write a namespace-wide unique value - not currently used
-#define AS_MSG_OP_WRITE_NOW 4		// write the server-current time - not currently used
+// Unused - 3
+// Unused - 4
 #define AS_MSG_OP_INCR 5			// arithmetically add a value to an existing value, works only on integers
-
-// Deprecated RTA ops - ignore.
-#define AS_MSG_OP_APPEND_SEGMENT 6			// append segment to a particle
-#define AS_MSG_OP_APPEND_SEGMENT_EXT 7		// extended append - with parameters
-#define AS_MSG_OP_APPEND_SEGMENT_QUERY 8	// query to return subset of segments
-
+// Unused - 6
+// Unused - 7
+// Unused - 8
 #define AS_MSG_OP_APPEND 9			// append a value to an existing value, works on strings and blobs
 #define AS_MSG_OP_PREPEND 10		// prepend a value to an existing value, works on strings and blobs
 #define AS_MSG_OP_TOUCH 11			// touch a value without doing anything else to it - will increment the generation
@@ -264,6 +265,17 @@ typedef struct index_metadata_t {
 #define AS_MSG_OP_MC_APPEND 130		// append the value to an existing value, works only strings for now
 #define AS_MSG_OP_MC_PREPEND 131	// prepend a value to an existing value, works only strings for now
 #define AS_MSG_OP_MC_TOUCH 132		// Memcache-compatible touch - does not change generation
+
+#define OP_IS_MODIFY(op) ( \
+	   (op) == AS_MSG_OP_INCR \
+	|| (op) == AS_MSG_OP_APPEND \
+	|| (op) == AS_MSG_OP_PREPEND \
+	|| (op) == AS_MSG_OP_MC_INCR \
+    || (op) == AS_MSG_OP_MC_APPEND \
+    || (op) == AS_MSG_OP_MC_PREPEND \
+    )
+
+#define OP_IS_TOUCH(op) ((op) == AS_MSG_OP_TOUCH || (op) == AS_MSG_OP_MC_TOUCH)
 
 typedef struct as_msg_op_s {
 	uint32_t op_sz;
@@ -479,14 +491,13 @@ extern int as_msg_send_reply(struct as_file_handle_s *fd_h, uint32_t result_code
 		uint32_t generation, uint32_t void_time, as_msg_op **ops,
 		struct as_bin_s **bins, uint16_t bin_count, struct as_namespace_s *ns,
 		uint *written_sz, uint64_t trid, const char *setname);
-extern int as_msg_send_error(struct as_file_handle_s *fd_h, uint32_t result_code);
 
 extern cl_msg *as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 		uint32_t void_time, as_msg_op **ops, struct as_bin_s **bins,
 		uint16_t bin_count, struct as_namespace_s *ns, cl_msg *msgp_in,
 		size_t *msg_sz_in, uint64_t trid, const char *setname);
 extern int as_msg_make_response_bufbuilder(struct as_index_s *r, struct as_storage_rd_s *rd,
-		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets, bool include_key, cf_vector *);
+		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets, bool include_key, bool skip_empty_records, cf_vector *);
 extern int as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code,
 		cf_buf_builder **bb_r, char *nsname);
 extern size_t as_msg_get_bufbuilder_newsize(struct as_index_s *r, struct as_storage_rd_s *rd,
@@ -519,3 +530,25 @@ extern uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
 extern uint8_t * as_msg_write_header(uint8_t *buf, size_t msg_sz, uint info1,
 		uint info2, uint info3, uint32_t generation, uint32_t record_ttl,
 		uint32_t transaction_ttl, uint32_t n_fields, uint32_t n_ops);
+
+// Async IO 
+typedef int (* as_netio_finish_cb) (void *udata, int retcode);
+typedef int (* as_netio_start_cb) (void *udata, int seq);
+typedef struct as_netio_s {
+	as_netio_finish_cb         finish_cb;
+	as_netio_start_cb          start_cb;	
+	void                     * data;
+	// fd and buffer
+	struct as_file_handle_s  * fd_h;
+	cf_buf_builder           * bb_r;
+	uint32_t                   offset;
+	uint32_t                   seq;
+	bool                       slow;
+} as_netio;
+
+void as_netio_init();
+int as_netio_send(as_netio *io, void *q, bool);
+
+#define AS_NETIO_OK        0
+#define AS_NETIO_CONTINUE  1
+#define AS_NETIO_ERR       2 

@@ -113,6 +113,8 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->enable_xdr = false;
 	ns->sets_enable_xdr = true; // ship all the sets by default
 	ns->ns_forward_xdr_writes = false; // forwarding of xdr writes is disabled by default
+	ns->ns_allow_nonxdr_writes = true; // allow nonxdr writes by default
+	ns->ns_allow_xdr_writes = true; // allow xdr writes by default
 	ns->allow_versions = false;
 	ns->cold_start_evict_ttl = 0xFFFFffff; // unless this is specified via config file, use evict void-time saved in device header
 	ns->conflict_resolution_policy = AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION;
@@ -121,6 +123,9 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->hwm_disk = 0.5; // default high water mark for eviction is 50%
 	ns->hwm_memory = 0.6; // default high water mark for eviction is 60%
 	ns->ldt_enabled = false; // By default ldt is not enabled
+	ns->ldt_page_size = 8192; // default ldt page size is 8192
+	ns->ldt_gc_sleep_us = 500; // Default is sleep for .5Ms. This translates to constant 2k Subrecord
+							   // GC per second.
 	ns->obj_size_hist_max = OBJ_SIZE_HIST_NUM_BUCKETS;
 	ns->single_bin = false;
 	ns->stop_writes_pct = 0.9; // stop writes when 90% of either memory or disk is used
@@ -398,9 +403,10 @@ as_namespace_eval_write_state(as_namespace *ns, bool *hwm_breached, bool *stop_w
 	// compute memory size of namespace
 	// compute index size - index is always stored in memory
 	uint64_t index_sz = cf_atomic_int_get(ns->n_objects) * as_index_size_get(ns);
+	uint64_t sub_index_sz = cf_atomic_int_get(ns->n_sub_objects) * as_index_size_get(ns);
 	uint64_t sindex_sz = as_sindex_get_ns_memory_used(ns);
 	uint64_t data_in_memory_sz = cf_atomic_int_get(ns->n_bytes_memory);
-	uint64_t memory_sz = index_sz + data_in_memory_sz + sindex_sz;
+	uint64_t memory_sz = index_sz + sub_index_sz + data_in_memory_sz + sindex_sz;
 
 	// Possible reasons for eviction or stopping writes.
 	// (We don't use all combinations, but in case we change our minds...)
@@ -497,6 +503,64 @@ uint16_t as_namespace_get_set_id(as_namespace *ns, const char *set_name)
 
 	return cf_vmapx_get_index(ns->p_sets_vmap, set_name, &idx) == CF_VMAPX_OK ?
 			(uint16_t)(idx + 1) : INVALID_SET_ID;
+}
+
+// At the moment this is only used by the enterprise build security feature.
+uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name)
+{
+	if (! set_name) {
+		// Should be impossible.
+		cf_warning(AS_NAMESPACE, "null set name");
+		return INVALID_SET_ID;
+	}
+
+	uint32_t idx;
+	cf_vmapx_err result = cf_vmapx_get_index(ns->p_sets_vmap, set_name, &idx);
+
+	if (result == CF_VMAPX_OK) {
+		return (uint16_t)(idx + 1);
+	}
+
+	if (result == CF_VMAPX_ERR_NAME_NOT_FOUND) {
+		as_set set;
+
+		memset(&set, 0, sizeof(set));
+
+		// Check name length just once, here at insertion. (Other vmap calls are
+		// safe if name is too long - they return CF_VMAPX_ERR_NAME_NOT_FOUND.)
+		strncpy(set.name, set_name, AS_SET_NAME_MAX_SIZE);
+
+		if (set.name[AS_SET_NAME_MAX_SIZE - 1]) {
+			set.name[AS_SET_NAME_MAX_SIZE - 1] = 0;
+
+			cf_warning(AS_NAMESPACE, "set name %s... too long", set.name);
+			return INVALID_SET_ID;
+		}
+
+		set.num_elements = 0; // *not* adding an element
+		result = cf_vmapx_put_unique(ns->p_sets_vmap, &set, &idx);
+
+		if (result == CF_VMAPX_ERR_NAME_EXISTS) {
+			return (uint16_t)(idx + 1);
+		}
+
+		if (result == CF_VMAPX_ERR_FULL) {
+			cf_warning(AS_NAMESPACE, "at set names limit, can't add %s", set.name);
+			return INVALID_SET_ID;
+		}
+
+		if (result != CF_VMAPX_OK) {
+			// Currently, remaining errors are all some form of out-of-memory.
+			cf_warning(AS_NAMESPACE, "error %d, can't add %s", result, set.name);
+			return INVALID_SET_ID;
+		}
+
+		return (uint16_t)(idx + 1);
+	}
+
+	// Should be impossible.
+	cf_warning(AS_NAMESPACE, "unexpected error %d", result);
+	return INVALID_SET_ID;
 }
 
 int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool check_threshold)
@@ -754,10 +818,13 @@ as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,
 			linear_histogram_get_info(ns->evict_hist, db);
 			cf_dyn_buf_append_char(db, ';');
 		} else if (strcmp(hist_name, "objsz") == 0) {
-			cf_dyn_buf_append_string(db, "objsz=");
-			linear_histogram_get_info(ns->obj_size_hist, db);
-			cf_dyn_buf_append_char(db, ';');
-
+			if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
+				cf_dyn_buf_append_string(db, "objsz=");
+				linear_histogram_get_info(ns->obj_size_hist, db);
+				cf_dyn_buf_append_char(db, ';');
+			} else {
+				cf_dyn_buf_append_string(db, "hist-not-applicable");
+			}
 		} else {
 			cf_dyn_buf_append_string(db, "error-unknown-hist-name");
 		}

@@ -10,7 +10,6 @@ Aerospike is a distributed, scalable NoSQL database. It is architected with thre
 
 For more information on Aerospike, please visit: [http://aerospike.com](http://aerospike.com)
 
-
 ## Build Prerequisites
 
 The Aerospike Database Server can be built and deployed on various
@@ -23,15 +22,15 @@ The majority of the Aerospike source code is written in the C
 programming language, conforming to the ANSI C99 standard. Building
 Aerospike requires the GCC 4.1 or later toolchain, with the standard
 GNU/Linux development tools and libraries installed in the build
-environment, including `autoconf` and `libtool`. In particular, the
-following libraries are needed:
+environment, including `autoconf`, `automake`, and `libtool`. In
+particular, the following libraries are needed:
 
 #### OpenSSL
 
 OpenSSL 0.9.8b or later is required for cryptographic hash functions
 (RIPEMD-160 & SHA-1) and pseudo-random number generation.
 
-* The CentOS 6 OpenSSL packages to install are:  `openssl`,
+* The CentOS 6/7 OpenSSL packages to install are:  `openssl`,
 `openssl-devel`, `openssl-static`.
 
 * The Debian 6/7 and Ubuntu 10/12/14 OpenSSL packages to install are:
@@ -39,13 +38,22 @@ OpenSSL 0.9.8b or later is required for cryptographic hash functions
 
 #### Lua 5.1
 
-The Lua 5.1 language is required for User Defined Function (UDF) support.
+The [Lua](http://www.lua.org) 5.1 language is required for User Defined
+Function (UDF) support.
 
-* The CentOS 6 Lua packages to install are:  `lua`, `lua-devel`, and
-`lua-static`.
+* By default, Aerospike builds with Lua 5.1 support provided by the
+[LuaJIT](http://luajit.org) submodule.
 
-* The Debian 6/7 and Ubuntu 10/12/14 Lua packages to install are:
+* Alternatively, it is possible to build with standard Lua 5.1 provided
+by the build environment.  In that case:
+
+	* The CentOS 6/7 Lua packages to install are:  `lua`,
+`lua-devel`, and `lua-static`.
+
+	* The Debian 6/7 and Ubuntu 10/12/14 Lua packages to install are:
 `lua5.1` and `liblua5.1-dev`.
+
+	* Build by passing the `USE_LUAJIT=0` option to `make`.
 
 ### Submodules
 
@@ -58,7 +66,7 @@ The Aerospike Database Server build depends upon 7 submodules:
 | jansson   | C library for encoding, decoding and manipulating JSON data |
 | jemalloc  | The JEMalloc Memory Allocator |
 | lua-core  | The Aerospike Core Lua Source Files |
-| luajit    | The LuaJIT (Just-In-Time-Compiler for Lua) |
+| luajit    | The LuaJIT (Just-In-Time Compiler for Lua) |
 | mod-lua   | The Aerospike Lua Interface |
 
 After the initial cloning of the `aerospike-server` repo., the

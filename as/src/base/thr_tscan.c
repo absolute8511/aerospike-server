@@ -1,7 +1,7 @@
 /*
  * thr_tscan.c
  *
- * Copyright (C) 2011-2014 Aerospike, Inc.
+ * Copyright (C) 2011-2015 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -23,6 +23,7 @@
 #include "base/thr_scan.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -33,6 +34,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 
+#include "aerospike/as_module.h"
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
@@ -95,8 +97,6 @@
 #define TSCAN_FIELD_REC_PROPS   7
 #define TSCAN_FIELD_JOB_ID      8
 
-#define TSCAN_OP_SPROC_UPDATE   1
-
 // States a scan job can be in
 #define AS_SCAN_JOB_ABORTED 	0x00000001
 #define AS_SCAN_JOB_DONE		0x00000002
@@ -125,12 +125,14 @@
 #define SCAN_UDF_BG     2
 #define SCAN_UDF_FG     3
 #define SCAN_SINDEX     4
+#define SCAN_AGGR       5
 
 //#define SEQ_SCAN 0
 //#define PRL_SCAN 0
 
 // TODO - eventually, we'll do better than this hard-wired value.
-const size_t INITIAL_BUFBUILDER_SIZE = 8 * 1024 * 1024;
+const size_t INITIAL_BUFBUILDER_SIZE = 2 * 1024 * 1024;
+const size_t SCAN_PROTO_LIMIT = 1024 * 1024;
 
 msg_template tscan_mt[] = {
 	{ TSCAN_FIELD_OP,       M_FT_UINT32 }, // operation
@@ -170,6 +172,7 @@ typedef struct {
 
 void  scan_job_release_and_destroy(tscan_job *job);
 int   tscan_send_fin_to_client(tscan_job *job, uint32_t result_code);
+int   tscan_send_response_to_client( tscan_job *job, uint8_t *buf, size_t len);
 int   tscan_enqueue_udfjob(tscan_job *job);
 int   tscan_start_job(tscan_job *job, as_transaction *tr, bool scan_disconnected_job);
 void  dump_digest(cf_digest *dd) {
@@ -183,6 +186,110 @@ void  dump_digest(cf_digest *dd) {
 
 const char *scan_type_array[] = {"NORMAL", "BACKGROUND_UDF", "FOREGROUND_UDF", "SINDEX_POPULATOR", "UNKNOWN"};
 const size_t scan_type_array_max = (sizeof(scan_type_array) / sizeof(const char *)) - 1;
+
+
+int
+tscan_add_val_response(tscan_task_data * task, const as_val * val, bool success)
+{
+	uint32_t msg_sz = 0;
+	as_val_tobuf(val, NULL, &msg_sz);
+	if (0 == msg_sz) {
+		cf_warning(AS_PROTO, "particle to buf: could not copy data!");
+	}
+	int ret = as_msg_make_val_response_bufbuilder(val, &task->bb, msg_sz, success); // error handling
+	if (ret != 0) {
+		cf_warning(AS_SCAN, "Weird there is space but still the packing failed "
+				"available = %d msg size = %d",
+				task->bb->alloc_sz - task->bb->used_sz, msg_sz);
+	}
+	return 0;
+}
+
+as_stream_status
+tscan_agg_ostream_write(const as_stream *s, as_val *v)
+{
+	tscan_task_data * task = as_stream_source(s);
+	if (!v) {
+		return AS_STREAM_OK;
+	}
+	if (tscan_add_val_response(task, v, true)) {
+		as_val_destroy(v);
+		return AS_STREAM_ERR;
+	}
+	as_val_destroy(v);
+	return AS_STREAM_OK;
+}
+
+const as_stream_hooks tscan_agg_istream_hooks = {
+		.destroy  = NULL,
+		.read     = as_aggr_istream_read,
+		.write    = NULL
+};
+
+const as_stream_hooks tscan_agg_ostream_hooks = {
+		.destroy  = NULL,
+		.read     = NULL,
+		.write    = tscan_agg_ostream_write
+};
+
+bool
+tscan_mem_op(mem_tracker *mt, uint32_t num_bytes, memtracker_op op)
+{
+	bool ret = true;
+	if (!mt || !mt->udata) {
+		return false;
+	}
+#if 0
+	uint64_t val = 0;
+	as_query_transaction *qtr = (as_query_transaction *)mt->udata;
+	if (qtr) return false;
+
+	if (op == MEM_RESERVE) {
+		val = cf_atomic_int_add(&g_config.udf_runtime_gmemory_used, num_bytes);
+		if (val > g_config.udf_runtime_max_gmemory) {
+			cf_atomic_int_sub(&g_config.udf_runtime_gmemory_used, num_bytes);
+			ret = false;
+			goto END;
+		}
+
+		val = cf_atomic_int_add(&qtr->udf_runtime_memory_used, num_bytes);
+		if (val > g_config.udf_runtime_max_memory) {
+			cf_atomic_int_sub(&qtr->udf_runtime_memory_used, num_bytes);
+			cf_atomic_int_sub(&g_config.udf_runtime_gmemory_used, num_bytes);
+			ret = false;
+			goto END;
+		}
+	} else if (op == MEM_RELEASE) {
+		cf_atomic_int_sub(&qtr->udf_runtime_memory_used, num_bytes);
+	} else if (op == MEM_RESET) {
+		cf_atomic_int_sub(&g_config.udf_runtime_gmemory_used,
+				qtr->udf_runtime_memory_used);
+		qtr->udf_runtime_memory_used = 0;
+	} else {
+		ret = false;
+	}
+END:
+#endif
+	return ret;
+}
+
+void
+tscan_set_error(void * caller)
+{
+}
+
+as_aggr_caller_type
+tscan_get_type()
+{
+	return AS_AGGR_SCAN;
+}
+
+const as_aggr_caller_intf scan_aggr_caller_qintf = {
+	.set_error = tscan_set_error,
+	.mem_op = tscan_mem_op,
+	.get_type = tscan_get_type
+};
+
 
 const char *
 tscan_get_type_str(uint8_t scan_type)
@@ -281,18 +388,7 @@ scan_job_done(tscan_job *job)
 
 	// Print end of sindex ticker here:
 	if (SCAN_JOB_IS_POPULATOR(job)) {
-		char *si_name = "<all>";
-		uint64_t si_memory   = (uint64_t)cf_atomic_int_get(job->ns->sindex_data_memory_used);
-
-		if (job->si) {
-			si_memory   = cf_atomic64_get(job->si->data_memory_used);
-			si_name = job->si->imd->iname;
-		}
-
-		cf_info(AS_SCAN, " Sindex-ticker done: ns=%s si=%s si-mem-used=%"PRIu64""
-				" elapsed=%"PRIu64" ms",
-				job->ns->name, si_name,
-				si_memory, cf_getms() - job->start_time);
+		as_sindex_ticker_done(job->ns, job->si, job->start_time);
 
 		if (job->job_type == SCAN_JOB_TYPE_SINDEX_POPULATEALL) {
 			as_sindex_boot_populateall_done(job->ns);
@@ -322,6 +418,36 @@ scan_udf_job_done(tscan_job *job, int rsp)
 			cf_atomic_int_get(job->n_obj_udf_success), cf_atomic_int_get(job->n_obj_udf_failed), cf_atomic_int_get(job->n_obj_udf_updated));
 }
 
+
+static void
+set_blocking(int fd, bool block)
+{
+	int flags = fcntl(fd, F_GETFL, 0);
+
+	if (flags < 0) {
+		cf_crash(AS_SCAN, "error while getting flags on FD %d (%d: %s)", fd, errno,
+				cf_strerror(errno));
+	}
+
+	flags = block ? flags & ~O_NONBLOCK : flags | O_NONBLOCK;
+
+	if (fcntl(fd, F_SETFL, flags) < 0) {
+		cf_crash(AS_SCAN, "error while setting flags on FD %d (%d: %s)", fd, errno,
+				cf_strerror(errno));
+	}
+}
+
+static inline void
+scan_release_file_handle(tscan_job *job)
+{
+	if (job->fd_h) {
+		set_blocking(job->fd_h->fd, false);
+		job->fd_h->fh_info &= ~FH_INFO_DONOT_REAP;
+		AS_RELEASE_FILE_HANDLE(job->fd_h);
+		job->fd_h = NULL;
+	}
+}
+
 void
 tscan_job_destructor( void *udata )
 {
@@ -334,11 +460,7 @@ tscan_job_destructor( void *udata )
 		udf_call_destroy(&job->call);
 		job->hasudf = false;
 	}
-	if (job->fd_h) {
-		cf_detail(AS_SCAN, "UDF: refcount of fd at destruction count is %d", cf_rc_count(job->fd_h));
-		AS_RELEASE_FILE_HANDLE(job->fd_h);
-		job->fd_h = NULL;
-	}
+	scan_release_file_handle(job);
 	if (job->ns) {
 		job->ns = NULL;
 	}
@@ -561,8 +683,11 @@ tscan_enqueue_udfjob(tscan_job *job)
 	if (job->job_type == SCAN_JOB_TYPE_PARTITION) {
 
 		if (job->cur_partition_id >= AS_PARTITIONS) {
-			// This is a code path that should never happen.
-			cf_warning(AS_SCAN, "UDF: partition id %d unexpected", job->cur_partition_id);
+			// This is a code path that should never happen may happen immediately
+			// after the last job is queued
+			if (job->cur_partition_id > (AS_PARTITIONS + 1)) {
+				cf_warning(AS_SCAN, "UDF: partition id %d unexpected for job %d", job->cur_partition_id, job->tid);
+			}
 			pthread_mutex_unlock(&job->LOCK);
 			// This is set to 0 so that the correct higher level cleanup can happen.
 			// However, this code path should never be reached!
@@ -635,16 +760,14 @@ int tscan_start_job(tscan_job *job, as_transaction *tr, bool scan_disconnected_j
 		else if (tr) {
 			job->fd_h = tr->proto_fd_h;
 			job->fd_h->fh_info |= FH_INFO_DONOT_REAP;
+			set_blocking(job->fd_h->fd, true);
 			tr->proto_fd_h = 0;
 			cf_detail(AS_SCAN, "UDF: refcount of fd at the start of the time %d", cf_rc_count(job->fd_h));
 		}
 
 		// Print start of sindex ticker here:
 		if (SCAN_JOB_IS_POPULATOR(job)) {
-			cf_info(AS_SCAN, " Sindex-ticker start: ns=%s si=%s job=%s",
-					job->ns->name ? job->ns->name : "<all>",
-					job->si ? job->si->imd->iname : "<all>",
-					(job->job_type == SCAN_JOB_TYPE_SINDEX_POPULATEALL) ? "SINDEX_POPULATEALL" : "SINDEX_POPULATE");
+			as_sindex_ticker_start(job->ns, job->si);
 		}
 
 		for (int i = 0; i < AS_PARTITIONS; i++) {
@@ -678,6 +801,7 @@ tscan_start_udfjob(tscan_job *job, as_transaction *tr, bool disconnected)
 	// per record UDF at this point for the scan.
 	job->fd_h               = tr->proto_fd_h;
 	job->fd_h->fh_info     |= FH_INFO_DONOT_REAP;
+	set_blocking(job->fd_h->fd, true);
 	tr->proto_fd_h          = 0;
 	job->cur_partition_id   = 0; // start from partition_id
 	cf_detail(AS_SCAN, "UDF: Pushed scan UDF job into the queue [%"PRIu64" %p %p]", job->tid, job, job->fd_h);
@@ -687,9 +811,7 @@ tscan_start_udfjob(tscan_job *job, as_transaction *tr, bool disconnected)
 	if ((job->call.udf_type == AS_SCAN_UDF_OP_BACKGROUND)
 			|| (disconnected)) {
 		tscan_send_fin_to_client(job, AS_PROTO_RESULT_OK);
-		job->fd_h->fh_info &= ~FH_INFO_DONOT_REAP;
-		cf_rc_release(job->fd_h);
-		job->fd_h           = 0;
+		scan_release_file_handle(job);
 	}
 
 	return cf_queue_push(g_scan_udf_job_q, &job);
@@ -725,6 +847,12 @@ tscan_binlist_from_op(as_namespace *ns, as_msg *msgp)
 	}
 	return binlist;
 }
+
+
+extern int
+as_aggr_call_init(as_aggr_call *call, as_transaction *txn, void *caller,
+		const as_aggr_caller_intf *caller_intf, const as_stream_hooks *istream_hooks,
+		const as_stream_hooks *ostream_hooks, as_namespace *ns, bool is_scan);
 
 // Start the scan of the system.
 //
@@ -824,10 +952,16 @@ as_tscan(as_transaction *tr)
 
 	// Have a pointer to msgp to free it later.
 	job->msgp = tr->msgp;
-	if (udf_call_init(&job->call, tr)) {
+	if (as_aggr_call_init(&job->agg_call, tr, job, &scan_aggr_caller_qintf,
+			&tscan_agg_istream_hooks, &tscan_agg_ostream_hooks, ns, true) == 0) {
+		job->hasudf = false;
+		job->scan_type = SCAN_AGGR;
+	}
+	else if (udf_call_init(&job->call, tr)) {
 		job->hasudf = false;
 		job->scan_type = SCAN_NORMAL;
-	} else {
+	}
+	else {
 		job->hasudf = true;
 		if (job->call.udf_type != AS_SCAN_UDF_OP_BACKGROUND) {
 			// Eventually we will support this -- but for now, it is a request of an
@@ -958,6 +1092,7 @@ as_internal_scan_udf_txn_setup(tr_create_data * d)
 	tr.udata.req_cb    = as_tscan_udf_tr_complete;
 	tr.udata.req_udata = d->udata;
 	tr.udata.req_type  = UDF_SCAN_REQUEST;
+	tr.flag            |= AS_TRANSACTION_FLAG_INTERNAL;
 
 	cf_atomic_int_incr(&job->uit_queued);
 	cf_detail(AS_SCAN, "UDF: [%d] internal transactions enqueued", job->uit_queued);
@@ -980,6 +1115,117 @@ as_internal_scan_udf_txn_setup(tr_create_data * d)
 	return 0;
 }
 
+void
+tscan_ll_recl_destroy_fn(cf_ll_element *ele)
+{
+	ll_recl_element * node = (ll_recl_element *) ele;
+	if (node) {
+		if (node->dig_arr) {
+			cf_free(node->dig_arr);
+		}
+		cf_free(node);
+	}
+}
+
+extern dig_arr_t * getDigestArray(void);
+
+int
+tscan_add_digest_list(cf_ll * recl, cf_digest * digest, int * dnum)
+{
+	cf_ll_element *ele = recl->tail;
+	bool create = ele == NULL;
+	dig_arr_t *dt;
+	if (!create) {
+		dt = ((ll_recl_element*)ele)->dig_arr;
+		if (dt->num == NUM_SINDEX_KV_PER_ARR) {
+			create = true;
+		}
+	}
+	if (create) {
+		dt = getDigestArray();
+		if (!dt) {
+			return -1;
+		}
+		ll_recl_element * node;
+		node = cf_malloc(sizeof(ll_recl_element));
+		node->dig_arr = dt;
+		cf_ll_append(recl, (cf_ll_element *)node);
+	}
+	memcpy(&dt->digs[dt->num], digest, CF_DIGEST_KEY_SZ);
+	dt->num++;
+	if (dnum) {
+		*dnum = *dnum + 1;
+	}
+	return 0;
+}
+
+void
+tscan_recl_cleanup(cf_ll *recl)
+{
+	if (recl) {
+		cf_ll_iterator * iter = NULL;
+		iter                  = cf_ll_getIterator(recl, true /*forward*/);
+		if (iter) {
+			cf_ll_element *ele;
+			while ((ele = cf_ll_getNext(iter))) {
+				ll_recl_element * node;
+				node = (ll_recl_element *) ele;
+				dig_arr_t * dt = node->dig_arr;
+				node->dig_arr =  NULL;
+				if (dt) {
+					releaseDigArrToQueue((void *)dt);
+				}
+			}
+		}
+		cf_ll_releaseIterator(iter);
+	}
+}
+
+int
+tscan_ll_recl_reduce_fn(cf_ll_element *ele, void *udata)
+{
+	return CF_LL_REDUCE_DELETE;
+}
+
+void
+tscan_add_aggr_result(char *res, tscan_task_data * task, bool success)
+{
+	const as_val * v = (as_val *) as_string_new (res, false);
+	tscan_add_val_response(task, v, success);
+	as_val_destroy(v);
+}
+
+extern int as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_result * ap_res);
+
+typedef struct tscan_aggr_tr_udata {
+	cf_ll *recl;
+	tscan_task_data *task;
+} tscan_aggr_tr_udata_t;
+
+void
+tscan_aggr_tree_reduce_fn(as_index_ref *r_ref, void *udata)
+{
+	as_index *r = r_ref->r;
+	tscan_aggr_tr_udata_t * d_ptr = (tscan_aggr_tr_udata_t *)(udata);
+	// If this is a valid set, check against the set of the record.
+	if (d_ptr->task->set_id != INVALID_SET_ID) {
+		if (as_index_get_set_id(r) != d_ptr->task->set_id) {
+			cf_detail(AS_SCAN, "Set mismatch %s %s",
+					as_namespace_get_set_name(d_ptr->task->ns, d_ptr->task->set_id),
+					as_namespace_get_set_name(d_ptr->task->ns, as_index_get_set_id(r)));
+			if (d_ptr->task->si) {
+				cf_atomic64_decr(&d_ptr->task->si->stats.recs_pending);
+			}
+			cf_atomic_int_incr(&(d_ptr->task->pjob->n_obj_set_diff));
+			as_record_done(r_ref, d_ptr->task->ns);
+			return;
+		}
+	}
+	tscan_add_digest_list (d_ptr->recl, &(r->key), NULL);
+	as_record_done(r_ref, d_ptr->task->ns);
+}
+
+
 //
 // Reduce a tree, build a response.
 //
@@ -992,6 +1238,12 @@ void
 tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 {
 	tscan_task_data *u = (tscan_task_data *) udata;
+
+	if (*u->aborted) {
+		as_record_done(r_ref, u->ns);
+		return;
+	}
+
 	cf_buf_builder **bb_r = &(u->bb);
 
 	as_index *r = r_ref->r;
@@ -1000,6 +1252,12 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 		if (u->si) cf_atomic64_decr(&u->si->stats.recs_pending);
 		cf_atomic_int_incr(&(u->pjob->n_obj_expired));
 		as_record_done(r_ref, u->ns);
+		if (SCAN_JOB_IS_POPULATOR(u->pjob)) {
+			uint64_t scanned = (uint64_t)cf_atomic_int_get(u->pjob->n_obj_scanned) +
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_set_diff) +
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_expired);
+			as_sindex_ticker(u->pjob->ns, u->si, scanned, u->pjob->start_time);
+		}
 		return;
 	}
 
@@ -1012,13 +1270,22 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 			if (u->si) cf_atomic64_decr(&u->si->stats.recs_pending);
 			cf_atomic_int_incr(&(u->pjob->n_obj_set_diff));
 			as_record_done(r_ref, u->ns);
+			if (SCAN_JOB_IS_POPULATOR(u->pjob)) {
+				uint64_t scanned = (uint64_t)cf_atomic_int_get(u->pjob->n_obj_scanned) +
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_set_diff) +
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_expired);
+				as_sindex_ticker(u->pjob->ns, u->si, scanned, u->pjob->start_time);
+			}
 			return;
 		}
 	}
 
 	// Increment the number of objects scanned outside of all the checks for
 	// udf/si, etc.
-	uint64_t n_obj_scanned = (uint64_t)cf_atomic_int_incr(&(u->pjob->n_obj_scanned));
+	// It is important to take in account the objects from different set and expired objects
+	uint64_t n_obj_scanned = (uint64_t)cf_atomic_int_incr(&(u->pjob->n_obj_scanned)) +
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_set_diff) +
+							(uint64_t)cf_atomic_int_get(u->pjob->n_obj_expired);
 
 	// Execute if UDF Call is defined. UDF cannot be executed inline. The logic
 	// is to create a internal transaction.
@@ -1056,11 +1323,11 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 		if (as_index_is_flag_set(r, AS_INDEX_FLAG_KEY_STORED)) {
 			as_storage_rd rd;
 			as_storage_record_open(u->ns, r, &rd, &r->key);
-			as_msg_make_response_bufbuilder(r, &rd, bb_r, true, NULL, true, true, u->binlist);
+			as_msg_make_response_bufbuilder(r, &rd, bb_r, true, NULL, true, true, true, u->binlist);
 			as_storage_record_close(r, &rd);
 		}
 		else {
-			as_msg_make_response_bufbuilder(r, NULL, bb_r, true, u->ns->name, true, false, u->binlist);
+			as_msg_make_response_bufbuilder(r, NULL, bb_r, true, u->ns->name, true, false, true, u->binlist);
 		}
 
 		if ((*bb_r)->alloc_sz > old_allocsz) {
@@ -1085,54 +1352,29 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 
 		// This reduce function is called for loading data into secondary index.
 		if (SCAN_JOB_IS_POPULATOR(u->pjob)) {
+
 			if (u->si) {
 				cf_atomic64_decr(&u->si->stats.recs_pending);
+				SINDEX_GRLOCK();
+				AS_SINDEX_RESERVE(u->si);
+				SINDEX_GUNLOCK();
 				as_sindex_put_rd(u->si, &rd);
+				as_sindex_ticker(u->pjob->ns, u->si, n_obj_scanned, u->pjob->start_time);
 			} else {
 				// No input si mentioned, so go ahead and populate all of the entries.
 				// SCAN_JOB_TYPE_SINDEX_POPULATEALL case.
 				// This function will parse all the ns si's, reserve it and read the data.
 				as_sindex_putall_rd(u->ns, &rd);
+				as_sindex_ticker(u->pjob->ns, NULL, n_obj_scanned, u->pjob->start_time);
 			}
 
-			const int sindex_ticker_obj_count = 100000;
-
-			if (n_obj_scanned % sindex_ticker_obj_count == 0) {
-				// Ticker can be dumped from here, we'll be in this place for both
-				// sindex populate and populate-all.
-				char *si_name = "<all>";
-				// si memory gets set from as_sindex_reserve_data_memory() which in turn gets set from :
-				// ai_btree_put() <- for every single sindex insertion (boot-time/dynamic)
-				// as_sindex_create() : for dynamic si creation, cluster change, smd on boot-up.
-
-				uint64_t si_memory   = (uint64_t)cf_atomic_int_get(u->pjob->ns->sindex_data_memory_used);
-
-				if (u->si) {
-					si_memory   = cf_atomic64_get(u->pjob->si->data_memory_used);
-					si_name = u->pjob->si->imd->iname;
-				}
-
-				uint64_t pct_obj_scanned = (n_obj_scanned * 100) / cf_atomic_int_get(u->pjob->ns->n_objects);
-				uint64_t elapsed = (cf_getms() - u->pjob->start_time);
-				uint64_t est_time = 0;
-
-				if (pct_obj_scanned > 0) {
-					est_time = ((elapsed * 100) / (uint64_t)pct_obj_scanned) - elapsed;
-				}
-
-				cf_info(AS_SCAN, " Sindex-ticker: ns=%s si=%s obj-scanned=%"PRIu64" si-mem-used=%"PRIu64""
-						" progress=%d%% est-time=%"PRIu64" ms",
-						u->pjob->ns->name, si_name,
-						u->pjob->n_obj_scanned,
-						si_memory, pct_obj_scanned, est_time);
-			}
 		} else {
 			if (! *bb_r) {
 				*bb_r = cf_buf_builder_create_size(INITIAL_BUFBUILDER_SIZE);
 				cf_atomic_int_add(&u->pjob->mem_buf, (*bb_r)->alloc_sz);
 			}
 			size_t old_allocsz = (*bb_r)->alloc_sz;
-			as_msg_make_response_bufbuilder(r, &rd, bb_r, false, NULL, true, true, u->binlist);
+			as_msg_make_response_bufbuilder(r, &rd, bb_r, false, NULL, true, true, true, u->binlist);
 			if ((*bb_r)->alloc_sz > old_allocsz) {
 				cf_atomic_int_add(&u->pjob->mem_buf, (*bb_r)->alloc_sz - old_allocsz);
 			}
@@ -1141,6 +1383,27 @@ tscan_tree_reduce(as_index_ref *r_ref, void *udata)
 	}
 
 	as_record_done(r_ref, u->ns);
+
+	if (! SCAN_JOB_IS_POPULATOR(u->pjob)) {
+		// If we exceed the proto size limit, send accumulated data back to client
+		// and reset the buf-builder to start a new proto.
+		if ((*bb_r)->used_sz > SCAN_PROTO_LIMIT) {
+			pthread_mutex_lock(&u->pjob->LOCK);
+
+			if (0 != tscan_send_response_to_client(u->pjob, (*bb_r)->buf, (*bb_r)->used_sz)) {
+				*u->aborted = true;
+			}
+
+			pthread_mutex_unlock(&u->pjob->LOCK);
+
+			cf_buf_builder_reset(*bb_r);
+		}
+
+		if (IS_SCAN_JOB_ABORTED(u->pjob)) {
+			*u->aborted = true;
+			u->pjob->result = AS_PROTO_RESULT_FAIL_SCAN_ABORT;
+		}
+	}
 
 END:
 	u->yield_count++;
@@ -1180,8 +1443,7 @@ tscan_send_response_to_client( tscan_job *job, uint8_t *buf, size_t len)
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
 				cf_info(AS_SCAN, "tid %"PRIu64": scan send response error returned %d errno %d fd %d ", job->tid, rv, errno, job->fd_h->fd);
-				AS_RELEASE_FILE_HANDLE(job->fd_h);
-				job->fd_h = 0;
+				scan_release_file_handle(job);
 				return(-1);
 			}
 		}
@@ -1195,8 +1457,7 @@ tscan_send_response_to_client( tscan_job *job, uint8_t *buf, size_t len)
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
 				cf_info(AS_SCAN, "tid %"PRIu64": scan send response error returned %d errno %d fd %d ", job->tid, rv, errno, job->fd_h->fd);
-				AS_RELEASE_FILE_HANDLE(job->fd_h);
-				job->fd_h = 0;
+				scan_release_file_handle(job);
 				return(-1);
 			}
 		}
@@ -1314,10 +1575,7 @@ scan_udf_job_manager(void *q_to_wait_on)
 				SCAN_JOB_PENDING_ON(job);
 				pthread_mutex_unlock(&job->LOCK);
 				// We have to keep the job around for stats, but free fd now.
-				if (job->fd_h) {
-					AS_RELEASE_FILE_HANDLE(job->fd_h);
-					job->fd_h = NULL;
-				}
+				scan_release_file_handle(job);
 				cf_queue_push(job_queue, &job);
 				goto NextElement;
 			}
@@ -1380,22 +1638,6 @@ NextElement:
 	return (0);
 }
 
-bool
-as_tscan_set_priority(uint64_t trid, uint16_t priority) {
-	tscan_job * job = NULL;
-	if (RCHASH_OK != rchash_get(g_scan_job_hash, &trid, sizeof(trid), (void **) &job)) {
-		cf_info(AS_SCAN, "Scan job with transaction id [%"PRIu64"] does not exist anymore", trid);
-		return false;
-	}
-	// Priority maps to number of threads in a job internally.
-	cf_info(AS_SCAN, "UDF: Received priority change for job [%"PRIu64"], setting number of threads to [%d]", job->tid, priority);
-	pthread_mutex_lock(&job->LOCK);
-	job->n_threads = priority;
-	pthread_mutex_unlock(&job->LOCK);
-	scan_job_release_and_destroy(job);
-	return true;
-}
-
 int
 as_tscan_abort(uint64_t trid)
 {
@@ -1410,6 +1652,28 @@ as_tscan_abort(uint64_t trid)
 	pthread_mutex_unlock(&job->LOCK);
 	scan_job_release_and_destroy(job);
 	return 0;
+}
+
+int
+abort_all_reduce_fn(void *key, uint32_t keylen, void *object, void *udata)
+{
+	tscan_job *job = (tscan_job*)object;
+	cf_info(AS_SCAN, "scan job %lu for '%s' - aborted by scan-abort-all info command",
+			job->tid, job->ns->name);
+	pthread_mutex_lock(&job->LOCK);
+	SCAN_JOB_ABORTED_ON(job);
+	pthread_mutex_unlock(&job->LOCK);
+	(*(int*)udata)++;
+
+	return CF_RCHASH_OK;
+}
+
+int
+as_tscan_abort_all()
+{
+	int num_jobs_killed = 0;
+	rchash_reduce(g_scan_job_hash, abort_all_reduce_fn, (void*)&num_jobs_killed);
+	return num_jobs_killed;
 }
 
 // For every job in the g_scan_job_hash, print the statistics.
@@ -1647,12 +1911,18 @@ tscan_partition_thr(void *q_to_wait_on)
 		u.rsv         = &rsv;
 		u.job_id      = job->tid;
 		u.pjob        = job;
+		u.aborted     = &job_early_terminate;
 
 		if (job->hasudf) {
 			cf_detail(AS_SCAN, "UDF: Scan job %"PRIu64" has udf", job->tid);
 			u.call = &job->call;
+			u.aggr_call = NULL;
+		} else if (job->scan_type == SCAN_AGGR) {
+			u.call = NULL;
+			u.aggr_call = &job->agg_call;
 		} else {
 			u.call = NULL;
+			u.aggr_call = NULL;
 		}
 
 		// Skip if index is gone.
@@ -1683,8 +1953,51 @@ tscan_partition_thr(void *q_to_wait_on)
 
 		// This function calls an index-reduce on all the nodes of the tree, its left and right
 		// and for each one of those index entries, call the cb-function : tscan_tree_reduce.
-		as_index_reduce_partial(rsv.tree, sample_obj_cnt, tscan_tree_reduce, (void *)&u);
-		//     as_partition_release(&rsv);
+		if ( u.aggr_call ) {
+			cf_ll * recl = cf_malloc(sizeof(cf_ll));
+
+			if (!recl) {
+				cf_warning(AS_SCAN, "unable to create digest list: out of memory");
+				job_early_terminate = true;
+			}
+			else {
+				cf_ll_init(recl, tscan_ll_recl_destroy_fn, false /*no lock*/);
+
+				tscan_aggr_tr_udata_t tree_reduce_udata = {
+					.recl = recl,
+					.task = &u
+				};
+
+				as_index_reduce(rsv.tree, tscan_aggr_tree_reduce_fn, (void *)&tree_reduce_udata);
+
+				as_result   *res    = as_result_new();
+				int ret             = as_aggr__process(u.aggr_call, recl, &u, res);
+				if (ret != 0) {
+					char *rs = as_module_err_string(ret);
+					if (res->value != NULL) {
+						as_string * lua_s   = as_string_fromval(res->value);
+						char *      lua_err = (char *) as_string_tostring(lua_s);
+						if (lua_err != NULL) {
+							int l_rs_len = strlen(rs);
+							rs = cf_realloc(rs, l_rs_len + strlen(lua_err) + 4);
+							sprintf(&rs[l_rs_len], " : %s", lua_err);
+						}
+					}
+					tscan_add_aggr_result(rs, &u, false);
+					cf_free(rs);
+					job_early_terminate = true;
+				}
+
+				as_result_destroy(res);
+				tscan_recl_cleanup(recl);
+				cf_ll_reduce(recl, true /*forward*/, tscan_ll_recl_reduce_fn, NULL);
+				cf_free(recl);
+			}
+		}
+		else {
+			as_index_reduce_partial(rsv.tree, sample_obj_cnt, tscan_tree_reduce, (void *)&u);
+		}
+
 		as_partition_release(&rsv);
 		cf_atomic_int_decr(&g_config.scan_tree_count);
 
@@ -1766,98 +2079,6 @@ WorkItemDone:
 	return(0);
 }
 
-int
-scan_udf_commit_prole( cf_node node, msg *m)
-{
-	//cf_info(AS_SCAN,"write_process: received write message from %"PRIx64,node);
-	uint32_t rv = 1; // failure
-
-	// Do the write.
-	cf_digest   *keyd;
-	size_t sz = 0;
-	if (0 != msg_get_buf(m, TSCAN_FIELD_DIGEST, (byte **) &keyd, &sz, MSG_GET_DIRECT)) {
-		cf_warning(AS_SCAN, "write process received message with out digest");
-		goto Out;
-	}
-
-	as_generation generation = 0;
-	if (0 != msg_get_uint32(m, TSCAN_FIELD_GENERATION, &generation)) {
-		cf_warning(AS_SCAN, "write process recevied message without generation");
-		goto Out;
-	}
-
-	uint8_t *pickled_buf = NULL;
-	size_t   pickled_sz = 0;
-	if (0 != msg_get_buf(m, TSCAN_FIELD_RECORD, (byte **) &pickled_buf, &pickled_sz, MSG_GET_DIRECT)) {
-
-		cf_warning(AS_SCAN, "write process received message without AS MSG or RECORD");
-		cf_atomic_int_incr(&g_config.rw_err_write_internal);
-		goto Out;
-	}
-
-	uint8_t *ns_name = 0;
-	size_t   ns_name_len;
-	if (0 != msg_get_buf(m, TSCAN_FIELD_NAMESPACE, &ns_name, &ns_name_len, MSG_GET_DIRECT)) {
-		cf_warning(AS_SCAN, "write process: no namespace");
-		cf_atomic_int_incr(&g_config.rw_err_dup_internal);
-		goto Out;
-	}
-
-	as_namespace *ns = as_namespace_get_bybuf(ns_name, ns_name_len);
-	if ( ! ns ) {
-		cf_warning(AS_SCAN,  "get abort invalid namespace received");
-		cf_atomic_int_incr(&g_config.rw_err_dup_internal);
-		goto Out;
-	}
-
-	as_rec_props rec_props;
-	msg_get_buf(m, TSCAN_FIELD_REC_PROPS, (byte **)&rec_props.p_data, (size_t*)&rec_props.size, MSG_GET_DIRECT);
-
-	uint32_t record_ttl = 0;
-	if (0 != msg_get_uint32(m, TSCAN_FIELD_RECORD_TTL, &record_ttl)) {
-		cf_warning(AS_SCAN, "write process received message without record_ttl");
-	}
-
-	as_partition_reservation rsv;
-	as_partition_reserve_migrate(ns, as_partition_getid(*keyd), &rsv, 0);
-	cf_atomic_int_incr(&g_config.scan_tree_count);
-	int rsp = write_local_pickled(keyd, &rsv, pickled_buf, pickled_sz, &rec_props, generation, record_ttl, node, 0);
-	if (rsp != 0 ) {
-		cf_warning(AS_SCAN, "writing pickled failed %d for digest %"PRIx64, rsp, *(uint64_t *) keyd);
-	}
-	else {
-		//cf_info(AS_SCAN,"writing pickled received %d for digest %"PRIx64,rsp,*(uint64_t *) keyd);
-		rv = 0;
-	}
-
-	as_partition_release(&rsv);
-	cf_atomic_int_decr(&g_config.scan_tree_count);
-Out:
-	as_fabric_msg_put(m);
-	return(rv);
-}
-
-int
-tscan_fabric_msg_receiver(cf_node node, msg *m, void *udata)
-{
-	uint32_t op = 99999;
-	msg_get_uint32(m, TSCAN_FIELD_OP, &op);
-
-	switch (op) {
-
-		case TSCAN_OP_SPROC_UPDATE:
-		{
-			// @TODO need to grab prole job and update status.
-			// cf_atomic_int_incr(&g_config.write_prole);
-
-			scan_udf_commit_prole(node, m);
-			break;
-		}
-
-	}
-	return(0);
-}
-
 static cf_atomic32   init_counter = 0;
 
 void
@@ -1894,7 +2115,6 @@ as_tscan_init()
 		cf_crash(AS_SCAN, "can't create scan job thread ");
 	}
 
-	as_fabric_register_msg_fn(M_TYPE_TSCAN, tscan_mt, sizeof(tscan_mt), tscan_fabric_msg_receiver, 0 /* udata */);
 	cf_info(AS_SCAN, "started %d threads", MAX_SCAN_THREADS);
 }
 

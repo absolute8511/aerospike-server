@@ -37,6 +37,9 @@
 #include <sys/socket.h>
 
 #include "aerospike/as_val.h"
+#include "aerospike/as_buffer.h"
+#include "aerospike/as_msgpack.h"
+#include "aerospike/as_serializer.h"
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_digest.h"
 #include "citrusleaf/cf_vector.h"
@@ -48,6 +51,7 @@
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/thr_tsvc.h"
+#include "base/ldt.h"
 #include "base/transaction.h"
 #include "base/udf_rw.h"
 #include "storage/storage.h"
@@ -185,9 +189,7 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 			if (as_bin_is_hidden(bins[i])) {
 				psz = 0;
 			} else {
-				bool tojson = (as_bin_get_particle_type(bins[i]) ==
-							   AS_PARTICLE_TYPE_LUA_BLOB);
-				_as_particle_tobuf(bins[i], 0, &psz, tojson); // get size
+				_as_particle_tobuf(bins[i], 0, &psz, false); // get size
 			}
 			msg_sz += psz;
 		}
@@ -320,9 +322,7 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 				op->particle_type = AS_PARTICLE_TYPE_NULL;
 				psz = 0; // packet of size NULL
 			} else {
-				bool tojson = (as_bin_get_particle_type(bins[i]) ==
-							   AS_PARTICLE_TYPE_LUA_BLOB);
-				if (0 != _as_particle_tobuf(bins[i], buf, &psz, tojson)) {
+				if (0 != _as_particle_tobuf(bins[i], buf, &psz, false)) {
 					cf_warning(AS_PROTO, "particle to buf: could not copy data!");
 				}
 			}
@@ -387,7 +387,7 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 		msg_sz += sizeof(as_msg_field) + set_name_len;
 	}
 
-	int in_use_bins = as_bin_inuse_count(rd);
+	int num_bins = as_bin_inuse_count(rd);
 	int list_bins   = 0;
 
 	if (nobindata == false) {
@@ -413,8 +413,8 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 			}
 		}
 		else {
-			msg_sz += sizeof(as_msg_op) * in_use_bins; // the bin headers
-			for (uint16_t i = 0; i < in_use_bins; i++) {
+			msg_sz += sizeof(as_msg_op) * num_bins; // the bin headers
+			for (uint16_t i = 0; i < num_bins; i++) {
 				as_bin *p_bin = &rd->bins[i];
 				msg_sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, p_bin->id));
 				uint32_t psz;
@@ -430,7 +430,7 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 
 int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets,
-		bool include_key, cf_vector *binlist)
+		bool include_key, bool skip_empty_records, cf_vector *binlist)
 {
 	// Sanity checks. Either rd should be there or nobindata and nsname should be present.
 	if (!(rd || (nobindata && nsname))) {
@@ -488,15 +488,20 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 	}
 
 	int list_bins   = 0;
-	int in_use_bins = 0;
+	int num_bins = 0;
 	if (rd) {
-		in_use_bins = as_bin_inuse_count(rd);
+		num_bins = as_bin_inuse_count(rd);
 	}
+	if (binlist) {
+		num_bins = cf_vector_size(binlist);
+	}
+	
+	as_val *ldtBinVal[num_bins];
+	as_particle_type ldtBinParticleType[num_bins];
 
 	if (nobindata == false) {
-		if(binlist) {
-			int binlist_sz = cf_vector_size(binlist);
-			for(uint16_t i = 0; i < binlist_sz; i++) {
+		if (binlist) {
+			for(uint16_t i = 0; i < num_bins; i++) {
 				char binname[AS_ID_BIN_SZ];
 				cf_vector_get(binlist, i, (void*)&binname);
 				cf_debug(AS_PROTO, " Binname projected inside is |%s| \n", binname);
@@ -507,30 +512,50 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 					continue;
 				}
 				cf_debug(AS_PROTO, "Adding bin |%s| to projected bins |%s| \n", binname);
-				list_bins++;
 				msg_sz += sizeof(as_msg_op);
 				msg_sz += rd->ns->single_bin ? 0 : strlen(binname);
 				uint32_t psz;
 				if (as_bin_is_hidden(p_bin)) {
-					psz = 0;
+					ldtBinVal[list_bins] = as_llist_scan(rd->ns, rd->ns->partitions[as_partition_getid(rd->keyd)].sub_vp, rd, p_bin);
+					if (ldtBinVal[list_bins]) {
+						ldtBinParticleType[list_bins] = AS_PARTICLE_TYPE_HIDDEN_LIST;
+					}
+					as_serializer s;
+					as_msgpack_init(&s);
+					psz = as_serializer_serialize_getsize(&s, (as_val *)ldtBinVal[list_bins]);
+					as_serializer_destroy(&s);
 				} else {
 					as_particle_tobuf(p_bin, 0, &psz); // get size
 				}
+				list_bins++;
 				msg_sz += psz;
+			}
+
+			// Don't return an empty record.
+			if (skip_empty_records && list_bins == 0) {
+				return 0;
 			}
 		}
 		else {
-			msg_sz += sizeof(as_msg_op) * in_use_bins; // the bin headers
-			for (uint16_t i = 0; i < in_use_bins; i++) {
+			msg_sz += sizeof(as_msg_op) * num_bins; // the bin headers
+			for (uint16_t i = 0; i < num_bins; i++) {
 				as_bin *p_bin = &rd->bins[i];
 				msg_sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, p_bin->id));
 				uint32_t psz;
 				if (as_bin_is_hidden(p_bin)) {
-					psz = 0;
+					ldtBinVal[list_bins] = as_llist_scan(rd->ns, rd->ns->partitions[as_partition_getid(rd->keyd)].sub_vp, rd, p_bin);
+					if (ldtBinVal[list_bins]) {
+						ldtBinParticleType[list_bins] = AS_PARTICLE_TYPE_HIDDEN_LIST;
+					}
+					as_serializer s;
+					as_msgpack_init(&s);
+					psz = as_serializer_serialize_getsize(&s, (as_val *)ldtBinVal[list_bins]);
+					as_serializer_destroy(&s);
 				} else {
 					as_particle_tobuf(p_bin, 0, &psz); // get size
 				}
 				msg_sz += psz;
+				list_bins++;
 			}
 		}
 	}
@@ -556,7 +581,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 		if (binlist)
 			msgp->n_ops = list_bins;
 		else
-			msgp->n_ops = in_use_bins;
+			msgp->n_ops = num_bins;
 	} else {
 		msgp->n_ops = 0;
 	}
@@ -607,10 +632,10 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 	if (nobindata) {
 		goto Out;
 	}
+	list_bins = 0;
 
-	if(binlist) {
-		int binlist_sz = cf_vector_size(binlist);
-		for(uint16_t i = 0; i < binlist_sz; i++) {
+	if (binlist) {
+		for (uint16_t i = 0; i < num_bins; i++) {
 
 			char binname[AS_ID_BIN_SZ];
 			cf_vector_get(binlist, i, (void*)&binname);
@@ -638,13 +663,28 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 
 				uint32_t psz = msg_sz - (buf - b); // size remaining in buffer, for safety
 				if (as_bin_is_hidden(p_bin)) {
-                	op->particle_type = AS_PARTICLE_TYPE_NULL;
-					psz = 0;
+					if (!ldtBinVal[list_bins]) {
+						op->particle_type = AS_PARTICLE_TYPE_NULL;
+						psz = 0;
+					} else {
+						op->particle_type = ldtBinParticleType[list_bins];
+						as_buffer abuf;
+						as_buffer_init(&abuf);
+						as_serializer s;
+						as_msgpack_init(&s);
+						as_serializer_serialize(&s, (as_val *)ldtBinVal[list_bins], &abuf);
+						psz = abuf.size;
+						memcpy(buf, abuf.data, abuf.size);
+						as_serializer_destroy(&s);
+						as_buffer_destroy(&abuf);
+						as_val_destroy(ldtBinVal[list_bins]);
+					}
 				} else {
 					if (0 != as_particle_tobuf(p_bin, buf, &psz)) {
 						cf_warning(AS_PROTO, "particle to buf: could not copy data!");
 					}
 				}
+				list_bins++;
 				buf += psz;
 				op->op_sz += psz;
 			}
@@ -657,7 +697,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 	}
 	else {
 		// over all bins, copy into the buffer
-		for (uint16_t i = 0; i < in_use_bins; i++) {
+		for (uint16_t i = 0; i < num_bins; i++) {
 
 			as_msg_op *op = (as_msg_op *)buf;
 			buf += sizeof(as_msg_op);
@@ -678,13 +718,28 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 
 				uint32_t psz = msg_sz - (buf - b); // size remaining in buffer, for safety
 				if (as_bin_is_hidden(&rd->bins[i])) {
-                	op->particle_type = AS_PARTICLE_TYPE_NULL;
-					psz = 0;
+					if (!ldtBinVal[list_bins]) {
+						op->particle_type = AS_PARTICLE_TYPE_NULL;
+						psz = 0;
+					} else {
+						op->particle_type = ldtBinParticleType[list_bins];
+						as_buffer abuf;
+						as_buffer_init(&abuf);
+						as_serializer s;
+						as_msgpack_init(&s);
+						as_serializer_serialize(&s, (as_val *)ldtBinVal[list_bins], &abuf);
+						psz = abuf.size;
+						memcpy(buf, abuf.data, abuf.size);
+						as_serializer_destroy(&s);
+						as_buffer_destroy(&abuf);
+						as_val_destroy(ldtBinVal[list_bins]);
+					}
 				} else {
 					if (0 != as_particle_tobuf(&rd->bins[i], buf, &psz)) {
 						cf_warning(AS_PROTO, "particle to buf: could not copy data!");
 					}
 				}
+				list_bins++;
 				buf += psz;
 				op->op_sz += psz;
 			}
@@ -817,12 +872,6 @@ Exit:
 
 	return(rv);
 
-}
-
-int
-as_msg_send_error(as_file_handle *fd_h, uint32_t result_code)
-{
-	return as_msg_send_reply(fd_h, result_code, 0, 0, NULL, NULL, 0, NULL, NULL, 0, NULL);
 }
 
 bool
@@ -1170,4 +1219,131 @@ as_msg_send_fin(int fd, uint32_t result_code)
 	as_msg_swap_header(&m.msg);
 
 	return as_msg_send_response(fd, (uint8_t*) &m, sizeof(m), MSG_NOSIGNAL);
+}
+
+#define AS_NETIO_MAX_IO_RETRY         5
+static pthread_t      g_netio_th;
+static pthread_t      g_netio_slow_th;
+static cf_queue     * g_netio_queue      = 0;
+static cf_queue     * g_netio_slow_queue = 0;
+void                * as_query__netio_th(void *q_to_wait_on);
+
+int
+as_query__send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offset, bool blocking)
+{
+	uint32_t len  = bb_r->used_sz;
+	uint8_t *buf  = bb_r->buf;
+
+	as_proto proto;
+	proto.version = PROTO_VERSION;
+	proto.type    = PROTO_TYPE_AS_MSG;
+	proto.sz      = len - 8;
+	as_proto_swap(&proto);
+
+    memcpy(bb_r->buf, &proto, 8); 
+
+	uint32_t pos = *offset;
+	int rv;
+	int retry = 0;
+	cf_detail(AS_PROTO," Start At %p %d %d", buf, pos, len);
+	while (pos < len) {
+		rv = send(fd_h->fd, buf + pos, len - pos, MSG_NOSIGNAL );
+		if (rv <= 0) {
+			if (errno != EAGAIN) {
+				cf_warning(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
+				shutdown(fd_h->fd, SHUT_RDWR);
+				return AS_NETIO_ERR;
+			}
+			if (!blocking && (retry > AS_NETIO_MAX_IO_RETRY)) {
+				*offset = pos;
+				cf_detail(AS_PROTO," End At %p %d %d", buf, pos, len);
+				return AS_NETIO_CONTINUE;
+			}
+			retry++;
+			// bigger packets so try few extra times 
+			usleep(100);
+		}
+		else {
+			pos += rv;
+		}
+	}
+	return AS_NETIO_OK;
+}
+
+void *
+as_netio_th(void *q_to_wait_on) {
+	cf_queue *           q = (cf_queue*)q_to_wait_on;
+	while (true) {
+		as_netio io;
+		if (cf_queue_pop(q, &io, CF_QUEUE_FOREVER) != 0) {
+			cf_crash(AS_PROTO, "Failed to pop from IO worker queue.");
+		}
+		if (io.slow) {
+			usleep(g_config.proto_slow_netio_sleep_ms * 1000);
+		}
+		if (as_netio_send(&io, g_netio_slow_queue, false) != AS_NETIO_CONTINUE) {
+			AS_RELEASE_FILE_HANDLE(io.fd_h);
+			cf_buf_builder_free(io.bb_r);
+		};
+	}
+}
+
+void 
+as_netio_init()
+{
+	g_netio_queue = cf_queue_create(sizeof(as_netio), true);
+	if (!g_netio_queue)
+		cf_crash(AS_PROTO, "Failed to create netio queue");
+	if (pthread_create(&g_netio_th, NULL, as_netio_th, (void *)g_netio_queue))
+		cf_crash(AS_PROTO, "Failed to create netio thread");
+
+	g_netio_slow_queue = cf_queue_create(sizeof(as_netio), true);
+	if (!g_netio_slow_queue)
+		cf_crash(AS_PROTO, "Failed to create netio slow queue");
+	if (pthread_create(&g_netio_slow_th, NULL, as_netio_th, (void *)g_netio_slow_queue))
+		cf_crash(AS_PROTO, "Failed to create netio slow thread");
+}
+
+/*
+ * Based on io object send buffer to the network, if fails
+ * the queues it up to be picked by the asynchronous queueing
+ * thread
+ *
+ * Caller is responsible for freeing up stuff in in the io structure
+ *
+ * qtr related stuff will be taken care of when callback is called.
+ * Callback is called upfront to be able check for timeout
+ *
+ * In case of success or failure module specific callback is called
+ * returns nothing
+ */
+int
+as_netio_send(as_netio *io, void *q_to_use, bool blocking)
+{
+	cf_queue *q = (cf_queue *)q_to_use;
+
+	int ret = io->start_cb(io, io->seq);
+
+	if (ret == AS_NETIO_OK) {
+		ret     = io->finish_cb(io, as_query__send_packet(io->fd_h, io->bb_r, &io->offset, blocking));
+	} 
+	else {
+		ret     = io->finish_cb(io, ret);
+	}
+    // If needs requeue then requeue it
+	switch(ret) {
+		case AS_NETIO_CONTINUE:
+			if (!q) {
+				cf_queue_push(g_netio_queue, io);
+	 		}
+			else {
+				io->slow = true;
+				cf_queue_push(q, io);
+			}
+			break;
+		default:
+            ret = AS_NETIO_OK;
+			break;
+	}
+    return ret;
 }

@@ -106,6 +106,10 @@ udf_storage_record_open(udf_record *urecord)
 
 	urecord->flag   |= UDF_RECORD_FLAG_STORAGE_OPEN;
 
+	if (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) {
+		urecord->lrecord->subrec_io++;
+	}
+
 	urecord->ldt_rectype_bits = as_ldt_record_get_rectype_bits(r);
 	cf_detail(AS_RW, "TO URECORD FROM INDEX Digest=%"PRIx64" bits %d %p",
 			  *(uint64_t *)&urecord->tr->keyd.digest[8], urecord->ldt_rectype_bits, urecord);
@@ -200,7 +204,7 @@ udf_record_open(udf_record * urecord)
 {
 	cf_debug_digest(AS_UDF, &urecord->tr->keyd, "[ENTER] Opening record key:");
 	if (urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN) {
-		cf_detail(AS_UDF, "Record already open");
+		cf_info(AS_UDF, "Record already open");
 		return 0;
 	}
 	as_transaction *tr    = urecord->tr;
@@ -232,7 +236,8 @@ udf_record_open(udf_record * urecord)
 			udf_storage_record_open(urecord);
 		}
 	} else {
-		cf_detail(AS_UDF, "udf_record_open: rec_get returned with %d", rec_rv);
+		cf_detail_digest(AS_UDF, &urecord->tr->keyd, "udf_record_open: %s rec_get returned with %d", 
+				(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) ? "sub" : "", rec_rv);
 	}
 	return rec_rv;
 } // end udf_re
@@ -245,7 +250,6 @@ udf_record_open(udf_record * urecord)
  *
  * Parameters:
  * 		urec       : UDF record being operated on
- * 		release_rsv: If tree partition reservation is released
  *
  * Return value : Nothing
  *
@@ -256,7 +260,7 @@ udf_record_open(udf_record * urecord)
  * 		udf_record_destroy
  */
 void
-udf_record_close(udf_record *urecord, bool release_rsv)
+udf_record_close(udf_record *urecord)
 {
 	as_transaction *tr    = urecord->tr;
 	cf_debug_digest(AS_UDF, &tr->keyd, "[ENTER] Closing record key:");
@@ -272,11 +276,10 @@ udf_record_close(udf_record *urecord, bool release_rsv)
 			"Storage Close:: Rec(%p) Flag(%x) Digest:", urecord, urecord->flag );
 	}
 
-	// No references are release in scope of UDF record
-	// only in case of aggregation for stream interface
-	if (tr && release_rsv) {
-		as_partition_release(&tr->rsv);
-		cf_atomic_int_decr(&g_config.dup_tree_count);
+	// Replication happens when the main record replicates
+	if (urecord->particle_data) {
+		cf_free(urecord->particle_data);
+		urecord->particle_data = 0;
 	}
 	udf_record_cache_free(urecord);
 }
@@ -312,6 +315,7 @@ udf_record_init(udf_record *urecord)
 	// Init flag
 	urecord->flag               = UDF_RECORD_FLAG_ISVALID;
 	urecord->flag              |= UDF_RECORD_FLAG_ALLOW_UPDATES;
+	urecord->flag              |= UDF_RECORD_FLAG_ALLOW_DESTROY;
 
 	urecord->pickled_buf        = NULL;
 	urecord->pickled_sz         = 0;
@@ -321,6 +325,9 @@ udf_record_init(udf_record *urecord)
 
 	urecord->ldt_rectype_bits   = 0;
 	urecord->keyd               = cf_digest_zero;
+	for (uint32_t i = 0; i < UDF_RECORD_BIN_ULIMIT; i++) {
+		urecord->updates[i].particle_buf = NULL;
+	}
 }
 
 /*
@@ -440,7 +447,7 @@ udf_record_cache_free(udf_record * urecord)
 {
 	cf_debug(AS_UDF, "[ENTER] NumUpdates(%d) ", urecord->nupdates );
 
-	for (int i = 0; i < urecord->nupdates; i ++ ) {
+	for (uint32_t i = 0; i < urecord->nupdates; i ++ ) {
 		udf_record_bin * bin = &urecord->updates[i];
 		if ( bin->name[0] != '\0' && bin->value != NULL ) {
 			bin->name[0] = '\0';
@@ -451,6 +458,13 @@ udf_record_cache_free(udf_record * urecord)
 			bin->name[0] = '\0';
 			as_val_destroy(bin->oldvalue);
 			bin->oldvalue = NULL;
+		}
+	}
+
+	for (uint32_t i = 0; i < UDF_RECORD_BIN_ULIMIT; i++) {
+		if (urecord->updates[i].particle_buf) {
+			cf_free(urecord->updates[i].particle_buf);
+			urecord->updates[i].particle_buf = NULL;
 		}
 	}
 	urecord->nupdates = 0;
@@ -699,6 +713,8 @@ udf_record_get(const as_rec * rec, const char * name)
 	value = udf_record_storage_get(urecord, name);
 
 	// We have a value, so we will cache it.
+	// DO NOT remove this. We need to cache copy to makes sure ref count 
+	// gets decremented post handing this as_val over to the lua world
 	if ( urecord && value ) {
 		udf_record_cache_set(urecord, name, value, false);
 	}
@@ -757,8 +773,16 @@ udf_record_set_flags(const as_rec * rec, const char * name, uint8_t flags)
 	return 0;
 }
 
+/**
+ * Set the Record Type bits for a record. Typically, this is how we show that
+ * a record is of type LDT (which requires special handling). This function
+ * allows us to either SET the record type (the "bits" parm is positive), or
+ * UNSET the record type (the "bits" parm is negative).  When we want to
+ * turn an "LDT Record" back into a "Normal Record", then we UNSET the LDT
+ * flag (with a negative bits value).
+ */
 static int
-udf_record_set_type(const as_rec * rec,  uint8_t  ldt_rectype_bits)
+udf_record_set_type(const as_rec * rec,  int8_t ldt_rectype_bits)
 {
 	if (!rec || !ldt_rectype_bits) {
 		cf_warning(AS_UDF, "Invalid Paramters: record=%p rec_type_bits=%d", rec, ldt_rectype_bits);
@@ -1007,11 +1031,10 @@ udf_record_setname(const as_rec * rec)
 	}
 }
 
-static bool
+bool
 udf_record_destroy(as_rec *rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
-	if (ret) {
+	if (!rec) {
 		return false;
 	}
 
@@ -1031,7 +1054,7 @@ udf_record_destroy(as_rec *rec)
 		cf_free(urecord->pickled_rec_props.p_data);
 		as_rec_props_clear(&urecord->pickled_rec_props);
 	}
-	udf_record_close(urecord, false);
+	udf_record_close(urecord);
 	return true;
 } 
 
@@ -1099,7 +1122,23 @@ udf_record_bin_names(const as_rec *rec, as_rec_bin_names_callback callback, void
 	}
 }
 
-
+const as_rec_hooks udf_subrecord_hooks = {
+	.get		= udf_record_get,
+	.set		= udf_record_set,
+	.remove		= udf_record_remove,
+	.ttl		= udf_record_ttl,
+	.gen		= udf_record_gen,
+	.key		= udf_record_key,
+	.setname	= udf_record_setname,
+	.destroy	= NULL,
+	.digest		= udf_record_digest,
+	.set_flags	= udf_record_set_flags,	// @LDT:: added for control over LDT Bins from Lua
+	.set_type	= udf_record_set_type,	// @LDT:: added for control over Rec Types from Lua
+	.set_ttl	= udf_record_set_ttl,
+	.drop_key	= udf_record_drop_key,
+	.bin_names	= udf_record_bin_names,
+	.numbins	= NULL,
+};
 
 const as_rec_hooks udf_record_hooks = {
 	.get		= udf_record_get,

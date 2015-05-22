@@ -187,7 +187,7 @@ as_proxy_divert(cf_node dst, as_transaction *tr, as_namespace *ns, uint64_t clus
 
 	tr->msgp = 0;
 
-	cf_debug(AS_PROXY, "proxy_divert: fab_msg %p digest %"PRIx64" dst %"PRIx64, m, *(uint64_t *)&tr->keyd, dst);
+	cf_debug_digest(AS_PROXY, &tr->keyd, "proxy_divert: fab_msg %p dst %"PRIx64, m, dst);
 
 	// Fill out a retransmit structure, insert into the retransmit hash.
 	msg_incr_ref(m);
@@ -245,15 +245,15 @@ as_proxy_shipop(cf_node dst, write_request *wr)
 	msg_set_buf(m, PROXY_FIELD_AS_PROTO, (void *) wr->msgp, as_proto_size_get(&wr->msgp->proto), MSG_SET_HANDOFF_MALLOC);
 	msg_set_uint64(m, PROXY_FIELD_CLUSTER_KEY, as_paxos_get_cluster_key());
 	msg_set_uint32(m, PROXY_FIELD_TIMEOUT_MS, wr->msgp->msg.transaction_ttl);
+	wr->msgp = 0;
 
 	// If it is shipped op.
 	uint32_t info = 0;
 	info |= PROXY_INFO_SHIPPED_OP;
 	msg_set_uint32(m, PROXY_FIELD_INFO, info);
 
-	cf_detail(AS_PROXY, "SHIPPED_OP %s->WINNER msg %p [Digest %"PRIx64"] Proxy Sent to %"PRIx64" %p",
-			wr->proxy_msg ? "NONORIG" : "ORIG", m, *(uint64_t *)&wr->keyd, dst, wr);
-	PRINTD(&wr->keyd);
+	cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP %s->WINNER msg %p Proxy Sent to %"PRIx64" %p tid(%d)",
+			wr->proxy_msg ? "NONORIG" : "ORIG", m, dst, wr, tid);
 
 	// Fill out a retransmit structure, insert into the retransmit hash.
 	msg_incr_ref(m);
@@ -281,7 +281,8 @@ as_proxy_shipop(cf_node dst, write_request *wr)
 		as_fabric_msg_put(m);
 	}
 
-	cf_atomic_int_incr(&g_config.proxy_initiate);
+	wr->shipped_op_initiator = true;
+	cf_atomic_int_incr(&g_config.ldt_proxy_initiate);
 
 	return 0;
 }
@@ -353,25 +354,25 @@ as_proxy_shipop_response_hdlr(msg *m, proxy_request *pr, bool *free_msg)
 	// Case 1: Non-originating node.
 	if (wr->proxy_msg) {
 		// Remember that "digest" gets printed at the end of cf_detail_digest().
+		// Fake the ORIGINATING Proxy tid
+		uint32_t transaction_id = 0;
+		msg_get_uint32(wr->proxy_msg, PROXY_FIELD_TID, &transaction_id);
+		msg_set_uint32(m, PROXY_FIELD_TID, transaction_id);
 		cf_detail_digest(AS_PROXY, &(wr->keyd), "SHIPPED_OP NON-ORIG :: Got Op Response(%p) :", wr);
-		cf_detail_digest(AS_PROXY, &(wr->keyd), "SHIPPED_OP NON-ORIG :: Forwarding Response. : ");
-		PRINTD(&wr->keyd);
+		cf_detail_digest(AS_PROXY, &(wr->keyd), "SHIPPED_OP NON-ORIG :: Back Forwarding Response for tid (%d). : ", transaction_id);
 		if (0 != (rv = as_fabric_send(wr->proxy_node, m, AS_FABRIC_PRIORITY_MEDIUM))) {
-			cf_detail(AS_PROXY, "SHIPPED_OP NONORIG [Digest %"PRIx64"] Failed Forwarding Response",
-					  *(uint64_t *)&wr->keyd, rv);
+			cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP NONORIG Failed Forwarding Response");
 			as_fabric_msg_put(m);
 		}
 		*free_msg = false;
 	}
 	// Case 2: Originating node.
 	else {
-		cf_detail(AS_PROXY, "SHIPPED_OP ORIG [Digest %"PRIx64"] Got Op Response", *(uint64_t *)&wr->keyd);
-		PRINTD(&wr->keyd);
+		cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP ORIG Got Op Response");
+		pthread_mutex_lock(&wr->lock);
 		if (wr->proto_fd_h) {
 			if (!wr->proto_fd_h->fd) {
-				cf_warning(AS_PROXY, "SHIPPED_OP ORIG [Digest %"PRIx64"] Missing fd in proto_fd ",
-						*(uint64_t*)&wr->keyd);
-				PRINTD(&wr->keyd);
+				cf_warning_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP ORIG Missing fd in proto_fd ");
 			}
 			else {
 				as_proto *proto;
@@ -403,25 +404,43 @@ as_proxy_shipop_response_hdlr(msg *m, proxy_request *pr, bool *free_msg)
 						break;
 					}
 				}
-				cf_detail(AS_PROXY, "SHIPPED_OP ORIG [Digest %"PRIx64"] Response Sent to Client",
-						*(uint64_t *)&wr->keyd);
-				PRINTD(&wr->keyd);
+				cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP ORIG Response Sent to Client");
 			}
+			wr->proto_fd_h->t_inprogress = false;
+			AS_RELEASE_FILE_HANDLE(wr->proto_fd_h);
+			wr->proto_fd_h = 0;
 		} else {
-			cf_warning(AS_PROXY, "SHIPPED_OP ORIG [Digest %"PRIx64"] Missing proto_fd ",
-					*(uint64_t*)&wr->keyd);
-			PRINTD(&wr->keyd);
+			// this may be NULL if the request has already timedout and the wr proto_fd_h
+			// will be cleaned up by then
+			cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP ORIG Missing proto_fd ");
 
-			as_transaction tr;
-			write_request_init_tr(&tr, wr);
-			if (udf_rw_needcomplete(&tr)) {
+			// Note: This may be needed if this is node where internal scan or query
+			// UDF is initiated where it happens so that there is migration is going 
+			// on and the request get routed to the remote node which is winning node
+			// This request may need the req_cb to be called.
+			if (udf_rw_needcomplete_wr(wr)) {
+				as_transaction tr;
+				write_request_init_tr(&tr, wr);
 				udf_rw_complete(&tr, 0, __FILE__, __LINE__);
-				UREQ_DATA_RESET(&tr.udata);
+				if (tr.proto_fd_h) {
+					tr.proto_fd_h->t_inprogress = false;
+					AS_RELEASE_FILE_HANDLE(tr.proto_fd_h);
+					tr.proto_fd_h = 0;
+				}
 			}
 		}
+		pthread_mutex_unlock(&wr->lock);
 	}
 
-	WR_RELEASE(wr);
+	// This node is shipOp initiator. Remove it from the Global
+	// hash
+	global_keyd gk;
+	gk.ns_id = wr->rsv.ns->id;
+	gk.keyd = wr->keyd;
+	g_write_hash_delete(&gk);
+
+	WR_RELEASE(pr->wr);
+	pr->wr = NULL;
 	return 0;
 }
 
@@ -500,10 +519,9 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 			msg_get_uint32(m, PROXY_FIELD_INFO, &info);
 			if (info & PROXY_INFO_SHIPPED_OP) {
 				tr.flag |= AS_TRANSACTION_FLAG_SHIPPED_OP;
-				cf_detail(AS_PROXY, "SHIPPED_OP WINNER [Digest %"PRIx64"] Operation Received", *(uint64_t *)&tr.keyd);
-				PRINTD(&tr.keyd);
+				cf_detail_digest(AS_PROXY, &tr.keyd, "SHIPPED_OP WINNER Operation Received");
 			} else {
-				cf_detail(AS_PROXY, "Received Proxy Request digest %"PRIx64"", *(uint64_t *)&tr.keyd);
+				cf_detail_digest(AS_PROXY, &tr.keyd, "Received Proxy Request digest tid(%d)", tr.trid);
 			}
 
 			MICROBENCHMARK_RESET();
@@ -786,10 +804,25 @@ proxy_retransmit_reduce_fn(void *key, void *data, void *udata)
 			cf_debug(AS_PROXY, "proxy_retransmit: too old request %d ms: terminating (dest %"PRIx64" {%s:%d}",
 					(p_now->now_ns - pr->start_time) / 1000000, pr->dest, pr->ns->name, pr->pid);
 
-			// TODO: make sure the op is not applied twice?
 			if (pr->wr) {
-				cf_detail(AS_PROXY, "SHIPPED_OP [Digest %"PRIx64"] Proxy Retransmit Timeout ...",
-						*(uint64_t *)&pr->wr->keyd);
+				cf_detail_digest(AS_PROXY, &pr->wr->keyd, "SHIPPED_OP Proxy Retransmit Timeout ...");
+				cf_atomic_int_incr(&g_config.ldt_proxy_timeout);
+				pthread_mutex_lock(&pr->wr->lock);
+				// Note: This may be needed if this is node where internal scan or query
+				// UDF is initiated where it happens so that there is migration is going 
+				// on and the request get routed to the remote node which is winning node
+				// This request may need the req_cb to be called.
+				if (udf_rw_needcomplete_wr(pr->wr)) {
+					as_transaction tr;
+					write_request_init_tr(&tr, pr->wr);
+					udf_rw_complete(&tr, 0, __FILE__, __LINE__);
+					if (tr.proto_fd_h) {
+						AS_RELEASE_FILE_HANDLE(tr.proto_fd_h);
+					}
+				}
+				pthread_mutex_unlock(&pr->wr->lock);
+				WR_RELEASE(pr->wr);
+				pr->wr            = NULL;
 			}
 
 			if (pr->fab_msg) {
@@ -825,13 +858,15 @@ Retry:
 			return 0;
 		}
 
+		if (pr->wr) {
+			cf_detail_digest(AS_PROXY, &pr->wr->keyd, "SHIPPED_OP Proxy Retransmit... NOOP");
+			as_fabric_msg_put(pr->fab_msg);
+			return 0;
+		}
+
 		cf_atomic_int_incr(&g_config.proxy_retry);
 
 		int rv = as_fabric_send(pr->dest, pr->fab_msg, AS_FABRIC_PRIORITY_MEDIUM);
-		// TODO: make sure the retransmit op does not apply more than once?
-		if (pr->wr) {
-			cf_detail(AS_PROXY, "SHIPPED_OP [Digest %"PRIx64"] Proxy Retransmit", *(uint64_t *)&pr->wr->keyd);
-		}
 
 		if (rv == 0) {
 			return 0;
@@ -844,18 +879,6 @@ Retry:
 			return -1;
 		}
 		else if (rv == -3) {
-
-			if (pr->wr) {
-				as_transaction tr;
-				write_request_init_tr(&tr, pr->wr);
-				if (udf_rw_needcomplete(&tr)) {
-					udf_rw_complete(&tr, 0, __FILE__, __LINE__);
-				}
-				WR_RELEASE(pr->wr);
-				as_fabric_msg_put(pr->fab_msg);
-				cf_detail(AS_PROXY, "SHIPPED_OP [Digest %"PRIx64"] Proxy Fail .. Aborting...", *(uint64_t *)&pr->wr->keyd);
-				return -2;
-			}
 
 			// The node I'm proxying to is no longer up. Find another node.
 			// (Easier to just send to the master and not pay attention to

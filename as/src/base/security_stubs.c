@@ -21,6 +21,7 @@
  */
 
 #include "base/security.h"
+#include "base/security_config.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -50,9 +51,17 @@ as_security_init()
 
 // Security is an enterprise feature - here, allow all operations.
 uint8_t
-as_security_check(const as_file_handle* fd_h, as_sec_priv priv)
+as_security_check(const as_file_handle* fd_h, as_sec_perm perm)
 {
 	return AS_PROTO_RESULT_OK;
+}
+
+// Security is an enterprise feature - here, allow all operations.
+bool
+as_security_check_data_op(as_transaction* tr, as_msg* m, as_namespace* ns,
+		as_sec_perm perm)
+{
+	return true;
 }
 
 // Security is an enterprise feature - here, there's no filter.
@@ -70,7 +79,7 @@ as_security_filter_destroy(void* pv_filter)
 
 // Security is an enterprise feature - here, do nothing.
 void
-as_security_log(const as_file_handle* fd_h, uint8_t result, as_sec_priv priv,
+as_security_log(const as_file_handle* fd_h, uint8_t result, as_sec_perm perm,
 		const char* action, const char* detail)
 {
 }
@@ -144,4 +153,22 @@ as_security_transact(as_transaction *tr)
 
 	tr->proto_fd_h->t_inprogress = false;
 	AS_RELEASE_FILE_HANDLE(tr->proto_fd_h);
+}
+
+
+//==========================================================
+// Public API - security configuration.
+//
+
+// Security is an enterprise feature - here, do nothing.
+void
+as_security_config_check()
+{
+}
+
+// Security is an enterprise feature - here, do nothing.
+void
+as_security_config_log_scope(uint32_t sink, const char* ns_name,
+		const char* set_name)
+{
 }

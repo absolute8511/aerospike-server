@@ -560,12 +560,6 @@ as_particle_setter g_particle_setter_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_set_blob,
 	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_set_blob,
 	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_set_blob,
-	[AS_PARTICLE_TYPE_APPEND]			= 0,
-	[AS_PARTICLE_TYPE_RTA_LIST]			= 0,
-	[AS_PARTICLE_TYPE_RTA_DICT]			= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_DICT]	= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_LIST]	= 0,
-	[AS_PARTICLE_TYPE_LUA_BLOB]			= as_particle_set_blob,
 	[AS_PARTICLE_TYPE_MAP]				= as_particle_set_blob,
 	[AS_PARTICLE_TYPE_LIST]				= as_particle_set_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_set_blob,
@@ -588,12 +582,6 @@ as_particle_getter g_particle_getter_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_get_blob,
 	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_get_blob,
 	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_get_blob,
-	[AS_PARTICLE_TYPE_APPEND]			= 0,
-	[AS_PARTICLE_TYPE_RTA_LIST]			= 0,
-	[AS_PARTICLE_TYPE_RTA_DICT]			= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_DICT]	= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_LIST]	= 0,
-	[AS_PARTICLE_TYPE_LUA_BLOB]			= as_particle_get_blob,
 	[AS_PARTICLE_TYPE_MAP]				= as_particle_get_blob,
 	[AS_PARTICLE_TYPE_LIST]				= as_particle_get_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_get_blob,
@@ -616,12 +604,6 @@ as_particle_getter_p g_particle_getter_p_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_get_p_blob,
 	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_get_p_blob,
 	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_get_p_blob,
-	[AS_PARTICLE_TYPE_APPEND]			= 0,
-	[AS_PARTICLE_TYPE_RTA_LIST]			= 0,
-	[AS_PARTICLE_TYPE_RTA_DICT]			= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_DICT]	= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_LIST]	= 0,
-	[AS_PARTICLE_TYPE_LUA_BLOB]			= as_particle_get_p_blob,
 	[AS_PARTICLE_TYPE_MAP]				= as_particle_get_p_blob,
 	[AS_PARTICLE_TYPE_LIST]				= as_particle_get_p_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_get_p_blob,
@@ -644,12 +626,6 @@ as_particle_destructor g_particle_destructor_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_destruct_blob,
 	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_destruct_blob,
 	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_destruct_blob,
-	[AS_PARTICLE_TYPE_APPEND]			= 0,
-	[AS_PARTICLE_TYPE_RTA_LIST]			= 0,
-	[AS_PARTICLE_TYPE_RTA_DICT]			= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_DICT]	= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_LIST]	= 0,
-	[AS_PARTICLE_TYPE_LUA_BLOB]			= as_particle_destruct_blob,
 	[AS_PARTICLE_TYPE_MAP]				= as_particle_destruct_blob,
 	[AS_PARTICLE_TYPE_LIST]				= as_particle_destruct_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_destruct_blob,
@@ -672,12 +648,6 @@ as_particle_get_flat g_particle_get_flat_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_get_flat_blob,
 	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_get_flat_blob,
 	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_get_flat_blob,
-	[AS_PARTICLE_TYPE_APPEND]			= 0,
-	[AS_PARTICLE_TYPE_RTA_LIST]			= 0,
-	[AS_PARTICLE_TYPE_RTA_DICT]			= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_DICT]	= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_LIST]	= 0,
-	[AS_PARTICLE_TYPE_LUA_BLOB]			= as_particle_get_flat_blob,
 	[AS_PARTICLE_TYPE_MAP]				= as_particle_get_flat_blob,
 	[AS_PARTICLE_TYPE_LIST]				= as_particle_get_flat_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_get_flat_blob,
@@ -700,12 +670,6 @@ as_particle_compare g_particle_compare_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_compare_blob,
 	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_compare_blob,
 	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_compare_blob,
-	[AS_PARTICLE_TYPE_APPEND]			= 0,
-	[AS_PARTICLE_TYPE_RTA_LIST]			= 0,
-	[AS_PARTICLE_TYPE_RTA_DICT]			= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_DICT]	= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_LIST]	= 0,
-	[AS_PARTICLE_TYPE_LUA_BLOB]			= as_particle_compare_blob,
 	[AS_PARTICLE_TYPE_MAP]				= as_particle_compare_blob,
 	[AS_PARTICLE_TYPE_LIST]				= as_particle_compare_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_compare_blob,
@@ -728,12 +692,6 @@ as_particle_get_base g_particle_get_base_size_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_RUBY_BLOB]		= as_particle_get_base_size_blob,
 	[AS_PARTICLE_TYPE_PHP_BLOB]			= as_particle_get_base_size_blob,
 	[AS_PARTICLE_TYPE_ERLANG_BLOB]		= as_particle_get_base_size_blob,
-	[AS_PARTICLE_TYPE_APPEND]			= 0,
-	[AS_PARTICLE_TYPE_RTA_LIST]			= 0,
-	[AS_PARTICLE_TYPE_RTA_DICT]			= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_DICT]	= 0,
-	[AS_PARTICLE_TYPE_RTA_APPEND_LIST]	= 0,
-	[AS_PARTICLE_TYPE_LUA_BLOB]			= as_particle_get_base_size_blob,
 	[AS_PARTICLE_TYPE_MAP]				= as_particle_get_base_size_blob,
 	[AS_PARTICLE_TYPE_LIST]				= as_particle_get_base_size_blob,
 	[AS_PARTICLE_TYPE_HIDDEN_LIST]		= as_particle_get_base_size_blob,
@@ -1090,8 +1048,6 @@ as_particle_get_size_in_memory(as_bin *b, as_particle *particle)
 			return 0;
 		case AS_PARTICLE_TYPE_STRING:
 			return sizeof(as_particle_string) + ((as_particle_string *)particle)->sz;
-		case AS_PARTICLE_TYPE_APPEND:
-			return 0; // can't do append without knowing the append structure which requires integration
 		case AS_PARTICLE_TYPE_BLOB:
 		case AS_PARTICLE_TYPE_JAVA_BLOB:
 		case AS_PARTICLE_TYPE_CSHARP_BLOB:
@@ -1176,18 +1132,18 @@ as_particle_get_flat_size(as_bin *b, size_t *flat_size)
 	uint8_t type = as_bin_get_particle_type(b);
 
 	if (type == AS_PARTICLE_TYPE_NULL)
-		return (-1);
+		return (-2);
 
 #ifdef EXTRA_CHECKS
 	// check the incoming type
 	if (type < AS_PARTICLE_TYPE_NULL || type >= AS_PARTICLE_TYPE_MAX) {
 		cf_info(AS_PARTICLE, "particle set: bad particle type %d, error", (int)type);
-		return(-1);
+		return(-3);
 	}
 #endif
 
 	uint32_t size = g_particle_get_flat_table[type](p);
-	if (size == 0)	return(-1);
+	if (size == 0)	return(-4);
 	*flat_size = size;
 	return(0);
 }

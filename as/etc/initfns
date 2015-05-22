@@ -20,5 +20,9 @@ if [[ $3 =~ gdb ]]; then
 else
   if [[ $3 =~ vg ]]; then
     CMD="valgrind --leak-check=full --suppressions=/etc/aerospike/valgrind.supp --db-attach=yes $CMD"
+  else
+    if [[ $3 =~ core ]]; then
+      export DAEMON_COREFILE_LIMIT="unlimited"
+    fi
   fi
 fi

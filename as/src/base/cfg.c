@@ -52,6 +52,7 @@
 
 #include "base/cluster_config.h"
 #include "base/datamodel.h"
+#include "base/ldt.h"
 #include "base/proto.h"
 #include "base/secondary_index.h"
 #include "base/security_config.h"
@@ -74,7 +75,7 @@ as_config g_config;
 void cfg_add_mesh_seed_addr_port(char* addr, int port);
 as_set* cfg_add_set(as_namespace* ns);
 void cfg_add_storage_file(as_namespace* ns, char* file_name);
-void cfg_add_storage_device(as_namespace* ns, char* device_name);
+void cfg_add_storage_device(as_namespace* ns, char* device_name, char* shadow_name);
 void cfg_init_si_var(as_namespace* ns);
 uint32_t cfg_obj_size_hist_max(uint32_t hist_max);
 void cfg_create_all_histograms();
@@ -111,6 +112,7 @@ cfg_set_defaults()
 	c->hist_track_back = 1800;
 	c->hist_track_slice = 10;
 	c->n_info_threads = 16;
+	c->ldt_benchmarks = false;
 	c->microbenchmarks = false;
 	c->migrate_max_num_incoming = AS_MIGRATE_DEFAULT_MAX_NUM_INCOMING; // for receiver-side migration flow-control
 	c->migrate_read_priority = 10; // # of rows between a quick context switch? not a great way to tune
@@ -121,6 +123,7 @@ cfg_set_defaults()
 	c->migrate_xmit_lwm = 5; // because the monitor the queue depth
 	c->migrate_xmit_priority = 40; // # of rows between a quick context switch? not a great way to tune
 	c->migrate_xmit_sleep = 500; // # of rows between a quick context switch? not a great way to tune
+	c->nsup_delete_sleep = 100; // 100 microseconds means a delete rate of 10k TPS
 	c->nsup_period = 120; // run nsup once every 2 minutes
 	c->nsup_startup_evict = true;
 	c->paxos_max_cluster_size = AS_CLUSTER_DEFAULT_SZ; // default the maximum cluster size to a "reasonable" value
@@ -128,6 +131,7 @@ cfg_set_defaults()
 	c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_MANUAL; // default to the manual paxos recovery policy
 	c->paxos_retransmit_period = 5; // run paxos retransmit once every 5 seconds
 	c->proto_fd_idle_ms = 60000; // 1 minute reaping of proto file descriptors
+	c->proto_slow_netio_sleep_ms = 1; // 1 ms sleep between retry for slow queries
 	c->run_as_daemon = true; // set false only to run in debugger & see console output
 	c->scan_priority = 200; // # of rows between a quick context switch?
 	c->scan_sleep = 1; // amount of time scan thread will sleep between two context switch
@@ -149,6 +153,12 @@ cfg_set_defaults()
 	// Network service defaults.
 	c->socket.proto = SOCK_STREAM; // not configurable, but addr and port are
 	c->socket_reuse_addr = true;
+
+	// Fabric TCP socket keepalive defaults.
+	c->fabric_keepalive_enabled = true;
+	c->fabric_keepalive_time = 1; // seconds
+	c->fabric_keepalive_intvl = 1; // seconds
+	c->fabric_keepalive_probes = 10; // tries
 
 	// Network heartbeat defaults.
 	c->hb_mode = AS_HB_MODE_UNDEF; // must supply heartbeat mode in the configuration file
@@ -260,6 +270,7 @@ typedef enum {
 	CASE_SERVICE_HIST_TRACK_SLICE,
 	CASE_SERVICE_HIST_TRACK_THRESHOLDS,
 	CASE_SERVICE_INFO_THREADS,
+	CASE_SERVICE_LDT_BENCHMARKS,
 	CASE_SERVICE_MICROBENCHMARKS,
 	CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING,
 	CASE_SERVICE_MIGRATE_READ_PRIORITY,
@@ -402,6 +413,11 @@ typedef enum {
 	// Normally visible, in canonical configuration file order:
 	CASE_NETWORK_FABRIC_ADDRESS,
 	CASE_NETWORK_FABRIC_PORT,
+	// Normally hidden, in canonical configuration file order:
+	CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED,
+	CASE_NETWORK_FABRIC_KEEPALIVE_TIME,
+	CASE_NETWORK_FABRIC_KEEPALIVE_INTVL,
+	CASE_NETWORK_FABRIC_KEEPALIVE_PROBES,
 
 	// Network info options:
 	// Normally visible, in canonical configuration file order:
@@ -422,6 +438,8 @@ typedef enum {
 	CASE_NAMESPACE_SETS_ENABLE_XDR,
 	CASE_NAMESPACE_XDR_REMOTE_DATACENTER,
 	CASE_NAMESPACE_FORWARD_XDR_WRITES,
+	CASE_NAMESPACE_ALLOW_NONXDR_WRITES,
+	CASE_NAMESPACE_ALLOW_XDR_WRITES,
 	// Normally hidden:
 	CASE_NAMESPACE_ALLOW_VERSIONS,
 	CASE_NAMESPACE_COLD_START_EVICT_TTL,
@@ -432,6 +450,8 @@ typedef enum {
 	CASE_NAMESPACE_HIGH_WATER_DISK_PCT,
 	CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT,
 	CASE_NAMESPACE_LDT_ENABLED,
+	CASE_NAMESPACE_LDT_GC_RATE,
+	CASE_NAMESPACE_LDT_PAGE_SIZE,
 	CASE_NAMESPACE_MAX_TTL,
 	CASE_NAMESPACE_OBJ_SIZE_HIST_MAX,
 	CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE,
@@ -554,6 +574,7 @@ typedef enum {
 
 	// Security (Aerospike) log options:
 	CASE_SECURITY_LOG_REPORT_AUTHENTICATION,
+	CASE_SECURITY_LOG_REPORT_DATA_OP,
 	CASE_SECURITY_LOG_REPORT_SYS_ADMIN,
 	CASE_SECURITY_LOG_REPORT_USER_ADMIN,
 	CASE_SECURITY_LOG_REPORT_VIOLATION,
@@ -561,6 +582,7 @@ typedef enum {
 	// Security syslog options:
 	CASE_SECURITY_SYSLOG_LOCAL,
 	CASE_SECURITY_SYSLOG_REPORT_AUTHENTICATION,
+	CASE_SECURITY_SYSLOG_REPORT_DATA_OP,
 	CASE_SECURITY_SYSLOG_REPORT_SYS_ADMIN,
 	CASE_SECURITY_SYSLOG_REPORT_USER_ADMIN,
 	CASE_SECURITY_SYSLOG_REPORT_VIOLATION
@@ -616,6 +638,7 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "hist-track-slice",				CASE_SERVICE_HIST_TRACK_SLICE },
 		{ "hist-track-thresholds",			CASE_SERVICE_HIST_TRACK_THRESHOLDS },
 		{ "info-threads",					CASE_SERVICE_INFO_THREADS },
+		{ "ldt-benchmarks",					CASE_SERVICE_LDT_BENCHMARKS },
 		{ "microbenchmarks",				CASE_SERVICE_MICROBENCHMARKS },
 		{ "migrate-max-num-incoming",		CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING },
 		{ "migrate-read-priority",			CASE_SERVICE_MIGRATE_READ_PRIORITY },
@@ -762,6 +785,10 @@ const cfg_opt NETWORK_HEARTBEAT_PROTOCOL_OPTS[] = {
 const cfg_opt NETWORK_FABRIC_OPTS[] = {
 		{ "address",						CASE_NETWORK_FABRIC_ADDRESS },
 		{ "port",							CASE_NETWORK_FABRIC_PORT },
+		{ "keepalive-enabled",				CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED },
+		{ "keepalive-time",					CASE_NETWORK_FABRIC_KEEPALIVE_TIME },
+		{ "keepalive-intvl",				CASE_NETWORK_FABRIC_KEEPALIVE_INTVL },
+		{ "keepalive-probes",				CASE_NETWORK_FABRIC_KEEPALIVE_PROBES },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -782,6 +809,8 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "sets-enable-xdr",				CASE_NAMESPACE_SETS_ENABLE_XDR },
 		{ "xdr-remote-datacenter",			CASE_NAMESPACE_XDR_REMOTE_DATACENTER },
 		{ "ns-forward-xdr-writes",			CASE_NAMESPACE_FORWARD_XDR_WRITES },
+		{ "allow-nonxdr-writes",			CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
+		{ "allow-xdr-writes",				CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
 		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
 		{ "cold-start-evict-ttl",			CASE_NAMESPACE_COLD_START_EVICT_TTL },
 		{ "conflict-resolution-policy",		CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY },
@@ -791,6 +820,8 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "high-water-disk-pct",			CASE_NAMESPACE_HIGH_WATER_DISK_PCT },
 		{ "high-water-memory-pct",			CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT },
 		{ "ldt-enabled",					CASE_NAMESPACE_LDT_ENABLED },
+		{ "ldt-gc-rate",                    CASE_NAMESPACE_LDT_GC_RATE },
+		{ "ldt-page-size",					CASE_NAMESPACE_LDT_PAGE_SIZE },
 		{ "max-ttl",						CASE_NAMESPACE_MAX_TTL },
 		{ "obj-size-hist-max",				CASE_NAMESPACE_OBJ_SIZE_HIST_MAX },
 		{ "read-consistency-level-override", CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE },
@@ -933,6 +964,7 @@ const cfg_opt SECURITY_OPTS[] = {
 
 const cfg_opt SECURITY_LOG_OPTS[] = {
 		{ "report-authentication",			CASE_SECURITY_LOG_REPORT_AUTHENTICATION },
+		{ "report-data-op",					CASE_SECURITY_LOG_REPORT_DATA_OP },
 		{ "report-sys-admin",				CASE_SECURITY_LOG_REPORT_SYS_ADMIN },
 		{ "report-user-admin",				CASE_SECURITY_LOG_REPORT_USER_ADMIN },
 		{ "report-violation",				CASE_SECURITY_LOG_REPORT_VIOLATION },
@@ -942,6 +974,7 @@ const cfg_opt SECURITY_LOG_OPTS[] = {
 const cfg_opt SECURITY_SYSLOG_OPTS[] = {
 		{ "local",							CASE_SECURITY_SYSLOG_LOCAL },
 		{ "report-authentication",			CASE_SECURITY_SYSLOG_REPORT_AUTHENTICATION },
+		{ "report-data-op",					CASE_SECURITY_SYSLOG_REPORT_DATA_OP },
 		{ "report-sys-admin",				CASE_SECURITY_SYSLOG_REPORT_SYS_ADMIN },
 		{ "report-user-admin",				CASE_SECURITY_SYSLOG_REPORT_USER_ADMIN },
 		{ "report-violation",				CASE_SECURITY_SYSLOG_REPORT_VIOLATION },
@@ -1190,28 +1223,64 @@ cfg_not_supported(const cfg_line* p_line, const char *feature)
 }
 
 char*
-cfg_strdup(const cfg_line* p_line)
+cfg_strdup_anyval_no_checks(const cfg_line* p_line, const char* val_tok)
 {
-	// TODO - should we check for empty string?
-
-	char* str = cf_strdup(p_line->val_tok_1);
+	char* str = cf_strdup(val_tok);
 
 	if (! str) {
 		cf_crash_nostack(AS_CFG, "line %d :: failed alloc for %s: %s",
-				p_line->num, p_line->name_tok, p_line->val_tok_1);
+				p_line->num, p_line->name_tok, val_tok);
 	}
 
 	return str;
 }
 
 char*
+cfg_strdup_no_checks(const cfg_line* p_line)
+{
+	return cfg_strdup_anyval_no_checks(p_line, p_line->val_tok_1);
+}
+
+char*
+cfg_strdup_val2_no_checks(const cfg_line* p_line)
+{
+	return cfg_strdup_anyval_no_checks(p_line, p_line->val_tok_2);
+}
+
+char*
+cfg_strdup_anyval(const cfg_line* p_line, const char* val_tok, bool is_required)
+{
+	if (val_tok[0] == 0) {
+		if (is_required) {
+			cf_crash_nostack(AS_CFG, "line %d :: %s must have a value specified",
+					p_line->num, p_line->name_tok);
+		}
+
+		// Do not duplicate empty strings.
+		return NULL;
+	}
+
+	return cfg_strdup_anyval_no_checks(p_line, val_tok);
+}
+
+char*
+cfg_strdup(const cfg_line* p_line, bool is_required)
+{
+	return cfg_strdup_anyval(p_line, p_line->val_tok_1, is_required);
+}
+
+char*
+cfg_strdup_val2(const cfg_line* p_line, bool is_required)
+{
+	return cfg_strdup_anyval(p_line, p_line->val_tok_2, is_required);
+}
+
+char*
 cfg_strdup_one_of(const cfg_line* p_line, const char* toks[], int num_toks)
 {
-	// TODO - should we check for empty string?
-
 	for (int i = 0; i < num_toks; i++) {
 		if (strcmp(p_line->val_tok_1, toks[i]) == 0) {
-			return cfg_strdup(p_line);
+			return cfg_strdup_no_checks(p_line);
 		}
 	}
 
@@ -1724,7 +1793,7 @@ as_config_init(const char *config_file)
 				c->paxos_single_replica_limit = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_PIDFILE:
-				c->pidfile = cfg_strdup(&line);
+				c->pidfile = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_SERVICE_SERVICE_THREADS:
 				c->n_service_threads = cfg_int(&line, 1, MAX_DEMARSHAL_THREADS);
@@ -1785,11 +1854,14 @@ as_config_init(const char *config_file)
 				c->hist_track_slice = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_HIST_TRACK_THRESHOLDS:
-				c->hist_track_thresholds = cfg_strdup(&line);
+				c->hist_track_thresholds = cfg_strdup_no_checks(&line);
 				// TODO - if config key present but no value (not even space) failure mode is bad...
 				break;
 			case CASE_SERVICE_INFO_THREADS:
 				c->n_info_threads = cfg_int_no_checks(&line);
+				break;
+			case CASE_SERVICE_LDT_BENCHMARKS:
+				c->ldt_benchmarks = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_MICROBENCHMARKS:
 				c->microbenchmarks = cfg_bool(&line);
@@ -1945,7 +2017,7 @@ as_config_init(const char *config_file)
 				c->use_queue_per_device = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_WORK_DIRECTORY:
-				c->work_directory = cfg_strdup(&line);
+				c->work_directory = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_SERVICE_WRITE_DUPLICATE_RESOLUTION_DISABLE:
 				c->write_duplicate_resolution_disable = cfg_bool(&line);
@@ -2113,7 +2185,7 @@ as_config_init(const char *config_file)
 			switch(cfg_find_tok(line.name_tok, NETWORK_SERVICE_OPTS, NUM_NETWORK_SERVICE_OPTS)) {
 			case CASE_NETWORK_SERVICE_ADDRESS:
 				// TODO - is the strdup necessary (addr ever freed)?
-				c->socket.addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup(&line);
+				c->socket.addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_SERVICE_PORT:
 				c->socket.port = cfg_port(&line);
@@ -2122,11 +2194,11 @@ as_config_init(const char *config_file)
 				cfg_renamed_name_tok(&line, "access-address");
 				// Intentional fall-through.
 			case CASE_NETWORK_SERVICE_ACCESS_ADDRESS:
-				c->external_address = cfg_strdup(&line);
+				c->external_address = cfg_strdup_no_checks(&line);
 				c->is_external_address_virtual = strcmp(line.val_tok_2, "virtual") == 0;
 				break;
 			case CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME:
-				c->network_interface_name = cfg_strdup(&line);
+				c->network_interface_name = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_SERVICE_REUSE_ADDRESS:
 				c->socket_reuse_addr = cfg_bool_no_value_is_true(&line);
@@ -2161,19 +2233,19 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case CASE_NETWORK_HEARTBEAT_ADDRESS:
-				c->hb_addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup(&line);
+				c->hb_addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_PORT:
 				c->hb_port = cfg_int_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_ADDRESS:
-				c->hb_init_addr = cfg_strdup(&line);
+				c->hb_init_addr = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_PORT:
 				c->hb_init_port = cfg_port(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_SEED_ADDRESS_PORT:
-				cfg_add_mesh_seed_addr_port(cfg_strdup(&line), cfg_port_val2(&line));
+				cfg_add_mesh_seed_addr_port(cfg_strdup_no_checks(&line), cfg_port_val2(&line));
 				break;
 			case CASE_NETWORK_HEARTBEAT_INTERVAL:
 				c->hb_interval = cfg_u32_no_checks(&line);
@@ -2182,7 +2254,7 @@ as_config_init(const char *config_file)
 				c->hb_timeout = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS:
-				c->hb_tx_addr = cfg_strdup(&line);
+				c->hb_tx_addr = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MCAST_TTL:
 				c->hb_mcast_ttl = cfg_u8_no_checks(&line);
@@ -2230,6 +2302,18 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NETWORK_FABRIC_PORT:
 				c->fabric_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED:
+				c->fabric_keepalive_enabled = cfg_bool(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_TIME:
+				c->fabric_keepalive_time = cfg_int_no_checks(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_INTVL:
+				c->fabric_keepalive_intvl = cfg_int_no_checks(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_PROBES:
+				c->fabric_keepalive_probes = cfg_int_no_checks(&line);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);
@@ -2325,6 +2409,18 @@ as_config_init(const char *config_file)
 					cfg_not_supported(&line, "XDR");
 				}
 				break;
+			case CASE_NAMESPACE_ALLOW_NONXDR_WRITES:
+				ns->ns_allow_nonxdr_writes = cfg_bool(&line);
+				if (ns->ns_allow_nonxdr_writes && ! c->xdr_cfg.xdr_supported) {
+					cfg_not_supported(&line, "XDR");
+				}
+				break;
+			case CASE_NAMESPACE_ALLOW_XDR_WRITES:
+				ns->ns_allow_xdr_writes = cfg_bool(&line);
+				if (ns->ns_allow_xdr_writes && ! c->xdr_cfg.xdr_supported) {
+					cfg_not_supported(&line, "XDR");
+				}
+				break;
 			case CASE_NAMESPACE_XDR_REMOTE_DATACENTER:
 				// The server isn't interested in this, but the XDR module is!
 				break;
@@ -2365,6 +2461,12 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_LDT_ENABLED:
 				ns->ldt_enabled = cfg_bool(&line);
+				break;
+			case CASE_NAMESPACE_LDT_GC_RATE:
+				ns->ldt_gc_sleep_us = cfg_u64(&line, 1, LDT_SUB_GC_MAX_RATE) * 1000000;
+				break;
+			case CASE_NAMESPACE_LDT_PAGE_SIZE:
+				ns->ldt_page_size = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_MAX_TTL:
 				ns->max_ttl = cfg_seconds(&line);
@@ -2468,6 +2570,9 @@ as_config_init(const char *config_file)
 				else {
 					c->n_namespaces_not_in_memory++;
 				}
+				if (ns->ldt_page_size > ns->storage_write_block_size) {
+					ns->ldt_page_size = ns->storage_write_block_size - 1024; // 1K headroom
+				}
 				ns = NULL;
 				cfg_end_context(&state);
 				break;
@@ -2484,13 +2589,13 @@ as_config_init(const char *config_file)
 		case NAMESPACE_STORAGE_DEVICE:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_DEVICE_OPTS, NUM_NAMESPACE_STORAGE_DEVICE_OPTS)) {
 			case CASE_NAMESPACE_STORAGE_DEVICE_DEVICE:
-				cfg_add_storage_device(ns, cfg_strdup(&line));
+				cfg_add_storage_device(ns, cfg_strdup(&line, true), cfg_strdup_val2(&line, false));
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_FILE:
-				cfg_add_storage_file(ns, cfg_strdup(&line));
+				cfg_add_storage_file(ns, cfg_strdup(&line, true));
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_FILESIZE:
-				ns->storage_filesize = cfg_i64_no_checks(&line);
+				ns->storage_filesize = cfg_i64(&line, 1024 * 1024, AS_STORAGE_MAX_DEVICE_SIZE);
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_SCHEDULER_MODE:
 				ns->storage_scheduler_mode = cfg_strdup_one_of(&line, DEVICE_SCHEDULER_MODES, NUM_DEVICE_SCHEDULER_MODES);
@@ -2572,7 +2677,7 @@ as_config_init(const char *config_file)
 		case NAMESPACE_STORAGE_KV:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_KV_OPTS, NUM_NAMESPACE_STORAGE_KV_OPTS)) {
 			case CASE_NAMESPACE_STORAGE_KV_DEVICE:
-				cfg_add_storage_file(ns, cfg_strdup(&line));
+				cfg_add_storage_file(ns, cfg_strdup(&line, true));
 				break;
 			case CASE_NAMESPACE_STORAGE_KV_FILESIZE:
 				ns->storage_filesize = cfg_i64_no_checks(&line);
@@ -2715,7 +2820,7 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case XDR_CASE_NAMEDPIPE_PATH:
-				c->xdr_cfg.xdr_digestpipe_path = cfg_strdup(&line);
+				c->xdr_cfg.xdr_digestpipe_path = cfg_strdup_no_checks(&line);
 				break;
 			case XDR_CASE_FORWARD_XDR_WRITES:
 				c->xdr_cfg.xdr_forward_xdrwrites = cfg_bool(&line);
@@ -2885,6 +2990,9 @@ as_config_init(const char *config_file)
 			case CASE_SECURITY_LOG_REPORT_AUTHENTICATION:
 				c->sec_cfg.report.authentication |= cfg_bool(&line) ? AS_SEC_SINK_LOG : 0;
 				break;
+			case CASE_SECURITY_LOG_REPORT_DATA_OP:
+				as_security_config_log_scope(AS_SEC_SINK_LOG, line.val_tok_1, line.val_tok_2);
+				break;
 			case CASE_SECURITY_LOG_REPORT_SYS_ADMIN:
 				c->sec_cfg.report.sys_admin |= cfg_bool(&line) ? AS_SEC_SINK_LOG : 0;
 				break;
@@ -2915,6 +3023,9 @@ as_config_init(const char *config_file)
 			case CASE_SECURITY_SYSLOG_REPORT_AUTHENTICATION:
 				c->sec_cfg.report.authentication |= cfg_bool(&line) ? AS_SEC_SINK_SYSLOG : 0;
 				break;
+			case CASE_SECURITY_SYSLOG_REPORT_DATA_OP:
+				as_security_config_log_scope(AS_SEC_SINK_SYSLOG, line.val_tok_1, line.val_tok_2);
+				break;
 			case CASE_SECURITY_SYSLOG_REPORT_SYS_ADMIN:
 				c->sec_cfg.report.sys_admin |= cfg_bool(&line) ? AS_SEC_SINK_SYSLOG : 0;
 				break;
@@ -2944,6 +3055,15 @@ as_config_init(const char *config_file)
 	}
 
 	fclose(FD);
+
+	//--------------------------------------------
+	// Checks that must wait until everything is parsed. Alternatively, such
+	// checks can be done in as_config_post_process() - doing them here means
+	// failure logs show in the console, doing them in as_config_post_process()
+	// means failure logs show in the log file.
+	//
+
+	as_security_config_check();
 
 	return &g_config;
 }
@@ -3120,13 +3240,14 @@ cfg_add_storage_file(as_namespace* ns, char* file_name)
 }
 
 void
-cfg_add_storage_device(as_namespace* ns, char* device_name)
+cfg_add_storage_device(as_namespace* ns, char* device_name, char* shadow_name)
 {
 	int i;
 
 	for (i = 0; i < AS_STORAGE_MAX_DEVICES; i++) {
 		if (! ns->storage_devices[i]) {
 			ns->storage_devices[i] = device_name;
+			ns->storage_shadows[i] = shadow_name;
 			break;
 		}
 	}
@@ -3237,6 +3358,12 @@ cfg_create_all_histograms()
 	create_and_check_hist(&c->write_sindex_hist, "write_sindex", HIST_MILLISECONDS);
 	create_and_check_hist(&c->defrag_storage_close_hist, "defrag_storage_close", HIST_MILLISECONDS);
 	create_and_check_hist(&c->prole_fabric_send_hist, "prole_fabric_send", HIST_MILLISECONDS);
+
+	create_and_check_hist(&c->ldt_multiop_prole_hist, "ldt_multiop_prole", HIST_MILLISECONDS);
+	create_and_check_hist(&c->ldt_io_record_cnt_hist, "ldt_rec_io_count", HIST_RAW);
+	create_and_check_hist(&c->ldt_update_record_cnt_hist, "ldt_rec_update_count", HIST_RAW);
+	create_and_check_hist(&c->ldt_update_io_bytes_hist, "ldt_rec_update_bytes", HIST_RAW);
+	create_and_check_hist(&c->ldt_hist, "ldt", HIST_MILLISECONDS);
 
 #ifdef HISTOGRAM_OBJECT_LATENCY
 	create_and_check_hist(&c->read0_hist, "read_0bucket", HIST_MILLISECONDS);

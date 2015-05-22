@@ -34,6 +34,9 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/param.h>	// for MIN()
+#ifdef USE_DF_DETECT
+#include <sys/syscall.h>
+#endif
 
 #include <citrusleaf/cf_atomic.h>
 #include <citrusleaf/cf_shash.h>
@@ -45,6 +48,13 @@
 // #define USE_CIRCUS 1
 
 // #define EXTRA_CHECKS 1
+
+/*
+ *  Alignment size for aligned allocations.
+ *  (Note:  While 512 works for reading from SSDs in anecdotal laboratory test conditions,
+ *           we're retaining the original page size alignment.)
+ */
+#define VALLOC_SZ    (4096)
 
 // Define this to halt when a memory accounting inconsistency is detected.
 // (Otherwise, simply log the occurrence and keep going.)
@@ -463,6 +473,96 @@ int mallocation_register(mallocation_type_t type, malloc_loc_t loc, ssize_t delt
 	return rv;
 }
 
+#ifdef USE_DF_DETECT
+/*
+ * Double "free()" Detection:
+ *
+ *   Purpose:
+ *   --------
+ *
+ *   Detect potential heap corruption events caused by calling "free()" twice sequentially on
+ *   the same dynamically-allocated memory block pointer.  (The additional per-block bookkeeping
+ *   info. is also very useful when examining memory under a debugger.)
+ *
+ *   Method:
+ *   -------
+ *
+ *   Add a 32-byte "hidden" header before each allocated block of memory(*) with following format:
+ *
+ *        ptr      ==> [ uint64_t:  ptr ^ HEADER_MASK                          ] : Header Signature
+ *        ptr +  8 ==> [ size_t:    original allocation size                   ] : Size of Actual User Data
+ *        ptr + 16 ==> [ uint32_t:  allocating TID | uint32_t:  allocating loc ] : Allocator Information
+ *        ptr + 24 ==> [ uint32_t:  freeing TID    | uint32_t:  freeing loc    ] : Freer Information
+ *    returned ptr ==> [ void *:    ...Actual User Data...                     ] : Actual User Data
+ *
+ *   where TID is the Linux Task ID of the allocating/freeing thread, and loc is the corresponding mallocation.
+ *
+ *   The caller (i.e., code outside of this module) only sees the Actual User Data portion of the block.
+ *
+ *   Whenever a block is (re-)allocated, the header is initialized, setting the Header Signature,
+ *    Size of Actual User Data, and Allocator Information, and the Freer Information is initialized to 0.
+ *
+ *   Whenever a block is freed, first the header is checked:
+ *
+ *     1). For a matching Header Signature.  (If no match, then we may have detected another form for corruption,
+ *          but for now, treat this case "safely" throughout, as if no header exists on this block.)
+ *
+ *     2). For whether the Freer Information is already set:
+ *          A). If so, we have detected a probable double free ~~ Log the damage!!!
+ *          B). If not, set the Freer Information corresponding to the present call.
+ *
+ *     And finally "free()" actually is called:
+ *          If this is a double "free()" (or other heap corruption) and JEMalloc debugging is enabled,
+ *          JEMalloc may now detect the problem via its own internal consistency checks and abort the program.
+ *          Otherwise, a SEGV may be imminent.
+ *
+ *   (*) Note that in the case of aligned allocations, an extra leading page of "VALLOC_SZ" bytes is allocated
+ *        to maintain proper alignment, and the double "free()" detection header is located at the bottom of that page.
+ *        Thus, when freeing aligned allocations (detectable via the original mallocation type), the pointer actually
+ *        freed must point to the start of the aligned allocation block, rather than to the header.
+ *
+ *   Dependencies:
+ *   -------------
+ *
+ *   Double "free()" detection is layered upon the ASMalloc infrastructure, which provides for each program
+ *   source code location where a dynamic memory allocation-related function is called, a unique, small, positive
+ *   integer (a "mallocation") and related utility types and functions.  Thus building with ASMalloc support is
+ *   necessary when using double "free()" detection.  (Pre-loading the ASMalloc library at run time, however,
+ *   is not required.)
+ */
+
+/*
+ *  Size of double "free()" detection header (in bytes.)
+ */
+#define HEADER_SZ    (4 * sizeof(uint64_t))
+
+/*
+ *  Double "free()" detection header signature:
+ *    This mask is to be XOR'd with the pointer value and stored at the pointer location.
+ */
+#define HEADER_MASK  (0x0123456789abcdef)
+
+/*
+ *  Initialize double "free()" detection block header.
+ */
+static void *cf_init_header(void *ptr, size_t size, malloc_loc_t loc)
+{
+	uint64_t *header = (uint64_t *) ptr;
+
+	// Aligned allocations have an extra leading page containing the header at the end.
+	if (MALLOCATION_TYPE_VALLOC == mallocations[loc].type) {
+		header = (uint64_t *) ((char *) ptr + VALLOC_SZ - HEADER_SZ);
+	}
+
+	header[0] = (uint64_t) header ^ HEADER_MASK;
+	header[1] = size;
+	header[2] = (uint64_t) (syscall(SYS_gettid) << 32) | loc;
+	header[3] = 0;
+
+	return (void *) &header[4];
+}
+#endif
+
 /*
  *  Wrapper for "calloc()" that notes the location.
  */
@@ -470,7 +570,19 @@ void *cf_calloc_loc(size_t nmemb, size_t size, malloc_loc_t loc)
 {
 	mallocation_register(MALLOCATION_TYPE_CALLOC, loc, nmemb * size);
 
-	void *retval = calloc(nmemb, size);
+	void *retval = 0;
+
+#ifdef USE_DF_DETECT
+	// XXX -- Uses "malloc()" to emulate "calloc()"!
+	size_t orig_size = nmemb * size, new_size = orig_size + HEADER_SZ;
+	void *ptr = malloc(new_size);
+	if (ptr) {
+		retval = cf_init_header(ptr, orig_size, loc);
+		memset(retval, 0, orig_size);
+	}
+#else
+	retval = calloc(nmemb, size);
+#endif
 
 	return retval;
 }
@@ -482,7 +594,17 @@ void *cf_malloc_loc(size_t size, malloc_loc_t loc)
 {
 	mallocation_register(MALLOCATION_TYPE_MALLOC, loc, size);
 
-	void *retval = malloc(size);
+	void *retval = 0;
+
+#ifdef USE_DF_DETECT
+	size_t new_size = size + HEADER_SZ;
+	void *ptr = malloc(new_size);
+	if (ptr) {
+		retval = cf_init_header(ptr, size, loc);
+	}
+#else
+	retval = malloc(size);
+#endif
 
 	return retval;
 }
@@ -492,6 +614,52 @@ void *cf_malloc_loc(size_t size, malloc_loc_t loc)
  */
 void cf_free_loc(void *ptr, malloc_loc_t loc)
 {
+#ifdef USE_DF_DETECT
+	if (ptr) {
+		char *ptr2 = (char *) ptr - HEADER_SZ;
+		uint64_t *header = (uint64_t *) ptr2;
+
+		if (((uint64_t) ptr2 ^ HEADER_MASK) != header[0]) {
+			cf_warning(CF_ALLOC, "***Notice:  cfl(%p) can't find DF_DETECT header @ File: \"%s\" Line: %d TID %ld***",
+					   ptr, mallocations[loc].file, mallocations[loc].line, syscall(SYS_gettid));
+			// XXX -- Treat this case by assuming no header exists....
+			PRINT_STACK();
+		} else {
+			int mloc = header[2] & ~-(1 << 16);
+
+			if (header[3]) {
+				// [Note:  The double-doublequote prevents unintended macroexpansion in the format string.]
+				cf_warning(CF_ALLOC, "***Detected double cf_""free(%p)!***", ptr);
+
+				size_t msize = (size_t) header[1];
+				int mtid = header[2] >> 32;
+				cf_warning(CF_ALLOC, "***Original cf_""malloc(%zu) @ File: \"%s\" Line: %d TID: %d***",
+						   msize, mallocations[mloc].file, mallocations[mloc].line, mtid);
+
+				int floc = header[3] & ~-(1 << 16);
+				int ftid = header[3] >> 32;
+				cf_warning(CF_ALLOC, "***First cf_""free(%p) @ File: \"%s\" Line: %d TID %d***",
+						   ptr, mallocations[floc].file, mallocations[floc].line, ftid);
+
+				cf_warning(CF_ALLOC, "***Second cf_""free(%p) @ File: \"%s\" Line: %d TID %ld***",
+						   ptr, mallocations[loc].file, mallocations[loc].line, syscall(SYS_gettid));
+
+				PRINT_STACK();
+
+			} else {
+				header[3] = (uint64_t) (syscall(SYS_gettid) << 32) | loc;
+			}
+
+			// Account for the extra leading page containing the header on aligned allocations.
+			if (MALLOCATION_TYPE_VALLOC == mallocations[mloc].type) {
+				ptr2 = ptr - VALLOC_SZ;
+			}
+
+			ptr = ptr2;
+		}
+	}
+#endif
+
 	mallocation_register(MALLOCATION_TYPE_FREE, loc, - malloc_usable_size(ptr));
 
 	free(ptr);
@@ -502,9 +670,100 @@ void cf_free_loc(void *ptr, malloc_loc_t loc)
  */
 void *cf_realloc_loc(void *ptr, size_t size, malloc_loc_t loc)
 {
+	void *retval = 0;
+
+#ifdef USE_DF_DETECT
+	if (size) {
+
+		mallocation_register(MALLOCATION_TYPE_REALLOC, loc, size);
+
+		size_t new_size = size + HEADER_SZ;
+		if (ptr) {
+			// A true "realloc()".
+			bool found_header = false;
+			char *ptr2 = (char *) ptr - HEADER_SZ;
+			uint64_t *header = (uint64_t *) ptr2;
+
+			if (((uint64_t) ptr2 ^ HEADER_MASK) != header[0]) {
+				cf_warning(CF_ALLOC, "***Notice:  crl(%p) [#1] can't find DF_DETECT header @ File: \"%s\" Line: %d TID %ld***",
+						   ptr, mallocations[loc].file, mallocations[loc].line, syscall(SYS_gettid));
+				// XXX -- Treat this case by assuming no header exists....
+				PRINT_STACK();
+			} else {
+				// (NB:  Could do more header validation here.)
+				found_header = true;
+				ptr = ptr2;
+			}
+
+			if ((ptr2 = realloc(ptr, new_size))) {
+				if (found_header) {
+					ptr2 = cf_init_header(ptr2, size, loc);
+				}
+				retval = ptr2;
+			}
+		} else {
+			// Acts like "malloc()".
+			void *ptr2 = realloc(ptr, new_size);
+			if (ptr2) {
+				retval = cf_init_header(ptr2, size, loc);
+			}
+		}
+	} else {
+		// Acts like "free()".
+		if (ptr) {
+			char *ptr2 = (char *) ptr - HEADER_SZ;
+			uint64_t *header = (uint64_t *) ptr2;
+
+			if (((uint64_t) ptr2 ^ HEADER_MASK) != header[0]) {
+				cf_warning(CF_ALLOC, "***Notice:  crl(%p) [#2] can't find DF_DETECT header @ File: \"%s\" Line: %d TID %ld***",
+						   ptr, mallocations[loc].file, mallocations[loc].line, syscall(SYS_gettid));
+				// XXX -- Treat this case by assuming no header exists....
+				PRINT_STACK();
+			} else {
+				int mloc = header[2] & ~-(1 << 16);
+
+				if (header[3]) {
+					cf_warning(CF_ALLOC, "***Detected double cf_""free(%p) [actually cf_realloc\(%p, 0)]!***", ptr,ptr);
+
+					size_t msize = (size_t) header[1];
+					int mtid = header[2] >> 32;
+					cf_warning(CF_ALLOC, "***Original cf_""malloc(%zu) @ File: \"%s\" Line: %d TID: %d***",
+							   msize, mallocations[mloc].file, mallocations[mloc].line, mtid);
+
+					int floc = header[3] & ~-(1 << 16);
+					int ftid = header[3] >> 32;
+					cf_warning(CF_ALLOC, "***First cf_""free(%p) @ File: \"%s\" Line: %d TID %d***",
+							   ptr, mallocations[floc].file, mallocations[floc].line, ftid);
+
+					cf_warning(CF_ALLOC, "***Second cf_""free(%p) @ File: \"%s\" Line: %d TID %ld***",
+							   ptr, mallocations[loc].file, mallocations[loc].line, syscall(SYS_gettid));
+
+					PRINT_STACK();
+				} else {
+					header[3] = (uint64_t) (syscall(SYS_gettid) << 32) | loc;
+				}
+
+				// Account for the extra leading page containing the header on aligned allocations.
+				if (MALLOCATION_TYPE_VALLOC == mallocations[mloc].type) {
+					ptr2 = ptr - VALLOC_SZ;
+				}
+
+				ptr = ptr2;
+			}
+		}
+
+		mallocation_register(MALLOCATION_TYPE_REALLOC, loc, - malloc_usable_size(ptr));
+
+		// XXX -- It's possible for "realloc(p, 0)" to return a non-NULL pointer suitable for passing to "free()".
+		//        (This case is not currently handled using a header, but ?should? still work, just with a "Notice:"
+		//        message and stack being logged by "cf_{free,realloc}_loc()".
+		retval = realloc(ptr, size);
+	}
+#else
 	mallocation_register(MALLOCATION_TYPE_REALLOC, loc, (size ? size : - malloc_usable_size(ptr)));
 
-	void *retval = realloc(ptr, size);
+	retval = realloc(ptr, size);
+#endif
 
 	return retval;
 }
@@ -516,8 +775,23 @@ char *cf_strdup_loc(const char *s, malloc_loc_t loc)
 {
 	mallocation_register(MALLOCATION_TYPE_STRDUP, loc, strlen(s) + 1);
 
+	char *retval = 0;
+
+#ifdef USE_DF_DETECT
+	// XXX -- Uses "malloc()" to emulate "strdup()"!
+	size_t size = strlen(s) + 1;
+	size_t new_size = size + HEADER_SZ;
+	void *ptr = malloc(new_size);
+	if (ptr) {
+		if ((retval = cf_init_header(ptr, size, loc))) {
+			memcpy(retval, s, size - 1);
+			* ((char *) retval + size - 1) = '\0';
+		}
+	}
+#else
 	// Disable inlining of "strdup()".
-	char *retval = (*(&(strdup)))(s);
+	retval = (*(&(strdup)))(s);
+#endif
 
 	return retval;
 }
@@ -529,8 +803,24 @@ char *cf_strndup_loc(const char *s, size_t n, malloc_loc_t loc)
 {
 	mallocation_register(MALLOCATION_TYPE_STRNDUP, loc, n);
 
+	char *retval = 0;
+
+#ifdef USE_DF_DETECT
+	// XXX -- Uses "malloc()" to emulate "strndup()"!
+	size_t size = MIN(strlen(s), n) + 1;
+	size_t new_size = size + HEADER_SZ;
+	void *ptr = malloc(new_size);
+	if (ptr) {
+		if ((retval = cf_init_header(ptr, size, loc))) {
+			memset(retval, 0, size);
+			memcpy(retval, s, size - 1);
+			* ((char *) retval + size - 1) = '\0';
+		}
+	}
+#else
 	// Disable inlining of "strndup()".
-	char *retval = (*(&(strndup)))(s, n);
+	retval = (*(&(strndup)))(s, n);
+#endif
 
 	return retval;
 }
@@ -540,19 +830,24 @@ char *cf_strndup_loc(const char *s, size_t n, malloc_loc_t loc)
  */
 void *cf_valloc_loc(size_t size, malloc_loc_t loc)
 {
-#if 1
 	mallocation_register(MALLOCATION_TYPE_VALLOC, loc, size);
 
-//	cf_debug(CF_ALLOC, "cvl(%lu, %d)\n", size, loc);
-
+	void *retval = 0;
 	void *ptr = 0;
-	void *retval = (!posix_memalign(&ptr, 4096, size) ? ptr : 0);
+
+#ifdef USE_DF_DETECT
+	// NB:  Allocate sufficient extra space to ensure proper alignment when including the header.
+	size_t new_size = size + VALLOC_SZ;
+	retval = (!posix_memalign(&ptr, VALLOC_SZ, new_size) ? ptr : 0);
+
+	if (retval && ptr) {
+		retval = cf_init_header(ptr, size, loc);
+	}
+#else
+	retval = (!posix_memalign(&ptr, VALLOC_SZ, size) ? ptr : 0);
+#endif
 
 	return retval;
-#else
-	// Alternative using regular "malloc()" instead to test for possible aligned allocation causing fragmentation.
-	return cf_malloc_loc(size, loc);
-#endif
 }
 
 /*
@@ -614,7 +909,7 @@ log_mallinfo(void)
 {
 	struct mallinfo mi = mallinfo();
 
-	cf_info(CF_ALLOC, "struct mallinfo *%p = {\n", &mi);
+	cf_info(CF_ALLOC, "struct mallinfo *%p = {", &mi);
 	cf_info(CF_ALLOC, "\tarena = %d;\t\t/* non-mmapped space allocated from system */", mi.arena);
 	cf_info(CF_ALLOC, "\tordblks = %d;\t\t/* number of free chunks */", mi.ordblks);
 	cf_info(CF_ALLOC, "\tsmblks = %d;\t\t/* number of fastbin blocks */ *GLIBC UNUSED*", mi.smblks);
@@ -1471,7 +1766,7 @@ cf_valloc_at(size_t sz, char *file, int line)
 	void *p = 0;
 
 	if (!g_memory_accounting_enabled) {
-		if (0 == posix_memalign(&p, 4096, sz)) {
+		if (0 == posix_memalign(&p, VALLOC_SZ, sz)) {
 			return(p);
 		} else {
 			return(0);
@@ -1480,7 +1775,7 @@ cf_valloc_at(size_t sz, char *file, int line)
 
 	cf_atomic64_incr(&mem_count_vallocs);
 
-	if (0 == posix_memalign(&p, 4096, sz)) {
+	if (0 == posix_memalign(&p, VALLOC_SZ, sz)) {
 		if (SHASH_OK == shash_put_unique(mem_count_shash, &p, &sz)) {
 			update_alloc_at_location(p, sz, CF_ALLOC_TYPE_VALLOC, file, line);
 		} else {
@@ -1763,10 +2058,11 @@ cf_rc_alloc_at(size_t sz, char *file, int line)
 	uint8_t *addr;
 	size_t asz = sizeof(cf_rc_hdr) + sz; // debug for stability - rounds us back to regular alignment on all systems
 
-#ifdef MEM_COUNT
+#if defined(MEM_COUNT) && !defined(USE_ASM)
 	// Track the calling program location.
 	addr = cf_malloc_at(asz, file, line);
 #else
+	// XXX -- Will not track in MEM_COUNT hash table when using ASMalloc!!
 	addr = cf_malloc(asz);
 #endif
 
@@ -1812,9 +2108,10 @@ cf_rc_free_at(void *addr, char *file, int line)
 		cf_alloc_register_free(addr, file, line);
 #endif
 
-#ifdef MEM_COUNT
+#if defined(MEM_COUNT) && !defined(USE_ASM)
 	cf_free_at((void *)hdr, file, line);
 #else
+	// XXX -- Will not track in MEM_COUNT hash table when using ASMalloc!!
 	cf_free((void *)hdr);
 #endif
 

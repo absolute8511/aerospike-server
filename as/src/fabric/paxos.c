@@ -79,9 +79,6 @@
 
 void as_paxos_current_init(as_paxos *p);
 
-// Defined in "partition.c":
-void as_partition_balance_new(cf_node *succession, bool *alive, bool migrate, as_paxos *paxos);
-
 
 /* AS_PAXOS_PROTOCOL_IDENTIFIER
  * Select the appropriate message identifier for the active Paxos protocol. */
@@ -186,6 +183,28 @@ as_paxos_state_next(int s, int next)
 }
 
 /*
+ * Names of the Paxos command messages.
+ * (NB:  Must match order and number of "AS_PAXOS_MSG_COMMAND_*" definitions in "paxos.h".)
+ */
+static char *as_paxos_cmd_name[] = {
+	"UNDEF",
+	"PREPARE",
+	"PREPARE_ACK",
+	"PREPARE_NACK",
+	"COMMIT",
+	"COMMIT_ACK",
+	"COMMIT_NACK",
+	"CONFIRM",
+	"SYNC_REQUEST",
+	"SYNC",
+	"PARTITION_SYNC_REQUEST",
+	"PARTITION_SYNC",
+	"HEARTBEAT_EVENT",
+	"RETRANSMIT_CHECK",
+	"SET_SUCC_LIST"
+};
+
+/*
  * Show the results of the succession list.
  * Stop after the first ZERO entry, but go no longer than AS_CLUSTER_SZ.
  */
@@ -222,9 +241,9 @@ dump_partition_state()
 	for (int index = 0; index < g_config.paxos_max_cluster_size; index++) {
 		if (g_config.paxos->succession[index] == (cf_node) 0)
 			continue;
-		cf_debug(AS_PAXOS, " Node %"PRIx64"",  g_config.paxos->succession[index]);
+		cf_debug(AS_PAXOS, " Node %"PRIx64"", g_config.paxos->succession[index]);
 		for (int i = 0; i < g_config.namespaces; i++) {
-			cf_debug(AS_PAXOS, " Name Space: %s",  g_config.namespace[i]->name);
+			cf_debug(AS_PAXOS, " Name Space: %s", g_config.namespace[i]->name);
 			int k = 0;
 			as_partition_vinfo *parts = g_config.paxos->c_partition_vinfo[i][index];
 			if (NULL == parts) {
@@ -1434,17 +1453,17 @@ void as_paxos_start_second_phase()
 {
 	as_paxos *p = g_config.paxos;
 	cf_node self = g_config.self_node;
+
 	/*
 	 * Generate one uuid and use this for the cluster key
 	 */
 	uint64_t cluster_key = 0;
-	cluster_key = cf_get_rand64();
 
-	if (0 == cluster_key)
-		/* what do we do here? */
-		cf_warning(AS_PAXOS, "null uuid generated");
-
+	// Generate a non-zero cluster key.
+	while (!(cluster_key = cf_get_rand64()))
+	  ;
 	as_paxos_set_cluster_key(cluster_key);
+
 	/*
 	 * Disallow migration requests into this node until we complete partition rebalancing
 	 */
@@ -1539,7 +1558,10 @@ as_paxos_transaction_apply(cf_node from_id)
 					break;
 				case AS_PAXOS_CHANGE_SUCCESSION_REMOVE:
 					cf_debug(AS_PAXOS, "removing failed node %"PRIx64"", t->c.id[i]);
-
+					if (p->principal_pro_tempore == t->c.id[i]) {
+						cf_info(AS_PAXOS, "removed node %"PRIx64" is no longer principal pro tempore", t->c.id[i]);
+						p->principal_pro_tempore = 0;
+					}
 					n_xact++;
 					if (0 != as_paxos_succession_remove(t->c.id[i]))
 						cf_warning(AS_PAXOS, "unable to remove node from succession: %"PRIx64"", t->c.id[i]);
@@ -1771,11 +1793,12 @@ as_paxos_msg_unwrap(msg *m, as_paxos_transaction *t)
 /* as_paxos_send_to_sl
  * Send a msg to the proposed succession list. */
 static int
-as_paxos_send_to_sl(msg *px_msg, int priority)
+as_paxos_send_to_sl(int cmd, as_paxos_transaction *tr, msg *px_msg, int priority)
 {
 	int rv = 0;
 	as_node_list nl;
 	as_paxos *p = g_config.paxos;
+	int succ_list_len = 0, succ_list_num_alive = 0, sent_count = 0;
 
 	nl.sz = 1;
 	nl.nodes[0] = g_config.self_node;
@@ -1785,10 +1808,23 @@ as_paxos_send_to_sl(msg *px_msg, int priority)
 		if ((p->alive[i] && (g_config.self_node != p->succession[i]))) {
 			nl.nodes[(nl.sz)++] = p->succession[i];
 		}
+
+		if (p->succession[i]) {
+			succ_list_len++;
+		}
+
+		if (p->alive[i]) {
+			succ_list_num_alive++;
+		}
 	}
 
+	cf_debug(AS_PAXOS, "Paxos succession list length %d ; num. alive %d", succ_list_len, succ_list_num_alive);
+
 	if (nl.sz == 1) {
-		return as_fabric_send(nl.nodes[0], px_msg, priority);
+		if (!(rv = as_fabric_send(nl.nodes[0], px_msg, priority))) {
+			sent_count++;
+		}
+		goto Done;
 	}
 
 	// careful with the ref count here: need to increment before every
@@ -1797,15 +1833,20 @@ as_paxos_send_to_sl(msg *px_msg, int priority)
 		if (i != nl.sz - 1) {
 			msg_incr_ref(px_msg);
 		}
-		if ((rv = as_fabric_send(nl.nodes[i], px_msg, priority))) {
+		if (!(rv = as_fabric_send(nl.nodes[i], px_msg, priority))) {
+			sent_count++;
+		} else {
 			goto Cleanup;
 		}
 	}
-
-	return rv;
+	goto Done;
 
 Cleanup:
 	as_fabric_msg_put(px_msg);
+
+Done:
+	cf_debug(AS_PAXOS, "sent Paxos command %s for transaction [%d.%d]@%"PRIx64" to %d of %d nodes",
+			 as_paxos_cmd_name[cmd], tr->gen.sequence, tr->gen.proposal, g_config.self_node, sent_count, nl.sz);
 
 	return rv;
 }
@@ -1815,6 +1856,7 @@ Cleanup:
 void
 as_paxos_spark(as_paxos_change *c)
 {
+	as_paxos *p = g_config.paxos;
 	cf_node self = g_config.self_node;
 	as_paxos_transaction *s, t;
 	msg *m = NULL;
@@ -1835,6 +1877,10 @@ as_paxos_spark(as_paxos_change *c)
 	for (int i = 0; i < t.c.n_change; i++) {
 		if (t.c.type[i] == AS_PAXOS_CHANGE_SUCCESSION_REMOVE) {
 			cf_debug(AS_PAXOS, "Node departure %"PRIx64"", t.c.id[i]);
+			if (p->principal_pro_tempore == t.c.id[i]) {
+				cf_info(AS_PAXOS, "in spark, removed node %"PRIx64" is no longer principal pro tempore", t.c.id[i]);
+				p->principal_pro_tempore = 0;
+			}
 			as_paxos_succession_setdeceased(t.c.id[i]);
 			if (false == as_paxos_succession_quorum()) {
 				/*
@@ -1857,8 +1903,34 @@ as_paxos_spark(as_paxos_change *c)
 	t.gen.sequence = as_paxos_current_get_sequence() + 1;
 	t.gen.proposal = 0;
 
-	cf_info(AS_PAXOS, "as_paxos_spark establishing transaction [%"PRIu32".%"PRIu32"]@%"PRIx64" %d first op %d %"PRIx64,
-			t.gen.sequence, t.gen.proposal, g_config.self_node, t.c.n_change, t.c.type[0], t.c.id[0]);
+	char change_buf[AS_CLUSTER_SZ * (2 * sizeof(cf_node) + 6) + 1] = { '\0' };
+	char *op = "", *cb = change_buf;
+	int count = 0;
+	for (int i = 0; i < t.c.n_change; i++) {
+		switch (t.c.type[i]) {
+		  case AS_PAXOS_CHANGE_NOOP:
+			  op = "NOP";
+			  break;
+		  case AS_PAXOS_CHANGE_SYNC:
+			  op = "SYN";
+			  break;
+		  case AS_PAXOS_CHANGE_SUCCESSION_ADD:
+			  op = "ADD";
+			  break;
+		  case AS_PAXOS_CHANGE_SUCCESSION_REMOVE:
+			  op = "DEL";
+			  break;
+		  case AS_PAXOS_CHANGE_UNKNOWN:
+		  default:
+			  op = "UNC";
+			  break;
+		}
+		count = sprintf(cb, "%s %"PRIx64"; ", op, t.c.id[i]);
+		cb += count;
+	}
+	*cb = '\0';
+	cf_info(AS_PAXOS, "as_paxos_spark establishing transaction [%"PRIu32".%"PRIu32"]@%"PRIx64" ClSz = %d ; # change = %d : %s",
+			t.gen.sequence, t.gen.proposal, g_config.self_node, p->cluster_size, t.c.n_change, change_buf);
 
 	/* Populate a new transaction with the change, establish it
 	 * in the pending transaction table, and send the message */
@@ -1867,14 +1939,15 @@ as_paxos_spark(as_paxos_change *c)
 		return;
 	}
 
-	if (NULL == (m = as_paxos_msg_wrap(s, AS_PAXOS_MSG_COMMAND_PREPARE))) {
-		cf_warning(AS_PAXOS, "unable to construct message");
+	int cmd = AS_PAXOS_MSG_COMMAND_PREPARE;
+	if (NULL == (m = as_paxos_msg_wrap(s, cmd))) {
+		cf_warning(AS_PAXOS, "failed to construct Paxos command %s msg", as_paxos_cmd_name[cmd]);
 		return;
 	}
 
 	int rv;
-	if ((rv = as_paxos_send_to_sl(m, AS_FABRIC_PRIORITY_HIGH))) {
-		cf_warning(AS_PAXOS, "sending to sl failed: rv %d", rv);
+	if ((rv = as_paxos_send_to_sl(cmd, s, m, AS_FABRIC_PRIORITY_HIGH))) {
+		cf_warning(AS_PAXOS, "in spark, sending Paxos command %s to successon list failed: rv %d", as_paxos_cmd_name[cmd], rv);
 		as_fabric_msg_put(m);
 	}
 }
@@ -2029,6 +2102,10 @@ as_paxos_process_heartbeat_event(msg *m)
 				break;
 			case FABRIC_NODE_DEPART:
 			case FABRIC_NODE_DUN:
+				if (p->principal_pro_tempore == events[i].nodeid) {
+					cf_info(AS_PAXOS, "departed node %"PRIx64" is no longer principal pro tempore", events[i].nodeid);
+					p->principal_pro_tempore = 0;
+				}
 				if (as_paxos_succession_ismember(events[i].nodeid)) {
 					c.type[j] = AS_PAXOS_CHANGE_SUCCESSION_REMOVE;
 					c.id[j] = events[i].nodeid;
@@ -2475,7 +2552,7 @@ as_paxos_thr(void *arg)
 			goto cleanup;
 		}
 
-		cf_debug(AS_PAXOS, "unwrapped | received paxos message from node %"PRIx64" command %d", qm->id, c);
+		cf_debug(AS_PAXOS, "unwrapped | received paxos message from node %"PRIx64" command %s (%d)", qm->id, as_paxos_cmd_name[c], c);
 
 		if (c == AS_PAXOS_MSG_COMMAND_SET_SUCC_LIST) {
 			as_paxos_process_set_succession_list(t.c.id);
@@ -2630,10 +2707,13 @@ as_paxos_thr(void *arg)
 						break;
 					case AS_PAXOS_TRANSACTION_VOTE_QUORUM:
 						cf_debug(AS_PAXOS, "received ACCEPT vote from %"PRIx64" and reached quorum", qm->id);
-						reply = as_paxos_msg_wrap(s, as_paxos_state_next(c, ACK));
-						int rv;
-						if ((rv = as_paxos_send_to_sl(reply, AS_FABRIC_PRIORITY_HIGH))) {
-							cf_warning(AS_PAXOS, "sending to sl failed: rv %d", rv);
+						int cmd, rv;
+						if (!(reply = as_paxos_msg_wrap(s, cmd = as_paxos_state_next(c, ACK)))) {
+							cf_warning(AS_PAXOS, "failed to wrap Paxos command %s msg", as_paxos_cmd_name[cmd]);
+							break;
+						}
+						if ((rv = as_paxos_send_to_sl(cmd, s, reply, AS_FABRIC_PRIORITY_HIGH))) {
+							cf_warning(AS_PAXOS, "sending Paxos command %s to successon list failed: rv %d", as_paxos_cmd_name[cmd], rv);
 							as_fabric_msg_put(reply);
 						}
 						as_paxos_transaction_vote_reset(s);
@@ -2696,8 +2776,7 @@ as_paxos_thr(void *arg)
 					/* Clean out the sync states array */
 					memset(p->partition_sync_state, 0, sizeof(p->partition_sync_state));
 
-					as_partition_balance_new(0, 0, true, p);
-					// as_partition_balance(0, true);
+					as_partition_balance();
 
 					if (p->cb) {
 						as_paxos_change c;
@@ -2708,6 +2787,20 @@ as_paxos_thr(void *arg)
 							(p->cb[i])(p->gen, &c, p->succession, p->cb_udata[i]);
 					}
 				}
+
+				/*
+				 *  This should not happen, but log a warning if it ever does.
+				 */
+				if (p->principal_pro_tempore && (principal != p->principal_pro_tempore) && (principal != g_config.self_node)) {
+					cf_warning(AS_PAXOS, "joining cluster with non-self principal %"PRIx64" which is not principal pro tempore %"PRIx64,
+							   principal, p->principal_pro_tempore);
+				}
+
+				/*
+				 * The principal pro tempore no longer, but the principal in fact.
+				 */
+				p->principal_pro_tempore = 0;
+
 				/*
 				 * TODO - We need to detect case where paxos messages get lost and retransmit
 				 */
@@ -2733,21 +2826,32 @@ as_paxos_thr(void *arg)
 				 * it is from another principal as part of cluster merge
 				 */
 				principal = as_paxos_succession_getprincipal();
+
 				/*
-				* Check if this new principal out ranks our own principal - could have just arrived
-				* Since it is possible we have not yet removed failed nodes for our state
-				* reject the transaction only if it is also from a node NOT in our current
-				* succession list
-				*/
+				 * Check if this new principal out ranks our own principal - could have just arrived
+				 * Since it is possible we have not yet removed failed nodes for our state
+				 * reject the transaction only if it is also from a node NOT in our current
+				 * succession list
+				 */
 				if ((qm->id < principal) && (false == as_paxos_succession_ismember(qm->id))) {
 					cf_debug(AS_PAXOS, "Ignoring sync message from principal %"PRIx64" < current principal %"PRIx64" and not in succession list", qm->id, principal);
 					break;
 				}
+
 				/*
 				 * Check if the principal sending the node is greater than our current principal or is part of the succession list
 				 */
 				if (self == principal) {
 					cf_debug(AS_PAXOS, "Principal applying sync message from %"PRIx64"", qm->id);
+				}
+
+				/*
+				 * Check if we have already SYNC'd with a greater principal pro tempore.
+				 */
+				if (qm->id < p->principal_pro_tempore) {
+					cf_info(AS_PAXOS, "Ignoring sync message from principal %"PRIx64" < principal pro tempore %"PRIx64,
+							qm->id, p->principal_pro_tempore);
+					break;
 				}
 
 				if (0 != as_paxos_sync_msg_apply(qm->m)) {
@@ -2765,8 +2869,16 @@ as_paxos_thr(void *arg)
 				cf_info(AS_PAXOS, sbuf);
 				as_paxos_print_cluster_key("SYNC MESSAGE");
 
-				if (qm->id != p->succession[0])
+				if (qm->id != p->succession[0]) {
 					cf_warning(AS_PAXOS, "Received paxos sync message from someone who is not principal %"PRIx64"", qm->id);
+				}
+
+				/*
+				 * The incoming SYNC message principal is now our principal pro tempore.
+				 */
+				cf_info(AS_PAXOS, "node %"PRIx64" is %s principal pro tempore",
+						qm->id, (p->principal_pro_tempore != qm->id ? "now" : "still"));
+				p->principal_pro_tempore = qm->id;
 
 				/*
 				 * Send the partition state to the principal as part of
@@ -2834,8 +2946,7 @@ as_paxos_thr(void *arg)
 						* cluster node has had its state updated before starting partition rebalance?
 						* Currently, the answer to this question is "no."
 						*/
-						as_partition_balance_new(0, 0, true, p);
-						// as_partition_balance(0, true);
+						as_partition_balance();
 
 						if (p->cb) {
 							as_paxos_change c;
@@ -2866,8 +2977,7 @@ as_paxos_thr(void *arg)
 				 * We now need to perform migrations as a result of external
 				 * synchronizations, since nodes outside the cluster could contain data due to a cluster merge
 				 */
-				as_partition_balance_new(0, 0, true, p);
-				// as_partition_balance(0, true);
+				as_partition_balance();
 
 				if (p->cb) {
 					as_paxos_change c;
@@ -2901,12 +3011,14 @@ cleanup:
 void
 as_paxos_init()
 {
-	as_paxos *p = NULL;
+	g_config.paxos = cf_calloc(1, sizeof(as_paxos));
+	cf_assert(g_config.paxos, AS_PAXOS, CF_CRITICAL, "allocation: %s", cf_strerror(errno));
 
-	p = cf_calloc(1, sizeof(as_paxos));
-	cf_assert(p, AS_PAXOS, CF_CRITICAL, "allocation: %s", cf_strerror(errno));
-	if (0 != pthread_mutex_init(&p->lock, NULL))
+	as_paxos *p = g_config.paxos; // shortcut pointer
+
+	if (0 != pthread_mutex_init(&p->lock, NULL)) {
 		cf_crash(AS_PAXOS, "unable to init mutex: %s", cf_strerror(errno));
+	}
 
 	as_paxos_set_cluster_integrity(p, false);
 
@@ -2921,117 +3033,102 @@ as_paxos_init()
 	p->cb_udata[0] = NULL;
 
 	// initialize the global structures for storing succession lists from heartbeats
-	memset(g_config.hb_paxos_succ_list_index,  0, sizeof(g_config.hb_paxos_succ_list_index));
+	memset(g_config.hb_paxos_succ_list_index, 0, sizeof(g_config.hb_paxos_succ_list_index));
 	memset(g_config.hb_paxos_succ_list, 0, sizeof(g_config.hb_paxos_succ_list));
 
 	/* Register with the fabric */
-	as_fabric_register_event_fn(&as_paxos_event, p);
-	as_fabric_register_msg_fn(M_TYPE_PAXOS, as_paxos_msg_template, sizeof(as_paxos_msg_template), &as_paxos_msgq_push, p);
+	as_fabric_register_event_fn(&as_paxos_event, NULL);
+	as_fabric_register_msg_fn(M_TYPE_PAXOS, as_paxos_msg_template, sizeof(as_paxos_msg_template), &as_paxos_msgq_push, NULL);
 
 	/* this may not be needed but just do it anyway */
 	memset(p->c_partition_vinfo, 0, sizeof(p->c_partition_vinfo));
 	/* Clean out the sync states array */
 	memset(p->partition_sync_state, 0, sizeof(p->partition_sync_state));
 
-	/* Paxos cluster ignition: start a new cohort with ourselves as the
-	 * principal.  We check if the sequence number is zero to avoid
-	 * re-ignition */
-	if (0 == p->gen.sequence) {
+	memset(p->succession, 0, sizeof(p->succession));
+	p->succession[0] = g_config.self_node;
 
-		memset(p->succession, 0, sizeof(p->succession));
-		p->succession[0] = g_config.self_node;
+	memset(p->alive, 0, sizeof(p->alive));
+	p->alive[0] = true;
 
-		memset(p->alive, 0, sizeof(p->alive));
-		p->alive[0] = true;
+	p->ready = true;
 
-		p->ready = true;
+	// Generate a non-zero cluster key.
+	uint64_t cluster_key;
 
-		/*
-		 * Generate one new key and use this as the Instance ID for all
-		 * the partitions of this newly ignited cluster. The version tree
-		 * path is set to the value "[1]"
-		 */
-		as_partition_vinfo new_vinfo;
-		memset(&new_vinfo, 0, sizeof(new_vinfo));
-		// Generate a non-zero Instance ID.
-		while (!(new_vinfo.iid = cf_get_rand64()))
-		  ;
-		new_vinfo.vtp[0] = (uint16_t)1;
+	while ((cluster_key = cf_get_rand64()) == 0) {
+		;
+	}
 
-		/*
-		 * Set the cluster key
-		 */
-		as_paxos_set_cluster_key(new_vinfo.iid);
-		as_paxos_print_cluster_key("IGNITION");
+	/*
+	 * Set the cluster key
+	 */
+	as_paxos_set_cluster_key(cluster_key);
+	as_paxos_print_cluster_key("IGNITION");
 
-		size_t successful_storage_reads = 0;
-		size_t failed_storage_reads = 0;
-		size_t n_null_storage = 0;
-		size_t n_found_storage = 0;
-		size_t n_uninit_storage = 0;
-		/* Mark all partitions in all namespaces as lost unless there is partition data in storage*/
-		for (int i = 0; i < g_config.namespaces; i++) {
-			/* Initialize every partition's iid and vtp values */
-			as_namespace *ns = g_config.namespace[i];
+	size_t successful_storage_reads = 0;
+	size_t failed_storage_reads = 0;
+	size_t n_null_storage = 0;
+	size_t n_found_storage = 0;
+	size_t n_uninit_storage = 0;
+	/* Mark all partitions in all namespaces as lost unless there is partition data in storage*/
+	for (int i = 0; i < g_config.namespaces; i++) {
+		/* Initialize every partition's iid and vtp values */
+		as_namespace *ns = g_config.namespace[i];
 
-			if (ns->storage_type != AS_STORAGE_ENGINE_MEMORY) { // skip loop if no persistent storage
-				for (int j = 0; j < AS_PARTITIONS; j++) {
-					as_partition_vinfo vinfo;
-					size_t vinfo_len = sizeof(vinfo);
+		if (NAMESPACE_HAS_PERSISTENCE(ns)) { // skip loop if no persistent storage
+			for (int j = 0; j < AS_PARTITIONS; j++) {
+				as_partition_vinfo vinfo;
+				size_t vinfo_len = sizeof(vinfo);
 
-					// Find if the value has been set in storage
-					if (0 == as_storage_info_get(ns, j, (uint8_t *)&vinfo, &vinfo_len)) {
-						successful_storage_reads++;
-						if (vinfo_len == sizeof(as_partition_vinfo)) {
-							cf_debug(AS_PAXOS, "{%s:%d} Partition version read from storage: iid %"PRIx64"", ns->name, j, vinfo.iid);
-							memcpy(&ns->partitions[j].version_info, &vinfo, sizeof(as_partition_vinfo));
-							if (is_partition_null(&vinfo))
-								n_null_storage++;
-							else {
-								cf_debug(AS_PAXOS, "{%s:%d} Partition sucessful revive from storage", ns->name, j);
-								ns->partitions[j].state = AS_PARTITION_STATE_SYNC;
-								n_found_storage++;
-							}
-						}
-						else { // treat partition as lost - common on startup
-							cf_debug(AS_PAXOS, "{%s:%d} Error getting info from storage, got len %d; partition will be treated as lost", ns->name, j, vinfo_len);
-							n_uninit_storage++;
+				// Find if the value has been set in storage
+				if (0 == as_storage_info_get(ns, j, (uint8_t *)&vinfo, &vinfo_len)) {
+					successful_storage_reads++;
+					if (vinfo_len == sizeof(as_partition_vinfo)) {
+						cf_debug(AS_PAXOS, "{%s:%d} Partition version read from storage: iid %"PRIx64"", ns->name, j, vinfo.iid);
+						memcpy(&ns->partitions[j].version_info, &vinfo, sizeof(as_partition_vinfo));
+						if (is_partition_null(&vinfo))
+							n_null_storage++;
+						else {
+							cf_debug(AS_PAXOS, "{%s:%d} Partition successful revive from storage", ns->name, j);
+							ns->partitions[j].state = AS_PARTITION_STATE_SYNC;
+							n_found_storage++;
 						}
 					}
-					else {
-						failed_storage_reads++;
+					else { // treat partition as lost - common on startup
+						cf_debug(AS_PAXOS, "{%s:%d} Error getting info from storage, got len %d; partition will be treated as lost", ns->name, j, vinfo_len);
+						n_uninit_storage++;
 					}
-				} // end for
-			} // end if
-
-			/* Allocate and initialize the global partition state structure */
-			size_t vi_sz = sizeof(as_partition_vinfo) * AS_PARTITIONS;
-			as_partition_vinfo *vi = cf_rc_alloc(vi_sz);
-			cf_assert(vi, AS_PAXOS, CF_CRITICAL, "rc_alloc: %s", cf_strerror(errno));
-			for (int j = 0; j < AS_PARTITIONS; j++)
-				memcpy(&vi[j], &ns->partitions[j].version_info, sizeof(as_partition_vinfo));
-			p->c_partition_vinfo[i][0] = vi;
-
-			/* Initialize the partition sizes array for sending in all Paxos protocol v3 or greater PARTITION_SYNC_REQUEST and PARTITION_SYNC messages. */
-			if (AS_PAXOS_PROTOCOL_IS_AT_LEAST_V(3)) {
-				for (int j = 0; j < AS_PARTITIONS; j++) {
-					p->c_partition_size[i][0][j] = ns->partitions[j].vp ? ns->partitions[j].vp->elements : 0;
-					p->c_partition_size[i][0][j] += ns->partitions[j].sub_vp ? ns->partitions[j].sub_vp->elements : 0;
 				}
+				else {
+					failed_storage_reads++;
+				}
+			} // end for
+		} // end if
+
+		/* Allocate and initialize the global partition state structure */
+		size_t vi_sz = sizeof(as_partition_vinfo) * AS_PARTITIONS;
+		as_partition_vinfo *vi = cf_rc_alloc(vi_sz);
+		cf_assert(vi, AS_PAXOS, CF_CRITICAL, "rc_alloc: %s", cf_strerror(errno));
+		for (int j = 0; j < AS_PARTITIONS; j++)
+			memcpy(&vi[j], &ns->partitions[j].version_info, sizeof(as_partition_vinfo));
+		p->c_partition_vinfo[i][0] = vi;
+
+		/* Initialize the partition sizes array for sending in all Paxos protocol v3 or greater PARTITION_SYNC_REQUEST and PARTITION_SYNC messages. */
+		if (AS_PAXOS_PROTOCOL_IS_AT_LEAST_V(3)) {
+			for (int j = 0; j < AS_PARTITIONS; j++) {
+				p->c_partition_size[i][0][j] = ns->partitions[j].vp ? ns->partitions[j].vp->elements : 0;
+				p->c_partition_size[i][0][j] += ns->partitions[j].sub_vp ? ns->partitions[j].sub_vp->elements : 0;
 			}
 		}
+	}
 
-		cf_debug(AS_PAXOS, "storage info reads: total %d successful %d failed %d", successful_storage_reads + failed_storage_reads, successful_storage_reads, failed_storage_reads);
-		cf_info(AS_PAXOS, "partitions from storage: total %d found %d lost(set) %d lost(unset) %d", n_found_storage + n_null_storage + n_uninit_storage, n_found_storage, n_null_storage, n_uninit_storage);
+	cf_debug(AS_PAXOS, "storage info reads: total %d successful %d failed %d", successful_storage_reads + failed_storage_reads, successful_storage_reads, failed_storage_reads);
+	cf_info(AS_PAXOS, "partitions from storage: total %d found %d lost(set) %d lost(unset) %d", n_found_storage + n_null_storage + n_uninit_storage, n_found_storage, n_null_storage, n_uninit_storage);
 
-		as_partition_balance_new(p->succession, p->alive, false, p);
-		// as_partition_balance(p->succession, false);
+	as_partition_balance_init();
 
-		cf_info(AS_PAXOS, "Paxos service ignited: %"PRIx64, p->succession[0]);
-	} else
-		cf_info(AS_PAXOS, "Paxos ignited: %"PRIx64, g_config.self_node);
-
-	g_config.paxos = p;
+	cf_info(AS_PAXOS, "Paxos service ignited: %"PRIx64, p->succession[0]);
 }
 
 /*
@@ -3108,6 +3205,32 @@ as_paxos_sup_thr(void *arg)
 void
 as_paxos_start()
 {
+	uint32_t wait_ms = g_config.hb_timeout * g_config.hb_interval * 2;
+	uint32_t wait_intervals = wait_ms < 100 ? 1 : wait_ms / 100;
+
+	cf_info(AS_PAXOS, "listening for other nodes (max %u milliseconds) ...",
+			wait_ms);
+
+	while (wait_intervals > 0) {
+		usleep(100000);
+
+		if (as_partition_balance_is_multi_node_cluster()) {
+			// Heartbeats have been received from other node(s) - we'll be in a
+			// multi-node cluster.
+			cf_info(AS_PAXOS, "... other node(s) detected - node will operate in a multi-node cluster");
+			break;
+		}
+
+		wait_intervals--;
+	}
+
+	if (wait_intervals == 0) {
+		// Didn't hear from other nodes, assume we'll be a single node cluster.
+		cf_info(AS_PAXOS, "... no other nodes detected - node will operate as a single-node cluster");
+
+		as_partition_balance_init_single_node_cluster();
+	}
+
 	as_paxos *p = g_config.paxos;
 	pthread_attr_t thr_attr;
 	pthread_t thr_id;

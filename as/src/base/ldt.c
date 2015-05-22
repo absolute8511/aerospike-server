@@ -92,110 +92,178 @@
  *
  *  Major Changes:
  *
- *  - Partition structure will have its own tree from which the LDT subrecord
- *    will be hanging. This is to make sure LDT record and LDT subrecord
- *    has different search space. This is avoid digest collision between two
- *    spaces.
+ *   LDT is different from other data type in following ways which makes life little
+ *   more fun !!! :)
  *
- *  - The LDT subrecord has its own digest to identify it. Following logic is used to
- *    make sure that in entire life of server no two subrecord digest which is
- *    generated repeat.  [See ldt_aerospike.c for randomizer function ]
+ *    1. They spread over multiple record, so making sure entire LDT change moves when 
+ *       doing and migrations and replication. This could span multiple to-fro trip between 
+ *       nodes.
+ *    2. LDT are generally huge sized we need to minimize moving them as much as possible.
+ *    3. Generally operation in the LDT are _NOT_ idempotent (unless user can enforce by 
+ *       himself e.g unique key in Llist) ...
  *
- *      - 12 bits of partition distinguishing bits and hence LDT_SUB for record
- *        in two different partition are in different space. This also means the
- *        when LDT_SUB digest is generated on two different nodes they can never
- *        collide as at any point of time the write to record in a given partition
- *        happens only on one node.
+ * Things to know
  *
- *      - 2 bytes for lock has [2-3] for same lock
+ * - LDT data is organized as, parent records and subrecords (connected to form entire large data). 
+ *   Partition structure will have its own tree from which the LDT subrecord will be hanging. This 
+ *   is to make sure LDT record and LDT subrecord has different search space. This is avoid digest 
+ *   collision between two spaces.
  *
- *      - 3 random bytes to make sure of uniqueness. At a given clock time on
- *        multiple node. [4-6]. The see for this random number if picked from
- *        the digest itself to make it thread safe for a digest.
+ * - LDT Version:
+ *   Each LDT has version in it which is different from the what is in the partition. This version 
+ *   is per LDT, which gets regenerated every time LDT data is migrated from a partition version to 
+ *   another partition version. (signifying something changed in the record). 
  *
- *      - 1 byte to for the storage distribution ... [7]. We want to make sure
- *        LDT subrecord falls on the same device as the LDT record
+ *   This version is embedded in the child sub record. So child subrecord digest look list <SUBD:version> 
+ *   (where last 8 bytes is version). What it means is at any point in time same subrecord can exist 
+ *   as different digest in the Aerospike but the one which version matching parent's version is valid 
+ *   one, others are cleaned up by the background GC task. 
  *
- *      - 6 bytes are based on system clock [8-14]
+ * - The LDT subrecord has its own digest to identify it. Following logic is used to make sure that 
+ *   in entire life of server no two subrecord digest which is generated repeat.  
+ *   [See ldt_aerospike.c for randomizer function ]
  *
- *      - 6 bytes of version which is generated at partition version creation
+ *   - 12 bits of partition distinguishing bits and hence LDT_SUB for record in two different partition 
+ *     are in different space. This also means the when LDT_SUB digest is generated on two different 
+ *     nodes they can never collide as at any point of time the write to record in a given partition
+ *     happens only on one node.
  *
+ *   - 2 bytes for lock has [2-3] for same lock
  *
- *  - Every time partition migrates in it will generate a new version for the given
- *    LDT. This is to make sure that all the incoming subrecord will have new digest
- *    so the subrecord never collide and create new copies. When the parent record
- *    of the winner LDT moves in it will have the partition version stamped in it.
- *    All the subrecord will be lazily / aggressively cleaned up from the system.
- *    [ See migrate.c for the detail code for this ]
+ *   - 3 random bytes to make sure of uniqueness. At a given clock time on multiple node. [4-6]. The 
+ *     seed for this random number if picked from the digest itself to make it thread safe for a digest.
  *
- *  - Read/Write: Because LDT are huge size we cannot ship get op (duplicate
- *    resolution) for entire record. So for the records with LDT bins the request
- *    is send to all the duplicates [writes/UDF] as well, with the protection at
- *    the initiating node (master if it is sync / origin [acting master node] in
- *    case of proxy). In case op is read the result is returned back to the
- *    originating node along with the generation and winner result is sent back
- *    to the client. In case of write after applying UDF then normal replication
- *    is triggered to send result to replica set along with generation. And the
- *    winner generation wins. Need better solution. Also it is necessary to make
- *    sure that the ops have order what it means is when the op is send it gets
- *    executed unless cluster view has changed. [ ldt.c / proxy.c / thr_rw.c to
- *    see the shipped op logic ]
+ *   - 1 byte to for the storage distribution ... [7]. We want to make sure LDT subrecord falls on the 
+ *     same device as the LDT record
+ *
+ *   - 6 bytes are based on system clock [8-14]
+ *
+ *   - 6 bytes of version which is generated at partition version creation
+ *
+ * - Read/Write: Because LDT are huge size we cannot ship get op (duplicate resolution) for entire 
+ *   record. So for the records with LDT bins the request is send to all the duplicates [writes/UDF] 
+ *   as well, with the protection at the initiating node (master if it is sync / origin [acting 
+ *   master node] in case of proxy). In case op is read the result is returned back to the originating 
+ *   node along with the generation and winner result is sent back to the client. In case of write 
+ *   after applying UDF then normal replication is triggered to send result to replica set along with 
+ *   generation. And the winner generation wins. Need better solution. Also it is necessary to make
+ *   sure that the ops have order what it means is when the op is send it gets executed unless cluster 
+ *   view has changed. 
+ *   [ ldt.c / proxy.c / thr_rw.c to see the shipped op logic ]
  *
  *    NB: See code for the details of locking and protection mechanism. And
  *        ACID semantics
  *    NB: See the code comments for the details of reducing the network bandwidth.
  *
- *  - Replication: Replication at both at the time of the duplicates/migration
- *    and at the normal runtime would pack entire changes done to LDT into one
- *    packet and send it over to the replica set. This is to make sure the
- *    Atomic semantics becomes less dependent on the network "finickiness". And
- *    make sure entire thing makes to replica [We still not solved the case
- *    where entire thing either makes to the storage or none makes it. But
- *    that cane be independent additional change]
+ *   Algorithm
+ *   =========
+ *   -- If there are no duplicates; perform LDT UDF execution and replicate
+ *   -- If there are duplicates; find the winning node i.e node with winning LDT record based on parent 
+ *      generation + ttl out of all the duplicate versions (it could be master / primary version / 
+ *      zombie). Ship the operation to that node using proxy subsystem. 
+ *   -- Apply LDT UDF on the winning node and replicate to (master / replica / qnode)
+ * 
  *
- *  - Migration: At the source of migrations the migration runs reduce on the
- *    primary and creates the list of the subrecord which is part of it. Then
- *    it walk through the subrecord and ships the entire list. Along with the
- *    sub record it sends generation of the parent LDT record and also the
- *    partition version. And in the end ships the LDT record.
+ * - Replication: Replication at both at the time of the duplicates/migration and at the normal runtime 
+ *   would pack entire changes done to LDT into one packet and send it over to the replica set. This 
+ *   is to make sure the Atomic semantics becomes less dependent on the network "finickiness". And
+ *   make sure entire thing makes to replica [We still not solved the case where entire thing either 
+ *   makes to the storage or none makes it. But that is independent additional change]
  *
- *    At the target of the migration. All the incoming migrating subrecord
- *    is accepted and inserted into the migrate subrecord tree. The sub record
- *    is not accepted if incoming generation cannot win. [OPTIMIZATION: If
- *    the first subrecord (which is sent along with generation) fails to win
- *    then the entire LDT shipping is aborted to save the network band width]
- *    When finally the parent LDT is received then reduce function is run so
- *    in single context all the subrecord are moved from migrate tree to the
- *    main tree.
+ *   Algorithm
+ *   =========
+ *   Replicating data from Partition X -> Partition Y write subrecord with version as in destination 
+ *   node. And when doing so for Partition X-> Partition Y then write subrecord with version as in source node.
  *
- *    Sub record also has the partition version hidden bin. This is needed
- *    to make sure both version can coexist on the storage. So the cold restart
- *    can handle it. See cold restart logic for more detail of its usage.
+ *   -- After write is applied pack up parent and all the modified sub record in single message along with 
+ *      -- The source partition's current version 
+ *      -- The source current outgoing migration LDT version.
+ *      and send it to master (in case write happens on non-master node) replicas and qnode.
+ *   -- At the destination on receiving the replication request check source partition version and destination 
+ *      partition version. 
+ *      - If the replication request is coming from partition version which is different then
+ *        - For LDT parent record 
+ *        - Skip replication unless there is incoming migration from replication source node and replication 
+ *          is in the RECORD mode.
+ *        - If not migrating it will either be happening in future in that case replicating parent before subrec 
+ *          is order violation or would have been already migrated in this case replication partition would match.
+ *      - For LDT subrec replicate with source ldt version. This could be optimized for certain cases where 
+ *        migration is expected to start in future ... But for now just writing it.
  *
- *  - Expiry / Eviction : Nsup threads only runs on the LDT record tree. If
- *    the parent record is deleted then all the existence subrecord are deleted
- *    from the sub record tree. See the logic the version cleaned and delete
- *    thread logic for sub record tree for details of how subrecord gets cleaned
- *    up. (NOTE: NSup refers to the Namespace Supervisor thread, which takes
- *    care of record expiration and eviction.)
  *
- *  - Warm restart : Both the record and subrecord are tree are allocated from
- *    arena shared memory .. attaching at the boot time simply bring back the
- *    entire state of system as it was when the node went down.
+ * - Migration: At the source of migrations the migration runs reduce in two phase
+ *     Phase 1: Reduce the subrecord tree 
+ *     Phase 2: Reduce record tree and send all the parent records. 
  *
- *  - Subrecord Version clean / delete: A background thread walk through the
- *    sub record main tree and keep checking if the existence record is present
- *    for the LDT subrecord ... if it exists then it checks to see if the LDT
- *    parent record version matches. If it does not match the version of LDT
- *    subrecord is cleaned up. If it matches the version is retained. In case
- *    existence sub record is missing the subrecord is cleaned up from the
- *    sub record tree.
+ *   When migrating data from one partition version to another unless entire record is moved existing 
+ *   subrecord cannot be overwritten at the destination... this could cause data corruption if the 
+ *   parent never makes it. So whenever the subrecord is moved from one partition version to another 
+ *   new version for the subrecord is introduced ...
+ 
+ *   Every time partition migrates in it will generate a new version for the given LDT. This is to make
+ *   sure that all the incoming subrecord will have new digest so the subrecord never collide and create 
+ *   new copies. When the parent record of the winner LDT moves in it will have the partition version 
+ *   stamped in it. All the subrecord will be lazily / aggressively cleaned up from the system.
+ *    [ See migrate.c for the detail code for this ]
  *
- *    NB: When the bin is deletes the ESR record is simply deleted from the
- *    sub record tree. And LDT subrecords are lazily cleaned up.
+ *   Algorithm
+ *   =========
+ *   - While migrating,  all subrecord should make it to the destination node before the parent node makes it
+ *   - While there is incoming or outgoing migration writes / read from the record should not fail.
+ *   - Migration from Partition X -> Partition Y creates new version of subrecord. System needs to be 
+ *     protected it from being GC. 
  *
- *    See the details in code in case two different ESR show up for two
- *    different versions of LDT.
+ *   Migration Source
+ *   - Generate migration LDT version number (only done once per outgoing migration at the start of migration and
+ *     is used by all LDT in that migration cycle) and send over to the node along with MIG_START message and node name.
+ *   - Set partition state to MIG_SUBRECORD_TX and Reduce sub record tree and send sub record along with
+ *     - Sub record generation
+ *     - Current migration ldt version
+ *     - Parent record generation and ttl
+ *   - Set partition state to MIG_RECORD_TX and Reduce parent record tree and send parent record with
+ *     - Current migration version
+ *     - Parent record generation and ttl.
+ *   - When migration finishes or aborts, Set partition MIG_NONE_TX.
+ *   - Restart from step one after new partition migration.
+ *
+ *   Migration Destination
+ *   - On receiving MIG_START request create mig object and track node wise current incoming version number.
+ *   - Move partition rx_state to MIG_SUBRECORD_RX.
+ *   - On receiving incoming SUB_RECORD migrate, check if the parent has winning generation if yes write the sub 
+ *     record with current incoming ldt version. If not drop the incoming.
+ *   - If this is first RECORD then move partition to state MIG_RECORD_RX.
+ *   - On receiving incoming RECORD, check for the winner generation if yes then write the Parent record with 
+ *     new version. If not drop the incoming.
+ *   - When migration finishes or aborts remove entry node->current incoming ldt version entry from tracking DS
+ *     and move partition to MIG_RECORD_NONE_TX state.
+ *     
+ * - Expiry / Eviction : Nsup threads only runs on the LDT record tree. If the parent record is deleted then 
+ *   all the existence subrecord are deleted from the sub record tree. See the logic the version cleaned and 
+ *   delete thread logic for sub record tree for details of how subrecord gets cleaned up. (NOTE: NSup refers 
+ *   to the Namespace Supervisor thread, which takes care of record expiration and eviction.)
+ *
+ *  - Warm restart : Both the record and subrecord are tree are allocated from arena shared memory .. attaching 
+ *    at the boot time simply bring back the entire state of system as it was when the node went down.
+ *
+ *  - Subrecord Version clean / delete: A background thread walk through the sub record main tree and keep 
+ *    checking if the existence record is present for the LDT subrecord ... if it exists then it checks to see 
+ *    if the LDT parent record version matches. If it does not match the version of LDT subrecord is cleaned up. 
+ *    If it matches the version is retained. In case existence sub record is missing the subrecord is cleaned 
+ *    up from the sub record tree.
+ *
+ *    NB: When the bin is deletes the ESR record is simply deleted from the sub record tree. And LDT subrecords 
+ *    are lazily cleaned up.
+ *
+ *    See the details in code in case two different ESR show up for two different versions of LDT.
+ *
+ *    Algorithm
+ *    =========
+ *    - Reduce sub record tree and check for
+ *      - If parent is around
+ *      - if ESR is around
+ *      - if parent version matches sub record version.
+ *    - Skip all the above check if the current partition state is SUBRECORD_RX or RECORD_RX and tracking 
+ *      DS has entry for the incoming ldt version entry.
  *
  *  - Defrag : Defrag when walking through storage looks up key in both record
  *    tree and sub record tree. If not found the record is candidate for defrag.
@@ -207,6 +275,7 @@
 #include <base/ldt.h>
 #include <base/ldt_record.h>
 #include <fabric/fabric.h>
+#include <fabric/migrate.h>
 #include <base/thr_rw_internal.h>
 #include <base/write_request.h>
 #include "base/thr_proxy.h"
@@ -253,36 +322,6 @@
 //-- Note that we've tried to make the mapping somewhat cannonical where
 //-- possible.
 //
-// Here are the fields (the contents) of the Property Maps.  We've annotated
-// the fields that are used by TopRecords and SubRecords (and both).
-// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#define PM_ItemCount             'I' // (Top): Count of all items in LDT
-#define PM_Version               'V' // (Top): Code Version
-#define PM_LdtType               'T' // (Top): Type: stack, set, map, list
-#define PM_BinName               'B' // (Top): LDT Bin Name
-#define PM_Magic                 'Z' // (All): Special Sauce
-#define PM_EsrDigest             'E' // (All): Digest of ESR
-#define PM_RecType               'R' // (All): Type of Rec:Top,Ldr,Esr,CDir
-#define PM_LogInfo               'L' // (All): Log Info (currently unused)
-#define PM_ParentDigest          'P' // (Subrec): Digest of TopRec
-#define PM_SelfDigest            'D' // (Subrec): Digest of THIS Record
-
-// Here are the fields that are found in the SINGLE "Hidden" LDT Control Map.
-//-- ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//-- Record Level Property Map (RPM) Fields: One RPM per record
-//-- ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#define RPM_LdtCount             'C'  // Number of LDTs in this rec
-#define RPM_Version              'V'  // Partition Version Info (6 bytes)
-#define RPM_Magic                'Z'  // Special Sauce
-#define RPM_SelfDigest           'D'  // Digest of this record
-
-
-// Define the LDT Hidden Bin Name -- for any record that contains LDTs
-#define REC_LDT_CTRL_BIN         "LDTCONTROLBIN"
-
-// Define the Property Map Bin Name for Sub Records
-#define SUBREC_PROP_BIN          "SR_PROP_BIN"
-#define LDT_VERSION_SZ           6
 
 
 //------------------------------------------------------------------------------
@@ -307,19 +346,37 @@ typedef struct ldt_op_props_s {
 const ldt_op_props LLIST_OP_PROPS[] = {
 		{ "add",			LDT_WRITE_OP },
 		{ "add_all",		LDT_WRITE_OP },
-		{ "destroy",		LDT_WRITE_OP },
+		{ "config",			LDT_READ_OP },
+		{ "destroy",		LDT_WRITE_OP },		
+		{ "exists",			LDT_READ_OP },
 		{ "filter",			LDT_READ_OP },
 		{ "find",			LDT_READ_OP },
+		{ "take",			LDT_WRITE_OP },
+		{ "find_from",		LDT_READ_OP },
+		{ "take_from",		LDT_WRITE_OP },
+		{ "find_first",		LDT_READ_OP },
+		{ "take_first",		LDT_WRITE_OP },
+		{ "find_last",		LDT_READ_OP },
+		{ "take_last",		LDT_WRITE_OP },
+		{ "find_range",		LDT_READ_OP },
+		{ "take_range",		LDT_WRITE_OP },
+		{ "find_range_lim",	LDT_READ_OP },
+		{ "take_range_lim",	LDT_WRITE_OP },
 		{ "get_capacity",	LDT_READ_OP },
 		{ "ldt_exists",		LDT_READ_OP },
 		{ "range",			LDT_READ_OP },
 		{ "remove",			LDT_WRITE_OP },
+		{ "remove_all",		LDT_WRITE_OP },
+		{ "remove_range",	LDT_WRITE_OP },
 		{ "scan",			LDT_READ_OP },
-		{ "set_capacity",	LDT_WRITE_OP },
-		{ "size",			LDT_READ_OP }
+		{ "setPageSize",	LDT_WRITE_OP },
+		{ "size",			LDT_READ_OP },
+		{ "update",			LDT_WRITE_OP },
+		{ "update_all",		LDT_WRITE_OP }
 };
 
 const ldt_op_props LMAP_OP_PROPS[] = {
+		{ "config",			LDT_READ_OP },
 		{ "destroy",		LDT_WRITE_OP },
 		{ "filter",			LDT_READ_OP },
 		{ "get",			LDT_READ_OP },
@@ -336,6 +393,7 @@ const ldt_op_props LMAP_OP_PROPS[] = {
 const ldt_op_props LSET_OP_PROPS[] = {
 		{ "add",			LDT_WRITE_OP },
 		{ "add_all",		LDT_WRITE_OP },
+		{ "config",			LDT_READ_OP },
 		{ "destroy",		LDT_WRITE_OP },
 		{ "exists",			LDT_READ_OP },
 		{ "filter",			LDT_READ_OP },
@@ -349,6 +407,7 @@ const ldt_op_props LSET_OP_PROPS[] = {
 };
 
 const ldt_op_props LSTACK_OP_PROPS[] = {
+		{ "config",			LDT_READ_OP },
 		{ "destroy",		LDT_WRITE_OP },
 		{ "filter",			LDT_READ_OP },
 		{ "get_capacity",	LDT_READ_OP },
@@ -521,16 +580,13 @@ void
 as_ldt_subrec_storage_validate(as_storage_rd *rd, char *op)
 {
 	if (!as_ldt_record_is_sub(rd->r)) {
-		cf_warning(AS_LDT, "LDT_INDEXBITS SUBREC bit not set in SUBREC index");
+		cf_warning(AS_LDT, "as_ldt_subrec_storage_validate %s: LDT_INDEXBITS SUBREC bit not set in SUBREC index", op);
 	}
 
 	cf_digest esr_digest;
-	if (as_ldt_subrec_storage_get_edigest(rd, &esr_digest)) {
-		cf_detail(AS_LDT, "Cannot get esr digest");
-	}
 	cf_digest parent_digest;
-	if (as_ldt_subrec_storage_get_pdigest(rd, &parent_digest)) {
-		cf_detail(AS_LDT, "Cannot get parent digest");
+	if (as_ldt_subrec_storage_get_digests(rd, &esr_digest, &parent_digest)) {
+		cf_warning(AS_LDT, "as_ldt_subrec_storage_validate %s Parent or ESR digest not set in subrecord", op);
 	}
 
 	as_partition_id  esr_pid    = as_partition_getid(esr_digest);
@@ -594,7 +650,7 @@ as_ldt_subrec_storage_validate(as_storage_rd *rd, char *op)
  *
  */
 void
-as_ldt_digest_randomizer(as_namespace *ns, cf_digest *dig)
+as_ldt_digest_randomizer(cf_digest *dig)
 {
 	// 4 Bytes Randomizer. srand() and rand() used to make things node safe and
 	// thread safe
@@ -681,6 +737,11 @@ as_ldt_digest_randomizer(as_namespace *ns, cf_digest *dig)
  *     the same node all the time which is kind of difficult. Other options
  *     is all the ops go to all the nodes. And no replication happens and let
  *     the record come in the normal course of replication.
+ *
+ * Note: Invariant of the problems it is ok to perform retries of shipop etc.
+ *       duplicate data is deemed lesser of evil that no data. Also the effect
+ *       is the DS specific. For timeseries any retry will result in the unique
+ *       key contraint in LLIST or in case of LSET or LMAP the op may be idempotent
  */
 int
 as_ldt_shipop(write_request *wr, cf_node dest_node)
@@ -692,10 +753,10 @@ as_ldt_shipop(write_request *wr, cf_node dest_node)
 }
 
 extern int as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
-									   as_index_ref *r_ref, as_record_merge_component *c);
+									   as_index_ref *r_ref, as_record_merge_component *c, bool *delete_record);
 int
 as_ldt_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
-					as_index_ref *r_ref, as_record_merge_component *c)
+					as_index_ref *r_ref, as_record_merge_component *c, bool *delete_record)
 {
 
 	// Setup index flags
@@ -710,7 +771,7 @@ as_ldt_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 	}
 
 	// default to normal record flattening
-	return as_record_flatten_component(rsv, rd, r_ref, c);
+	return as_record_flatten_component(rsv, rd, r_ref, c, delete_record);
 }
 
 /*
@@ -809,7 +870,7 @@ as_ldt_get_from_map(const as_map *prop_map, char prop_type, void *value)
 int
 as_ldt_set_in_map(as_map *prop_map, char prop_type, void *value)
 {
-	cf_debug(AS_LDT, "[ENTER] PropType(%c)", prop_type );
+	cf_detail(AS_LDT, "[ENTER] PropType(%c)", prop_type );
 
 	int rv = 0;
 	switch(prop_type) {
@@ -832,7 +893,7 @@ as_ldt_set_in_map(as_map *prop_map, char prop_type, void *value)
 					cf_free(valstr2);
 				}
 			} else {
-				cf_detail(AS_LDT, "Failed to set version %c=%d",
+				cf_debug(AS_LDT, "Failed to set version %c=%d",
 						prop_type, ldt_version);
 				// note: not necessary to destroy key_val here.
 				rv = -2;
@@ -855,11 +916,11 @@ as_ldt_set_in_map(as_map *prop_map, char prop_type, void *value)
  * 			rd:          Record to set version into.
  * 			ldt_version: 5 LSB as version for 8 passed in bytes
  *
- * Returns: 0 in case of success
- *          o/w failure
+ * Returns: <0 in case of failure
+ * 			>0  number of bytes copied in case of success
  */
 int
-as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8_t *pp_stack_particles)
+as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8_t *pp_stack_particles, char *fname, int lineno)
 {
 	// No op when version is disabled
 	if (!rd->ns->ldt_enabled)
@@ -868,12 +929,12 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 	as_bin * binp           = as_bin_get(rd, (byte *)REC_LDT_CTRL_BIN, strlen(REC_LDT_CTRL_BIN));
 	int rv                  = 0;
 	if (!binp) {
-		cf_debug(AS_LDT, "Control bin not found");
+		cf_warning_digest(AS_LDT, &rd->keyd, "as_ldt_parent_storage_set_version: [LDT Control bin not found %s %d]", fname, lineno);
 		return -1;
 	}
 	as_val * valp           = as_val_frombin( binp );
 	if (!valp) {
-		cf_debug(AS_LDT, "Control bin not found");
+		cf_warning(AS_LDT, "as_ldt_parent_storage_set_version : [LDT Control bin Deserialization error]... Fail");
 		return -2;
 	}
 
@@ -882,21 +943,23 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 	// type that we're extracting.
 	as_map * prop_map        = as_map_fromval(valp);
 	if( !prop_map ) {
-		cf_warning(AS_LDT, "Control bin is not of type MAP");
+		cf_warning(AS_LDT, "as_ldt_parent_storage_set_version: [LDT Control bin is not of type MAP]... Fail");
 		as_val_destroy(valp);
 		return -2;
 	}
 	rv = as_ldt_set_in_map(prop_map, RPM_Version, (void *)&ldt_version);
 
 	if (rv) {
-		cf_debug(AS_LDT, "Could not set map ");
+		cf_warning(AS_LDT, "as_ldt_parent_storage_set_version: [LDT Control bin version cannot be set rv=%d] ... Fail", rv);
 		as_val_destroy(valp);
 		return -3;
 	}
-	// as_val_tostring() values must always be captured and freed.
-	char * valstr =  as_val_tostring(valp);
-	cf_detail(AS_LDT, "After property map set result %s", valstr );
-	cf_free(valstr);
+	if ( DEBUG ) {
+		// as_val_tostring() values must always be captured and freed.
+		char * valstr =  as_val_tostring(valp);
+		cf_detail(AS_LDT, "After property map set result %s", valstr );
+		cf_free(valstr);
+	}
 
 	// Abstract it out in some API .. bad duplication here  ...
 	as_buffer buf;
@@ -906,7 +969,7 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 	int res = as_serializer_serialize(&s, valp, &buf);
 
 	if (res != 0) {
-		cf_warning(AS_LDT, "Map serialization failure (%d), res");
+		cf_warning(AS_LDT, "as_ldt_parent_storage_set_version: Map serialization failure (%d), res");
 		as_serializer_destroy(&s);
 		as_buffer_destroy(&buf);
 		as_val_destroy(valp);
@@ -933,6 +996,8 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 	as_serializer_destroy(&s);
 	as_buffer_destroy(&buf);
 	as_val_destroy(valp);
+	cf_debug(AS_LDT, "(%s:%d) Setting parent version to %ld %d", fname, lineno, ldt_version,rd->r->generation);
+	//PRINT_STACK();
 
 	rd->write_to_device = true;
 	return pbytes;
@@ -952,7 +1017,7 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
  * Parameter: vinfo (out) gets populated with the version information
  */
 int
-as_ldt_parent_storage_get_version(as_storage_rd *rd, uint64_t *ldt_version)
+as_ldt_parent_storage_get_version(as_storage_rd *rd, uint64_t *ldt_version, bool no_fail, char *fname, int lineno)
 {
 	// No op when version is disabled
 	if (!rd->ns->ldt_enabled)
@@ -963,26 +1028,36 @@ as_ldt_parent_storage_get_version(as_storage_rd *rd, uint64_t *ldt_version)
 	int       rv            = 0;
 	if (!binp) {
 		if (as_ldt_record_is_parent(rd->r)) {
-			cf_warning(AS_LDT, "Control bin not found LDT parent record");
+			if (no_fail) {
+				cf_warning_digest(AS_LDT, &rd->keyd, "Control bin not found LDT parent record %s %d", fname, lineno);
+			}
 		} else {
-			cf_detail(AS_LDT, "Control bin not found");
+			cf_debug(AS_LDT, "Control bin not found");
 		}
 		rv                      = -1;
 	} else {
 		const as_val * valp           = as_val_frombin( binp );
+		if (!valp) {
+			if (no_fail) {
+				cf_warning(AS_LDT, "Property Bin %s Corrupted", REC_LDT_CTRL_BIN);
+			}
+			return -2;
+		}
+
 		// We must always retrieve typed values from as_val using the type specific
 		// accessor function -- which will return NULL if we guessed wrong on the
 		// type that we're extracting.
 		const as_map * prop_map        = as_map_fromval(valp);
 		if( !prop_map ) {
 			cf_warning(AS_LDT, "Control bin is not of type MAP");
+			as_val_destroy(valp);
 			return -2;
 		}
 
 		rv                      = as_ldt_get_from_map(prop_map, RPM_Version, (void *)ldt_version);
 		as_val_destroy(valp);
 	}
-	cf_detail(AS_LDT, "Version Search find %ld with rv = %d", *ldt_version, rv);
+	cf_debug(AS_LDT, "(%s,%d)Version Search find %ld with rv = %d", fname, lineno, *ldt_version, rv);
 	return rv;
 }
 
@@ -1005,10 +1080,10 @@ as_ldt_parent_storage_get_version(as_storage_rd *rd, uint64_t *ldt_version)
  *          o/w failure
  */
 int
-as_ldt_subrec_storage_get_digest(as_storage_rd *rd, char digest_type, cf_digest *keyd)
+as_ldt_subrec_storage_get_digests(as_storage_rd *rd, cf_digest *edigest, cf_digest *pdigest)
 {
-	if (!rd || !keyd) {
-		cf_warning(AS_LDT, "Invalid Paramter [%p %p]", rd, keyd);
+	if (!rd) {
+		cf_warning(AS_LDT, "Invalid Paramter [%p]", rd);
 		return -1;
 	}
 
@@ -1023,9 +1098,7 @@ as_ldt_subrec_storage_get_digest(as_storage_rd *rd, char digest_type, cf_digest 
 		cf_warning(AS_LDT, "Property Bin %s Corrupted", SUBREC_PROP_BIN);
 		return -2;
 	}
-	cf_debug(AS_LDT, "Got a value from the bin: type(%d)", valp->type);
-
-//	const as_map * prop_map    = as_map_fromval(valp); // keep this step for debugging
+	cf_detail(AS_LDT, "Got a value from the bin: type(%d)", valp->type);
 
 	// We must always retrieve typed values from as_val using the type specific
 	// accessor function -- which will return NULL if we guessed wrong on the
@@ -1036,40 +1109,24 @@ as_ldt_subrec_storage_get_digest(as_storage_rd *rd, char digest_type, cf_digest 
 		return -2;
 	}
 
-	// when using as_val_tostring(), always place in a temp var and
-	// then free it after use.
-	char * valstr = as_val_tostring( valp );
-	cf_debug(AS_LDT, "Map %s", valstr );
-	cf_free(valstr);
-
-	if (as_ldt_get_from_map(prop_map, digest_type, keyd)) {
-		as_val_destroy(valp);
-		cf_warning(AS_LDT, "Property Bin %s Corrupted cannot get %c digest",
-				SUBREC_PROP_BIN, digest_type);
-		return -3;
+	if ( DEBUG ) {
+		// when using as_val_tostring(), always place in a temp var and
+		// then free it after use.
+		char * valstr = as_val_tostring( valp );
+		cf_debug(AS_LDT, "Map %s", valstr );
+		cf_free(valstr);
+	}
+	int rv  = 0;
+	if ((edigest && as_ldt_get_from_map(prop_map, PM_EsrDigest, edigest)) 
+			|| (pdigest && as_ldt_get_from_map(prop_map, PM_ParentDigest, pdigest))) {
+		cf_warning(AS_LDT, "as_ldt_subrec_storage_get_digests: Property Bin %s Corrupted "
+				" [Cannot get esr or parent digest]... Fail", SUBREC_PROP_BIN);
+		rv = -3;
 	}
 	as_val_destroy(valp);
-	return 0;
+	return rv;
 }
 
-
-/*
- * Return the digest of the sub record's parent.
- */
-int
-as_ldt_subrec_storage_get_pdigest(as_storage_rd *rd, cf_digest *keyd)
-{
-	return as_ldt_subrec_storage_get_digest(rd, PM_ParentDigest, keyd);
-}
-
-/*
- * Return the digest of the sub record's Existence Sub Record.
- */
-int
-as_ldt_subrec_storage_get_edigest(as_storage_rd *rd, cf_digest *keyd)
-{
-	return as_ldt_subrec_storage_get_digest(rd, PM_EsrDigest, keyd);
-}
 
 inline void
 as_ldt_record_set_rectype_bits(as_index *r, const as_rec_props *props)
@@ -1141,7 +1198,7 @@ as_ldt_flag_has_parent(uint16_t flag)
  * ESR record when opened in here is with skip_lock.
  */
 bool
-as_ldt_version_match(uint64_t subrec_version, as_index_tree *tree, cf_digest *keyd, as_namespace *ns)
+as_ldt_is_parent_and_version_match(uint64_t subrec_version, as_index_tree *tree, cf_digest *keyd, as_namespace *ns)
 {
 	int rv = 0;
 	as_storage_rd rd;
@@ -1156,15 +1213,11 @@ as_ldt_version_match(uint64_t subrec_version, as_index_tree *tree, cf_digest *ke
 
 	if (!as_ldt_record_is_parent(r)) {
 		// if parent is not a LDT parent version does not match
-		cf_warning(AS_LDT, "LDT_INDEXBIT Expected Parent Bits Not Found");
+		cf_debug(AS_LDT, "LDT_INDEXBIT Expected Parent Bits Not Found");
 		as_record_done(&r_ref, ns);
 		return false;
 	}
 
-	// TODO: this is inefficient for defrag. It will blow up number of I/O that
-	// is performed ...
-	// TODO: Need to make sure version info is in the index for storage
-	// on disk case
 	rv              = as_storage_record_open(ns, r, &rd, keyd);
 	if (0 != rv) {
 		cf_warning_digest(AS_UDF, keyd,
@@ -1172,19 +1225,20 @@ as_ldt_version_match(uint64_t subrec_version, as_index_tree *tree, cf_digest *ke
 		as_record_done(&r_ref, ns);
 		return false;
 	}
+	cf_atomic_int_incr(&ns->lstats.ldt_gc_io);
 	rd.n_bins = as_bin_get_n_bins(r, &rd);
 	as_bin stack_bins[rd.ns->storage_data_in_memory ? 0 : rd.n_bins];
 	rd.bins = as_bin_get_all(r, &rd, stack_bins);
 
 	uint64_t parent_version = 0;
-	rv = as_ldt_parent_storage_get_version(&rd, &parent_version);
+	rv = as_ldt_parent_storage_get_version(&rd, &parent_version, false, __FILE__, __LINE__);
 	if (0 != rv) {
-		cf_detail(AS_LDT, "LDT_SUB_GC Something wrong could not get LDT parent version rv = %d", rv);
+		cf_debug(AS_LDT, "LDT_SUB_GC Something wrong could not get LDT parent version rv = %d", rv);
 		goto Cleanup;
 	}
 
-	cf_detail(AS_LDT, "LDT_SUB_GC Subrec and parent version check %"PRIx64" %ld != %ld %p",
-			  *(uint64_t *)keyd, parent_version, subrec_version, rd.r);
+	cf_debug_digest(AS_LDT, keyd, "LDT_SUB_GC Subrec and parent version check %ld != %ld %p",
+			  parent_version, subrec_version, rd.r);
 	if (parent_version == subrec_version) {
 		rv = 0;
 	} else {
@@ -1226,13 +1280,15 @@ Cleanup:
  *
  * Parameter: None
  *
- * TODO: make sure this starts after the data is already loaded
- * from the disk
- *
  * TODO: Not needed once we have 128byte subrecord index record
  * need to be opened only in case of storage in memory case, for storage
  * acccounting
+ *
+ * TODO: IO efficiency track LDT_GC_IO
  */
+#define LDT_SUB_GC_NO_ESR                      1
+#define LDT_SUB_GC_NO_PARENT                   2
+#define LDT_SUB_GC_PARENT_VERSION_MISMATCH     3
 void
 as_ldt_sub_gc_fn(as_index_ref *r_ref, void *udata)
 {
@@ -1241,23 +1297,28 @@ as_ldt_sub_gc_fn(as_index_ref *r_ref, void *udata)
 	as_namespace *ns        = linfo->ns;
 	as_partition *p         = &ns->partitions[as_partition_getid(r->key)];
 
-	// If record is migrating avoid sub tree GC in general. But it is too big
-	// a window ... We can actually migrate when the partition is sending out
-	// data ...fix it !!!
-	if ((p->rxstate == AS_PARTITION_MIG_RX_STATE_RECORD)
-			|| (p->rxstate == AS_PARTITION_MIG_RX_STATE_SUBRECORD)) {
-		cf_detail(AS_LDT, " Skipping Defrag Partition Mig State is RECV_SUBRECORD");
+	// Miscellaneous Checks
+	if (!as_ldt_record_is_sub(r)) {
+		cf_warning(AS_LDT, "LDT_SUB_GC: Missing Index bits !!");
 		as_record_done(r_ref, ns);
 		return;
 	}
+	cf_atomic_int_incr(&ns->lstats.ldt_gc_processed);
 
-	// TODO: Enable the check
-	//	if (r->void_time != 0) {
-	//		cf_warning(AS_LDT, "No void time should be set in subrecord !!! found %d", r->void_time);
-	//	}
+	if (r->void_time != 0) {
+		cf_debug(AS_LDT, "No void time should be set in subrecord !!! found %d", r->void_time);
+	}
 
-	if (!as_ldt_record_is_sub(r)) {
-		cf_warning(AS_LDT, "LDT_Defrag: Missing Index bits !!");
+	// Subrecord Version
+	cf_digest subrec_digest = r->key;
+	uint64_t subrec_version = as_ldt_subdigest_getversion(&subrec_digest);
+	cf_detail(AS_LDT, "LDT_SUB_GC Sub Record Version %ld", subrec_version);
+
+	// If there is incoming migration and subrecord is of incoming migration, then
+	// skip it. The parent may not have made it yet so garbage collecting this would
+	// be problem.
+	if (true == as_migrate_is_incoming(&subrec_digest, subrec_version, p->partition_id, 0)) {
+		cf_detail(AS_LDT, " LDT_SUB_GC Skipping Defrag for version %ld ", subrec_version);
 		as_record_done(r_ref, ns);
 		return;
 	}
@@ -1267,42 +1328,33 @@ as_ldt_sub_gc_fn(as_index_ref *r_ref, void *udata)
 	// b) ESR DIGEST
 	// c) VERSION
 	// d) For in-memory case memory usage
-	//
-	//
-	// TODO: Needs Improvement.
-	// Once subrecord tree is 128byte push all the info about parent and esr
-	// and version in there ... and do not do IO. Potential excessive I/O.
+
+	// LDT_GC_IO: SUBRECORD
 	as_storage_rd rd;
 	int rv                  = as_storage_record_open(ns, r, &rd, &r->key);
-	cf_digest subrec_digest = rd.keyd;
 	if (0 != rv) {
 		cf_warning(AS_UDF, "LDT_SUB_GC Could not open record %"PRIx64"!! rv=%d", *(uint64_t *)&rd.keyd, rv);
 		as_record_done(r_ref, ns);
 		return;
 	}
+	cf_atomic_int_incr(&ns->lstats.ldt_gc_io);
 	rd.n_bins               = as_bin_get_n_bins(r, &rd);
-	as_bin stack_bins[rd.n_bins];
-	if ( ! ns->storage_data_in_memory && ! ns->single_bin ) {
-		rd.n_bins = sizeof(stack_bins) / sizeof(as_bin);
-	}
+	as_bin stack_bins[(!ns->storage_data_in_memory) ? rd.n_bins : 0];
 	rd.bins                 = as_bin_get_all(r, &rd, stack_bins);
 
-	// Subrecord Version
-	uint64_t subrec_version = 0;
-	subrec_version          = as_ldt_subdigest_getversion(&subrec_digest);
-	cf_detail(AS_LDT, "SUBRECVERSION OUT OF SUBREC_DIGEST %ld", subrec_version);
-
-	// ESR digest with matching Version
+	// Read Parent and ESR digest 
 	cf_digest esr_digest;
-	if (as_ldt_subrec_storage_get_edigest(&rd, &esr_digest)) {
+	cf_digest parent_digest;
+	if (as_ldt_subrec_storage_get_digests(&rd, &esr_digest, &parent_digest)) {
 		goto Cleanup;
 	}
-	as_ldt_subdigest_setversion(&esr_digest, subrec_version);
 
-	// Parent Version
-	cf_digest parent_digest;
-	if (as_ldt_subrec_storage_get_pdigest(&rd, &parent_digest)) {
-		goto Cleanup;
+	// Do not check esr of esr.
+	bool check_esr          = false;
+	if (!as_ldt_record_is_esr(r)) {
+		// ESR digest with matching Version
+		as_ldt_subdigest_setversion(&esr_digest, subrec_version);
+		check_esr = true;
 	}
 
 	uint64_t starting_memory_bytes = 0;
@@ -1319,17 +1371,18 @@ as_ldt_sub_gc_fn(as_index_ref *r_ref, void *udata)
 	// c) Check if the version matches that of parent/esr ??? (if not the version is invalid)
 	bool delete = false;
 	char type   = 0;
+	rv = 0;
 
-	if (as_record_exists(p->sub_vp, &esr_digest, ns)) {
+	if (check_esr && (rv = as_record_exists(p->sub_vp, &esr_digest, ns))) {
 		delete = true;
-		type   = 1;
-	} else if (as_record_exists(p->vp, &parent_digest, ns)) {
+		type   = LDT_SUB_GC_NO_ESR;
+	} else if ((rv = as_record_exists(p->vp, &parent_digest, ns))) {
 		delete = true;
-		type   = 2;
-	} else if (!as_ldt_version_match(subrec_version, p->vp, &parent_digest, ns)) {
+		type   = LDT_SUB_GC_NO_PARENT;
+	} else if (!as_ldt_is_parent_and_version_match(subrec_version, p->vp, &parent_digest, ns)) {
+		// LDT_GC_IO: Parent IO
 		delete = true;
-		type   = 3;
-		linfo->num_version_mismatch_gc++;
+		type   = LDT_SUB_GC_PARENT_VERSION_MISMATCH;
 	} else {
 		cf_detail(AS_LDT, "LDT_SUB_GC Found both parent and ESR record !!");
 	}
@@ -1338,24 +1391,38 @@ as_ldt_sub_gc_fn(as_index_ref *r_ref, void *udata)
 		if (ns->storage_data_in_memory) {
 			cf_atomic_int_sub(&p->n_bytes_memory, starting_memory_bytes);
 		}
-		cf_detail(AS_LDT, "LDT_SUB_GC Expiry of the SubRecord type=%d version=%ld partition state is %d:%d",
-				type, subrec_version, p->rxstate, p->txstate);
+		cf_detail_digest(AS_LDT, &subrec_digest, "LDT_SUB_GC Expiry of the SubRecord type=%d version=%ld for partition %d rv=%d",
+				type, subrec_version, p->partition_id, rv);
 		cf_detail_digest(AS_LDT, &subrec_digest, "Sub-Rec Digest: ");
 		cf_detail_digest(AS_LDT, &esr_digest, "ESR Digest: ");
 		cf_detail_digest(AS_LDT, &parent_digest, "Parent Digest: ");
 		as_index_delete(p->sub_vp, &subrec_digest);
+		switch (type) {
+			case LDT_SUB_GC_NO_ESR: 
+				cf_atomic_int_incr(&ns->lstats.ldt_gc_no_esr_cnt);
+				break;
+			case LDT_SUB_GC_NO_PARENT: 
+				cf_atomic_int_incr(&ns->lstats.ldt_gc_no_parent_cnt);
+				break;
+			case LDT_SUB_GC_PARENT_VERSION_MISMATCH: 
+				cf_atomic_int_incr(&ns->lstats.ldt_gc_parent_version_mismatch_cnt);
+				break;
+			default:
+				break;
+		}
+		cf_atomic_int_incr(&ns->lstats.ldt_gc_cnt);
 		linfo->num_gc++;
 	}
 	as_record_done(r_ref, ns);
 
 	// TODO: Have a better slow down strategy !!!
-	usleep(100);
+	usleep(ns->ldt_gc_sleep_us);
 	return;
 
 Cleanup:
 	as_storage_record_close(r, &rd);
 	as_record_done(r_ref, ns);
-	usleep(100);
+	usleep(ns->ldt_gc_sleep_us);
 }
 
 
@@ -1381,18 +1448,19 @@ as_ldt_merge_component_is_candidate(as_partition_reservation *rsv, as_record_mer
 		return true;
 	}
 	as_index *r  = r_ref.r;
+	bool rv = false;
 
 	// If component has higher generation ttl then it is merge candidate
 	if (c->pgeneration > r->generation
 			|| (c->pgeneration == r->generation && c->pvoid_time > r->void_time)) {
 		as_record_done(&r_ref, rsv->ns);
-		return true;
+		rv = true;
 	} else {
-		cf_debug_digest(AS_LDT,&r->key, "Local Parent Wins ... ignoring incoming:");
-//		PRINTD(&r->key);
+		rv = false;
 		as_record_done(&r_ref, rsv->ns);
-		return false;
 	}
+	cf_detail_digest(AS_LDT, &r->key, "Local Parent vs incoming [%d %d] void_time [%ld %ld]", r->generation, c->pgeneration, r->void_time, c->pvoid_time);
+	return rv;
 
 #if 0
 	// We have version as well want to do something smart ???
@@ -1408,4 +1476,350 @@ as_ldt_merge_component_is_candidate(as_partition_reservation *rsv, as_record_mer
 	}
 	if (parent_version == c->version) { /* do something */ }
 #endif
+}
+
+/*
+ * Main routine to replicate the chunks of LDT objects. The LDT directory rec
+ * is not replicated using this function. This function is called for each chunk
+ * that got updated as part of the single LDT operation. Note that in a single
+ * LDT operation, there can be only few chunks that change. i.e chunks in one
+ * path of the tree structure.
+ *
+ * Assumption:
+ * 1. All records should have been closed.
+ * 2. Pickled buf for all the record and subrecord which needs shipping should have
+ * 	  been filled.
+ *
+ * Function:
+ *
+ * 1. Walk through each sub record and use its pickled buf to create
+ *    RW_OP_WRITE. Pack it in the buffer and push it into the RW_MULTI_OP
+ *    packet.
+ * 2. This function packs entire pickled buf into the message that is one extra
+ *    allocation into the multi-op over the fabric. The message hangs from the
+ *    wr for the parent record for the retransmit
+ */
+int
+as_ldt_record_pickle(ldt_record *lrecord,
+				  uint8_t               ** pickled_buf,
+				  size_t                 * pickled_sz,
+				  uint32_t               * pickled_void_time)
+{
+	cf_detail(AS_LDT, "Enter: MULTI_OP: Packing LDT record");
+
+	udf_record *h_urecord  = as_rec_source(lrecord->h_urec);
+	as_transaction   *h_tr = h_urecord->tr;
+
+	// Do an early check if we need to replicate to other nodes. In cases like
+	// single-replica or single-node we don't need to do any replication.
+	cf_node dest_nodes_tmp[AS_CLUSTER_SZ];
+	memset(dest_nodes_tmp, 0, sizeof(dest_nodes_tmp));
+	int listsz = as_partition_getreplica_readall(h_tr->rsv.ns, h_tr->rsv.pid, dest_nodes_tmp);
+	if (listsz == 0) {
+		return 0;
+	}
+
+	bool is_delete       = (h_urecord->pickled_buf) ? false : true;
+	int  ret             = 0;
+	int  ops             = 0;
+	// TODO: Change this hard coded value to a number based on number of 
+	//       record which has changed
+	msg *m[lrecord->num_slots_used + 1];
+	memset(m, 0, (lrecord->num_slots_used + 1) * sizeof(msg *));
+
+
+	if (is_delete) {
+		*pickled_buf = 0;
+		*pickled_sz  = 0;
+	} else {
+		size_t sz     = 0;
+		size_t buflen = 0;
+
+		m[ops] = as_fabric_msg_get(M_TYPE_RW);
+		if (!m[ops]) {
+			ret = -3;
+			goto Out;
+		}
+		if (!is_delete && h_urecord->pickled_buf) {
+			cf_detail(AS_LDT, "MULTI_OP: Packing LDT Head Record");
+			rw_msg_setup(m[ops], h_tr, &h_tr->keyd,
+							&h_urecord->pickled_buf,
+							h_urecord->pickled_sz,
+							h_urecord->pickled_void_time,
+							&h_urecord->pickled_rec_props,
+							RW_OP_WRITE,
+							h_urecord->ldt_rectype_bits, true);
+			buflen = 0;
+			msg_fillbuf(m[ops], NULL, &buflen);
+			sz += buflen;
+			ops++;
+		}
+
+		// This macro is a for-loop thru the SR list and a test for valid SR entry
+		FOR_EACH_SUBRECORD(i, j, lrecord) {
+			udf_record *c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
+			is_delete             = (c_urecord->pickled_buf) ? false : true;
+			as_transaction *c_tr  = c_urecord->tr;
+
+			if ( ((!c_urecord->pickled_buf) || (c_urecord->pickled_sz <= 0)) && !is_delete ) {
+				cf_warning(AS_RW, "Got an empty pickled buf while trying to "
+						" replicate record with digest %"PRIx64" %p, %d, %d",
+						(uint64_t *)&c_tr->keyd, pickled_buf, pickled_sz, is_delete);
+				ret = -2;
+				goto Out;
+			}
+
+			// if pickled_buf is there then it is a write operation
+			if (!is_delete && c_urecord->pickled_buf) {
+				cf_detail(AS_LDT, "MULTI_OP: Packing LDT SUB Record");
+				m[ops] = as_fabric_msg_get(M_TYPE_RW);
+				if (!m[ops]) {
+					ret = -3;
+					goto Out;
+				}
+				rw_msg_setup(m[ops], c_tr, &c_tr->keyd,
+								&c_urecord->pickled_buf,
+								c_urecord->pickled_sz,
+								c_urecord->pickled_void_time,
+								&c_urecord->pickled_rec_props,
+								RW_OP_WRITE,
+								c_urecord->ldt_rectype_bits, true);
+				buflen = 0;
+				msg_fillbuf(m[ops], NULL, &buflen);
+				sz += buflen;
+				ops++;
+			}
+		}
+
+		if (sz) {
+			uint8_t *buf = cf_malloc(sz);
+			if (!buf) {
+				pickled_sz   = 0;
+				*pickled_buf = NULL;
+				ret          = -1;
+				goto Out;
+			}
+			*pickled_buf = buf;
+			*pickled_sz  = sz;
+			int rsz = sz;
+			sz = 0;
+
+			for (int i = 0; i < ops; i++) {
+				sz = rsz - sz;
+				ret = msg_fillbuf(m[i], buf, &sz);
+				buf += sz;
+			}
+			*pickled_void_time = 0;
+		}
+	}
+Out:
+
+	if (ret) {
+		cf_debug(AS_LDT, "MULTI_OP Packing failed with ret = %d", ret);
+		if (*pickled_buf) {
+			cf_free(*pickled_buf);
+			*pickled_buf = NULL;
+			*pickled_sz  = 0;
+			*pickled_void_time = 0;
+		}
+	}
+
+	for (int i = 0; i < ops; i++) {
+		if(m[i]) {
+			as_fabric_msg_put(m[i]);
+		}
+	}
+	// TODO: Check value of ret and do the needed cleanup
+	return ret;
+}
+int
+as_ldt_get_key(char c, as_string *key, char *key_buffer)
+{
+	sprintf(key_buffer, "%c", c);
+	as_string_init(key, key_buffer, false);
+	return 0;
+}
+
+char *
+as_ldt_leaf_getNext(as_storage_rd *rd)
+{
+	as_bin * bb    = as_bin_get(rd, (uint8_t *)"LsrControlBin", 13);
+	as_val * srMap = as_val_frombin(bb);
+
+	char key_buffer[2]; as_string key;
+	as_ldt_get_key((char)LF_NextPage, &key, key_buffer);
+
+	as_bytes *dig = (as_bytes *)as_hashmap_get((as_hashmap*)srMap, (as_val *)&key);
+	char *curDigest = as_val_tostring(dig);	
+	as_val_destroy(srMap);
+	return curDigest;
+}
+
+bool
+as_bin_is_ldt_bin(as_map * prop_map)
+{
+	bool ret = true;
+
+	char key_buffer[2]; as_string key;
+	as_ldt_get_key((char) PM_Magic, &key, key_buffer);
+
+	as_val * value = as_hashmap_get((as_hashmap *)prop_map, (as_val *)&key); 
+	if (!value) {
+		return false;
+	}
+
+	if (strcmp (as_string_get((as_string*)value), "MAGIC")) {
+		ret = false;
+	}
+	
+	if (ret) {
+		as_ldt_get_key((char )PM_LdtType, &key, key_buffer);
+		value = as_hashmap_get((as_hashmap *)prop_map, (as_val *) &key); 
+		if (strcmp(as_string_get((as_string*)value), "LLIST"))
+			ret = false;
+	}
+	return ret;
+}
+as_list *
+as_ldt_leaf_scan(as_storage_rd *rd)
+{
+	as_bin * bb  = as_bin_get(rd, (uint8_t *)"LsrListBin", 10);
+	as_list *sl  = (as_list *)as_val_frombin(bb); 
+	return sl;
+}
+
+as_list * 
+as_bin_get_llist(as_namespace *ns, as_index_tree *sub_tree, as_val *ctrl_list, uint64_t ldt_version) 
+{
+	as_map *propMap = as_list_get_map((as_list *)ctrl_list, 0);
+	if (!propMap) {
+		cf_debug(AS_LDT, "Control Bin Property Map not of type map");
+		return NULL;
+	}
+
+	as_map *ldtMap = as_list_get_map((as_list *)ctrl_list, 1);
+	if (!ldtMap) {
+		cf_debug(AS_LDT, "Control Bin ldt Map not of type map");
+		return NULL;
+	}
+	
+	char key_buffer[2]; as_string key;
+
+	as_ldt_get_key((char)LS_StoreState , &key, key_buffer);
+	as_string *storestate = (as_string *)as_hashmap_get((as_hashmap *)ldtMap, (as_val *)&key);
+	char *storestatestr = as_val_tostring(storestate);
+	cf_debug(AS_LDT, "storestate |%s|", storestatestr);
+	if (strcmp("\"C\"", storestatestr) == 0) {
+		as_ldt_get_key((char)LS_CompactList, &key, key_buffer);
+		as_list *rl = (as_list *)as_hashmap_get((as_hashmap *)ldtMap, (as_val *)&key);
+		as_val_reserve(rl);
+		cf_free(storestatestr);
+		return rl;
+	}	
+	cf_free(storestatestr);
+
+	as_ldt_get_key((char)LS_LeftLeafDigest, &key, key_buffer);
+	as_bytes *leftMostDigest = (as_bytes *)as_hashmap_get((as_hashmap *)ldtMap, (as_val *)&key);
+	char *curDigest = as_val_tostring(leftMostDigest);
+
+	as_arraylist *rl = as_arraylist_new(100, 100);
+	while (true) {
+		if (!curDigest || (!strcmp(curDigest,"0"))) { 
+			return (as_list *)rl;
+		}
+			
+		// 1. Setup digest
+		cf_digest keyd;
+		if (as_ldt_string_todigest(curDigest, &keyd)) {
+			return (as_list *)rl;
+		}
+		as_ldt_subdigest_setversion(&keyd, ldt_version);
+		cf_free(curDigest);
+
+		// 2. Open Record
+		as_index_ref   sub_r_ref; 
+		as_storage_rd  sub_rd;
+		sub_r_ref.skip_lock = true;
+		int rv = as_record_get(sub_tree, &keyd, &sub_r_ref, ns);
+		if (rv) {
+			cf_warning(AS_LDT, "LDT stucture invalid");
+			as_val_destroy(rl);
+			return NULL;
+		}
+
+		as_record *sub_r = sub_r_ref.r;
+
+		as_storage_record_open(ns, sub_r, &sub_rd, &sub_r->key);
+		sub_rd.n_bins = as_bin_get_n_bins(sub_r, &sub_rd);
+		// Have bound checks ...
+		as_bin stack_bins[(sub_r && !ns->storage_data_in_memory) ? sub_rd.n_bins : 0];
+		sub_rd.bins = as_bin_get_all(sub_r, &sub_rd, stack_bins);
+
+		// 3. Scan the current leaf
+		as_list *sl = as_ldt_leaf_scan(&sub_rd); 
+		as_arraylist_iterator it;
+		as_arraylist_iterator_init(&it, (as_arraylist *)sl);
+		while (as_arraylist_iterator_has_next(&it)) {
+			as_val * val = (as_val *)as_arraylist_iterator_next(&it);
+			as_val_reserve(val);
+			as_arraylist_append((as_arraylist *)rl, val);
+		}
+		as_val_destroy(sl);
+		as_arraylist_iterator_destroy(&it);
+
+		// 4. Find next 
+		curDigest = as_ldt_leaf_getNext(&sub_rd);
+		
+		// 5. Close Current
+		as_storage_record_close(sub_r, &sub_rd);
+		as_record_done(&sub_r_ref, ns);
+	}
+	return (as_list *)rl;
+}
+
+as_val *
+as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_bin *binp) 
+{
+	uint8_t type = as_particle_type_convert(as_bin_get_particle_type(binp));
+	if (type != AS_PARTICLE_TYPE_LIST) {
+		return NULL;
+	}
+
+	as_val * valp  = as_val_frombin(binp);
+	if (!valp) {
+		cf_warning(AS_LDT, "Property Bin %s Corrupted", SUBREC_PROP_BIN);
+		return NULL;
+	}
+
+	// We must always retrieve typed values from as_val using the type specific
+	// accessor function -- which will return NULL if we guessed wrong on the
+	// type that we're extracting.
+	const as_list * ctrl_list = as_list_fromval(valp);
+	if (!ctrl_list) {
+		cf_debug(AS_LDT, "Control bin is not of type list");
+		as_val_destroy(valp);
+		return NULL;
+	}
+
+	// Not ref counted need not be destroyed...
+	as_map *prop_map = as_list_get_map(ctrl_list, 0);
+	if (!prop_map) {
+		cf_debug(AS_LDT, "Control Bin Property Map not of type map");
+		as_val_destroy(valp);
+		return NULL;
+	}
+
+	as_list *result_list = NULL;
+	if (as_bin_is_ldt_bin(prop_map)) {
+		cf_debug(AS_LDT, "Bin %s is LDT Bin", as_bin_get_name_from_id(ns, binp->id));	
+		uint64_t ldt_version;
+		if (!as_ldt_parent_storage_get_version(rd, &ldt_version, true, __FILE__, __LINE__)) {
+			result_list = as_bin_get_llist(ns, sub_tree, (as_val *)ctrl_list, ldt_version); 
+		} 
+	} else {
+		cf_debug(AS_LDT, "Bin %s is _NOT_ LDT Bin", as_bin_get_name_from_id(rd->ns, binp->id));	
+	}
+
+	as_val_destroy(valp);
+	return (as_val *)result_list;
 }

@@ -170,48 +170,68 @@ as_index_get_insert_vlock(as_index_tree *tree, cf_digest *key, as_index_ref *ind
 {
 	as_index 		*n, *s, *t;
 	cf_arenax_handle n_h, s_h, t_h;
+	bool retry;
 
-	/* Lock the tree */
-	pthread_mutex_lock(&tree->lock);
+	do {
+		/* Lock the tree */
+		pthread_mutex_lock(&tree->lock);
 
-	/* Insert the node directly into the tree, via the typical method of
-	 * binary tree insertion */
-	s_h = tree->root_h;
-	s = tree->root;
+		/* Insert the node directly into the tree, via the typical method of
+		 * binary tree insertion */
+		s_h = tree->root_h;
+		s = tree->root;
 
-	t_h = tree->root->left_h;
-	t = RESOLVE_H(t_h);
+		t_h = tree->root->left_h;
+		t = RESOLVE_H(t_h);
 
-	// cf_debug(AS_INDEX,"get-insert: key %"PRIx64" sentinal %p",*(uint64_t *)key, tree->sentinel);
+		// cf_debug(AS_INDEX,"get-insert: key %"PRIx64" sentinal %p",*(uint64_t *)key, tree->sentinel);
 
-	while (t_h != tree->sentinel_h) {
+		while (t_h != tree->sentinel_h) {
 
-		s = t;
-		s_h = t_h;
-//		cf_debug(AS_INDEX,"  at %p: key %"PRIx64": right %p left %p",t,*(uint64_t *)&t->key,t->right,t->left);
+			s = t;
+			s_h = t_h;
+	//		cf_debug(AS_INDEX,"  at %p: key %"PRIx64": right %p left %p",t,*(uint64_t *)&t->key,t->right,t->left);
 
-		int c = cf_digest_compare(key, &t->key);
-		if (c) {
-			t_h = (c > 0) ? t->left_h : t->right_h;
-			t = RESOLVE_H(t_h);
+			int c = cf_digest_compare(key, &t->key);
+			if (c) {
+				t_h = (c > 0) ? t->left_h : t->right_h;
+				t = RESOLVE_H(t_h);
+			}
+			else
+				break;
 		}
-		else
-			break;
-	}
 
-	/* If the node already exists, simply return it */
-	if ((s != tree->root) && (0 == cf_digest_compare(key, &s->key))) {
-		as_index_reserve(s);
-		cf_atomic_int_incr(&g_config.global_record_ref_count);
-		pthread_mutex_unlock(&tree->lock);
-		if (!index_ref->skip_lock) {
-			olock_vlock(g_config.record_locks, key, &(index_ref->olock) );
-			cf_atomic_int_incr(&g_config.global_record_lock_count);
+		/* If the node already exists, simply return it */
+		if ((s != tree->root) && (0 == cf_digest_compare(key, &s->key))) {
+			as_index_reserve(s);
+			cf_atomic_int_incr(&g_config.global_record_ref_count);
+			pthread_mutex_unlock(&tree->lock);
+			if (!index_ref->skip_lock) {
+				olock_vlock(g_config.record_locks, key, &(index_ref->olock) );
+				cf_atomic_int_incr(&g_config.global_record_lock_count);
+			}
+			index_ref->r = s;
+			index_ref->r_h = s_h;
+			return(0);
 		}
-		index_ref->r = s;
-		index_ref->r_h = s_h;
-		return(0);
-	}
+
+		// We didn't find the tree element, so we'll be inserting it.
+
+		retry = false;
+
+		if (EBUSY == pthread_mutex_trylock(&tree->reduce_lock)) {
+			// The tree is being reduced - could take long, unlock so reads and
+			// overwrites aren't blocked.
+			pthread_mutex_unlock(&tree->lock);
+
+			// Wait until the tree reduce is done...
+			pthread_mutex_lock(&tree->reduce_lock);
+			pthread_mutex_unlock(&tree->reduce_lock);
+
+			// ... and start over - we unlocked, so the tree may have changed.
+			retry = true;
+		}
+	} while (retry);
 
 //	cf_debug(AS_INDEX,"get-insert: not found");
 
@@ -219,6 +239,7 @@ as_index_get_insert_vlock(as_index_tree *tree, cf_digest *key, as_index_ref *ind
 	n_h = cf_arenax_alloc(tree->arena);
 	if (0 == n_h) {
 		cf_warning(AS_INDEX, "arenax alloc failed");
+		pthread_mutex_unlock(&tree->reduce_lock);
 		pthread_mutex_unlock(&tree->lock);
 		return(-1);
 	}
@@ -298,8 +319,9 @@ as_index_get_insert_vlock(as_index_tree *tree, cf_digest *key, as_index_ref *ind
 	RESOLVE_H(tree->root->left_h)->color = CF_RCRB_BLACK;
 	tree->elements++;
 
-	// done with tree now, and pick up the olock
+	pthread_mutex_unlock(&tree->reduce_lock);
 	pthread_mutex_unlock(&tree->lock);
+
 	if (!index_ref->skip_lock) {
 		olock_vlock(g_config.record_locks, key, &(index_ref->olock) );
 		cf_atomic_int_incr(&g_config.global_record_lock_count);
@@ -585,19 +607,38 @@ as_index_delete(as_index_tree *tree, cf_digest *key)
 {
 	as_index *r, *s, *t;
 	cf_arenax_handle r_h, s_h, t_h;
-	int rv = 0;
+	bool retry;
 
-	/* Lock the tree */
-	if (0 != pthread_mutex_lock(&tree->lock)) {
-		cf_warning(AS_INDEX, "unable to acquire tree lock: %s", cf_strerror(errno));
-		return(-1);
-	}
+	do {
+		/* Lock the tree */
+		if (0 != pthread_mutex_lock(&tree->lock)) {
+			cf_warning(AS_INDEX, "unable to acquire tree lock: %s", cf_strerror(errno));
+			return(-1);
+		}
 
-	/* Find a node with the matching key; if none exists, eject immediately */
-	if (-1 == as_index_search_h_lockless(tree, key, &r, &r_h)) {
-		rv = -2;
-		goto release;
-	}
+		/* Find a node with the matching key; if none exists, eject immediately */
+		if (-1 == as_index_search_h_lockless(tree, key, &r, &r_h)) {
+			pthread_mutex_unlock(&tree->lock);
+			return -2;
+		}
+
+		// We found the tree element, so we'll be deleting it.
+
+		retry = false;
+
+		if (EBUSY == pthread_mutex_trylock(&tree->reduce_lock)) {
+			// The tree is being reduced - could take long, unlock so reads and
+			// overwrites aren't blocked.
+			pthread_mutex_unlock(&tree->lock);
+
+			// Wait until the tree reduce is done...
+			pthread_mutex_lock(&tree->reduce_lock);
+			pthread_mutex_unlock(&tree->reduce_lock);
+
+			// ... and start over - we unlocked, so the tree may have changed.
+			retry = true;
+		}
+	} while (retry);
 
 	if ((tree->sentinel_h == r->left_h) || (tree->sentinel_h == r->right_h)) {
 		s = r;
@@ -678,9 +719,10 @@ as_index_delete(as_index_tree *tree, cf_digest *key)
 	}
 	tree->elements--;
 
-release:
+	pthread_mutex_unlock(&tree->reduce_lock);
 	pthread_mutex_unlock(&tree->lock);
-	return(rv);
+
+	return 0;
 }
 
 
@@ -696,6 +738,7 @@ as_index_tree_create(cf_arenax *arena, as_index_value_destructor destructor, voi
 		return(NULL);
 
 	pthread_mutex_init(&tree->lock, NULL);
+	pthread_mutex_init(&tree->reduce_lock, NULL);
 
 	tree->arena = arena;
 
@@ -756,6 +799,7 @@ as_index_tree_resume(cf_arenax *arena, as_index_value_destructor destructor, voi
 	}
 
 	pthread_mutex_init(&tree->lock, NULL);
+	pthread_mutex_init(&tree->reduce_lock, NULL);
 
 	tree->arena = arena;
 
@@ -881,7 +925,7 @@ as_index_reduce(as_index_tree* tree, as_index_reduce_fn cb, void* udata)
 void
 as_index_reduce_partial(as_index_tree* tree, uint32_t sample_count, as_index_reduce_fn cb, void* udata)
 {
-	pthread_mutex_lock(&tree->lock);
+	pthread_mutex_lock(&tree->reduce_lock);
 
 	// For full reduce, get the number of elements inside the tree lock.
 	if (sample_count == AS_REDUCE_ALL) {
@@ -889,7 +933,7 @@ as_index_reduce_partial(as_index_tree* tree, uint32_t sample_count, as_index_red
 	}
 
 	if (sample_count == 0) {
-		pthread_mutex_unlock(&tree->lock);
+		pthread_mutex_unlock(&tree->reduce_lock);
 		return;
 	}
 
@@ -901,7 +945,7 @@ as_index_reduce_partial(as_index_tree* tree, uint32_t sample_count, as_index_red
 		v_a = cf_malloc(sz);
 
 		if (! v_a) {
-			pthread_mutex_unlock(&tree->lock);
+			pthread_mutex_unlock(&tree->reduce_lock);
 			return;
 		}
 	}
@@ -925,7 +969,7 @@ as_index_reduce_partial(as_index_tree* tree, uint32_t sample_count, as_index_red
 
 	cf_debug(AS_INDEX, "as_index_reduce_traverse took %"PRIu64" ms", cf_getms() - start_ms);
 
-	pthread_mutex_unlock(&tree->lock);
+	pthread_mutex_unlock(&tree->reduce_lock);
 
 	for (uint i = 0; i < v_a->pos; i++) {
 		as_index_ref r_ref;
@@ -968,7 +1012,7 @@ void
 as_index_reduce_sync(as_index_tree *tree, as_index_reduce_sync_fn cb, void *udata)
 {
 	/* Lock the tree */
-	pthread_mutex_lock(&tree->lock);
+	pthread_mutex_lock(&tree->reduce_lock);
 
 	if ( (tree->root) &&
 			(tree->root->left_h) &&
@@ -978,7 +1022,7 @@ as_index_reduce_sync(as_index_tree *tree, as_index_reduce_sync_fn cb, void *udat
 
 	}
 
-	pthread_mutex_unlock(&tree->lock);
+	pthread_mutex_unlock(&tree->reduce_lock);
 }
 
 
@@ -993,13 +1037,15 @@ as_index_tree_release(as_index_tree *tree, void *destructor_udata)
 	// cf_debug(AS_RECORD, "as_index_release FREEING TREE :  %p", tree);
 
 	/* Purge the tree and all its ilk */
-	pthread_mutex_lock(&tree->lock);
 	as_index_tree_purge_h(tree, RESOLVE_H(tree->root->left_h), tree->root->left_h);
 
 	/* Release the tree's memory */
 	cf_arenax_free(tree->arena, tree->root_h);
 	cf_arenax_free(tree->arena, tree->sentinel_h);
-	pthread_mutex_unlock(&tree->lock);
+
+	pthread_mutex_destroy(&tree->lock);
+	pthread_mutex_destroy(&tree->reduce_lock);
+
 	memset(tree, 0, sizeof(as_index_tree)); // a little debug
 	cf_rc_free(tree);
 

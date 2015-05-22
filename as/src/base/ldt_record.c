@@ -39,6 +39,7 @@
 #include "aerospike/as_val.h"
 
 #include "fault.h"
+#include "base/ldt.h"
 
 
 /*********************************************************************
@@ -52,14 +53,14 @@ int
 ldt_record_init(ldt_record *lrecord)
 {
 	// h_urec is setup in udf_rw.c which point to the main record
-	lrecord->h_urec  = 0;
-	lrecord->as      = &g_as_aerospike;
-
-	// No versioning right now !!!
-	lrecord->version = 0;
-	for(int i = 0; i < MAX_LDT_CHUNKS; i++) {
-		lrecord->chunk[i].slot = -1;
-	}
+	lrecord->h_urec         = 0;
+	lrecord->as             = &g_as_aerospike;
+	lrecord->max_chunks     = 0;
+	lrecord->num_slots_used = 0;
+	lrecord->version        = 0;
+	lrecord->subrec_io      = 0; 
+	// Default is normal UDF
+	lrecord->udf_context    = 0;
 	return 0;
 }
 
@@ -68,7 +69,7 @@ ldt_record_get(const as_rec * rec, const char * name)
 {
 	static const char * meth = "ldt_record_get()";
 	if (!rec || !name) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p, name=%p", meth, rec, name);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p, name=%p]... Fail", meth, rec, name);
 		return NULL;
 	}
 	ldt_record *lrecord   = (ldt_record *)as_rec_source(rec);
@@ -84,7 +85,7 @@ ldt_record_set(const as_rec * rec, const char * name, const as_val * value)
 {
 	static const char * meth = "ldt_record_set()";
 	if (!rec || !name) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p, name=%p", meth, rec, name);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p, name=%p]:", meth, rec, name);
 		return 2;
 	}
 	ldt_record *lrecord   = (ldt_record *)as_rec_source(rec);
@@ -100,7 +101,7 @@ ldt_record_set_flags(const as_rec * rec, const char * name,  uint8_t  flags)
 {
 	static const char * meth = "ldt_record_set_flags()";
 	if (!rec || !name) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p, name=%p", meth, rec, name);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p, name=%p]... Fail", meth, rec, name);
 		return 2;
 	}
 	ldt_record *lrecord   = (ldt_record *)as_rec_source(rec);
@@ -111,12 +112,16 @@ ldt_record_set_flags(const as_rec * rec, const char * name,  uint8_t  flags)
 	return as_rec_set_flags(h_urec, name, flags);
 }
 
+/**
+ * Set the record type.  If "rec_type" is negative, then we "unset" the rec_type,
+ * which is needed before we delete a record that no longer contains any LDTs.
+ */
 static int
-ldt_record_set_type(const as_rec * rec,  uint8_t rec_type )
+ldt_record_set_type(const as_rec * rec,  int8_t rec_type )
 {
 	static const char * meth = "ldt_record_set_type()";
 	if (!rec) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p", meth, rec);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]... Fail", meth, rec);
 		return 2;
 	}
 
@@ -133,7 +138,7 @@ ldt_record_set_ttl(const as_rec * rec,  uint32_t ttl)
 {
 	static const char * meth = "ldt_record_set_ttl()";
 	if (!rec) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p", meth, rec);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]... Fail", meth, rec);
 		return 2;
 	}
 
@@ -150,7 +155,7 @@ ldt_record_drop_key(const as_rec * rec)
 {
 	static const char * meth = "ldt_record_drop_key()";
 	if (!rec) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p", meth, rec);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]... Fail", meth, rec);
 		return 2;
 	}
 
@@ -167,7 +172,7 @@ ldt_record_remove(const as_rec * rec, const char * name)
 {
 	static const char * meth = "ldt_record_remove()";
 	if (!rec || !name) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p, name=%p", meth, rec, name);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p, name=%p]... Fail", meth, rec, name);
 		return 2;
 	}
 	ldt_record *lrecord   = (ldt_record *)as_rec_source(rec);
@@ -183,7 +188,7 @@ ldt_record_ttl(const as_rec * rec)
 {
 	static char * const meth = "ldt_record_ttl()";
 	if (!rec) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p", meth, rec);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]... Fail", meth, rec);
 		return 0;
 	}
 	ldt_record *lrecord   = (ldt_record *)as_rec_source(rec);
@@ -200,7 +205,7 @@ ldt_record_gen(const as_rec * rec)
 {
 	static const char * meth = "ldt_record_gen()";
 	if (!rec) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p", meth, rec);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]... Fail", meth, rec);
 		return 0;
 	}
 	ldt_record *lrecord  = (ldt_record *)as_rec_source(rec);
@@ -252,7 +257,7 @@ ldt_record_digest(const as_rec * rec)
 {
 	static const char * meth = "ldt_record_digest()";
 	if (!rec) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p", meth, rec);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]... Fail", meth, rec);
 		return NULL;
 	}
 
@@ -270,7 +275,7 @@ ldt_record_bin_names(const as_rec * rec, as_rec_bin_names_callback callback, voi
 {
 	static const char * meth = "ldt_record_bin_names()";
 	if (!rec) {
-		cf_warning(AS_UDF, "%s Invalid Paramters: record=%p", meth, rec);
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]... Fail", meth, rec);
 		return 2;
 	}
 

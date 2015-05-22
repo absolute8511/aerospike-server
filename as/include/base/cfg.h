@@ -51,9 +51,9 @@
 #include "fabric/paxos.h"
 
 
-#define MAX_TRANSACTION_QUEUES 64
-#define MAX_DEMARSHAL_THREADS  48	// maximum number of demarshal worker threads
-#define MAX_FABRIC_WORKERS 64		// maximum fabric worker threads
+#define MAX_TRANSACTION_QUEUES 128
+#define MAX_DEMARSHAL_THREADS  256	// maximum number of demarshal worker threads
+#define MAX_FABRIC_WORKERS 128		// maximum fabric worker threads
 #define MAX_BATCH_THREADS 16		// maximum batch worker threads
 
 struct as_namespace_s;
@@ -114,7 +114,7 @@ typedef struct as_config_s {
 	uint32_t			query_bufpool_size;
 	uint32_t			query_short_q_max_size;
 	uint32_t			query_long_q_max_size;
-	uint32_t			query_untracked_time;
+	uint32_t			query_untracked_time_ns;
 
 	int					n_transaction_queues;
 	int					n_transaction_threads_per_queue;
@@ -130,8 +130,17 @@ typedef struct as_config_s {
 	/* after this many milliseconds, connections are aborted unless transaction is in progress */
 	int					proto_fd_idle_ms;
 
+	/* sleep this many millisecond before retrying for all the blocked query */
+	int					proto_slow_netio_sleep_ms;
+
 	/* The TCP port for the fabric */
 	int					fabric_port;
+
+	/* Fabric TCP socket keepalive parameters */
+	bool				fabric_keepalive_enabled;
+	int					fabric_keepalive_time;
+	int					fabric_keepalive_intvl;
+	int					fabric_keepalive_probes;
 
 	/* The TCP port for the info socket */
 	int					info_port;
@@ -182,6 +191,9 @@ typedef struct as_config_s {
 
 	// whether to collect storage benchmarks
 	bool				storage_benchmarks;
+	
+	// whether to collect ldt benchmarks
+	bool				ldt_benchmarks;
 
 	// whether memory accounting is enabled
 	bool				memory_accounting;
@@ -270,6 +282,7 @@ typedef struct as_config_s {
 
 	// Temporary dangling prole garbage collection.
 	uint32_t			prole_extra_ttl;	// seconds beyond expiry time after which we garbage collect, 0 for no garbage collection
+	bool				non_master_sets_delete;	// locally delete non-master records in sets that are being emptied
 
 	xdr_config			xdr_cfg;							// XDR related config parameters
 	xdr_lastship_s		xdr_lastship[AS_CLUSTER_SZ];		// last XDR shipping info of other nodes
@@ -297,6 +310,8 @@ typedef struct as_config_s {
 	histogram      *_sindex_gc_pimd_rlock_hist;   // HIstogram to track time spent under pimd rlock by sindex GC
 	histogram      *_sindex_gc_pimd_wlock_hist;   // Histogram to track time spent under pimd wlock by sindex GC
 
+	bool                qnodes_pre_reserved;      // If true we will reserve all the qnodes upfront 
+												  // before processing query. Default - TRUE
 	cf_atomic64			query_reqs;
 	cf_atomic64			query_fail;
 	cf_atomic64			query_short_queue_full;
@@ -352,8 +367,10 @@ typedef struct as_config_s {
 	cf_atomic_int		migrate_num_incoming_refused; // For receiver-side migration flow control.
 	cf_atomic_int		proto_transactions;
 	cf_atomic_int		proxy_initiate; // initiated
+	cf_atomic_int		ldt_proxy_initiate; // initiated
 	cf_atomic_int		proxy_action;   // did it
 	cf_atomic_int		proxy_retry;    // retried it
+	cf_atomic_int		ldt_proxy_timeout;    // retried it
 	cf_atomic_int		proxy_retry_q_full;
 	cf_atomic_int		proxy_unproxy;
 	cf_atomic_int		proxy_retry_same_dest;
@@ -465,6 +482,15 @@ typedef struct as_config_s {
 	histogram *			read8_hist;
 	histogram *			read9_hist;
 #endif
+
+	// LDT related histogram
+	histogram *			ldt_multiop_prole_hist;   // histogram that tracks LDT multi op replication performance (in fabric)
+	histogram *			ldt_update_record_cnt_hist; // histogram that tracks number of records written (write/update)
+                                             // by LDT UDF execluding parent record
+	histogram *			ldt_io_record_cnt_hist; // histogram that tracks number of records opened (write/update)
+                                             // by LDT UDF execluding parent record
+	histogram *			ldt_update_io_bytes_hist;   // histogram that tracks number bytes written by LDT every transaction
+	histogram * 		ldt_hist;            // histogram that tracks ldt performance
 
 	cf_atomic_int		stat_read_reqs;
 	cf_atomic_int		stat_read_reqs_xdr;
@@ -580,6 +606,10 @@ typedef struct as_config_s {
 	cf_atomic_int		err_write_fail_incompatible_type;
 	cf_atomic_int		err_write_fail_prole_delete;
 	cf_atomic_int		err_write_fail_key_mismatch;
+	cf_atomic_int		err_write_fail_record_too_big;
+	cf_atomic_int		err_write_fail_bin_name;
+	cf_atomic_int		err_write_fail_bin_not_found;
+	cf_atomic_int		err_write_fail_forbidden;
 
 	cf_atomic_int		stat_duplicate_operation;
 

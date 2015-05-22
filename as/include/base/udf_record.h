@@ -50,6 +50,7 @@ typedef struct udf_record_bin_s {
 	bool				dirty;
 	bool				ishidden;
 	bool				washidden;
+	void                *particle_buf;
 } udf_record_bin;
 
 typedef struct udf_record_s {
@@ -63,7 +64,8 @@ typedef struct udf_record_s {
 	as_bin				stack_bins[256];
 
 	// UDF CHANGE CACHE
-	udf_record_bin		updates[UDF_RECORD_BIN_ULIMIT]; // stores modified bins. internal to udf module
+	udf_record_bin		updates[UDF_RECORD_BIN_ULIMIT]; // stores cache bin value
+                                                        // if ditry is set modified bins. internal to udf module
 	uint32_t			nupdates; // reset after every cache free, incremented in every cache set
 
 	// RUNTIME ACCOUNTING
@@ -76,7 +78,7 @@ typedef struct udf_record_s {
 	// INTERNAL UTILITY
 	ldt_record 			*lrecord; // Parent lrecord
 	uint16_t			flag;
-	int8_t				ldt_rectype_bits; // ESR  / LDT / PARENT LDT
+	int8_t				ldt_rectype_bits; // ESR  / LDT / PARENT LDT / NOTHING
 
 	// FABRIC MESSAGE
 	uint8_t				*pickled_buf;
@@ -96,6 +98,7 @@ typedef struct udf_record_s {
 #define UDF_RECORD_FLAG_METADATA_UPDATED	0x0100
 
 extern const as_rec_hooks udf_record_hooks;
+extern const as_rec_hooks udf_subrecord_hooks;
 
 //------------------------------------------------
 // Utility functions for all the wrapper as_record implementation
@@ -103,7 +106,7 @@ extern const as_rec_hooks udf_record_hooks;
 extern void     udf_record_cache_free   (udf_record *);
 extern int      udf_record_open         (udf_record *);
 extern int      udf_storage_record_open (udf_record *);
-extern void     udf_record_close        (udf_record *, bool);
+extern void     udf_record_close        (udf_record *);
 extern int      udf_storage_record_close(udf_record *);
 extern void     udf_record_init         (udf_record *);
 extern void     udf_record_cleanup      (udf_record *, bool);
@@ -115,8 +118,9 @@ extern bool     udf_record_ldt_enabled  (const as_rec * rec);
 #define UDF_ERR_RECORD_NOT_VALID     3
 #define UDF_ERR_PARAMETER            4
 extern int      udf_record_param_check(const as_rec *rec, const char *bname, char *fname, int lineno);
+extern bool     udf_record_destroy(as_rec *rec);
 
 //------------------------------------------------
 // Note that the main interface routines do NOT get declared here.
 // extern int      udf_record_set_flags(const as_rec *, const char *, uint8_t);
-// extern int      udf_record_set_type(const as_rec *,  uint8_t);
+// extern int      udf_record_set_type(const as_rec *,  int8_t);

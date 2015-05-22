@@ -97,8 +97,8 @@ static int _find_index(int tmatch, icol_t *ic, bool prtl)
 	} else {
 		ci_t *ci = NULL;
 
-		char tmp_cname[AS_ID_BIN_SZ + 10 + 1];
-		memset(tmp_cname, 0, AS_ID_BIN_SZ + 10 + 1);
+		char tmp_cname[CDICT_HASH_KEY_SIZE];
+		memset(tmp_cname, 0, CDICT_HASH_KEY_SIZE);
 		memcpy(tmp_cname, rt->col[ic->cmatch].name, strlen(rt->col[ic->cmatch].name));
 		if(SHASH_OK != shash_get(rt->cdict, tmp_cname, (void **) &ci)) {
 			cf_debug(AS_SINDEX, "shash get failed on %s", rt->col[ic->cmatch].name);
@@ -182,8 +182,8 @@ int match_partial_index(int tmatch, cf_ll *indl)
 
 int match_partial_index_name(char *iname)
 {
-	char tmp_name[AS_ID_NAMESPACE_SZ + AS_ID_INAME_SZ + 1];
-	memset(tmp_name, 0, AS_ID_NAMESPACE_SZ + AS_ID_INAME_SZ + 1);
+	char tmp_name[TBLD_HASH_KEY_SIZE];
+	memset(tmp_name, 0, TBLD_HASH_KEY_SIZE);
 	memcpy(tmp_name, iname, strlen(iname));
 
 	long val = -1;
@@ -209,8 +209,8 @@ int find_table(char *tname)
 {
 	long val = -1;
 
-	char tmp_tname[AS_ID_NAMESPACE_SZ + AS_SET_NAME_MAX_SIZE + 1];
-	memset(tmp_tname, 0, AS_ID_NAMESPACE_SZ + AS_SET_NAME_MAX_SIZE + 1);
+	char tmp_tname[TBLD_HASH_KEY_SIZE];
+	memset(tmp_tname, 0, TBLD_HASH_KEY_SIZE);
 	memcpy(tmp_tname, tname, strlen(tname));
 	if(SHASH_OK != shash_get(TblD, (void *)tmp_tname, (void *)&val)) {
 		cf_detail(AS_SINDEX, "shash get failed on %s", tname);
@@ -221,8 +221,8 @@ int find_table(char *tname)
 
 icol_t *find_column(int tmatch, char *cname)
 {
-	char tmp_cname[AS_ID_BIN_SZ + 10 + 1];
-	memset(tmp_cname, 0, AS_ID_BIN_SZ + 10 + 1);
+	char tmp_cname[CDICT_HASH_KEY_SIZE];	
+	memset(tmp_cname, 0, CDICT_HASH_KEY_SIZE);
 	memcpy(tmp_cname, cname, strlen(cname));
 
 	r_tbl_t *rt = &Tbl[tmatch];

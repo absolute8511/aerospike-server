@@ -304,7 +304,9 @@ typedef void (*as_index_value_destructor) (as_index *v, void *udata);
 //
 
 typedef struct as_index_tree_s {
-	pthread_mutex_t		lock;
+	// Note: reduce_lock's scope is always inside of lock's scope.
+	pthread_mutex_t		lock;        // insert, delete vs. insert, delete, get
+	pthread_mutex_t		reduce_lock; // insert, delete vs. reduce
 
 	as_index			*root;
 	cf_arenax_handle	root_h;

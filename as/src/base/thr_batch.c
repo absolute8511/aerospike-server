@@ -135,7 +135,7 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 							rd.n_bins = as_bin_inuse_count(&rd);
 						}
 
-						as_msg_make_response_bufbuilder(r, (get_data ? &rd : NULL), bb_r, !get_data, (get_data ? NULL : ns->name), true, false, btr->binlist);
+						as_msg_make_response_bufbuilder(r, (get_data ? &rd : NULL), bb_r, !get_data, (get_data ? NULL : ns->name), true, false, false, btr->binlist);
 
 						if (get_data) {
 							as_storage_record_close(r, &rd);

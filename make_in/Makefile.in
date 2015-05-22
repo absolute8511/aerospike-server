@@ -54,6 +54,13 @@ ifeq ($(MEM_COUNT),1)
   AS_CFLAGS += -DMEM_COUNT
 endif
 
+ifeq ($(USE_DF_DETECT),1)
+  ifneq ($(USE_ASM),1)
+    $(error Please build with ASMalloc support also to enable Double "free()" Detection)
+  endif
+  AS_CFLAGS += -DUSE_DF_DETECT
+endif
+
 ifeq ($(USE_ASM),1)
   AS_CFLAGS += -DUSE_ASM
   INCLUDES += -I$(ASMALLOC)/include
@@ -74,11 +81,6 @@ ifeq ($(PREPRO),1)
   SUFFIX = $(PREPRO_SUFFIX)
   AS_CFLAGS += -E -DPREPRO=$(PREPRO) -DGEN_TAG=$(GEN_TAG)"\
 "
-else
-  ifeq ($(MEXP_PHASE),2)
-    AS_CFLAGS += -DUSE_ASM
-    INCLUDES += -I$(ASMALLOC)/include
-  endif
 endif
 
 ifeq ($(WRAP),1)
@@ -147,6 +149,9 @@ DEF_FN += -D__FILENAME__=\"$(notdir $<)\"
 #CFLAGS_64 = $(COMMON_FLAGS) -DMARCH_x86_64
 #CFLAGS_32 = $(COMMON_CFLAGS) -DMARCH_i686
 
-LDFLAGS = -rdynamic -L$(CF_LIB_DIR) -L$(XDR_LIB_DIR) -L$(KV_LIB_DIR) $(WRAPFLAGS)
+LDFLAGS = -rdynamic -L$(CF_LIB_DIR) -L$(XDR_LIB_DIR) $(WRAPFLAGS)
+ifeq ($(USE_KV),1)
+  LDFLAGS += -L$(KV_LIB_DIR)
+endif
 
 STRIP = strip -p -v -s

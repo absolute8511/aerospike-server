@@ -35,6 +35,7 @@
 
 #include <citrusleaf/cf_shash.h>
 #include <citrusleaf/cf_ll.h>
+#include <base/secondary_index.h>
 
 #define uchar    unsigned char
 #define ushort16 unsigned short
@@ -54,8 +55,8 @@ typedef struct uint160 {
  */
 #define NAME_STR_LEN               128
 
-#define INIT_MAX_NUM_TABLES        64
-#define INIT_MAX_NUM_INDICES       64
+#define INIT_MAX_NUM_TABLES        256
+#define INIT_MAX_NUM_INDICES       256
 
 #define MAX_PARTITIONS_PER_INDEX   256
 
@@ -124,6 +125,9 @@ enum OP {NONE, EQ, NE, GT, GE, LT, LE, RQ, IN, LFUNC};
 		fprintf(fp, "DEBUG_U160: high: %llu mid: %llu low: %u", ubh, ubm, u); \
 	}
 
+#define CDICT_HASH_KEY_SIZE AS_SINDEX_MAX_PATH_LENGTH + 2*AS_SINDEX_TYPE_STR_SIZE
+#define TBLD_HASH_KEY_SIZE AS_ID_NAMESPACE_SZ + AS_SET_NAME_MAX_SIZE + 1
+#define INDD_HASH_KEY_SIZE TBLD_HASH_KEY_SIZE
 
 /***************** Opaque Forward Type Declarations *****************/
 

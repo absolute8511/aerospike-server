@@ -60,8 +60,7 @@ set_shmmax() {
 create_piddir() {
 	if [ ! -d $PIDDIR ] 
 	then
-		mkdir $PIDDIR
-		chown $ASD_USER:$ASD_GROUP $PIDDIR
+		(mkdir $PIDDIR && chown $ASD_USER:$ASD_GROUP $PIDDIR) &> /dev/null
 	fi
 	}
 

@@ -30,11 +30,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <citrusleaf/cf_atomic.h>
-#include <citrusleaf/cf_vector.h>
+#include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_vector.h"
 
 #include "dynbuf.h"
 
+#include "base/aggr.h"
 #include "base/datamodel.h"
 #include "base/proto.h"
 #include "base/secondary_index.h"
@@ -46,8 +47,9 @@
 // Client can send either background or client udf (response for every udf).
 typedef enum as_scan_udf_op {
 	AS_SCAN_UDF_NONE,
-	AS_SCAN_UDF_OP_UDF,
+	AS_SCAN_UDF_OP_AGGREGATE,
 	AS_SCAN_UDF_OP_BACKGROUND,
+	AS_SCAN_UDF_OP_UDF
 } as_scan_udf_op;
 
 typedef enum as_scan_state_logged {
@@ -82,6 +84,7 @@ typedef struct {
 	// Scan UDF specific fields
 	bool                hasudf;              		// Has record UDF
 	udf_call            call;                		// udf_call if there is UDF
+	as_aggr_call        agg_call;                   // Stream UDF Details
 	cf_atomic_int       uit_queued;    				// Throttling: max in flight scan
 	uint8_t             scan_type;                  //scan type (normal,background,foreground,sindex)
 	// UDF transaction per job
@@ -116,6 +119,8 @@ typedef struct {
 	as_sindex *         si;
 	cf_vector *         binlist;
 	udf_call *          call;                       // read copy @TODO should be ref counted
+	as_aggr_call *      aggr_call;                  // read copy @TODO should be ref counted
+	bool *				aborted;
 } tscan_task_data;
 
 /* Function declarations */
@@ -124,7 +129,7 @@ extern int as_scan(as_transaction *tr);
 extern int as_scan_kill(int tid);
 extern int as_tscan_list(char *name, cf_dyn_buf *db);
 extern int as_tscan_abort(uint64_t trid);
-extern bool as_tscan_set_priority(uint64_t trid, uint16_t priority);
+extern int as_tscan_abort_all();
 
 // Call when the incoming fd blows up
 extern void as_scan_cleanup_fd(int fd);

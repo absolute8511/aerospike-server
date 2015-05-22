@@ -564,6 +564,27 @@ int udf_cask_info_remove(char *name, char * params, cf_dyn_buf * out) {
 	return 0;
 }
 
+/*
+ *  Clear out the Lua cache.
+ */
+int udf_cask_info_clear_cache(char *name, char * params, cf_dyn_buf * out)
+{
+	cf_debug(AS_INFO, "UDF CASK INFO CLEAR CACHE");
+
+	mod_lua_wrlock(&mod_lua);
+
+	as_module_event e = {
+		.type = AS_MODULE_EVENT_CLEAR_CACHE
+	};
+	as_module_update(&mod_lua, &e);
+
+	mod_lua_unlock(&mod_lua);
+
+	cf_dyn_buf_append_string(out, "ok");
+
+	return 0;
+}
+
 /**
  * (Re-)Configure UDF modules
  */

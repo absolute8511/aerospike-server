@@ -72,6 +72,8 @@ typedef enum {
 	AS_STORAGE_ENGINE_KV		= 3
 } as_storage_type;
 
+#define NAMESPACE_HAS_PERSISTENCE(ns) \
+	(ns->storage_type != AS_STORAGE_ENGINE_MEMORY) 
 // For sizing the storage API "v-tables".
 #define AS_STORAGE_ENGINE_TYPES 4
 
@@ -164,6 +166,7 @@ extern bool as_storage_record_size_and_check(as_storage_rd *rd);
 extern void as_storage_wait_for_defrag();
 extern bool as_storage_overloaded(as_namespace *ns); // returns true if write queue is too backed up
 extern bool as_storage_has_space(as_namespace *ns);
+extern void as_storage_defrag_sweep(as_namespace *ns);
 
 // Storage of generic data into device headers.
 extern int as_storage_info_set(as_namespace *ns, uint idx, uint8_t *buf, size_t len);
@@ -228,6 +231,7 @@ extern bool as_storage_record_size_and_check_ssd(as_storage_rd *rd);
 extern void as_storage_wait_for_defrag_ssd(as_namespace *ns);
 extern bool as_storage_overloaded_ssd(as_namespace *ns);
 extern bool as_storage_has_space_ssd(as_namespace *ns);
+extern void as_storage_defrag_sweep_ssd(as_namespace *ns);
 
 extern int as_storage_info_set_ssd(as_namespace *ns, uint idx, uint8_t *buf, size_t len);
 extern int as_storage_info_get_ssd(as_namespace *ns, uint idx, uint8_t *buf, size_t *len);

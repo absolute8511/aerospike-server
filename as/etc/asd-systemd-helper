@@ -1,0 +1,23 @@
+#!/bin/bash
+mem=`/sbin/sysctl -n kernel.shmall`
+min=4294967296
+if [ ${#mem} -le ${#min} ]; then
+    if [ $mem -lt $min ]; then
+    echo "kernel.shmall too low, setting to 4G pages = 16TB"
+    /sbin/sysctl -w kernel.shmall=$min
+    fi
+fi
+
+mem=`/sbin/sysctl -n kernel.shmmax`
+min=1073741824
+if [ ${#mem} -le ${#min} ]; then
+    if [ $mem -lt $min ]; then
+    echo "kernel.shmmax too low, setting to 1GB"
+    /sbin/sysctl -w kernel.shmmax=$min
+    fi
+fi
+
+if [ -f /etc/aerospike/initfns ]
+then
+    . /etc/aerospike/initfns
+fi

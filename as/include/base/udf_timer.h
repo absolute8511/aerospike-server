@@ -41,7 +41,6 @@ struct time_tracker_s {
 /*****************************************************************************
  * STATIC FUNCTIONS
  *****************************************************************************/
-as_timer *   udf_timer_init();
 void         udf_timer_setup(time_tracker *tt);
 void         udf_timer_cleanup();
 extern const as_timer_hooks udf_timer_hooks;

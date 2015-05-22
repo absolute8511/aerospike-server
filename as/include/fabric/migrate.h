@@ -66,6 +66,9 @@ typedef enum as_migrate_type_e {
 	AS_MIGRATE_TYPE_OVERWRITE = 1
 } as_migrate_type;
 
+#define AS_MIGRATE_RX_STATE_SUBRECORD 1
+#define AS_MIGRATE_RX_STATE_RECORD 2
+typedef uint8_t as_partition_mig_rx_state;
 
 // an a 'START' notification, the callback may return a value.
 // If that value is -1, the migration will be abandoned (with 'ERROR' notification)
@@ -94,6 +97,9 @@ void as_migrate_init();
 // Set the number of migrate xmit threads.
 int as_migrate_set_num_xmit_threads(int n_threads);
 
+bool
+as_migrate_is_incoming(cf_digest *subrec_digest, uint64_t version, as_partition_id partition_id, int state);
+
 // migrate a tree to a node
 // and find out when it's done
 int as_migrate(cf_node *dst, uint dst_sz,
@@ -113,3 +119,9 @@ void as_migrate_dump(bool verbose);
 as_migrate_cb_return as_partition_migrate_rx(as_migrate_state s,
 		as_namespace *ns, as_partition_id pid, as_index_tree *tree,
 		cf_node source_node, void *udata);
+
+/*
+ * Check and return if passed in version is found in migration incoming ldt version hash
+ */
+int
+as_migrate_is_incoming_version(uint64_t version, uint64_t *found_version);
