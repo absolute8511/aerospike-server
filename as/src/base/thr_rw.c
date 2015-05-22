@@ -4930,7 +4930,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	if ((m->info1 & AS_MSG_INFO1_XDR) == 0 ||
 			g_config.xdr_cfg.xdr_forward_xdrwrites ||
 			ns->ns_forward_xdr_writes) {
-		xdr_write(ns, tr->keyd, r->generation, 0, is_delete, set_id);
+		xdr_write(ns, tr->keyd, tr->generation, 0, is_delete, set_id);
 	}
 
 	return 0;
