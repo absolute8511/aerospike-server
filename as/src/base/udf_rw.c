@@ -228,7 +228,7 @@ udf_rw_get_ldt_error(void *val, size_t vlen)
 		// we are obviously not looking at an LDT error.
 		if (&charptr[9] < &valptr[vlen]) {
 			if (memcmp(&charptr[5], ":LDT-", 5) == 0) {
-				error_code = strtol(&charptr[1], NULL, 0);
+				error_code = strtol(&charptr[1], NULL, 10);
 				cf_debug(AS_UDF, "LDT Error: Code(%ld) String(%s)",
 						error_code, (char *) val);
 				return error_code;
@@ -1134,6 +1134,8 @@ int udf_rw_addresponse(as_transaction *tr, void *udata)
 int
 udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 {
+	*op = UDF_OPTYPE_NONE;
+
 	// Step 1: Setup UDF Record and LDT record
 	as_transaction *tr = call->transaction;
 	as_index_ref    r_ref;
@@ -1252,7 +1254,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 
 		udf_rw_update_ldt_err_stats(ns, res);
 
-		if (UDF_OP_IS_READ(*op)) {
+		if (UDF_OP_IS_READ(*op) || *op == UDF_OPTYPE_NONE) {
 			send_result(res, call, NULL);
 			as_result_destroy(res);
 		} else {

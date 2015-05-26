@@ -85,7 +85,7 @@ const char *g_config_file = DEFAULT_CONFIG_FILE;
 void cfg_add_mesh_seed_addr_port(char* addr, int port);
 as_set* cfg_add_set(as_namespace* ns);
 void cfg_add_storage_file(as_namespace* ns, char* file_name);
-void cfg_add_storage_device(as_namespace* ns, char* device_name);
+void cfg_add_storage_device(as_namespace* ns, char* device_name, char* shadow_name);
 void cfg_init_si_var(as_namespace* ns);
 uint32_t cfg_obj_size_hist_max(uint32_t hist_max);
 void cfg_create_all_histograms();
@@ -163,6 +163,12 @@ cfg_set_defaults()
 	// Network service defaults.
 	c->socket.proto = SOCK_STREAM; // not configurable, but addr and port are
 	c->socket_reuse_addr = true;
+
+	// Fabric TCP socket keepalive defaults.
+	c->fabric_keepalive_enabled = true;
+	c->fabric_keepalive_time = 1; // seconds
+	c->fabric_keepalive_intvl = 1; // seconds
+	c->fabric_keepalive_probes = 10; // tries
 
 	// Network heartbeat defaults.
 	c->hb_mode = AS_HB_MODE_UNDEF; // must supply heartbeat mode in the configuration file
@@ -417,6 +423,11 @@ typedef enum {
 	// Normally visible, in canonical configuration file order:
 	CASE_NETWORK_FABRIC_ADDRESS,
 	CASE_NETWORK_FABRIC_PORT,
+	// Normally hidden, in canonical configuration file order:
+	CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED,
+	CASE_NETWORK_FABRIC_KEEPALIVE_TIME,
+	CASE_NETWORK_FABRIC_KEEPALIVE_INTVL,
+	CASE_NETWORK_FABRIC_KEEPALIVE_PROBES,
 
 	// Network info options:
 	// Normally visible, in canonical configuration file order:
@@ -437,6 +448,8 @@ typedef enum {
 	CASE_NAMESPACE_SETS_ENABLE_XDR,
 	CASE_NAMESPACE_XDR_REMOTE_DATACENTER,
 	CASE_NAMESPACE_FORWARD_XDR_WRITES,
+	CASE_NAMESPACE_ALLOW_NONXDR_WRITES,
+	CASE_NAMESPACE_ALLOW_XDR_WRITES,
 	// Normally hidden:
 	CASE_NAMESPACE_ALLOW_VERSIONS,
 	CASE_NAMESPACE_COLD_START_EVICT_TTL,
@@ -782,6 +795,10 @@ const cfg_opt NETWORK_HEARTBEAT_PROTOCOL_OPTS[] = {
 const cfg_opt NETWORK_FABRIC_OPTS[] = {
 		{ "address",						CASE_NETWORK_FABRIC_ADDRESS },
 		{ "port",							CASE_NETWORK_FABRIC_PORT },
+		{ "keepalive-enabled",				CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED },
+		{ "keepalive-time",					CASE_NETWORK_FABRIC_KEEPALIVE_TIME },
+		{ "keepalive-intvl",				CASE_NETWORK_FABRIC_KEEPALIVE_INTVL },
+		{ "keepalive-probes",				CASE_NETWORK_FABRIC_KEEPALIVE_PROBES },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -802,6 +819,8 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "sets-enable-xdr",				CASE_NAMESPACE_SETS_ENABLE_XDR },
 		{ "xdr-remote-datacenter",			CASE_NAMESPACE_XDR_REMOTE_DATACENTER },
 		{ "ns-forward-xdr-writes",			CASE_NAMESPACE_FORWARD_XDR_WRITES },
+		{ "allow-nonxdr-writes",			CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
+		{ "allow-xdr-writes",				CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
 		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
 		{ "cold-start-evict-ttl",			CASE_NAMESPACE_COLD_START_EVICT_TTL },
 		{ "conflict-resolution-policy",		CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY },
@@ -1214,28 +1233,64 @@ cfg_not_supported(const cfg_line* p_line, const char *feature)
 }
 
 char*
-cfg_strdup(const cfg_line* p_line)
+cfg_strdup_anyval_no_checks(const cfg_line* p_line, const char* val_tok)
 {
-	// TODO - should we check for empty string?
-
-	char* str = cf_strdup(p_line->val_tok_1);
+	char* str = cf_strdup(val_tok);
 
 	if (! str) {
 		cf_crash_nostack(AS_CFG, "line %d :: failed alloc for %s: %s",
-				p_line->num, p_line->name_tok, p_line->val_tok_1);
+				p_line->num, p_line->name_tok, val_tok);
 	}
 
 	return str;
 }
 
 char*
+cfg_strdup_no_checks(const cfg_line* p_line)
+{
+	return cfg_strdup_anyval_no_checks(p_line, p_line->val_tok_1);
+}
+
+char*
+cfg_strdup_val2_no_checks(const cfg_line* p_line)
+{
+	return cfg_strdup_anyval_no_checks(p_line, p_line->val_tok_2);
+}
+
+char*
+cfg_strdup_anyval(const cfg_line* p_line, const char* val_tok, bool is_required)
+{
+	if (val_tok[0] == 0) {
+		if (is_required) {
+			cf_crash_nostack(AS_CFG, "line %d :: %s must have a value specified",
+					p_line->num, p_line->name_tok);
+		}
+
+		// Do not duplicate empty strings.
+		return NULL;
+	}
+
+	return cfg_strdup_anyval_no_checks(p_line, val_tok);
+}
+
+char*
+cfg_strdup(const cfg_line* p_line, bool is_required)
+{
+	return cfg_strdup_anyval(p_line, p_line->val_tok_1, is_required);
+}
+
+char*
+cfg_strdup_val2(const cfg_line* p_line, bool is_required)
+{
+	return cfg_strdup_anyval(p_line, p_line->val_tok_2, is_required);
+}
+
+char*
 cfg_strdup_one_of(const cfg_line* p_line, const char* toks[], int num_toks)
 {
-	// TODO - should we check for empty string?
-
 	for (int i = 0; i < num_toks; i++) {
 		if (strcmp(p_line->val_tok_1, toks[i]) == 0) {
-			return cfg_strdup(p_line);
+			return cfg_strdup_no_checks(p_line);
 		}
 	}
 
@@ -1748,7 +1803,7 @@ as_config_init()
 				c->paxos_single_replica_limit = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_PIDFILE:
-				c->pidfile = cfg_strdup(&line);
+				c->pidfile = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_SERVICE_SERVICE_THREADS:
 				c->n_service_threads = cfg_int(&line, 1, MAX_DEMARSHAL_THREADS);
@@ -1809,7 +1864,7 @@ as_config_init()
 				c->hist_track_slice = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_HIST_TRACK_THRESHOLDS:
-				c->hist_track_thresholds = cfg_strdup(&line);
+				c->hist_track_thresholds = cfg_strdup_no_checks(&line);
 				// TODO - if config key present but no value (not even space) failure mode is bad...
 				break;
 			case CASE_SERVICE_INFO_THREADS:
@@ -1972,7 +2027,7 @@ as_config_init()
 				c->use_queue_per_device = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_WORK_DIRECTORY:
-				c->work_directory = cfg_strdup(&line);
+				c->work_directory = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_SERVICE_WRITE_DUPLICATE_RESOLUTION_DISABLE:
 				c->write_duplicate_resolution_disable = cfg_bool(&line);
@@ -2140,7 +2195,7 @@ as_config_init()
 			switch(cfg_find_tok(line.name_tok, NETWORK_SERVICE_OPTS, NUM_NETWORK_SERVICE_OPTS)) {
 			case CASE_NETWORK_SERVICE_ADDRESS:
 				// TODO - is the strdup necessary (addr ever freed)?
-				c->socket.addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup(&line);
+				c->socket.addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_SERVICE_PORT:
 				c->socket.port = cfg_port(&line);
@@ -2149,11 +2204,11 @@ as_config_init()
 				cfg_renamed_name_tok(&line, "access-address");
 				// Intentional fall-through.
 			case CASE_NETWORK_SERVICE_ACCESS_ADDRESS:
-				c->external_address = cfg_strdup(&line);
+				c->external_address = cfg_strdup_no_checks(&line);
 				c->is_external_address_virtual = strcmp(line.val_tok_2, "virtual") == 0;
 				break;
 			case CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME:
-				c->network_interface_name = cfg_strdup(&line);
+				c->network_interface_name = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_SERVICE_REUSE_ADDRESS:
 				c->socket_reuse_addr = cfg_bool_no_value_is_true(&line);
@@ -2188,19 +2243,19 @@ as_config_init()
 				}
 				break;
 			case CASE_NETWORK_HEARTBEAT_ADDRESS:
-				c->hb_addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup(&line);
+				c->hb_addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_PORT:
 				c->hb_port = cfg_int_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_ADDRESS:
-				c->hb_init_addr = cfg_strdup(&line);
+				c->hb_init_addr = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_PORT:
 				c->hb_init_port = cfg_port(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_SEED_ADDRESS_PORT:
-				cfg_add_mesh_seed_addr_port(cfg_strdup(&line), cfg_port_val2(&line));
+				cfg_add_mesh_seed_addr_port(cfg_strdup_no_checks(&line), cfg_port_val2(&line));
 				break;
 			case CASE_NETWORK_HEARTBEAT_INTERVAL:
 				c->hb_interval = cfg_u32_no_checks(&line);
@@ -2209,7 +2264,7 @@ as_config_init()
 				c->hb_timeout = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS:
-				c->hb_tx_addr = cfg_strdup(&line);
+				c->hb_tx_addr = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MCAST_TTL:
 				c->hb_mcast_ttl = cfg_u8_no_checks(&line);
@@ -2257,6 +2312,18 @@ as_config_init()
 				break;
 			case CASE_NETWORK_FABRIC_PORT:
 				c->fabric_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED:
+				c->fabric_keepalive_enabled = cfg_bool(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_TIME:
+				c->fabric_keepalive_time = cfg_int_no_checks(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_INTVL:
+				c->fabric_keepalive_intvl = cfg_int_no_checks(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_PROBES:
+				c->fabric_keepalive_probes = cfg_int_no_checks(&line);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);
@@ -2349,6 +2416,18 @@ as_config_init()
 			case CASE_NAMESPACE_FORWARD_XDR_WRITES:
 				ns->ns_forward_xdr_writes = cfg_bool(&line);
 				if (ns->ns_forward_xdr_writes && ! c->xdr_cfg.xdr_supported) {
+					cfg_not_supported(&line, "XDR");
+				}
+				break;
+			case CASE_NAMESPACE_ALLOW_NONXDR_WRITES:
+				ns->ns_allow_nonxdr_writes = cfg_bool(&line);
+				if (ns->ns_allow_nonxdr_writes && ! c->xdr_cfg.xdr_supported) {
+					cfg_not_supported(&line, "XDR");
+				}
+				break;
+			case CASE_NAMESPACE_ALLOW_XDR_WRITES:
+				ns->ns_allow_xdr_writes = cfg_bool(&line);
+				if (ns->ns_allow_xdr_writes && ! c->xdr_cfg.xdr_supported) {
 					cfg_not_supported(&line, "XDR");
 				}
 				break;
@@ -2520,13 +2599,13 @@ as_config_init()
 		case NAMESPACE_STORAGE_DEVICE:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_DEVICE_OPTS, NUM_NAMESPACE_STORAGE_DEVICE_OPTS)) {
 			case CASE_NAMESPACE_STORAGE_DEVICE_DEVICE:
-				cfg_add_storage_device(ns, cfg_strdup(&line));
+				cfg_add_storage_device(ns, cfg_strdup(&line, true), cfg_strdup_val2(&line, false));
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_FILE:
-				cfg_add_storage_file(ns, cfg_strdup(&line));
+				cfg_add_storage_file(ns, cfg_strdup(&line, true));
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_FILESIZE:
-				ns->storage_filesize = cfg_i64_no_checks(&line);
+				ns->storage_filesize = cfg_i64(&line, 1024 * 1024, AS_STORAGE_MAX_DEVICE_SIZE);
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_SCHEDULER_MODE:
 				ns->storage_scheduler_mode = cfg_strdup_one_of(&line, DEVICE_SCHEDULER_MODES, NUM_DEVICE_SCHEDULER_MODES);
@@ -2608,7 +2687,7 @@ as_config_init()
 		case NAMESPACE_STORAGE_KV:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_KV_OPTS, NUM_NAMESPACE_STORAGE_KV_OPTS)) {
 			case CASE_NAMESPACE_STORAGE_KV_DEVICE:
-				cfg_add_storage_file(ns, cfg_strdup(&line));
+				cfg_add_storage_file(ns, cfg_strdup(&line, true));
 				break;
 			case CASE_NAMESPACE_STORAGE_KV_FILESIZE:
 				ns->storage_filesize = cfg_i64_no_checks(&line);
@@ -2754,7 +2833,7 @@ as_config_init()
 				cfg_deprecated_name_tok(&line);
 				cf_warning(AS_AS, "Use 'xdr-namedpipe-path'");
 			case XDR_CASE_NAMEDPIPE_PATH:
-				c->xdr_cfg.xdr_digestpipe_path = cfg_strdup(&line);
+				c->xdr_cfg.xdr_digestpipe_path = cfg_strdup_no_checks(&line);
 				break;
 			case XDR_CASE_FORWARD_XDR_WRITES:
 				c->xdr_cfg.xdr_forward_xdrwrites = cfg_bool(&line);
@@ -3176,13 +3255,14 @@ cfg_add_storage_file(as_namespace* ns, char* file_name)
 }
 
 void
-cfg_add_storage_device(as_namespace* ns, char* device_name)
+cfg_add_storage_device(as_namespace* ns, char* device_name, char* shadow_name)
 {
 	int i;
 
 	for (i = 0; i < AS_STORAGE_MAX_DEVICES; i++) {
 		if (! ns->storage_devices[i]) {
 			ns->storage_devices[i] = device_name;
+			ns->storage_shadows[i] = shadow_name;
 			break;
 		}
 	}

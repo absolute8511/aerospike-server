@@ -114,7 +114,7 @@ udf_aerospike_delbin(udf_record * urecord, const char * bname)
 
 	as_bin * b = as_bin_get(rd, (byte *)bname, blen);
 	if ( !b ) {
-		cf_warning(AS_UDF, "udf_aerospike_delbin: Invalid Operation [Bin name(%s) not found of delete]... Fail", bname);
+		cf_debug(AS_UDF, "udf_aerospike_delbin: Invalid Operation [Bin name(%s) not found of delete]... Fail", bname);
 		return -1;
 	}
 

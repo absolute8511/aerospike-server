@@ -79,6 +79,7 @@
 
 #define AS_STORAGE_MAX_DEVICES 32 // maximum devices per namespace
 #define AS_STORAGE_MAX_FILES 32 // maximum files per namespace
+#define AS_STORAGE_MAX_DEVICE_SIZE (2L * 1024L * 1024L * 1024L * 1024L) // 2Tb, due to rblock_id in as_index
 
 #define OBJ_SIZE_HIST_NUM_BUCKETS 100
 #define EVICTION_HIST_NUM_BUCKETS 100
@@ -941,6 +942,8 @@ struct as_namespace_s {
 	bool						enable_xdr;
 	bool 						sets_enable_xdr; // namespace-level flag to enable set-based xdr shipping.
 	bool 						ns_forward_xdr_writes; // namespace-level flag to enable forwarding of xdr writes
+	bool 						ns_allow_nonxdr_writes; // namespace-level flag to allow nonxdr writes or not
+	bool 						ns_allow_xdr_writes; // namespace-level flag to allow xdr writes or not
 
 	/* The server default read consistency level for this namespace. */
 	as_policy_consistency_level read_consistency_level;
@@ -961,6 +964,7 @@ struct as_namespace_s {
 	as_storage_type storage_type;
 	char *storage_path;
 	char *storage_devices[AS_STORAGE_MAX_DEVICES];
+	char *storage_shadows[AS_STORAGE_MAX_DEVICES];
 	char *storage_files[AS_STORAGE_MAX_FILES];
 	char *storage_scheduler_mode; // relevant for devices only, not files
 	off_t		storage_filesize;

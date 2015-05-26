@@ -40,6 +40,11 @@
 #include <citrusleaf/cf_b64.h>
 
 
+/*
+ *  Maximum length for logging binary (i.e., hexadecimal or bit string) data.
+ */
+#define MAX_BINARY_BUF_SZ (64 * 1024)
+
 /* cf_fault_context_strings, cf_fault_severity_strings, cf_fault_scope_strings
  * Strings describing fault states */
 
@@ -481,7 +486,6 @@ cf_fault_event(const cf_fault_context context, const cf_fault_severity severity,
 		const char *file_name, const char * function_name, const int line,
 		char *msg, ...)
 {
-
 	/* Prefilter: don't construct messages we won't end up writing */
 	if (severity > cf_fault_filter[context])
 		return;
@@ -562,6 +566,7 @@ cf_fault_event(const cf_fault_context context, const cf_fault_severity severity,
 	}
 } // end cf_fault_event()
 
+
 /**
  * Generate a Packed Hex String Representation of the binary string.
  * e.g. 0xfc86e83a6d6d3024659e6fe48c351aaaf6e964a5
@@ -583,7 +588,7 @@ generate_packed_hex_string(void *mem_ptr, uint len, char* output)
 		p += 2;
 	}
 	*p++ = 0; // Null terminate the output buffer.
-	return (int) ((void *)p - startp ); // show how much space we used.
+	return (int) ((void *)p - startp); // show how much space we used.
 } // end generate_packed_hex_string()
 
 
@@ -603,7 +608,7 @@ generate_spaced_hex_string(void *mem_ptr, uint len, char* output)
 		p += 3;
 	}
 	*p++ = 0; // Null terminate the output buffer.
-	return (int) ((void *)p - startp ); // show how much space we used.
+	return (int) ((void *)p - startp); // show how much space we used.
 } // end generate_spaced_hex_string()
 
 
@@ -627,15 +632,14 @@ generate_column_hex_string(void *mem_ptr, uint len, char* output)
 	for (i = 0; i < len; i++) {
 		sprintf(p, "%02x ", d[i]); // Two chars and a space
 		p += 3;
-		if( (i+1) % 8 == 0 && i != 0 ){
+		if ((i+1) % 8 == 0 && i != 0) {
 			*p++ = '\n';  // add a line return
 		}
 	}
 	*p++ = '\n'; // Finish with a new line
 	*p++ = 0; // Null terminate the output buffer.
-	return (int) ((void *)p - startp ); // show how much space we used.
+	return (int) ((void *)p - startp); // show how much space we used.
 } // end generate_column_hex_string()
-
 
 
 /**
@@ -663,7 +667,6 @@ int generate_base64_string(void *mem_ptr, uint len, char output_buf[])
 } // end generate_base64_hex_string()
 
 
-
 /**
  * Generate a BIT representation with spaces between the four bit groups.
  * Print the bits left to right (big to small).
@@ -680,15 +683,15 @@ int generate_4spaced_bits_string(void *mem_ptr, uint len, char* output)
 	// For each byte in the string
 	for (int i = 0; i < len; i++) {
 		uint_val = d[i];
-		for (int j = 0; j < 8; j++ ){
+		for (int j = 0; j < 8; j++) {
 			sprintf(p, "%1d", ((uint_val << j) & mask));
 			p++;
 			// Add a space after every 4th bit
-			if( (j+1) % 4 == 0 ) *p++ = ' ';
+			if ( (j+1) % 4 == 0 ) *p++ = ' ';
 		}
 	}
 	*p++ = 0; // Null terminate the output buffer.
-	return (int) ((void *)p - startp ); // show how much space we used.
+	return (int) ((void *)p - startp); // show how much space we used.
 } // end generate_4spaced_bits_string()
 
 /**
@@ -720,9 +723,8 @@ int generate_column_bits_string(void *mem_ptr, uint len, char* output)
 		if ((i + 1) % 4 == 0) *p++ = '\n';
 	}
 	*p++ = 0; // Null terminate the output buffer.
-	return (int) ((void *)p - startp ); // show how much space we used.
+	return (int) ((void *)p - startp); // show how much space we used.
 } // end generate_column_bits_string()
-
 
 
 /* cf_fault_event -- TWO:  Expand on the LOG ability by being able to
@@ -753,12 +755,16 @@ cf_fault_event2(const cf_fault_context context, const cf_fault_severity severity
 		return;
 
 	va_list argp;
-	char mbuf[2048];
+	char mbuf[MAX_BINARY_BUF_SZ];
 	time_t now;
 	struct tm nowtm;
 
-#define BIN_LIMIT 1024
-	char binary_buf[BIN_LIMIT];
+	char binary_buf[MAX_BINARY_BUF_SZ];
+
+	// Arbitrarily limit output to a fixed maximum length.
+	if (len > MAX_BINARY_BUF_SZ) {
+		len = MAX_BINARY_BUF_SZ;
+	}
 	char * labelp = NULL; // initialize to quiet build warning
 
 	/* Make sure there's always enough space for the \n\0. */
@@ -848,9 +854,10 @@ cf_fault_event2(const cf_fault_context context, const cf_fault_severity severity
 	}
 
 	// Append our final BINARY string, if present (some might pass in NULL).
-	if ( mem_ptr ){
-		pos += snprintf(mbuf + pos, limit-pos, "<%s>:%s", labelp, binary_buf );
+	if ( mem_ptr ) {
+		pos += snprintf(mbuf + pos, limit - pos, "<%s>:%s", labelp, binary_buf);
 	}
+
 	// Check for overflow (see above).
 	if (pos > limit) {
 		pos = limit;
@@ -964,6 +971,7 @@ cf_fault_event_nostack(const cf_fault_context context,
 		raise(SIGINT);
 	}
 }
+
 
 int
 cf_fault_sink_strlist(cf_dyn_buf *db)

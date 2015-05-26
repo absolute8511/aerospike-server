@@ -642,7 +642,7 @@ info_get_stats(char *name, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";sindex_ucgarbage_found=");
 	APPEND_STAT_COUNTER(db, g_config.query_false_positives);
-	
+
 	cf_dyn_buf_append_string(db, ";sindex_gc_locktimedout=");
 	APPEND_STAT_COUNTER(db, g_config.sindex_gc_timedout);
 
@@ -657,7 +657,7 @@ info_get_stats(char *name, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";sindex_gc_list_deletion_time=");
 	APPEND_STAT_COUNTER(db, g_config.sindex_gc_list_deletion_time);
-	
+
 	cf_dyn_buf_append_string(db, ";sindex_gc_objects_validated=");
 	APPEND_STAT_COUNTER(db, g_config.sindex_gc_objects_validated);
 
@@ -1894,7 +1894,7 @@ info_command_smd_cmd(char *name, char *params, cf_dyn_buf *db)
 				cf_dyn_buf_append_string(db, "error");
 				return 0;
 			}
-		} 
+		}
 	}
 
 	if (!strcmp(cmd, "set") || !strcmp(cmd, "delete") || !strcmp(cmd, "get")) {
@@ -2262,7 +2262,7 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";ldt-enabled=");
 	cf_dyn_buf_append_string(db, ns->ldt_enabled ? "true" : "false");
-	
+
 	cf_dyn_buf_append_string(db, ";ldt-page-size=");
 	cf_dyn_buf_append_uint64(db, ns->ldt_page_size);
 
@@ -2274,6 +2274,12 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";ns-forward-xdr-writes=");
 	cf_dyn_buf_append_string(db, ns->ns_forward_xdr_writes ? "true" : "false");
+
+	cf_dyn_buf_append_string(db, ";allow-nonxdr-writes=");
+	cf_dyn_buf_append_string(db, ns->ns_allow_nonxdr_writes ? "true" : "false");
+
+	cf_dyn_buf_append_string(db, ";allow-xdr-writes=");
+	cf_dyn_buf_append_string(db, ns->ns_allow_xdr_writes ? "true" : "false");
 
 	cf_dyn_buf_append_string(db, ";disallow-null-setname=");
 	cf_dyn_buf_append_string(db, ns->disallow_null_setname ? "true" : "false");
@@ -2400,6 +2406,16 @@ info_network_info_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, g_config.socket_reuse_addr ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";fabric-port=");
 	cf_dyn_buf_append_int(db, g_config.fabric_port);
+
+	cf_dyn_buf_append_string(db, ";fabric-keepalive-enabled=");
+	cf_dyn_buf_append_string(db, g_config.fabric_keepalive_enabled ? "true" : "false");
+	cf_dyn_buf_append_string(db, ";fabric-keepalive-time=");
+	cf_dyn_buf_append_int(db, g_config.fabric_keepalive_time);
+	cf_dyn_buf_append_string(db, ";fabric-keepalive-intvl=");
+	cf_dyn_buf_append_int(db, g_config.fabric_keepalive_intvl);
+	cf_dyn_buf_append_string(db, ";fabric-keepalive-probes=");
+	cf_dyn_buf_append_int(db, g_config.fabric_keepalive_probes);
+
 // network-info-port is the asd info port variable/output, This was chosen because info-port conflicts with XDR config parameter.
 // Ideally XDR should use xdr-info-port and asd should use info-port.
 	cf_dyn_buf_append_string(db, ";network-info-port=");
@@ -3020,7 +3036,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			if (val < 0) {
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" micro seconds to %"PRIu64" micro seconds", 
+			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" micro seconds to %"PRIu64" micro seconds",
 						g_config.query_untracked_time_ns/1000, val);
 			g_config.query_untracked_time_ns = val * 1000;
 		}
@@ -3204,27 +3220,27 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			}
 		}
 		else if (0 == as_info_parameter_get(params, "query-microbenchmark", context, &context_len)) {
-			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) { 
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
 				cf_info(AS_INFO, "Changing value of query-enable-histogram to %s", context);
 				g_config.query_enable_histogram = true;
-			}    
-			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) { 
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
 				cf_info(AS_INFO, "Changing value of query-enable-histogram to %s", context);
 				g_config.query_enable_histogram = false;
-			}    
+			}
 			else {
 				goto Error;
 			}
 		}
 		else if (0 == as_info_parameter_get(params, "pre-reserve-qnodes", context, &context_len)) {
-			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) { 
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
 				cf_info(AS_INFO, "Changing value of reserve-qnodes-upfront to %s", context);
 				g_config.qnodes_pre_reserved = true;
-			}    
-			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) { 
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
 				cf_info(AS_INFO, "Changing value of reserve-qnodes-upfront to %s", context);
 				g_config.qnodes_pre_reserved = false;
-			}    
+			}
 			else {
 				goto Error;
 			}
@@ -3532,12 +3548,38 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 		}
 		else if (0 == as_info_parameter_get(params, "ns-forward-xdr-writes", context, &context_len)) {
 			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
-				cf_info(AS_INFO, "Changing value of sets-enable-xdr of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
+				cf_info(AS_INFO, "Changing value of ns-forward-xdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
 				ns->ns_forward_xdr_writes = true;
 			}
 			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
-				cf_info(AS_INFO, "Changing value of sets-enable-xdr of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
+				cf_info(AS_INFO, "Changing value of ns-forward-xdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_forward_xdr_writes], context);
 				ns->ns_forward_xdr_writes = false;
+			}
+			else {
+				goto Error;
+			}
+		}
+		else if (0 == as_info_parameter_get(params, "allow-nonxdr-writes", context, &context_len)) {
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
+				cf_info(AS_INFO, "Changing value of allow-nonxdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_allow_nonxdr_writes], context);
+				ns->ns_allow_nonxdr_writes = true;
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
+				cf_info(AS_INFO, "Changing value of allow-nonxdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_allow_nonxdr_writes], context);
+				ns->ns_allow_nonxdr_writes = false;
+			}
+			else {
+				goto Error;
+			}
+		}
+		else if (0 == as_info_parameter_get(params, "allow-xdr-writes", context, &context_len)) {
+			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
+				cf_info(AS_INFO, "Changing value of allow-xdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_allow_xdr_writes], context);
+				ns->ns_allow_xdr_writes = true;
+			}
+			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
+				cf_info(AS_INFO, "Changing value of allow-xdr-writes of ns %s from %s to %s", ns->name, bool_val[ns->ns_allow_xdr_writes], context);
+				ns->ns_allow_xdr_writes = false;
 			}
 			else {
 				goto Error;
@@ -3736,6 +3778,10 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_node nodeid = atoll(context);
 			xdr_handle_failednodeprocessingdone(nodeid);
 		}
+		else if (0 == as_info_parameter_get(params, "xdr-namedpipe-path", context, &context_len)) {
+			g_config.xdr_cfg.xdr_digestpipe_path = cf_strdup(context);
+			cf_info(AS_INFO, "xdr-namedpipe-path set to : %s", context);
+		}
 		else if (0 == as_info_parameter_get(params, "stop-writes-noxdr", context, &context_len)) {
 			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
 				cf_info(AS_INFO, "Changing value of stop-writes-noxdr from %s to %s", bool_val[g_config.xdr_cfg.xdr_stop_writes_noxdr], context);
@@ -3798,6 +3844,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 	else
 		goto Error;
 
+	cf_info(AS_INFO, "config-set command completed: params %s",params);
 	cf_dyn_buf_append_string(db, "ok");
 	return(0);
 
@@ -4272,7 +4319,12 @@ info_some(char *buf, char *buf_lim, const as_file_handle* fd_h, cf_dyn_buf *db)
 
 			// parse parameters
 			tok = c + 1;
-			while (*c != EOL) c++;
+			// make sure c doesn't go beyond buf_lim
+			while (*c != EOL && c < buf_lim-1) c++;
+			if (*c != EOL) {
+				cf_warning(AS_INFO, "Info '%s' parameter not terminated with '\\n'.", name);
+				break;
+			}
 			*c = 0;
 			char *param = tok;
 
@@ -5144,7 +5196,7 @@ build_service_list(cf_ifaddr * ifaddr, int ifaddr_sz, cf_dyn_buf *db) {
 			cf_dyn_buf_append_char(db, ';');
 		}
 	}
-	
+
 	// take off the last ';' if there was any string there
 	if (db->used_sz > 0)
 		cf_dyn_buf_chomp(db);
@@ -5182,7 +5234,7 @@ info_interfaces_fn(void *gcc_is_ass)
 					break;
 				}
 			}
-		} else { 
+		} else {
 			changed = true;
 		}
 
@@ -5225,7 +5277,7 @@ info_interfaces_static_fn(void *gcc_is_ass)
 
 	cf_info(AS_INFO, " static external network definition ");
 
-	// check external-address is matching with given addresses in service list 
+	// check external-address is matching with given addresses in service list
 	uint8_t buf[512];
 	cf_ifaddr *ifaddr;
 	int	ifaddr_sz;
@@ -5243,7 +5295,7 @@ info_interfaces_static_fn(void *gcc_is_ass)
 	cf_dyn_buf_free(&temp_service_db);
 	cf_free(service_str);
 
-	// For valid external-address specify the same in service-list 
+	// For valid external-address specify the same in service-list
 	cf_dyn_buf_define(service_db);
 	cf_dyn_buf_append_string(&service_db, g_config.external_address);
 	cf_dyn_buf_append_char(&service_db, ':');
@@ -5754,7 +5806,7 @@ info_get_namespace_info(as_namespace *ns, cf_dyn_buf *db)
 	// LDT operational statistics
 	//
 	// print only if LDT is enabled
-	if (ns->ldt_enabled) {	
+	if (ns->ldt_enabled) {
 		cf_dyn_buf_append_string(db, ";ldt-reads=");
 		cf_dyn_buf_append_uint32(db, cf_atomic_int_get(ns->lstats.ldt_read_reqs));
 		cf_dyn_buf_append_string(db, ";ldt-read-success=");
@@ -6287,7 +6339,7 @@ as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn
 		return 0;
 	}
 
-	// Get the index type. 
+	// Get the index type.
 	// It could be list, mapkeys, mapvalues, or by default none.
 	char indextype_str[128];
 	memset(indextype_str, 0, 128);
@@ -6318,7 +6370,7 @@ as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn
 		}
 	}
 
-	// Gather indexdata	
+	// Gather indexdata
 	char indexdata_str[1024];
 	int  indexdata_len = sizeof(indexdata_str);
 	if (as_info_parameter_get(params, STR_INDEXDATA, indexdata_str,
@@ -6448,7 +6500,7 @@ int info_command_sindex_create(char *name, char *params, cf_dyn_buf *db)
 		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_INDEX_FOUND,
 				"Index with the same name already exists or this bin has already been indexed.");
 		goto ERR;
-	} 
+	}
 	else if (res == AS_SINDEX_ERR_PARAM) {
 		cf_info(AS_INFO, "Index-name is too long, should be a max of: %d.", AS_ID_INAME_SZ - 1);
 		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_INDEX_NAME_MAXLEN,
@@ -6729,6 +6781,16 @@ int info_command_abort_scan(char *name, char *params, cf_dyn_buf *db) {
 	else {
 		cf_dyn_buf_append_string(db, "OK");
 	}
+
+	return 0;
+}
+
+int info_command_abort_all_scans(char *name, char *params, cf_dyn_buf *db) {
+
+	int n_scans_killed = as_tscan_abort_all();
+
+	cf_dyn_buf_append_string(db, "OK - number of scans killed: ");
+	cf_dyn_buf_append_int(db, n_scans_killed);
 
 	return 0;
 }
@@ -7133,7 +7195,7 @@ as_info_init()
 	as_info_set_command("udf-clear-cache", udf_cask_info_clear_cache, PERM_UDF_MANAGE);
 
 	// JOBS
-	as_info_set_command("jobs", info_command_mon_cmd, PERM_SERVICE_CTRL);  // Manipulate the multi-key lookup monitoring infrastructure.
+	as_info_set_command("jobs", info_command_mon_cmd, PERM_JOB_MONITOR);  // Manipulate the multi-key lookup monitoring infrastructure.
 
 	// Undocumented Secondary Index Command
 	as_info_set_command("sindex-histogram", info_command_sindex_histogram, PERM_SERVICE_CTRL);
@@ -7142,10 +7204,11 @@ as_info_init()
 	as_info_set_command("sindex-qnodemap", info_command_sindex_qnodemap, PERM_NONE);
 
 	as_info_set_dynamic("query-list", as_query_list, false);
-	as_info_set_command("query-kill", info_command_query_kill, PERM_SERVICE_CTRL);
+	as_info_set_command("query-kill", info_command_query_kill, PERM_QUERY_MANAGE);
 	as_info_set_dynamic("query-stat", as_query_stat, false);
-	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SERVICE_CTRL);  // Abort a tscan with a given id.
-	as_info_set_dynamic("scan-list", as_tscan_list, false);                         // List job ids of all scans.
+	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SCAN_MANAGE);            // Abort a scan with a given id.
+	as_info_set_command("scan-abort-all", info_command_abort_all_scans, PERM_SCAN_MANAGE);   // Abort all scans.
+	as_info_set_dynamic("scan-list", as_tscan_list, false);                                  // List job ids of all scans.
 	as_info_set_command("sindex-describe", info_command_sindex_describe, PERM_NONE);
 	as_info_set_command("sindex-stat", info_command_sindex_stat, PERM_NONE);
 	as_info_set_command("sindex-list", info_command_sindex_list, PERM_NONE);
@@ -7165,7 +7228,7 @@ as_info_init()
 
 	as_fabric_register_msg_fn(M_TYPE_INFO, info_mt, sizeof(info_mt), info_msg_fn, 0 /* udata */ );
 
-	// Take necessery steps if specific address is given in service address 
+	// Take necessery steps if specific address is given in service address
 	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0 ) {
 		if (g_config.external_address != NULL){
 			// check external-address is matches with service address
@@ -7174,7 +7237,7 @@ as_info_init()
 						g_config.external_address, g_config.socket.addr);
 			}
 		} else {
-			// Check if service address is any. If not any then put this adress in external address 
+			// Check if service address is any. If not any then put this adress in external address
 			// to avoid updation of service list continuosly
 			g_config.external_address = g_config.socket.addr;
 		}

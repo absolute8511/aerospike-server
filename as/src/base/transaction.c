@@ -338,6 +338,17 @@ as_transaction_create( as_transaction *tr, tr_create_data *  trc_data)
 	return 0;
 }
 
+void
+as_transaction_error(as_transaction* tr, uint32_t error_code)
+{
+	if (tr->proto_fd_h) {
+		as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL);
+		tr->proto_fd_h = 0;
+		MICROBENCHMARK_HIST_INSERT_P(error_hist);
+		cf_atomic_int_incr(&g_config.err_tsvc_requests);
+	}
+}
+
 // Helper to release transaction file handles.
 void
 as_release_file_handle(as_file_handle *proto_fd_h)

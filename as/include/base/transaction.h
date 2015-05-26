@@ -265,3 +265,5 @@ typedef struct tr_create_data {
 
 extern int   as_internal_udf_txn_setup(tr_create_data * d);
 extern int   as_transaction_create(as_transaction *tr, tr_create_data * data);
+
+void as_transaction_error(as_transaction* tr, uint32_t error_code);

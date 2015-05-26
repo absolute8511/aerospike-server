@@ -275,6 +275,7 @@ typedef struct {
 	int worker_id;
 
 	bool nodelay_isset;
+	bool keepalive_isset;
 
 	fabric_node_element *fne;
 
@@ -472,6 +473,7 @@ fabric_buffer_create(int fd)
 	fb->fd = fd;
 	fb->worker_id = -1; // no worker assigned yet
 	fb->nodelay_isset = false;
+	fb->keepalive_isset = false;
 	fb->fne = NULL;
 	fb->connected = false; // not in the connected_fb_hash yet
 	fb->status = FB_STATUS_IDLE;
@@ -859,6 +861,40 @@ fabric_write_complete(fabric_buffer *fb)
 	}
 }
 
+static void
+fabric_set_keepalive_options(fabric_buffer *fb)
+{
+	if (!fb->keepalive_isset && g_config.fabric_keepalive_enabled) {
+		int value = 1;
+
+		cf_debug(AS_FABRIC, "Setting keepalive on fd %d to %s time: %d intvl: %d probes: %d",
+				   fb->fd, g_config.fabric_keepalive_enabled ? "ON" : "OFF",
+				   g_config.fabric_keepalive_time, g_config.fabric_keepalive_intvl,
+				   g_config.fabric_keepalive_probes);
+
+		if (0 > setsockopt(fb->fd, SOL_SOCKET, SO_KEEPALIVE, &value, sizeof(value))) {
+			cf_warning(AS_FABRIC, "setsockopt: SO_KEEPALIVE (fd %d; errno %d)", fb->fd, errno);
+		}
+
+		value = g_config.fabric_keepalive_time;
+		if ((value > 0) && (0 > setsockopt(fb->fd, IPPROTO_TCP, TCP_KEEPIDLE, &value, sizeof(value)))) {
+			cf_warning(AS_FABRIC, "setsockopt: TCP_KEEPIDLE (fd %d; errno %d)", fb->fd, errno);
+		}
+
+		value = g_config.fabric_keepalive_intvl;
+		if ((value > 0) && (0 > setsockopt(fb->fd, IPPROTO_TCP, TCP_KEEPINTVL, &value, sizeof(value)))) {
+			cf_warning(AS_FABRIC, "setsockopt: TCP_KEEPINTVL (fd %d; errno %d)", fb->fd, errno);
+		}
+
+		value = g_config.fabric_keepalive_probes;
+		if ((value > 0) && (0 > setsockopt(fb->fd, IPPROTO_TCP, TCP_KEEPCNT, &value, sizeof(value)))) {
+			cf_warning(AS_FABRIC, "setsockopt: TCP_KEEPCNT (fd %d; errno %d)", fb->fd, errno);
+		}
+
+		fb->keepalive_isset = true;
+	}
+}
+
 int
 fabric_process_writable(fabric_buffer *fb)
 {
@@ -896,9 +932,11 @@ fabric_process_writable(fabric_buffer *fb)
 
 	if (fb->nodelay_isset == false) {
 		int flag = 1;
-		setsockopt(fb->fd, SOL_TCP, TCP_NODELAY, &flag, sizeof(flag) );
+		setsockopt(fb->fd, SOL_TCP, TCP_NODELAY, &flag, sizeof(flag));
 		fb->nodelay_isset = true;
 	}
+
+	fabric_set_keepalive_options(fb);
 
 	if (fb->w_in_place) {
 		// cf_assert(fb->fd, AS_FABRIC, CF_WARNING, "attempted write to fd 0");
