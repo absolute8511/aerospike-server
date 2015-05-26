@@ -146,7 +146,7 @@ void rw_complete(write_request *wr, as_transaction *tr, as_index_ref *r_ref);
 void read_local(as_transaction *tr, as_index_ref *r_ref);
 int write_local(as_transaction *tr, write_local_generation *wlg,
 				uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
-				as_rec_props *p_pickled_rec_props, cf_dyn_buf *db, bool journal);
+				as_rec_props *p_pickled_rec_props, cf_dyn_buf *db);
 int write_journal(as_transaction *tr, write_local_generation *wlg); // only do write
 int write_delete_journal(as_transaction *tr);
 static void release_proto_fd_h(as_file_handle *proto_fd_h);
@@ -926,7 +926,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 
 					rv = write_local(tr, &wlg, &wr->pickled_buf,
 							&wr->pickled_sz, &wr->pickled_void_time,
-							&wr->pickled_rec_props, &wr->response_db, false);
+							&wr->pickled_rec_props, &wr->response_db);
 					WR_TRACK_INFO(wr, "internal_rw_start: write local done ");
 				}
 				if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
@@ -3313,7 +3313,7 @@ write_local_failed(as_transaction* tr, as_index_ref* r_ref,
 }
 
 int write_local_preprocessing(as_transaction *tr, write_local_generation *wlg,
-		bool journal, bool *is_done)
+		bool *is_done)
 {
 	*is_done = true;
 
@@ -3355,16 +3355,7 @@ int write_local_preprocessing(as_transaction *tr, write_local_generation *wlg,
 		return -1;
 	}
 
-	// Decide whether we need to write to the journal or not.
-	if (journal && AS_PARTITION_STATE_SYNC != tr->rsv.state) {
-		if (AS_PARTITION_STATE_DESYNC != tr->rsv.state) {
-			cf_debug(AS_RW, "journal wr: unusual state %d", (int)tr->rsv.state);
-		}
-		write_journal(tr, wlg);
-		cf_detail(AS_RW, "write_local: writing in journal %"PRIx64"", *(uint64_t*)&tr->keyd);
-		return 0;
-	}
-	else if (tr->rsv.reject_writes) {
+	if (tr->rsv.reject_writes) {
 		cf_debug(AS_RW, "{%s:%d} write_local: partition rejects writes - writes will flow from master. digest %"PRIx64"",
 				ns->name, tr->rsv.pid, *(uint64_t*)&tr->keyd);
 		return 0;
@@ -4709,7 +4700,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 int
 write_local(as_transaction *tr, write_local_generation *wlg,
 		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
-		as_rec_props *p_pickled_rec_props, cf_dyn_buf *db, bool journal)
+		as_rec_props *p_pickled_rec_props, cf_dyn_buf *db)
 {
 	//------------------------------------------------------
 	// Perform checks that don't need to loop over ops, or
@@ -4717,7 +4708,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	//
 
 	bool is_done = false;
-	int result = write_local_preprocessing(tr, wlg, journal, &is_done);
+	int result = write_local_preprocessing(tr, wlg, &is_done);
 
 	if (is_done) {
 		return result;
@@ -5216,7 +5207,7 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 		if (jqe.delete == true)
 			rv = write_delete_local(&tr, false, 0, false);
 		else
-			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, 0, false);
+			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, 0);
 
 		cf_detail(AS_RW, "write journal: wrote: rv %d key %"PRIx64,
 				rv, *(uint64_t *)&tr.keyd);
