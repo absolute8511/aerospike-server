@@ -3640,17 +3640,36 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 	int sindex_ret = AS_SINDEX_OK;
 	int sindex_found = 0;
 
+	bool not_just_created[n_new_bins];
+
+	for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
+		not_just_created[i_new] = false;
+	}
+
 	SINDEX_GRLOCK();
 
 	// Maximum number of sindexes which can be changed in one transaction is
 	// 2 * ns->sindex_cnt.
 	SINDEX_BINS_SETUP(sbins, 2 * ns->sindex_cnt);
 
+	// For every old bin, find the corresponding new bin (if any) and adjust the
+	// secondary index if the bin was modified. If no corresponding new bin is
+	// found, it means the old bin was deleted - also adjust the secondary index
+	// accordingly.
+
 	for (uint32_t i_old = 0; i_old < n_old_bins; i_old++) {
 		as_bin *b_old = &old_bins[i_old];
 		bool found = false;
 
-		for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
+		// Loop over new bins. Start at old bin index (if possible) and go down,
+		// wrapping around to do the higher indexes last. This will find a match
+		// (if any) very quickly - instantly, unless there were bins deleted.
+
+		bool any_new = n_new_bins != 0;
+		int32_t n_new_minus_1 = (int32_t)n_new_bins - 1;
+		int32_t i_new = (int32_t)i_old > n_new_minus_1 ? n_new_minus_1 : (int32_t)i_old;
+
+		while (any_new) {
 			as_bin *b_new = &new_bins[i_new];
 
 			if (b_old->id == b_new->id) {
@@ -3664,6 +3683,15 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 				}
 
 				found = true;
+				not_just_created[i_new] = true;
+				break;
+			}
+
+			if (--i_new < 0 && (i_new = n_new_minus_1) <= (int32_t)i_old) {
+				break;
+			}
+
+			if (i_new == (int32_t)i_old) {
 				break;
 			}
 		}
@@ -3673,22 +3701,15 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 		}
 	}
 
+	// Now find the new bins that are just-created bins. We've marked the others
+	// in the loop above, so any left are just-created.
+
 	for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
-		as_bin *b_new = &new_bins[i_new];
-		bool found = false;
-
-		for (uint32_t i_old = 0; i_old < n_old_bins; i_old++) {
-			as_bin *b_old = &old_bins[i_old];
-
-			if (b_new->id == b_old->id) {
-				found = true;
-				break;
-			}
+		if (not_just_created[i_new]) {
+			continue;
 		}
 
-		if (! found) {
-			sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
-		}
+		sindex_found += as_sindex_sbins_from_bin(ns, set_name, &new_bins[i_new], &sbins[sindex_found], AS_SINDEX_OP_INSERT);
 	}
 
 	SINDEX_GUNLOCK();
