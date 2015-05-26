@@ -29,6 +29,7 @@
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
+#include <sys/param.h>	// for MIN()
 #include <sys/socket.h>
 
 #include "citrusleaf/alloc.h"
@@ -194,11 +195,35 @@ thr_demarshal_reaper_fn(void *arg)
 	return NULL;
 }
 
+// Get the remote IP address and port connected to a socket file descriptor.
+// Return 0 if successful, and populate the caller-provided IP address and port.
+// Return -1 otherwise.
+static int
+get_fd_ip_addr_and_port(int fd, char *ip_addr, size_t ip_addr_sz, int *port)
+{
+	struct sockaddr_in addr_in;
+	socklen_t addr_len = sizeof(addr_in);
+	int retval = -1;
+
+	// Try to get the client details for better logging.
+	// Otherwise, fall back to generic log message.
+	if (getpeername(fd, (struct sockaddr *) &addr_in, &addr_len) == 0
+		&& ip_addr
+		&& inet_ntop(AF_INET, &addr_in.sin_addr.s_addr, (char *) ip_addr, ip_addr_sz) != NULL) {
+		retval = 0;
+		if (port) {
+			*port = ntohs(addr_in.sin_port);
+		}
+	}
+
+	return retval;
+}
+
+
 // Log information about a suspicious incoming transaction.
 static void
 log_as_proto_and_peeked_data(as_proto *proto, uint8_t *peekbuf, size_t peeked_data_sz)
 {
-	cf_warning(AS_DEMARSHAL, "Received unexpected extra data from client when peeking as_proto!");
 	cf_warning(AS_DEMARSHAL, "as_proto {version = %d ; type = %d ; sz = %zu (0x%x)}", proto->version, proto->type, proto->sz, proto->sz);
 	cf_warning(AS_DEMARSHAL, "peeked_data_sz = %ld (0x%x)", peeked_data_sz, peeked_data_sz);
 	cf_warning_binary(AS_DEMARSHAL, peekbuf, peeked_data_sz, CF_DISPLAY_HEX_SPACED, "peekbuf");
@@ -468,22 +493,18 @@ thr_demarshal(void *arg)
 					// Swap the necessary elements of the as_proto.
 					as_proto_swap(&proto);
 
+					// (For storing the returned values when getting the client info.)
+					char ip_addr[24];
+					ip_addr[0] = 0;
+					int port = 0;
+
 					if (proto.sz > PROTO_SIZE_MAX) {
-						struct sockaddr_in addr_in;
-						socklen_t addr_len = sizeof(addr_in);
-
-						char some_addr[24];
-						some_addr[0] = 0;
-
-						// Try to get the client details for better logging.
-						// Otherwise, fall back to generic log message.
-						if (getpeername(fd, (struct sockaddr*)&addr_in, &addr_len) == 0
-								&& inet_ntop(AF_INET, &addr_in.sin_addr.s_addr, (char *)some_addr, sizeof(some_addr)) != NULL) {
+						if (!get_fd_ip_addr_and_port(fd, ip_addr, sizeof(ip_addr), &port)) {
 							cf_warning(AS_DEMARSHAL, "proto input from %s:%d: msg greater than %d, likely request from non-Aerospike client, rejecting: sz %"PRIu64,
-									some_addr, ntohs(addr_in.sin_port), PROTO_SIZE_MAX, proto.sz);
+									   ip_addr, port, PROTO_SIZE_MAX, proto.sz);
 						} else {
 							cf_warning(AS_DEMARSHAL, "proto input: msg greater than %d, likely request from non-Aerospike client, rejecting: sz %"PRIu64,
-									PROTO_SIZE_MAX, proto.sz);
+									   PROTO_SIZE_MAX, proto.sz);
 						}
 						goto NextEvent_FD_Cleanup;
 					}
@@ -498,12 +519,21 @@ thr_demarshal(void *arg)
 					if (PROTO_TYPE_AS_MSG == proto.type) {
 						bool found = false;
 						size_t offset = sizeof(as_msg);
-						if (!(peeked_data_sz = cf_socket_recv(fd, peekbuf, peekbuf_sz, 0))) {
+						// Number of bytes to peek from the socket.
+						size_t peek_sz = peekbuf_sz;                 // Peak up to the size of the peek buffer.
+//						size_t peek_sz = MIN(proto.sz, peekbuf_sz);  // Peek only up to the minimum necessary number of bytes.
+						if (!(peeked_data_sz = cf_socket_recv(fd, peekbuf, peek_sz, 0))) {
 							cf_warning(AS_DEMARSHAL, "could not peek the as_msg header");
 							goto NextEvent_FD_Cleanup;
 						} else if (peeked_data_sz > min_as_msg_sz) {
 //							cf_debug(AS_DEMARSHAL, "(Peeked %zu bytes.)", peeked_data_sz);
 							if (peeked_data_sz > proto.sz) {
+								char ip_port_str[64];
+								ip_port_str[0] = '\0';
+								if (!get_fd_ip_addr_and_port(fd, ip_addr, sizeof(ip_addr), &port)) {
+									snprintf(ip_port_str, sizeof(ip_port_str), "%s:%d ", ip_addr, port);
+								}
+								cf_warning(AS_DEMARSHAL, "Received unexpected extra data from client %ssocket %d when peeking as_proto!", ip_port_str, fd);
 								log_as_proto_and_peeked_data(&proto, peekbuf, peeked_data_sz);
 								goto NextEvent_FD_Cleanup;
 							}
@@ -548,6 +578,7 @@ thr_demarshal(void *arg)
 
 					// Allocate the complete message buffer.
 					proto_p = cf_malloc(sizeof(as_proto) + proto.sz);
+
 					cf_assert(proto_p, AS_DEMARSHAL, CF_CRITICAL, "allocation: %zu %s", (sizeof(as_proto) + proto.sz), cf_strerror(errno));
 					memcpy(proto_p, &proto, sizeof(as_proto));
 
