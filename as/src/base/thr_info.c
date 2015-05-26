@@ -4317,7 +4317,12 @@ info_some(char *buf, char *buf_lim, const as_file_handle* fd_h, cf_dyn_buf *db)
 
 			// parse parameters
 			tok = c + 1;
-			while (*c != EOL) c++;
+			// make sure c doesn't go beyond buf_lim
+			while (*c != EOL && c < buf_lim-1) c++;
+			if (*c != EOL) {
+				cf_warning(AS_INFO, "Info '%s' parameter not terminated with '\\n'.", name);
+				break;
+			}
 			*c = 0;
 			char *param = tok;
 
