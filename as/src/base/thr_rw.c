@@ -3648,7 +3648,7 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 	// found, it means the old bin was deleted - also adjust the secondary index
 	// accordingly.
 
-	for (uint32_t i_old = 0; i_old < n_old_bins; i_old++) {
+	for (int32_t i_old = 0; i_old < (int32_t)n_old_bins; i_old++) {
 		as_bin *b_old = &old_bins[i_old];
 		bool found = false;
 
@@ -3658,7 +3658,7 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 
 		bool any_new = n_new_bins != 0;
 		int32_t n_new_minus_1 = (int32_t)n_new_bins - 1;
-		int32_t i_new = (int32_t)i_old > n_new_minus_1 ? n_new_minus_1 : (int32_t)i_old;
+		int32_t i_new = n_new_minus_1 < i_old ? n_new_minus_1 : i_old;
 
 		while (any_new) {
 			as_bin *b_new = &new_bins[i_new];
@@ -3678,11 +3678,11 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 				break;
 			}
 
-			if (--i_new < 0 && (i_new = n_new_minus_1) <= (int32_t)i_old) {
+			if (--i_new < 0 && (i_new = n_new_minus_1) <= i_old) {
 				break;
 			}
 
-			if (i_new == (int32_t)i_old) {
+			if (i_new == i_old) {
 				break;
 			}
 		}
