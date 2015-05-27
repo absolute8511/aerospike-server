@@ -3346,13 +3346,14 @@ int write_local_preprocessing(as_transaction *tr, write_local_generation *wlg,
 	}
 
 	// Fail if disallow_null_setname is true and set name is absent or empty.
-	as_msg_field *set_name = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
+	if (ns->disallow_null_setname) {
+		as_msg_field *f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
 
-	if (ns->disallow_null_setname &&
-			(! set_name || as_msg_field_get_value_sz(set_name) == 0)) {
-		cf_info(AS_RW, "write_local: null/empty set name not allowed for namespace %s", ns->name);
-		write_local_failed(tr, 0, false, 0, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
-		return -1;
+		if (! f || as_msg_field_get_value_sz(f) == 0) {
+			cf_info(AS_RW, "write_local: null/empty set name not allowed for namespace %s", ns->name);
+			write_local_failed(tr, 0, false, 0, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
+			return -1;
+		}
 	}
 
 	if (tr->rsv.reject_writes) {
