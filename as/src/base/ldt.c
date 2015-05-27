@@ -1569,26 +1569,24 @@ as_ldt_record_pickle(ldt_record *lrecord,
 				goto Out;
 			}
 
-			// if pickled_buf is there then it is a write operation
-			if (!is_delete && c_urecord->pickled_buf) {
-				cf_detail(AS_LDT, "MULTI_OP: Packing LDT SUB Record");
-				m[ops] = as_fabric_msg_get(M_TYPE_RW);
-				if (!m[ops]) {
-					ret = -3;
-					goto Out;
-				}
-				rw_msg_setup(m[ops], c_tr, &c_tr->keyd,
-								&c_urecord->pickled_buf,
-								c_urecord->pickled_sz,
-								c_urecord->pickled_void_time,
-								&c_urecord->pickled_rec_props,
-								RW_OP_WRITE,
-								c_urecord->ldt_rectype_bits, true);
-				buflen = 0;
-				msg_fillbuf(m[ops], NULL, &buflen);
-				sz += buflen;
-				ops++;
+			m[ops] = as_fabric_msg_get(M_TYPE_RW);
+			if (!m[ops]) {
+				ret = -3;
+				goto Out;
 			}
+			cf_detail(AS_LDT, "MULTI_OP: Packing Write for LDT SUB Record %d", c_urecord->ldt_rectype_bits);
+			rw_msg_setup(m[ops], c_tr, &c_tr->keyd,
+							&c_urecord->pickled_buf,
+							c_urecord->pickled_sz,
+							c_urecord->pickled_void_time,
+							&c_urecord->pickled_rec_props,
+							RW_OP_WRITE,
+							c_urecord->ldt_rectype_bits, true);
+			
+			buflen = 0;
+			msg_fillbuf(m[ops], NULL, &buflen);
+			sz += buflen;
+			ops++;
 		}
 
 		if (sz) {
