@@ -2365,7 +2365,7 @@ as_config_init()
 		case NAMESPACE:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_OPTS, NUM_NAMESPACE_OPTS)) {
 			case CASE_NAMESPACE_REPLICATION_FACTOR:
-				ns->cfg_replication_factor = ns->replication_factor = cfg_u16_no_checks(&line);
+				ns->cfg_replication_factor = ns->replication_factor = cfg_u16(&line, 1, AS_CLUSTER_SZ);
 				break;
 			case CASE_NAMESPACE_LIMIT_SIZE:
 				cfg_renamed_name_tok(&line, "memory-size");

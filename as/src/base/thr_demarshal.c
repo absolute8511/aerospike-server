@@ -640,14 +640,12 @@ thr_demarshal(void *arg)
 					}
 
 					// Check if it's compressed.
-					if (tr.msgp->proto.type == PROTO_TYPE_AS_MSG_COMPRESSED)
-					{
+					if (tr.msgp->proto.type == PROTO_TYPE_AS_MSG_COMPRESSED) {
 						// Decompress it - allocate buffer to hold decompressed
 						// packet.
-						uint8_t *decompressed_buf;
-						uint8_t *tmp_decompressed_buf = (uint8_t *)&decompressed_buf;
+						uint8_t *decompressed_buf = NULL;
 						int rv = 0;
-						if ((rv = as_packet_decompression((uint8_t *)proto_p, tmp_decompressed_buf))) {
+						if ((rv = as_packet_decompression((uint8_t *)proto_p, &decompressed_buf, NULL))) {
 							cf_warning(AS_DEMARSHAL, "as_proto decompression failed! (rv %d)", rv);
 							cf_warning_binary(AS_DEMARSHAL, proto_p, sizeof(as_proto) + proto_p->sz, CF_DISPLAY_HEX_SPACED, "compressed proto_p");
 							goto NextEvent_FD_Cleanup;
