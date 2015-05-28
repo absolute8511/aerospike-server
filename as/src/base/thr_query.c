@@ -1328,6 +1328,8 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 	// matches the query.
 	// This can be performance hit for big list and maps.
 	as_val * res_val = NULL;
+	as_val * val     = NULL;
+	bool matches     = false;
 	bool from_cdt    = false;
 	switch (type) {
 		case AS_PARTICLE_TYPE_INTEGER : {
@@ -1337,7 +1339,8 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 				cf_debug(AS_QUERY, "as_query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
 					type, start->type, end->type, as_sindex_pktype(qtr->si->imd),
 					qtr->si->imd->bnames[0], qtr->si->imd->iname);
-				return false;
+				matches = false;
+				break;
 			}
 
 			int64_t   i = 0;
@@ -1347,9 +1350,11 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			if (skey->key.int_key != i) {
 				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
 						"not matches bin value in record. bin value %ld skey value %ld", i, skey->key.int_key);
-				return false;
+				matches = false;
+				break;
 			}
-			return true;
+			matches = true;
+			break;
 		}
 		case AS_PARTICLE_TYPE_STRING : {
 			if ((type != as_sindex_pktype(qtr->si->imd))
@@ -1358,7 +1363,8 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 				cf_debug(AS_QUERY, "as_query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
 					type, start->type, end->type, as_sindex_pktype(qtr->si->imd),
 					qtr->si->imd->bnames[0], qtr->si->imd->iname);
-				return false;
+				matches = false;
+				break;
 			}
 
 			uint32_t psz = 32;
@@ -1372,24 +1378,27 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does not matches bin value in record."
 				" skey %"PRIu64" value in bin %"PRIu64"", skey->key.str_key, bin_digest);
 	
-				return false;
+				matches = false;
+				break;
 			}
-			return true;
+			matches = true;
+			break;
 		}
 		case AS_PARTICLE_TYPE_MAP : {
-			as_val * v = as_val_frombin(b);
-			res_val = as_sindex_extract_val_from_path(qtr->si->imd, v);	
+			val     = as_val_frombin(b);
+			res_val = as_sindex_extract_val_from_path(qtr->si->imd, val);	
 			if (!res_val) {
-				return false;
+				matches = false;
+				break;
 			}
 			from_cdt = true;
 			break;
 		}
 		case AS_PARTICLE_TYPE_LIST : {
-			as_val * v = as_val_frombin(b);
-			res_val = as_sindex_extract_val_from_path(qtr->si->imd, v);	
+			val     = as_val_frombin(b);
+			res_val = as_sindex_extract_val_from_path(qtr->si->imd, val);	
 			if (!res_val) {
-				return false;
+				matches = false;
 			}
 			from_cdt = true;
 			break;
@@ -1403,19 +1412,19 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 		if (res_val->type == AS_INTEGER) {
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_DEFAULT) {
-				return as_query_match_integer_fromval(qtr, res_val, skey);
+				matches = as_query_match_integer_fromval(qtr, res_val, skey);
 			}
 			else {
-				return false;
+				matches = false;
 			}
 		}
 		else if (res_val->type == AS_STRING) {
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_DEFAULT) {
-				return as_query_match_string_fromval(qtr, res_val, skey);
+				matches = as_query_match_string_fromval(qtr, res_val, skey);
 			}
 			else {
-				return false;
+				matches = false;
 			}
 		}
 		else if (res_val->type == AS_MAP) {
@@ -1425,13 +1434,15 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPKEYS) {
 				as_map * map = as_map_fromval(res_val);
-				return !as_map_foreach(map, as_query_match_mapkeys_foreach, &q_s);
+				matches = !as_map_foreach(map, as_query_match_mapkeys_foreach, &q_s);
 			}
 			else if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPVALUES){
 				as_map * map = as_map_fromval(res_val);
-				return !as_map_foreach(map, as_query_match_mapvalues_foreach, &q_s);
+				matches = !as_map_foreach(map, as_query_match_mapvalues_foreach, &q_s);
 			}
-			return false;
+			else {
+				matches = false;
+			}
 		}
 		else if (res_val->type == AS_LIST) {
 			as_sindex_qtr_skey q_s;
@@ -1441,14 +1452,18 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			// Defensive check
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_LIST) {
 				as_list * list = as_list_fromval(res_val);
-				return !as_list_foreach(list, as_query_match_listele_foreach, &q_s);
+				matches = !as_list_foreach(list, as_query_match_listele_foreach, &q_s);
 			}
 			else {
-				return false;
+				matches = false;
 			}
 		}
 	}
-	return false;
+
+	if (val) {
+		as_val_destroy(val);
+	}
+	return matches;
 }
 
 bool
