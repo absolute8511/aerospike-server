@@ -5009,6 +5009,9 @@ as_sindex_extract_val_from_path(as_sindex_metadata * imd, as_val * v)
 					return NULL;
 				}
 				val = as_map_get(map, key);
+				if (key) {
+					as_val_destroy(key);
+				}
 				if ( !val ) {
 					return NULL;
 				}
