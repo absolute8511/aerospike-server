@@ -1558,16 +1558,8 @@ as_ldt_record_pickle(ldt_record *lrecord,
 		// This macro is a for-loop thru the SR list and a test for valid SR entry
 		FOR_EACH_SUBRECORD(i, j, lrecord) {
 			udf_record *c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
-			is_delete             = (c_urecord->pickled_buf) ? false : true;
 			as_transaction *c_tr  = c_urecord->tr;
 
-			if ( ((!c_urecord->pickled_buf) || (c_urecord->pickled_sz <= 0)) && !is_delete ) {
-				cf_warning(AS_RW, "Got an empty pickled buf while trying to "
-						" replicate record with digest %"PRIx64" %p, %d, %d",
-						(uint64_t *)&c_tr->keyd, pickled_buf, pickled_sz, is_delete);
-				ret = -2;
-				goto Out;
-			}
 
 			m[ops] = as_fabric_msg_get(M_TYPE_RW);
 			if (!m[ops]) {
@@ -1575,6 +1567,17 @@ as_ldt_record_pickle(ldt_record *lrecord,
 				goto Out;
 			}
 			cf_detail(AS_LDT, "MULTI_OP: Packing Write for LDT SUB Record %d", c_urecord->ldt_rectype_bits);
+			bool reset_flag = true;
+			if (!c_urecord->pickled_buf) {
+				// Fake it as delete
+				if (c_tr->msgp->msg.info1 & AS_MSG_INFO2_DELETE) {
+					reset_flag = false;	
+				} else {
+					c_tr->msgp->msg.info2 |= AS_MSG_INFO2_DELETE;
+					reset_flag = true;
+				}
+			}
+
 			rw_msg_setup(m[ops], c_tr, &c_tr->keyd,
 							&c_urecord->pickled_buf,
 							c_urecord->pickled_sz,
@@ -1582,6 +1585,10 @@ as_ldt_record_pickle(ldt_record *lrecord,
 							&c_urecord->pickled_rec_props,
 							RW_OP_WRITE,
 							c_urecord->ldt_rectype_bits, true);
+
+			if (reset_flag) {
+				c_tr->msgp->msg.info2 &= ~AS_MSG_INFO2_DELETE;
+			}
 			
 			buflen = 0;
 			msg_fillbuf(m[ops], NULL, &buflen);

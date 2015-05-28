@@ -547,11 +547,8 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 		} else { // deletes come here
 			cf_detail(AS_RW, "Send delete to replica %"PRIx64"",
 							*(uint64_t*)keyd);
-			// Fake it as delete
-			tr->msgp->msg.info2 |= AS_MSG_INFO2_DELETE;
 			msg_set_buf(m, RW_FIELD_AS_MSG, (void *) tr->msgp,
 					as_proto_size_get(&tr->msgp->proto), MSG_SET_COPY);
-			tr->msgp->msg.info2 &= ~AS_MSG_INFO2_DELETE;
 			msg_set_unset(m, RW_FIELD_RECORD);
 
 			rw_msg_setup_infobits(m, tr, ldt_rectype_bits, has_udf);
