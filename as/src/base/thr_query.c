@@ -178,9 +178,6 @@ struct as_query_transaction_s {
 
 	as_query_type            job_type;  // Job type [LOOKUP/AGG/UDF/MRJ]
 	cf_vector              * binlist;
-	udf_call                 call;     // Record UDF Details
-	as_aggr_call             agg_call; // Stream UDF Details 
-	as_sindex_qctx           qctx;     // Secondary Index details
 
 	// OUTPUT
 	int                      result_code;
@@ -217,8 +214,6 @@ struct as_query_transaction_s {
 	cf_buf_builder  *        bb_r;
 	pthread_mutex_t          buf_mutex;
 	cf_atomic_int	         udf_runtime_memory_used;  // Currently reserved udf runtime memory
-	struct ai_obj            bkey;
-	as_partition_reservation rsv[AS_PARTITIONS];
 	
 	// Following are single threaded access put it in single byte
 	bool                     is_malloc;
@@ -232,6 +227,14 @@ struct as_query_transaction_s {
 	cf_atomic_int            uit_queued;    				// Throttling: max in flight scan
 	cf_atomic_int            uit_completed; 				// Number of udf transactions successfully completed
 	cf_atomic64			     uit_total_run_time;			// Average transaction processing time for all udf internal transactions
+	// Folllowing elements are big.
+	// Keep them at the end of structure to avoid them while memzeroing qtr
+	struct ai_obj            bkey;
+	udf_call                 call;     // Record UDF Details
+	as_aggr_call             agg_call; // Stream UDF Details 
+	as_sindex_qctx           qctx;     // Secondary Index details
+
+	as_partition_reservation rsv[AS_PARTITIONS];
 };
 
 typedef enum {
@@ -2672,7 +2675,9 @@ as_query(as_transaction *tr)
 		rv = AS_QUERY_ERR;
 		goto Cleanup;
 	}
-	memset(qtr, 0, sizeof(as_query_transaction));
+	// Be aware of the size of qtr
+	// Memset it partially
+	memset(qtr, 0, offsetof(as_query_transaction, bkey));
 	qtr->is_malloc           = true;
 	qtr->inited              = false;
 	qtr->trid                = tr->trid;
