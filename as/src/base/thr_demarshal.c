@@ -644,8 +644,9 @@ thr_demarshal(void *arg)
 						// Decompress it - allocate buffer to hold decompressed
 						// packet.
 						uint8_t *decompressed_buf = NULL;
+						size_t decompressed_buf_size = 0;
 						int rv = 0;
-						if ((rv = as_packet_decompression((uint8_t *)proto_p, &decompressed_buf, NULL))) {
+						if ((rv = as_packet_decompression((uint8_t *)proto_p, &decompressed_buf, &decompressed_buf_size))) {
 							cf_warning(AS_DEMARSHAL, "as_proto decompression failed! (rv %d)", rv);
 							cf_warning_binary(AS_DEMARSHAL, proto_p, sizeof(as_proto) + proto_p->sz, CF_DISPLAY_HEX_SPACED, "compressed proto_p");
 							goto NextEvent_FD_Cleanup;
@@ -655,9 +656,28 @@ thr_demarshal(void *arg)
 						// Free the compressed packet since we'll be using the
 						// decompressed packet from now on.
 						cf_free(proto_p);
+						proto_p = NULL;
 						// Get original packet.
 						tr.msgp = (cl_msg *)decompressed_buf;
 						as_proto_swap(&(tr.msgp->proto));
+
+						if (tr.msgp->proto.sz > PROTO_SIZE_MAX) {
+							cf_warning(AS_DEMARSHAL, "as_proto decompressed packet sz %lu > %lu (MAX) %d", tr.msgp->proto.sz, PROTO_SIZE_MAX, (tr.msgp->proto.sz > PROTO_SIZE_MAX));
+							cf_free(decompressed_buf);
+							goto NextEvent_FD_Cleanup;
+						}
+
+						if (tr.msgp->proto.sz != decompressed_buf_size - sizeof(as_proto)) {
+							cf_warning(AS_DEMARSHAL, "as_proto decompressed packet sz %lu != decompressed buffer size %lu", tr.msgp->proto.sz, decompressed_buf_size - sizeof(as_proto));
+							cf_free(decompressed_buf);
+							goto NextEvent_FD_Cleanup;
+						}
+
+						if (tr.msgp->proto.type == PROTO_TYPE_AS_MSG_COMPRESSED) {
+							cf_warning(AS_DEMARSHAL, "as_proto decompressed packet cannot contain another compressed packet.");
+							cf_free(decompressed_buf);
+							goto NextEvent_FD_Cleanup;
+						}
 					}
 
 					// Security protocol transactions.
