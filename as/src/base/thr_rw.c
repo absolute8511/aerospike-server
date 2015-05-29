@@ -3547,57 +3547,6 @@ write_local_handle_msg_key(as_transaction *tr, as_storage_rd *rd)
 	return 0;
 }
 
-// Note - bigger than max record size to allow for multiple ops to same bin.
-#define MAX_STACK_PARTICLES_SIZE (1024 * 1024 * 4)
-
-int32_t
-write_local_stack_particles_size(as_transaction *tr, as_storage_rd *rd)
-{
-	// Shortcut pointers.
-	as_msg *m = &tr->msgp->msg;
-	as_namespace *ns = tr->rsv.ns;
-
-	int32_t size = 0;
-
-	as_msg_op *op = NULL;
-	int i = 0;
-
-	while ((op = as_msg_op_iterate(m, op, &i)) != NULL) {
-		if (op->op == AS_MSG_OP_WRITE) {
-			if (op->particle_type != AS_PARTICLE_TYPE_NULL) {
-				// Any incoming particle goes in the stack buffer.
-				int32_t result = as_particle_size_from_client(op);
-
-				if (result < 0) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: as_particle_size_from_client() failed ", ns->name);
-					return result;
-				}
-
-				size += result;
-			}
-		}
-		else if (OP_IS_MODIFY(op->op)) {
-			// If the existing record has this bin, get it.
-			as_bin *bin = as_bin_get(rd, op->name, op->name_sz);
-			int32_t result = as_bin_particle_size_modify_from_client(bin, op);
-
-			if (result < 0) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: as_particle_size_modify_from_client() failed ", ns->name);
-				return result;
-			}
-
-			size += result;
-		}
-	}
-
-	if (size > MAX_STACK_PARTICLES_SIZE) {
-		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: stack particles size %d > %u bytes ", ns->name, size, MAX_STACK_PARTICLES_SIZE);
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
-	}
-
-	return size;
-}
-
 int
 write_local_bin_check(as_transaction *tr, as_bin *bin)
 {
@@ -3862,8 +3811,8 @@ as_bin_cdt_alloc_modify_from_client(const as_bin *b, as_msg_op *op, as_bin *resu
 	return -1;
 }
 
-int32_t
-as_bin_cdt_stack_modify_from_client(const as_bin *b, uint8_t *p_stack_particles, as_msg_op *op, as_bin *result)
+int
+as_bin_cdt_stack_modify_from_client(const as_bin *b, cf_dyn_buf *particles_db, as_msg_op *op, as_bin *result)
 {
 	return -1;
 }
@@ -3878,7 +3827,7 @@ int
 write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 		as_msg_op **ops, as_bin *response_bins, uint32_t *p_n_response_bins,
 		as_bin *result_bins, uint32_t *p_n_result_bins,
-		uint8_t *p_stack_particles,
+		cf_dyn_buf *particles_db,
 		as_bin *cleanup_bins, uint32_t *p_n_cleanup_bins)
 {
 	// Shortcut pointers.
@@ -3888,7 +3837,6 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
 
 	int result;
-	int32_t sz_result;
 
 	as_msg_op *op = NULL;
 	int i = 0;
@@ -3940,12 +3888,10 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 					append_bin_to_destroy(&cleanup_bin, cleanup_bins, p_n_cleanup_bins);
 				}
 				else {
-					if ((sz_result = as_bin_particle_stack_from_client(b, p_stack_particles, op)) < 0) {
+					if ((result = as_bin_particle_stack_from_client(b, particles_db, op)) < 0) {
 						cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_stack_from_client() ", ns->name);
-						return -sz_result;
+						return -result;
 					}
-
-					p_stack_particles += (uint32_t)sz_result;
 				}
 			}
 
@@ -3983,12 +3929,10 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				append_bin_to_destroy(&cleanup_bin, cleanup_bins, p_n_cleanup_bins);
 			}
 			else {
-				if ((sz_result = as_bin_particle_stack_modify_from_client(b, p_stack_particles, op)) < 0) {
+				if ((result = as_bin_particle_stack_modify_from_client(b, particles_db, op)) < 0) {
 					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_particle_stack_modify_from_client() ", ns->name);
-					return -sz_result;
+					return -result;
 				}
-
-				p_stack_particles += (uint32_t)sz_result;
 			}
 
 			if (ordered_ops) {
@@ -4042,12 +3986,10 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				append_bin_to_destroy(&cleanup_bin, cleanup_bins, p_n_cleanup_bins);
 			}
 			else {
-				if ((sz_result = as_bin_cdt_stack_modify_from_client(b, p_stack_particles, op, &result_bin)) < 0) {
+				if ((result = as_bin_cdt_stack_modify_from_client(b, particles_db, op, &result_bin)) < 0) {
 					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_bin_cdt_alloc_modify_from_client() ", ns->name);
-					return -sz_result;
+					return -result;
 				}
-
-				p_stack_particles += (uint32_t)sz_result;
 			}
 
 			if (ordered_ops || as_bin_inuse(&result_bin)) {
@@ -4096,7 +4038,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 
 int
 write_local_bin_ops(as_transaction *tr, as_storage_rd *rd,
-		uint8_t *p_stack_particles,
+		cf_dyn_buf *particles_db,
 		as_bin *cleanup_bins, uint32_t *p_n_cleanup_bins, cf_dyn_buf *db)
 {
 	// Shortcut pointers.
@@ -4113,7 +4055,7 @@ write_local_bin_ops(as_transaction *tr, as_storage_rd *rd,
 
 	int result = write_local_bin_ops_loop(tr, rd,
 			ops, response_bins, &n_response_bins, result_bins, &n_result_bins,
-			p_stack_particles, cleanup_bins, p_n_cleanup_bins);
+			particles_db, cleanup_bins, p_n_cleanup_bins);
 
 	if (result != 0) {
 		destroy_stack_bins(result_bins, n_result_bins);
@@ -4163,6 +4105,8 @@ write_local_bin_ops(as_transaction *tr, as_storage_rd *rd,
 // These splits handle the bin operations part of write_local() which are very
 // different depending on configuration.
 //
+
+#define STACK_PARTICLES_SIZE (1024 * 1024)
 
 //================================================
 // Data-in-memory, single-bin.
@@ -4475,24 +4419,14 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	}
 
 	//------------------------------------------------------
-	// Loop over ops to gather stack particles size info.
-	//
-
-	int32_t sz_result = write_local_stack_particles_size(tr, rd);
-
-	if (sz_result < 0) {
-		return -sz_result;
-	}
-
-	uint8_t stack_particles[sz_result];
-	uint8_t *p_stack_particles = stack_particles;
-
-	//------------------------------------------------------
 	// Loop over bin ops to affect new bin space, creating
 	// the new record bins to write.
 	//
 
-	if ((result = write_local_bin_ops(tr, rd, p_stack_particles, NULL, NULL, db)) != 0) {
+	cf_dyn_buf_define_size(particles_db, STACK_PARTICLES_SIZE);
+
+	if ((result = write_local_bin_ops(tr, rd, &particles_db, NULL, NULL, db)) != 0) {
+		cf_dyn_buf_free(&particles_db);
 		return result;
 	}
 
@@ -4508,6 +4442,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	// Pickle before writing - bins may disappear on as_storage_record_close().
 	if (! pickle_all(rd, pickle)) {
 		write_local_index_metadata_unwind(&old_metadata, r);
+		cf_dyn_buf_free(&particles_db);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
@@ -4525,6 +4460,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
 		write_local_pickle_unwind(pickle);
 		write_local_index_metadata_unwind(&old_metadata, r);
+		cf_dyn_buf_free(&particles_db);
 		return -write_result;
 	}
 
@@ -4542,6 +4478,7 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	}
 
 	*is_delete = ! as_bin_inuse_has(rd);
+	cf_dyn_buf_free(&particles_db);
 
 	return 0;
 }
@@ -4597,19 +4534,6 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	}
 
 	//------------------------------------------------------
-	// Loop over ops to gather stack particles size info.
-	//
-
-	int32_t sz_result = write_local_stack_particles_size(tr, rd);
-
-	if (sz_result < 0) {
-		return -sz_result;
-	}
-
-	uint8_t stack_particles[sz_result];
-	uint8_t *p_stack_particles = stack_particles;
-
-	//------------------------------------------------------
 	// Copy old bins (if any) - which are currently in new
 	// bins array - to old bins array, for sindex purposes.
 	//
@@ -4623,7 +4547,10 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	// the new record bins to write.
 	//
 
-	if ((result = write_local_bin_ops(tr, rd, p_stack_particles, NULL, NULL, db)) != 0) {
+	cf_dyn_buf_define_size(particles_db, STACK_PARTICLES_SIZE);
+
+	if ((result = write_local_bin_ops(tr, rd, &particles_db, NULL, NULL, db)) != 0) {
+		cf_dyn_buf_free(&particles_db);
 		return result;
 	}
 
@@ -4643,6 +4570,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	// Pickle before writing - bins may disappear on as_storage_record_close().
 	if (! pickle_all(rd, pickle)) {
 		write_local_index_metadata_unwind(&old_metadata, r);
+		cf_dyn_buf_free(&particles_db);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
@@ -4658,6 +4586,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
 		write_local_pickle_unwind(pickle);
 		write_local_index_metadata_unwind(&old_metadata, r);
+		cf_dyn_buf_free(&particles_db);
 		return -result;
 	}
 
@@ -4685,6 +4614,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	}
 
 	*is_delete = ! as_bin_inuse_has(rd);
+	cf_dyn_buf_free(&particles_db);
 
 	return 0;
 }

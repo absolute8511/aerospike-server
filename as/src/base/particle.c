@@ -36,6 +36,7 @@
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_byte_order.h"
 
+#include "dynbuf.h"
 #include "fault.h"
 
 #include "base/datamodel.h"
@@ -74,19 +75,19 @@ as_particle_concat_size_from_wire_null(as_particle_type wire_type, const uint8_t
 	return -1;
 }
 
-int32_t
+int
 as_particle_append_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	return -1;
 }
 
-int32_t
+int
 as_particle_prepend_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	return -1;
 }
 
-int32_t
+int
 as_particle_incr_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	return -1;
@@ -222,21 +223,21 @@ as_particle_concat_size_from_wire_int(as_particle_type wire_type, const uint8_t 
 	return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 }
 
-int32_t
+int
 as_particle_append_from_wire_int(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	cf_warning(AS_PARTICLE, "append to integer/float");
 	return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 }
 
-int32_t
+int
 as_particle_prepend_from_wire_int(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	cf_warning(AS_PARTICLE, "prepend to integer/float");
 	return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 }
 
-int32_t
+int
 as_particle_incr_from_wire_int(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	if (wire_type != AS_PARTICLE_TYPE_INTEGER) {
@@ -440,7 +441,7 @@ as_particle_to_flat_int(const as_particle *p, uint8_t *flat)
 // Most FLOAT particle table functions just use the equivalent INTEGER
 // particle functions. Here are the differences...
 
-int32_t
+int
 as_particle_incr_from_wire_float(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	// For now we won't allow adding integers (or anything else) to floats.
@@ -536,7 +537,7 @@ as_particle_concat_size_from_wire_blob(as_particle_type wire_type, const uint8_t
 	return (int32_t)(sizeof(as_particle_blob_mem) + p_blob_mem->sz + value_size);
 }
 
-int32_t
+int
 as_particle_append_from_wire_blob(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	as_particle_blob_mem *p_blob_mem = (as_particle_blob_mem *)*pp;
@@ -549,10 +550,10 @@ as_particle_append_from_wire_blob(as_particle_type wire_type, const uint8_t *wir
 	memcpy(p_blob_mem->data + p_blob_mem->sz, wire_value, value_size);
 	p_blob_mem->sz += value_size;
 
-	return (int32_t)(sizeof(as_particle_blob_mem) + p_blob_mem->sz);
+	return 0;
 }
 
-int32_t
+int
 as_particle_prepend_from_wire_blob(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	as_particle_blob_mem *p_blob_mem = (as_particle_blob_mem *)*pp;
@@ -566,10 +567,10 @@ as_particle_prepend_from_wire_blob(as_particle_type wire_type, const uint8_t *wi
 	memcpy(p_blob_mem->data, wire_value, value_size);
 	p_blob_mem->sz += value_size;
 
-	return (int32_t)(sizeof(as_particle_blob_mem) + p_blob_mem->sz);
+	return 0;
 }
 
-int32_t
+int
 as_particle_incr_from_wire_blob(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
 	cf_warning(AS_PARTICLE, "unexpected increment of blob/string");
@@ -840,7 +841,7 @@ as_particle_concat_size_from_wire_fn g_particle_concat_size_from_wire_table[AS_P
 	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_concat_size_from_wire_blob,
 };
 
-typedef int32_t (*as_particle_append_from_wire_fn) (as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp);
+typedef int (*as_particle_append_from_wire_fn) (as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp);
 
 as_particle_append_from_wire_fn g_particle_append_from_wire_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_NULL]				= as_particle_append_from_wire_null,
@@ -861,7 +862,7 @@ as_particle_append_from_wire_fn g_particle_append_from_wire_table[AS_PARTICLE_TY
 	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_append_from_wire_blob,
 };
 
-typedef int32_t (*as_particle_prepend_from_wire_fn) (as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp);
+typedef int (*as_particle_prepend_from_wire_fn) (as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp);
 
 as_particle_prepend_from_wire_fn g_particle_prepend_from_wire_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_NULL]				= as_particle_prepend_from_wire_null,
@@ -882,7 +883,7 @@ as_particle_prepend_from_wire_fn g_particle_prepend_from_wire_table[AS_PARTICLE_
 	[AS_PARTICLE_TYPE_HIDDEN_MAP]		= as_particle_prepend_from_wire_blob,
 };
 
-typedef int32_t (*as_particle_incr_from_wire_fn) (as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp);
+typedef int (*as_particle_incr_from_wire_fn) (as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp);
 
 as_particle_incr_from_wire_fn g_particle_incr_from_wire_table[AS_PARTICLE_TYPE_MAX] = {
 	[AS_PARTICLE_TYPE_NULL]				= as_particle_incr_from_wire_null,
@@ -1419,7 +1420,7 @@ as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
 	as_particle *new_particle = NULL;
 
 	as_particle *old_particle = b->particle;
-	int32_t result = 0;
+	int result = 0;
 
 	switch (operation) {
 	case AS_MSG_OP_MC_INCR:
@@ -1477,15 +1478,13 @@ as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
 		}
 
 		b->particle = old_particle;
-
-		return (int)result;
 	}
 
-	return 0;
+	return result;
 }
 
-int32_t
-as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg_op *op)
+int
+as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op)
 {
 	uint8_t operation = op->op;
 	as_particle_type op_type = (as_particle_type)op->particle_type;
@@ -1508,14 +1507,16 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 		int32_t mem_size = g_particle_size_from_wire_table[op_type](op_value, op_value_size);
 
 		if (mem_size < 0) {
-			return mem_size;
+			return (int)mem_size;
 		}
 
 		as_particle *old_particle = b->particle;
 
 		// Instead of allocating, we use the stack buffer provided. (Note that
 		// embedded types like integer will overwrite this with the value.)
-		b->particle = (as_particle *)stack;
+		if (0 > cf_dyn_buf_reserve(particles_db, (size_t)mem_size, (uint8_t **)&b->particle)) {
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
 
 		// Load the new particle into the bin.
 		int result = g_particle_from_wire_table[op_type](op_type, op_value, op_value_size, &b->particle);
@@ -1528,7 +1529,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 			b->particle = old_particle;
 		}
 
-		return result == 0 ? mem_size : (int32_t)result;
+		return result;
 	}
 
 	// There is an existing particle, which we will modify.
@@ -1536,7 +1537,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 	int32_t new_mem_size = 0;
 
 	as_particle *old_particle = b->particle;
-	int32_t result = 0;
+	int result = 0;
 
 	switch (operation) {
 	case AS_MSG_OP_MC_INCR:
@@ -1557,10 +1558,12 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 	case AS_MSG_OP_APPEND:
 		new_mem_size = g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 		if (new_mem_size < 0) {
-			return new_mem_size;
+			return (int)new_mem_size;
 		}
-		memcpy(stack, b->particle, g_particle_size_table[existing_type](b->particle));
-		b->particle = (as_particle *)stack;
+		if (0 > cf_dyn_buf_reserve(particles_db, (size_t)new_mem_size, (uint8_t **)&b->particle)) {
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
+		memcpy(b->particle, old_particle, g_particle_size_table[existing_type](old_particle));
 		result = g_particle_append_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 		break;
 	case AS_MSG_OP_MC_PREPEND:
@@ -1571,10 +1574,12 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 	case AS_MSG_OP_PREPEND:
 		new_mem_size = g_particle_concat_size_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 		if (new_mem_size < 0) {
-			return new_mem_size;
+			return (int)new_mem_size;
 		}
-		memcpy(stack, b->particle, g_particle_size_table[existing_type](b->particle));
-		b->particle = (as_particle *)stack;
+		if (0 > cf_dyn_buf_reserve(particles_db, (size_t)new_mem_size, (uint8_t **)&b->particle)) {
+			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
+		memcpy(b->particle, old_particle, g_particle_size_table[existing_type](old_particle));
 		result = g_particle_prepend_from_wire_table[existing_type](op_type, op_value, op_value_size, &b->particle);
 		break;
 	default:
@@ -1584,7 +1589,6 @@ as_bin_particle_stack_modify_from_client(as_bin *b, uint8_t* stack, const as_msg
 
 	if (result < 0) {
 		b->particle = old_particle;
-		return result;
 	}
 
 	return result;
@@ -1636,8 +1640,8 @@ as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op)
 	return result;
 }
 
-int32_t
-as_bin_particle_stack_from_client(as_bin *b, uint8_t *stack, const as_msg_op *op)
+int
+as_bin_particle_stack_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op)
 {
 	// We assume that if we're using stack particles, the old particle is either
 	// nonexistent or also a stack particle - either way, don't destroy.
@@ -1648,14 +1652,16 @@ as_bin_particle_stack_from_client(as_bin *b, uint8_t *stack, const as_msg_op *op
 	int32_t mem_size = g_particle_size_from_wire_table[type](value, value_size);
 
 	if (mem_size < 0) {
-		return mem_size;
+		return (int)mem_size;
 	}
 
 	as_particle *old_particle = b->particle;
 
 	// Instead of allocating, we use the stack buffer provided. (Note that
 	// embedded types like integer will overwrite this with the value.)
-	b->particle = (as_particle *)stack;
+	if (0 > cf_dyn_buf_reserve(particles_db, (size_t)mem_size, (uint8_t **)&b->particle)) {
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+	}
 
 	// Load the new particle into the bin.
 	int result = g_particle_from_wire_table[type](type, value, value_size, &b->particle);
@@ -1668,7 +1674,7 @@ as_bin_particle_stack_from_client(as_bin *b, uint8_t *stack, const as_msg_op *op
 		b->particle = old_particle;
 	}
 
-	return result == 0 ? mem_size : (int32_t)result;
+	return result;
 }
 
 // TODO - re-do to leave original intact on failure.
