@@ -1570,7 +1570,7 @@ as_ldt_record_pickle(ldt_record *lrecord,
 			bool reset_flag = true;
 			if (!c_urecord->pickled_buf) {
 				// Fake it as delete
-				if (c_tr->msgp->msg.info1 & AS_MSG_INFO2_DELETE) {
+				if (c_tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
 					reset_flag = false;	
 				} else {
 					c_tr->msgp->msg.info2 |= AS_MSG_INFO2_DELETE;
