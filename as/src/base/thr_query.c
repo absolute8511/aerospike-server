@@ -1981,16 +1981,25 @@ as_query__generator(as_query_transaction *qtr)
 	// Setup Query Transaction if it not already setup
 	if (!qtr->inited) {
 		// Aerospike Index object initialization
-		qtr->qctx.bkey = &qtr->bkey;
-		init_ai_obj(qtr->qctx.bkey);
-		bzero(&qtr->qctx.bdig, sizeof(cf_digest));
 		qtr->result_code              = AS_PROTO_RESULT_OK;
+		
+		// Initialize qctx
 		// start with the threshold value
 		qtr->qctx.bsize               = g_config.query_threshold;
 		qtr->qctx.new_ibtr            = true;
 		qtr->qctx.nbtr_done           = false;
 		qtr->qctx.pimd_idx            = -1;
+		qtr->qctx.recl                = NULL;
+		qtr->qctx.n_bdigs             = 0;
 		qtr->qctx.qnodes_pre_reserved = g_config.qnodes_pre_reserved;
+		qtr->qctx.bkey                = &qtr->bkey;
+		init_ai_obj(qtr->qctx.bkey);
+		bzero(&qtr->qctx.bdig, sizeof(cf_digest));
+		// Populate all the paritions for which this node is a qnode.
+		if (qtr->qctx.qnodes_pre_reserved) {
+			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
+		}
+
 		qtr->priority                 = g_config.query_priority;
 		qtr->bb_r                     = as_query__bb_poolrequest();
 		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
@@ -2000,10 +2009,6 @@ as_query__generator(as_query_transaction *qtr)
 		if (!qtr->bb_r) {
 			cf_warning(AS_QUERY, "Buf builder request was unsunccessful.");
 			goto Cleanup;
-		}
-		// Populate all the paritions for which this node is a qnode.
-		if (qtr->qctx.qnodes_pre_reserved) {
-			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
 		}
 
 		qtr->inited               = true;
