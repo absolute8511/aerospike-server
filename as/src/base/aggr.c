@@ -180,7 +180,6 @@ as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_resul
 		.flag               = UDF_RECORD_FLAG_ISVALID ,
 		.starting_memory_bytes = 0,
 	};
-	l_urecord.flag |= UDF_RECORD_FLAG_ALLOW_DESTROY;
 
 	as_rec                  l_urec;
 	query_record l_qrecord = {

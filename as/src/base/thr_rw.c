@@ -147,7 +147,7 @@ int write_local(as_transaction *tr, write_local_generation *wlg,
 				uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
 				as_rec_props *p_pickled_rec_props, bool journal, cf_node masternode);
 int write_journal(as_transaction *tr, write_local_generation *wlg); // only do write
-int write_delete_journal(as_transaction *tr);
+int write_delete_journal(as_transaction *tr, bool is_subrec);
 static void release_proto_fd_h(as_file_handle *proto_fd_h);
 void xdr_write(as_namespace *ns, cf_digest keyd, as_generation generation,
 			   cf_node masternode, bool is_delete, uint16_t set_id);
@@ -526,6 +526,9 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 
 		rw_msg_setup_infobits(m, tr, ldt_rectype_bits, has_udf);
 
+		// Send this along with parent packet as well. This is required
+		// in case the LDT parent replication is done without MULTI_OP.
+		// Example touch of the some other bin in the LDT parent
 		if (as_ldt_flag_has_parent(ldt_rectype_bits)) {
 			rw_msg_setup_ldt_fields(m, tr, keyd, ldt_rectype_bits);
 		}
@@ -2440,9 +2443,6 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		} 
 	}
 
-	// Set the version in subrec digest if need be.
-	as_ldt_set_prole_subrec_version(keyd, rsv, linfo, info);
-
 	int rv      = as_record_get_create(tree, keyd, &r_ref, rsv->ns, is_subrec);
 	as_index *r = r_ref.r;
 
@@ -2578,7 +2578,8 @@ Out:
 	return (0);
 }
 
-int as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv) 
+int
+as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv) 
 {
 	linfo->ldt_source_version = 0;
 	linfo->ldt_prole_version_set = false;
@@ -2969,10 +2970,14 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 		if (AS_PARTITION_STATE_DESYNC != tr->rsv.state)
 			cf_debug(AS_RW, "journal delete: unusual state %d",
 					(int)tr->rsv.state);
-		write_delete_journal(tr);
+		if (tr->flag & AS_TRANSACTION_FLAG_LDT_SUB) {
+			cf_detail_digest(AS_LDT, &tr->keyd, "LDT Subrecord journalling and skipping %"PRIx64"\n");
+		}
+
+		write_delete_journal(tr, (tr->flag & AS_TRANSACTION_FLAG_LDT_SUB));
 		return (0);
 	} else if (AS_PARTITION_STATE_DESYNC == tr->rsv.state) {
-		cf_debug(AS_RW,
+		cf_detail(AS_RW,
 				"{%s:%d} write_delete_local: partition is desync - writes will flow from master",
 				ns->name, tr->rsv.pid);
 		return (0);
@@ -2994,6 +2999,10 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 
 	if (0 != as_record_get(tree, &tr->keyd, &r_ref, ns)) {
 		tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
+
+		if (tr->flag & AS_TRANSACTION_FLAG_LDT_SUB) {
+			cf_detail_digest(AS_LDT, &tr->keyd,  "LDT Subrecord Delete Request did not find record %"PRIx64"\n");
+		}
 		return -1;
 	}
 
@@ -3005,6 +3014,10 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 			 ((m->info2 & AS_MSG_INFO2_GENERATION_GT) && m->generation <= r->generation))) {
 		as_record_done(&r_ref, ns);
 		tr->result_code = AS_PROTO_RESULT_FAIL_GENERATION;
+		if (tr->flag & AS_TRANSACTION_FLAG_LDT_SUB) {
+			cf_detail_digest(AS_LDT, &tr->keyd, "LDT Subrecord Delete Request gen check failed %"PRIx64"\n");
+		}
+
 		return -1;
 	}
 
@@ -4486,6 +4499,7 @@ typedef struct {
 	cl_msg *msgp; // data to write
 	bool delete; // or a delete flag if it's a delete
 	write_local_generation wlg;
+	bool is_subrec;
 } journal_queue_element;
 
 //
@@ -4518,6 +4532,7 @@ int write_journal(as_transaction *tr, write_local_generation *wlg) {
 	jqe.msgp = cf_malloc(sizeof(as_proto) + tr->msgp->proto.sz);
 	memcpy(jqe.msgp, tr->msgp, sizeof(as_proto) + tr->msgp->proto.sz);
 	jqe.delete = false;
+	jqe.is_subrec = false;
 	jqe.wlg = *wlg;
 
 	journal_hash_key jhk;
@@ -4574,7 +4589,7 @@ int write_journal(as_transaction *tr, write_local_generation *wlg) {
 // Write into the journal a "delete" element
 //
 
-int write_delete_journal(as_transaction *tr) {
+int write_delete_journal(as_transaction *tr, bool is_subrec) {
 	cf_detail(AS_RW, "write to delete journal: %"PRIx64"", *(uint64_t*)&tr->keyd);
 
 	if (journal_hash == 0)
@@ -4586,6 +4601,7 @@ int write_delete_journal(as_transaction *tr) {
 	jqe.digest = tr->keyd;
 	jqe.msgp = 0;
 	jqe.delete = true;
+	jqe.is_subrec = is_subrec;
 
 	journal_hash_key jhk;
 	jhk.ns_id = jqe.ns->id;
@@ -4719,9 +4735,12 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 #endif
 
 		int rv;
+		if (jqe.is_subrec) {
+			tr.flag |= AS_TRANSACTION_FLAG_LDT_SUB;
+		}
 		if (jqe.delete == true)
 			rv = write_delete_local(&tr, false, 0, false);
-		else
+		else 
 			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, false, 0);
 
 		cf_detail(AS_RW, "write journal: wrote: rv %d key %"PRIx64,
@@ -4738,51 +4757,25 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 }
 
 int
-write_process_op(as_namespace *ns, cf_digest *keyd, cl_msg *msgp,
-		as_partition_reservation *rsvp, cf_node node, as_generation generation)
+write_process_op(as_transaction *tr, cl_msg *msgp, cf_node node, as_generation generation)
 {
-	// INIT_TR
-	as_transaction tr;
-	as_transaction_init(&tr, keyd, msgp);
-
-	tr.rsv = *rsvp;
-
-	// Check here if this is prole delete caused by nsup
-	// If yes we need to tell XDR not to ship the delete
-	uint32_t info = msgp->msg.info1;
-	if (info & RW_INFO_NSUP_DELETE) {
-		tr.flag |= AS_TRANSACTION_FLAG_NSUP_DELETE;
-	}
-
-	if (ns->ldt_enabled) {
-		if ((info & RW_INFO_LDT_SUBREC)
-				|| (info & RW_INFO_LDT_ESR)) {
-			tr.flag |= AS_TRANSACTION_FLAG_LDT_SUB;
-			cf_detail(AS_RW,
-					"LDT Subrecord Replication Request Received %"PRIx64"\n",
-					*(uint64_t* )keyd);
-		}
-	}
-	if (info & RW_INFO_UDF_WRITE) {
-		cf_atomic_int_incr(&g_config.udf_replica_writes);
-	}
-
+	as_namespace *ns = tr->rsv.ns;
 	int rv = 0;
 	if (msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
-		rv = write_delete_local(&tr, true, node, false);
+		rv = write_delete_local(tr, true, node, false);
 	} else if (generation == 0) {
 		write_local_generation wlg;
 		wlg.use_gen_check = false;
 		wlg.use_gen_set = false;
 		wlg.use_msg_gen = false;
-		rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
+		rv = write_local(tr, &wlg, 0, 0, 0, 0, true, node);
 	} else if (true == ns->single_bin) {
 		write_local_generation wlg;
 		wlg.use_gen_check = false;
 		wlg.use_gen_set = true;
 		wlg.gen_set = generation;
 		wlg.use_msg_gen = false;
-		rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
+		rv = write_local(tr, &wlg, 0, 0, 0, 0, true, node);
 	} else {
 		write_local_generation wlg;
 		if (generation) {
@@ -4793,31 +4786,30 @@ write_process_op(as_namespace *ns, cf_digest *keyd, cl_msg *msgp,
 		}
 		wlg.use_gen_set = false;
 		wlg.use_msg_gen = false;
-		rv = write_local(&tr, &wlg, 0, 0, 0, 0, true, node);
+		rv = write_local(tr, &wlg, 0, 0, 0, 0, true, node);
 	}
 
 	if (rv == 0) {
-		tr.result_code = 0;
+		tr->result_code = 0;
 	} else {
 		// TODO: Handle case when its a Replace operation in write_local,
 		// it also returns AS_PROTO_RESULT_FAIL_NOTFOUND
-		if ((tr.result_code == AS_PROTO_RESULT_FAIL_NOTFOUND)
+		if ((tr->result_code == AS_PROTO_RESULT_FAIL_NOTFOUND)
 				&& (msgp->msg.info2 & AS_MSG_INFO2_DELETE)) {
 			cf_atomic_int_incr(&g_config.err_write_fail_prole_delete);
 		} else {
 			cf_info(AS_RW,
 					"rw prole operation: failed, ns %s rv %d result code %d, "
 					"digest %"PRIx64"",
-					ns->name, rv, tr.result_code, *(uint64_t*)&tr.keyd);
+					ns->name, rv, tr->result_code, *(uint64_t*)&tr->keyd);
 		}
 	}
 
-	return tr.result_code;
+	return tr->result_code;
 }
 
 int
-write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp,
-		bool f_respond, ldt_prole_info *linfo)
+write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_respond)
 {
 	uint32_t result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 	bool local_reserve = false;
@@ -4917,11 +4909,25 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp,
 
 	as_namespace *ns = rsvp->ns;
 
-	if (as_ldt_check_and_get_prole_version(keyd, rsvp, linfo, info, NULL, false, __FILE__, __LINE__)) {
+	ldt_prole_info linfo;
+
+	if ((info & RW_INFO_LDT) && as_rw_get_ldt_info(&linfo, m, rsvp)) {
+		cf_warning(AS_LDT, "Could not find ldt info at prole");
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
+	}
+		
+	if (as_ldt_check_and_get_prole_version(keyd, rsvp, &linfo, info, NULL, false, __FILE__, __LINE__)) {
 		// If parent cannot be due to incoming migration it is ok
 		// continue and allow subrecords to be replicated
 		result_code = AS_PROTO_RESULT_OK;
 		goto Out;
+	}
+
+	// Set the version in subrec digest if need be.
+	as_ldt_set_prole_subrec_version(keyd, rsvp, &linfo, info);
+
+	if (info & RW_INFO_UDF_WRITE) {
+		cf_atomic_int_incr(&g_config.udf_replica_writes);
 	}
 
 	// Two ways to tell a prole to write something -
@@ -4935,10 +4941,32 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp,
 	// the entire record) is sent and the node simply overwrites it.
 	int rv = 0;
 	if (msgp) {
-		result_code = write_process_op(ns, keyd, msgp, rsvp, node, generation);
+		// INIT_TR
+		as_transaction tr;
+		as_transaction_init(&tr, keyd, msgp);
+
+		tr.rsv = *rsvp;
+
+		// Check here if this is prole delete caused by nsup
+		// If yes we need to tell XDR not to ship the delete
+		if (info & RW_INFO_NSUP_DELETE) {
+			tr.flag |= AS_TRANSACTION_FLAG_NSUP_DELETE;
+		}
+
+		if (ns->ldt_enabled) {
+			if ((info & RW_INFO_LDT_SUBREC)
+					|| (info & RW_INFO_LDT_ESR)) {
+				tr.flag |= AS_TRANSACTION_FLAG_LDT_SUB;
+				cf_detail(AS_RW,
+						"LDT Subrecord Replication Request Received %"PRIx64"\n",
+						*(uint64_t* )keyd);
+			}
+		}
+
+		result_code = write_process_op(&tr, msgp, node, generation);
 	} else {
 		rv = write_local_pickled(keyd, rsvp, pickled_buf, pickled_sz,
-				&rec_props, generation, void_time, node, info, linfo); 
+				&rec_props, generation, void_time, node, info, &linfo); 
 		if (rv == 0) {
 			result_code = AS_PROTO_RESULT_OK;
 		} else {
@@ -5872,12 +5900,6 @@ rw_multi_process(cf_node node, msg *m)
 	cf_atomic_int_incr(&g_config.wprocess_tree_count);
 	reserved = true;
 
-	// Raj (TODO) bailing out like this may be problem
-	ldt_prole_info linfo;
-	if (as_rw_get_ldt_info(&linfo, m, &rsv)) {
-		goto Out;
-	}
-
 	int offset = 0;
 	int count = 0;
 	while (1) {
@@ -5919,7 +5941,7 @@ rw_multi_process(cf_node node, msg *m)
 			cf_detail(AS_RW, "MULTI_OP: Received Sindex multi op");
 		} else {
 			cf_detail(AS_RW, "MULTI_OP: Received LDT multi op");
-			ret = write_process_new(node, op_msg, &rsv, false, &linfo);
+			ret = write_process_new(node, op_msg, &rsv, false);
 		}
 		if (ret) {
 			ret = -3;

@@ -405,24 +405,6 @@ as_query__update_stats(as_query_transaction *qtr)
 	? true                       \
 	: false
 
-static int query_aerospike_log(const as_aerospike * a, const char * file, const int line, const int lvl, const char * msg) {
-	cf_fault_event(AS_QUERY, lvl, file, NULL, line, (char *) msg);
-	return 0;
-}
-
-static const as_aerospike_hooks query_aerospike_hooks = {
-	.open_subrec      = NULL,
-	.close_subrec     = NULL,
-	.update_subrec    = NULL,
-	.create_subrec    = NULL,
-	.rec_update       = NULL,
-	.rec_remove       = NULL,
-	.rec_exists       = NULL,
-	.log              = query_aerospike_log,
-	.get_current_time = NULL,
-	.destroy          = NULL
-};
-
 // INTERNAL FUNCTIONS:
 int
 ll_recl_reduce_fn(cf_ll_element *ele, void *udata)
@@ -849,11 +831,11 @@ as_qtr__release(as_query_transaction *qtr, char *fname, int lineno)
  *
  * Returns -
  * 		On success - AS_QUERY_OK
- * 		ON faiilure - AS_QUERY_ERR
+ * 		ON failure - AS_QUERY_ERR
  *
  * 	Synchronization -
  * 		Takes a lock before reserving the qtr. why do we need
- * 		it looks unnecessray ??
+ * 		it looks unnecessary ??
  */
 
 int
@@ -1010,7 +992,7 @@ do {                                 \
 	if ((qtr)                        \
         && ((qtr)->end_time != 0)    \
 		&& (cf_getns() > (qtr)->end_time)) { \
-		cf_debug(AS_QUERY, "Query Timedout %lu %lu", cf_getns(), (qtr)->end_time); \
+		cf_debug(AS_QUERY, "Query Timed-out %lu %lu", cf_getns(), (qtr)->end_time); \
         (qtr)->result_code  =  AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT; \
         (qtr)->abort        =  true;           \
 		cf_debug(AS_QUERY, "Query %p Aborted at %s:%d", (qtr), __FILE__, __LINE__); \
@@ -2007,8 +1989,12 @@ as_query__generator(as_query_transaction *qtr)
 
 		// Check if bufbuilder request was successful
 		if (!qtr->bb_r) {
-			cf_warning(AS_QUERY, "Buf builder request was unsunccessful.");
+			cf_warning(AS_QUERY, "Buf builder request was unsuccessful.");
 			goto Cleanup;
+		}
+		// Populate all the partitions for which this node is a qnode.
+		if (qtr->qctx.qnodes_pre_reserved) {
+			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
 		}
 
 		qtr->inited               = true;
@@ -2043,7 +2029,7 @@ as_query__generator(as_query_transaction *qtr)
 				}
 			}
 		}
-		// Step 3: Client is slow requeue
+		// Step 1.5: Client is slow requeue
 		if (as_query__netio_wait(qtr) != AS_QUERY_OK) {
 			if (as_query__queue(qtr) != 0) {
 				cf_warning(AS_QUERY, "Long running transaction Queueing Error... continue!!");
@@ -2235,7 +2221,7 @@ as_query_init()
 	if (!g_query_request_queue)
 		cf_crash(AS_QUERY, "Failed to create query io queue");
 
-	// Create the query worker threads detatched so we don't need to join with them.
+	// Create the query worker threads detached so we don't need to join with them.
 	if (pthread_attr_init(&g_query_worker_th_attr)) {
 		cf_crash(AS_SINDEX, "failed to initialize the query worker thread attributes");
 	}
@@ -2256,7 +2242,7 @@ as_query_init()
 	if (!g_query_long_queue)
 		cf_crash(AS_QUERY, "Failed to create long query transaction queue");
 
-	// Create the query threads detatched so we don't need to join with them.
+	// Create the query threads detached so we don't need to join with them.
 	if (pthread_attr_init(&g_query_th_attr)) {
 		cf_crash(AS_SINDEX, "failed to initialize the query thread attributes");
 	}
@@ -2321,13 +2307,13 @@ as_query_init()
  * 	Returns -
  * 		AS_QUERY_OK  - On successful resize of query threads.
  * 		AS_QUERY_ERR - Either the set_size exceeds AS_QUERY_MAX_THREADS
- * 					   OR Query threads were not intialized on the first place.
+ * 					   OR Query threads were not initialized on the first place.
  */
 int
 as_query_worker_reinit(int set_size, int *actual_size)
 {
 	if (g_query_init == 0) {
-		cf_warning(AS_QUERY, "Query threads not initialtized cannot reinitialize");
+		cf_warning(AS_QUERY, "Query threads not initialized cannot reinitialize");
 		return AS_QUERY_ERR;
 	}
 
@@ -2960,8 +2946,6 @@ as_query_list(char *name, cf_dyn_buf *db)
 	return AS_QUERY_OK;
 }
 
-extern const as_list_hooks udf_arglist_hooks;
-void as_query_fakestream(as_stream *istream, as_list *arglist, as_stream *ostream);
 void
 as_query_fakestream(as_stream *istream, as_list *arglist, as_stream *ostream)
 {
