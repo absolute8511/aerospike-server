@@ -1,4 +1,4 @@
-/*
+/* 
  * thr_query.c
  *
  * Copyright (C) 2012-2014 Aerospike, Inc.
@@ -1991,10 +1991,6 @@ as_query__generator(as_query_transaction *qtr)
 		if (!qtr->bb_r) {
 			cf_warning(AS_QUERY, "Buf builder request was unsuccessful.");
 			goto Cleanup;
-		}
-		// Populate all the partitions for which this node is a qnode.
-		if (qtr->qctx.qnodes_pre_reserved) {
-			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
 		}
 
 		qtr->inited               = true;
