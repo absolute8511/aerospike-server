@@ -87,15 +87,15 @@ typedef struct udf_record_s {
 	as_rec_props		pickled_rec_props;
 } udf_record;
 
-#define UDF_RECORD_FLAG_ALLOW_UPDATES		0x0001
-#define UDF_RECORD_FLAG_ALLOW_DESTROY		0x0002
-#define UDF_RECORD_FLAG_IS_SUBRECORD		0x0004
-#define UDF_RECORD_FLAG_OPEN				0x0008
-#define UDF_RECORD_FLAG_STORAGE_OPEN		0x0010
-#define UDF_RECORD_FLAG_HAS_UPDATES			0x0020
-#define UDF_RECORD_FLAG_PREEXISTS			0x0040
-#define UDF_RECORD_FLAG_ISVALID				0x0080
-#define UDF_RECORD_FLAG_METADATA_UPDATED	0x0100
+#define UDF_RECORD_FLAG_ALLOW_UPDATES		0x0001   // Write/Updates Allowed
+#define UDF_RECORD_FLAG_UNUSED		        0x0002   // UNUSED
+#define UDF_RECORD_FLAG_IS_SUBRECORD		0x0004   // Is udf_record for SubRecord
+#define UDF_RECORD_FLAG_OPEN				0x0008   // as_record_open done
+#define UDF_RECORD_FLAG_STORAGE_OPEN		0x0010   // as_storage_record_open done
+#define UDF_RECORD_FLAG_HAS_UPDATES			0x0020   // Write/Update done
+#define UDF_RECORD_FLAG_PREEXISTS			0x0040   // Record preexisted not created
+#define UDF_RECORD_FLAG_ISVALID				0x0080   // Udf is setup and in use
+#define UDF_RECORD_FLAG_METADATA_UPDATED	0x0100   // Write/Update metadata done
 
 extern const as_rec_hooks udf_record_hooks;
 extern const as_rec_hooks udf_subrecord_hooks;
