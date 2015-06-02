@@ -24,27 +24,32 @@
 
 #include <stdint.h>
 
-/*
+typedef enum compression_type_e {
+	COMPRESSION_ZLIB = 1
+} compression_type;
+
+/**
  * Function to decompress the given data
  * Expected arguments
- * 1. Type of compression
- * 	1 for zlib
- * 2. Length of buffer to be decompressed - mandatory
- * 3. Pointer to buffer to be decompressed - mandatory
- * 4. Length of buffer to hold decompressed data - mandatory
- * 5. Pointer to buffer to hold decompressed data - mandatory
+ * @param type			Type of compression
+ * @param length		Length of buffer to be decompressed
+ * @param buf			Pointer to buffer to be decompressed
+ * @param out_buf_len	Length of buffer to hold decompressed data
+ * @param out_buf		Pointer to buffer to hold decompressed data
+ * @return 0 if successful
  */
 int
-as_decompress(int argc, uint8_t **argv);
+as_decompress(compression_type type, size_t buf_len, const uint8_t *buf, size_t *out_buf_len, uint8_t *out_buf);
 
-/*
+/**
  * Function to get back decompressed packet from PROTO_TYPE_AS_MSG_COMPRESSED packet
  * Packet :  Header - Original size of message - Compressed message
- * Input : buf - Pointer to PROTO_TYPE_AS_MSG_COMPRESSED packet. - Input
- *         decompressed_packet - Pointer holding address of decompressed packet. - Output
+ * @param buf					Pointer to PROTO_TYPE_AS_MSG_COMPRESSED packet.
+ * @param output_packet			Pointer holding address of decompressed packet.
+ * @param output_packet_size 	Size of output_packet buffer
  */
 int
-as_packet_decompression(uint8_t *buf, uint8_t *decompressed_packet);
+as_packet_decompression(uint8_t *buf, uint8_t **output_packet, size_t *output_packet_size);
 
 /*
  * Function to compress the given data
