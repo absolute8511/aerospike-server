@@ -1,4 +1,4 @@
-/*
+/* 
  * thr_query.c
  *
  * Copyright (C) 2012-2014 Aerospike, Inc.
@@ -178,9 +178,6 @@ struct as_query_transaction_s {
 
 	as_query_type            job_type;  // Job type [LOOKUP/AGG/UDF/MRJ]
 	cf_vector              * binlist;
-	udf_call                 call;     // Record UDF Details
-	as_aggr_call             agg_call; // Stream UDF Details 
-	as_sindex_qctx           qctx;     // Secondary Index details
 
 	// OUTPUT
 	int                      result_code;
@@ -217,8 +214,6 @@ struct as_query_transaction_s {
 	cf_buf_builder  *        bb_r;
 	pthread_mutex_t          buf_mutex;
 	cf_atomic_int	         udf_runtime_memory_used;  // Currently reserved udf runtime memory
-	struct ai_obj            bkey;
-	as_partition_reservation rsv[AS_PARTITIONS];
 	
 	// Following are single threaded access put it in single byte
 	bool                     is_malloc;
@@ -232,6 +227,14 @@ struct as_query_transaction_s {
 	cf_atomic_int            uit_queued;    				// Throttling: max in flight scan
 	cf_atomic_int            uit_completed; 				// Number of udf transactions successfully completed
 	cf_atomic64			     uit_total_run_time;			// Average transaction processing time for all udf internal transactions
+	// Folllowing elements are big.
+	// Keep them at the end of structure to avoid them while memzeroing qtr
+	struct ai_obj            bkey;
+	udf_call                 call;     // Record UDF Details
+	as_aggr_call             agg_call; // Stream UDF Details 
+	as_sindex_qctx           qctx;     // Secondary Index details
+
+	as_partition_reservation rsv[AS_PARTITIONS];
 };
 
 typedef enum {
@@ -401,24 +404,6 @@ as_query__update_stats(as_query_transaction *qtr)
 			|| ((qtr)->ns->storage_data_in_memory)))) \
 	? true                       \
 	: false
-
-static int query_aerospike_log(const as_aerospike * a, const char * file, const int line, const int lvl, const char * msg) {
-	cf_fault_event(AS_QUERY, lvl, file, NULL, line, (char *) msg);
-	return 0;
-}
-
-static const as_aerospike_hooks query_aerospike_hooks = {
-	.open_subrec      = NULL,
-	.close_subrec     = NULL,
-	.update_subrec    = NULL,
-	.create_subrec    = NULL,
-	.rec_update       = NULL,
-	.rec_remove       = NULL,
-	.rec_exists       = NULL,
-	.log              = query_aerospike_log,
-	.get_current_time = NULL,
-	.destroy          = NULL
-};
 
 // INTERNAL FUNCTIONS:
 int
@@ -846,11 +831,11 @@ as_qtr__release(as_query_transaction *qtr, char *fname, int lineno)
  *
  * Returns -
  * 		On success - AS_QUERY_OK
- * 		ON faiilure - AS_QUERY_ERR
+ * 		ON failure - AS_QUERY_ERR
  *
  * 	Synchronization -
  * 		Takes a lock before reserving the qtr. why do we need
- * 		it looks unnecessray ??
+ * 		it looks unnecessary ??
  */
 
 int
@@ -1007,7 +992,7 @@ do {                                 \
 	if ((qtr)                        \
         && ((qtr)->end_time != 0)    \
 		&& (cf_getns() > (qtr)->end_time)) { \
-		cf_debug(AS_QUERY, "Query Timedout %lu %lu", cf_getns(), (qtr)->end_time); \
+		cf_debug(AS_QUERY, "Query Timed-out %lu %lu", cf_getns(), (qtr)->end_time); \
         (qtr)->result_code  =  AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT; \
         (qtr)->abort        =  true;           \
 		cf_debug(AS_QUERY, "Query %p Aborted at %s:%d", (qtr), __FILE__, __LINE__); \
@@ -1328,6 +1313,8 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 	// matches the query.
 	// This can be performance hit for big list and maps.
 	as_val * res_val = NULL;
+	as_val * val     = NULL;
+	bool matches     = false;
 	bool from_cdt    = false;
 	switch (type) {
 		case AS_PARTICLE_TYPE_INTEGER : {
@@ -1337,7 +1324,8 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 				cf_debug(AS_QUERY, "as_query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
 					type, start->type, end->type, as_sindex_pktype(qtr->si->imd),
 					qtr->si->imd->bnames[0], qtr->si->imd->iname);
-				return false;
+				matches = false;
+				break;
 			}
 
 			int64_t   i = 0;
@@ -1347,9 +1335,11 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			if (skey->key.int_key != i) {
 				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
 						"not matches bin value in record. bin value %ld skey value %ld", i, skey->key.int_key);
-				return false;
+				matches = false;
+				break;
 			}
-			return true;
+			matches = true;
+			break;
 		}
 		case AS_PARTICLE_TYPE_STRING : {
 			if ((type != as_sindex_pktype(qtr->si->imd))
@@ -1358,7 +1348,8 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 				cf_debug(AS_QUERY, "as_query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
 					type, start->type, end->type, as_sindex_pktype(qtr->si->imd),
 					qtr->si->imd->bnames[0], qtr->si->imd->iname);
-				return false;
+				matches = false;
+				break;
 			}
 
 			uint32_t psz = 32;
@@ -1372,24 +1363,27 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does not matches bin value in record."
 				" skey %"PRIu64" value in bin %"PRIu64"", skey->key.str_key, bin_digest);
 	
-				return false;
+				matches = false;
+				break;
 			}
-			return true;
+			matches = true;
+			break;
 		}
 		case AS_PARTICLE_TYPE_MAP : {
-			as_val * v = as_val_frombin(b);
-			res_val = as_sindex_extract_val_from_path(qtr->si->imd, v);	
+			val     = as_val_frombin(b);
+			res_val = as_sindex_extract_val_from_path(qtr->si->imd, val);	
 			if (!res_val) {
-				return false;
+				matches = false;
+				break;
 			}
 			from_cdt = true;
 			break;
 		}
 		case AS_PARTICLE_TYPE_LIST : {
-			as_val * v = as_val_frombin(b);
-			res_val = as_sindex_extract_val_from_path(qtr->si->imd, v);	
+			val     = as_val_frombin(b);
+			res_val = as_sindex_extract_val_from_path(qtr->si->imd, val);	
 			if (!res_val) {
-				return false;
+				matches = false;
 			}
 			from_cdt = true;
 			break;
@@ -1403,19 +1397,19 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 		if (res_val->type == AS_INTEGER) {
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_DEFAULT) {
-				return as_query_match_integer_fromval(qtr, res_val, skey);
+				matches = as_query_match_integer_fromval(qtr, res_val, skey);
 			}
 			else {
-				return false;
+				matches = false;
 			}
 		}
 		else if (res_val->type == AS_STRING) {
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_DEFAULT) {
-				return as_query_match_string_fromval(qtr, res_val, skey);
+				matches = as_query_match_string_fromval(qtr, res_val, skey);
 			}
 			else {
-				return false;
+				matches = false;
 			}
 		}
 		else if (res_val->type == AS_MAP) {
@@ -1425,13 +1419,15 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPKEYS) {
 				as_map * map = as_map_fromval(res_val);
-				return !as_map_foreach(map, as_query_match_mapkeys_foreach, &q_s);
+				matches = !as_map_foreach(map, as_query_match_mapkeys_foreach, &q_s);
 			}
 			else if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPVALUES){
 				as_map * map = as_map_fromval(res_val);
-				return !as_map_foreach(map, as_query_match_mapvalues_foreach, &q_s);
+				matches = !as_map_foreach(map, as_query_match_mapvalues_foreach, &q_s);
 			}
-			return false;
+			else {
+				matches = false;
+			}
 		}
 		else if (res_val->type == AS_LIST) {
 			as_sindex_qtr_skey q_s;
@@ -1441,14 +1437,18 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			// Defensive check
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_LIST) {
 				as_list * list = as_list_fromval(res_val);
-				return !as_list_foreach(list, as_query_match_listele_foreach, &q_s);
+				matches = !as_list_foreach(list, as_query_match_listele_foreach, &q_s);
 			}
 			else {
-				return false;
+				matches = false;
 			}
 		}
 	}
-	return false;
+
+	if (val) {
+		as_val_destroy(val);
+	}
+	return matches;
 }
 
 bool
@@ -1963,16 +1963,25 @@ as_query__generator(as_query_transaction *qtr)
 	// Setup Query Transaction if it not already setup
 	if (!qtr->inited) {
 		// Aerospike Index object initialization
-		qtr->qctx.bkey = &qtr->bkey;
-		init_ai_obj(qtr->qctx.bkey);
-		bzero(&qtr->qctx.bdig, sizeof(cf_digest));
 		qtr->result_code              = AS_PROTO_RESULT_OK;
+		
+		// Initialize qctx
 		// start with the threshold value
 		qtr->qctx.bsize               = g_config.query_threshold;
 		qtr->qctx.new_ibtr            = true;
 		qtr->qctx.nbtr_done           = false;
 		qtr->qctx.pimd_idx            = -1;
+		qtr->qctx.recl                = NULL;
+		qtr->qctx.n_bdigs             = 0;
 		qtr->qctx.qnodes_pre_reserved = g_config.qnodes_pre_reserved;
+		qtr->qctx.bkey                = &qtr->bkey;
+		init_ai_obj(qtr->qctx.bkey);
+		bzero(&qtr->qctx.bdig, sizeof(cf_digest));
+		// Populate all the paritions for which this node is a qnode.
+		if (qtr->qctx.qnodes_pre_reserved) {
+			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
+		}
+
 		qtr->priority                 = g_config.query_priority;
 		qtr->bb_r                     = as_query__bb_poolrequest();
 		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
@@ -1980,12 +1989,8 @@ as_query__generator(as_query_transaction *qtr)
 
 		// Check if bufbuilder request was successful
 		if (!qtr->bb_r) {
-			cf_warning(AS_QUERY, "Buf builder request was unsunccessful.");
+			cf_warning(AS_QUERY, "Buf builder request was unsuccessful.");
 			goto Cleanup;
-		}
-		// Populate all the paritions for which this node is a qnode.
-		if (qtr->qctx.qnodes_pre_reserved) {
-			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
 		}
 
 		qtr->inited               = true;
@@ -2020,7 +2025,7 @@ as_query__generator(as_query_transaction *qtr)
 				}
 			}
 		}
-		// Step 3: Client is slow requeue
+		// Step 1.5: Client is slow requeue
 		if (as_query__netio_wait(qtr) != AS_QUERY_OK) {
 			if (as_query__queue(qtr) != 0) {
 				cf_warning(AS_QUERY, "Long running transaction Queueing Error... continue!!");
@@ -2212,7 +2217,7 @@ as_query_init()
 	if (!g_query_request_queue)
 		cf_crash(AS_QUERY, "Failed to create query io queue");
 
-	// Create the query worker threads detatched so we don't need to join with them.
+	// Create the query worker threads detached so we don't need to join with them.
 	if (pthread_attr_init(&g_query_worker_th_attr)) {
 		cf_crash(AS_SINDEX, "failed to initialize the query worker thread attributes");
 	}
@@ -2233,7 +2238,7 @@ as_query_init()
 	if (!g_query_long_queue)
 		cf_crash(AS_QUERY, "Failed to create long query transaction queue");
 
-	// Create the query threads detatched so we don't need to join with them.
+	// Create the query threads detached so we don't need to join with them.
 	if (pthread_attr_init(&g_query_th_attr)) {
 		cf_crash(AS_SINDEX, "failed to initialize the query thread attributes");
 	}
@@ -2298,13 +2303,13 @@ as_query_init()
  * 	Returns -
  * 		AS_QUERY_OK  - On successful resize of query threads.
  * 		AS_QUERY_ERR - Either the set_size exceeds AS_QUERY_MAX_THREADS
- * 					   OR Query threads were not intialized on the first place.
+ * 					   OR Query threads were not initialized on the first place.
  */
 int
 as_query_worker_reinit(int set_size, int *actual_size)
 {
 	if (g_query_init == 0) {
-		cf_warning(AS_QUERY, "Query threads not initialtized cannot reinitialize");
+		cf_warning(AS_QUERY, "Query threads not initialized cannot reinitialize");
 		return AS_QUERY_ERR;
 	}
 
@@ -2657,7 +2662,9 @@ as_query(as_transaction *tr)
 		rv = AS_QUERY_ERR;
 		goto Cleanup;
 	}
-	memset(qtr, 0, sizeof(as_query_transaction));
+	// Be aware of the size of qtr
+	// Memset it partially
+	memset(qtr, 0, offsetof(as_query_transaction, bkey));
 	qtr->is_malloc           = true;
 	qtr->inited              = false;
 	qtr->trid                = tr->trid;
@@ -2935,8 +2942,6 @@ as_query_list(char *name, cf_dyn_buf *db)
 	return AS_QUERY_OK;
 }
 
-extern const as_list_hooks udf_arglist_hooks;
-void as_query_fakestream(as_stream *istream, as_list *arglist, as_stream *ostream);
 void
 as_query_fakestream(as_stream *istream, as_list *arglist, as_stream *ostream)
 {

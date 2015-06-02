@@ -28,109 +28,85 @@
 
 #include "fault.h"
 
+#include "base/packet_compression.h"
 #include "base/proto.h"
 
-#define COMPRESSION_ZLIB 1
 #define STACK_BUF_SZ (1024 * 16)
 
-/*
+/**
  * Function to decompress the given data
  * Expected arguments
- * 1. Type of compression
- * 	1 for zlib
- * 2. Length of buffer to be decompressed - mandatory
- * 3. Pointer to buffer to be decompressed - mandatory
- * 4. Length of buffer to hold decompressed data - mandatory
- * 5. Pointer to buffer to hold decompressed data - mandatory
+ * @param type			Type of compression
+ * @param length		Length of buffer to be decompressed
+ * @param buf			Pointer to buffer to be decompressed
+ * @param out_buf_len	Length of buffer to hold decompressed data
+ * @param out_buf		Pointer to buffer to hold decompressed data
+ * @return 0 if successful
  */
 int
-as_decompress(int argc, uint8_t **argv)
+as_decompress(compression_type type, size_t buf_len, const uint8_t *buf, size_t *out_buf_len, uint8_t *out_buf)
 {
-	#define MANDATORY_NO_ARGUMENTS 5
-	int compression_type;
-	size_t *buf_len;
-	uint8_t *buf;
-	size_t *out_buf_len;
-	uint8_t *out_buf;
 	int ret_value = -1;
-
 	cf_debug(AS_COMPRESSION, "In as_decompress");
-
-	compression_type = *argv[0];
-	buf_len = (size_t *)argv[1];
-	buf = argv[2];
-	out_buf_len = (size_t *)argv[3];
-	out_buf = argv[4];
-
-	switch (compression_type)
-	{
-		case COMPRESSION_ZLIB:
+	switch (type) {
+		case COMPRESSION_ZLIB: {
+			// manual convert to match types just in case
+			uLongf converted_out_buf_len = *out_buf_len;
 			// zlib api to decompress the data
-			ret_value = uncompress(out_buf, out_buf_len, buf, *buf_len);
+			ret_value = uncompress(out_buf, &converted_out_buf_len, buf, (uLongf) buf_len);
+			*out_buf_len = converted_out_buf_len;
 			break;
+		}
 		default:
-			cf_warning(AS_COMPRESSION, "Unknown as_proto compression type: %d", compression_type);
+			cf_warning(AS_COMPRESSION, "Unknown as_proto compression type: %d", type);
 			break;
 	}
 	cf_debug(AS_COMPRESSION, "Returned as_decompress : %d", ret_value);
 	return ret_value;
 }
 
-/*
- * Function to decompress packet from PROTO_TYPE_AS_MSG_COMPRESSED packet
- * Received packet :  Header - Original size of message - Compressed message
- * Input : buf - Pointer to packet to be decompressed. - Input
- *         decompressed_packet - Decompressed packet received in buf. - Input/Output
+/**
+ * Function to get back decompressed packet from PROTO_TYPE_AS_MSG_COMPRESSED packet
+ * Packet :  Header - Original size of message - Compressed message
+ * @param buf			Pointer to PROTO_TYPE_AS_MSG_COMPRESSED packet. - Input
+ * @param output_packet	Pointer holding address of decompressed packet. - Output
  */
 int
-as_packet_decompression(uint8_t *buf, uint8_t **decompressed_packet)
+as_packet_decompression(uint8_t *buf, uint8_t **output_packet, size_t *output_packet_size)
 {
 	int ret_value = -1;
-	size_t decompressed_as_packet_sz;
-	size_t buf_sz;
-
 	as_comp_proto *as_comp_protop = (as_comp_proto *) buf;
 
 	cf_debug(AS_COMPRESSION, "In as_packet_decompression");
 
-	if (as_comp_protop->proto.type != PROTO_TYPE_AS_MSG_COMPRESSED)
-	{
+	if (as_comp_protop->proto.type != PROTO_TYPE_AS_MSG_COMPRESSED)	{
 		cf_warning(AS_COMPRESSION, "as_packet_decompression : Invalid input data : type received %d != PROTO_TYPE_AS_MSG_COMPRESSED (%d)",
 				   as_comp_protop->proto.type, PROTO_TYPE_AS_MSG_COMPRESSED);
 		cf_warning(AS_COMPRESSION, "Returned as_packet_decompression : %d", ret_value);
 		return ret_value;
 	}
 
-	decompressed_as_packet_sz = as_comp_protop->org_sz;
-	buf_sz = as_comp_protop->proto.sz - 8;
-	buf = buf + sizeof(as_comp_proto);
+#if 0 // enable this when byte swap also fixed on client side
+	as_comp_protop->org_sz = cf_swap_from_be64(as_comp_protop->org_sz);
+#endif
+	size_t decompressed_as_packet_sz = as_comp_protop->org_sz;
+	// sanity check for client supplied size
+	if (decompressed_as_packet_sz > PROTO_SIZE_MAX) {
+		// the closest error for this case is "input data was corrupted or incomplete"
+		return Z_DATA_ERROR;
+	}
 
-	//uncompressed_as_packet_sz = uncompressed_as_packet_sz;
-	*decompressed_packet = cf_malloc(decompressed_as_packet_sz);
-
-	/* Call client API to decompress data
-	 * Expected arguments
-	 * 1. Type of compression
-	 * 	1 for zlib
-	 * 2. Length of buffer to be decompressed - mandatory
-	 * 3. Pointer to buffer to be decompressed - mandatory
-	 * 4. Length of buffer to hold decompressed data - mandatory
-	 * 5. Pointer to buffer to hold decompressed data - mandatory
-	 */
-	uint8_t *argv[5];
-	int argc = 5;
-	int compression_type = COMPRESSION_ZLIB;
-	argv[0] = (uint8_t *)&compression_type;
-	argv[1] = (uint8_t *)&buf_sz;
-	argv[2] = buf;
-	argv[3] = (uint8_t *)&decompressed_as_packet_sz;
-	argv[4] = *decompressed_packet;
-
-	ret_value = as_decompress(argc, argv);
-	if (ret_value)
-	{
+	size_t buf_sz = as_comp_protop->proto.sz - 8;
+	buf += sizeof(as_comp_proto);
+	uint8_t *decompressed_packet = cf_malloc(decompressed_as_packet_sz);
+	ret_value = as_decompress(COMPRESSION_ZLIB, buf_sz, buf, &decompressed_as_packet_sz, decompressed_packet);
+	if (ret_value) {
 		cf_free(decompressed_packet);
-		decompressed_packet = NULL;
+	} else {
+		*output_packet = decompressed_packet;
+		if (output_packet_size) {
+			*output_packet_size = decompressed_as_packet_sz;
+		}
 	}
 	cf_debug(AS_COMPRESSION, "Returned as_packet_decompression : %d", ret_value);
 	return (ret_value);

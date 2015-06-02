@@ -232,6 +232,7 @@ udf_record_open(udf_record * urecord)
 			rec_rv = -2;
 		} else {
 			urecord->flag   |= UDF_RECORD_FLAG_OPEN;
+			urecord->flag   |= UDF_RECORD_FLAG_PREEXISTS;
 			cf_detail_digest(AS_UDF, &tr->keyd, "Open %p %x Digest:", urecord, urecord->flag);
 			udf_storage_record_open(urecord);
 		}
@@ -315,7 +316,6 @@ udf_record_init(udf_record *urecord)
 	// Init flag
 	urecord->flag               = UDF_RECORD_FLAG_ISVALID;
 	urecord->flag              |= UDF_RECORD_FLAG_ALLOW_UPDATES;
-	urecord->flag              |= UDF_RECORD_FLAG_ALLOW_DESTROY;
 
 	urecord->pickled_buf        = NULL;
 	urecord->pickled_sz         = 0;
@@ -1039,22 +1039,8 @@ udf_record_destroy(as_rec *rec)
 	}
 
 	udf_record *urecord = (udf_record *) as_rec_source(rec);
-
-	if (!(urecord->flag & UDF_RECORD_FLAG_ALLOW_DESTROY)) {
-		return false;
-	}
-
-	if (urecord->pickled_buf) {
-		cf_free(urecord->pickled_buf);
-		urecord->pickled_buf       = NULL;
-		urecord->pickled_sz        = 0;
-		urecord->pickled_void_time = 0;
-	}
-	if (urecord->pickled_rec_props.p_data) {
-		cf_free(urecord->pickled_rec_props.p_data);
-		as_rec_props_clear(&urecord->pickled_rec_props);
-	}
 	udf_record_close(urecord);
+	udf_record_cleanup(urecord, true);
 	return true;
 } 
 
