@@ -409,7 +409,7 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 					cf_debug(AS_PROTO, "To be projected bin |%s| not found \n", binname);
 					continue;
 				}
-				cf_debug(AS_PROTO, "Adding bin |%s| to projected bins |%s| \n", binname);
+				cf_debug(AS_PROTO, "Adding bin |%s| to projected bins \n", binname);
 				list_bins++;
 				msg_sz += sizeof(as_msg_op);
 				msg_sz += rd->ns->single_bin ? 0 : strlen(binname);
