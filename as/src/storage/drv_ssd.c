@@ -4021,11 +4021,11 @@ ssd_init_shadows(as_namespace *ns, drv_ssds *ssds)
 
 		ssd->shadow_name = ns->storage_shadows[i];
 
-		int fd = open(ssd->name, ssd->open_flag, S_IRUSR | S_IWUSR);
+		int fd = open(ssd->shadow_name, ssd->open_flag, S_IRUSR | S_IWUSR);
 
 		if (-1 == fd) {
 			cf_warning(AS_DRV_SSD, "unable to open shadow device %s: %s",
-					ssd->name, cf_strerror(errno));
+					ssd->shadow_name, cf_strerror(errno));
 			return -1;
 		}
 
@@ -4052,7 +4052,8 @@ ssd_init_shadows(as_namespace *ns, drv_ssds *ssds)
 
 		close(fd);
 
-		cf_info(AS_DRV_SSD, "shadow device %s is compatible with main device");
+		cf_info(AS_DRV_SSD, "shadow device %s is compatible with main device",
+				ssd->shadow_name);
 
 		if (ns->storage_scheduler_mode) {
 			// Set scheduler mode specified in config file.

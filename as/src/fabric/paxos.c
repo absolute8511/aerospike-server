@@ -1883,11 +1883,9 @@ as_paxos_spark(as_paxos_change *c)
 			}
 			as_paxos_succession_setdeceased(t.c.id[i]);
 			if (false == as_paxos_succession_quorum()) {
-				/*
-				 * TODO: Quorum collapse needs to not happen anymore
-				cf_crash(AS_PAXOS, "quorum visibility lost!");
-				 */
-				cf_warning(AS_PAXOS, "quorum visibility lost! Continuing anyway ...");
+				// Note:  Current policy is to continue providing service availability,
+				//         even upon node departure exceeding the previous cluster quorum.
+				cf_debug(AS_PAXOS, "quorum visibility lost! Continuing anyway ...");
 			}
 		}
 	}
@@ -2113,7 +2111,9 @@ as_paxos_process_heartbeat_event(msg *m)
 					as_paxos_succession_setdeceased(c.id[j]);
 					j++;
 					if (false == as_paxos_succession_quorum()) {
-						cf_warning(AS_PAXOS, "quorum visibility lost! Continuing anyway ...");
+						// Note:  Current policy is to continue providing service availability,
+						//         even upon node departure exceeding the previous cluster quorum.
+						cf_debug(AS_PAXOS, "quorum visibility lost! Continuing anyway ...");
 					}
 				}
 				break;
