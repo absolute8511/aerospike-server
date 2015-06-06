@@ -3819,13 +3819,13 @@ as_bin_cdt_read_from_client(const as_bin *b, as_msg_op *op, as_bin *result)
 }
 
 int
-as_bin_cdt_alloc_modify_from_client(const as_bin *b, as_msg_op *op, as_bin *result)
+as_bin_cdt_alloc_modify_from_client(as_bin *b, as_msg_op *op, as_bin *result)
 {
 	return -1;
 }
 
 int
-as_bin_cdt_stack_modify_from_client(const as_bin *b, cf_dyn_buf *particles_db, as_msg_op *op, as_bin *result)
+as_bin_cdt_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, as_msg_op *op, as_bin *result)
 {
 	return -1;
 }
@@ -3847,7 +3847,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
-	bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
+	bool respond_all_ops = (m->info2 & AS_MSG_INFO2_RESPOND_ALL_OPS) != 0;
 
 	int result;
 
@@ -3908,7 +3908,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				}
 			}
 
-			if (ordered_ops) {
+			if (respond_all_ops) {
 				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
 			}
 		}
@@ -3948,7 +3948,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				}
 			}
 
-			if (ordered_ops) {
+			if (respond_all_ops) {
 				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
 			}
 		}
@@ -3963,7 +3963,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				ops[(*p_n_response_bins)] = op;
 				response_bins[(*p_n_response_bins)++] = *b;
 			}
-			else if (ordered_ops) {
+			else if (respond_all_ops) {
 				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
 			}
 		}
@@ -3974,8 +3974,6 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				return result;
 			}
 
-			// Do CDT modify operations always become creates if there's no
-			// existing particle?
 			if (! b) {
 				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
 			}
@@ -4005,7 +4003,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				}
 			}
 
-			if (ordered_ops || as_bin_inuse(&result_bin)) {
+			if (respond_all_ops || as_bin_inuse(&result_bin)) {
 				ops[(*p_n_response_bins)] = op;
 				response_bins[(*p_n_response_bins)++] = result_bin;
 				append_bin_to_destroy(&result_bin, result_bins, p_n_result_bins);
@@ -4036,7 +4034,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				response_bins[(*p_n_response_bins)++] = result_bin;
 				append_bin_to_destroy(&result_bin, result_bins, p_n_result_bins);
 			}
-			else if (ordered_ops) {
+			else if (respond_all_ops) {
 				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
 			}
 		}
@@ -6114,7 +6112,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 		as_bin_get_all_p(&rd, response_bins);
 	}
 	else {
-		bool ordered_ops = (m->info2 & AS_MSG_INFO2_ORDERED_OPS) != 0;
+		bool respond_all_ops = (m->info2 & AS_MSG_INFO2_RESPOND_ALL_OPS) != 0;
 		int result;
 
 		as_msg_op *op = 0;
@@ -6124,7 +6122,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 			if (op->op == AS_MSG_OP_READ) {
 				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
 
-				if (b || ordered_ops) {
+				if (b || respond_all_ops) {
 					ops[n_bins] = op;
 					response_bins[n_bins++] = b;
 				}
@@ -6149,7 +6147,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 					}
 				}
 
-				if (b || ordered_ops) {
+				if (b || respond_all_ops) {
 					ops[n_bins] = op;
 					response_bins[n_bins++] = b;
 				}
