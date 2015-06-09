@@ -1896,6 +1896,8 @@ as_ldt_particle_to_client(const as_val *val, as_msg_op *op)
 	as_buffer_destroy(&abuf);
 	as_val_destroy(val);
 
+	op->op_sz += added_size;
+
 	return added_size;
 }
 
