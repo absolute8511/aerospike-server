@@ -767,6 +767,18 @@ struct as_partition_reservation_s {
 	__rsv.reject_writes = false; \
 	__rsv.cluster_key = 0;
 
+#define AS_PARTITION_RESERVATION_INITP(__rsv)   \
+	__rsv->ns = NULL; \
+	__rsv->is_write = false; \
+	__rsv->pid = AS_PARTITION_ID_UNDEF; \
+	__rsv->p = 0; \
+	__rsv->state = AS_PARTITION_STATE_UNDEF; \
+	__rsv->tree = 0; \
+	__rsv->n_dupl = 0; \
+	__rsv->reject_writes = false; \
+	__rsv->cluster_key = 0;
+
+
 // This is a statistics function
 typedef struct as_partition_states_s {
 	int		sync_actual;

@@ -3129,11 +3129,12 @@ as_query_reserve_qnode(as_namespace * ns, as_query_transaction * qtr, as_partiti
 		return &qtr->rsv[pid];
 	}
 	else {
-		// get the qnode reservation per record
-		// Good for unique sindex queries.
-		as_partition_reservation tmp_rsv = *rsv;
-
-		AS_PARTITION_RESERVATION_INIT(tmp_rsv);
+		// Works for scan aggregation
+		if (!rsv) {
+			cf_warning(AS_QUERY, "rsv is null while reserving qnode.");
+			return NULL;
+		}
+		AS_PARTITION_RESERVATION_INITP(rsv);
 		if (0 != as_partition_reserve_qnode(ns, pid, rsv)) {
 			return NULL;
 		}
