@@ -56,8 +56,8 @@
 #include "base/ldt_record.h"
 #include "base/proto.h"
 #include "base/rec_props.h"
+#include "base/scan.h"
 #include "base/thr_rw_internal.h"
-#include "base/thr_scan.h"
 #include "base/thr_write.h"
 #include "base/transaction.h"
 #include "base/udf_aerospike.h"
@@ -162,15 +162,6 @@ send_response(udf_call *call, const char *key, size_t klen, int vtype, void *val
 
 	if (call->udf_type == AS_SCAN_UDF_OP_BACKGROUND) {
 		// If we are doing a background UDF scan, do not send any result back
-		if (tr->udata.req_type == UDF_SCAN_REQUEST) {
-			cf_detail(AS_UDF, "UDF: Background transaction, send no result back. "
-					"Parent job id [%"PRIu64"]", ((tscan_job*)(tr->udata.req_udata))->tid);
-			if (strncmp(key, "FAILURE", 8) == 0) {
-				cf_atomic_int_incr(&((tscan_job*)(tr->udata.req_udata))->n_obj_udf_failed);
-			} else if (strncmp(key, "SUCCESS", 8) == 0) {
-				cf_atomic_int_incr(&((tscan_job*)(tr->udata.req_udata))->n_obj_udf_success);
-			}
-		}
 		return 0;
 	} else if (call->udf_type == AS_SCAN_UDF_OP_UDF) {
 		// Do not release fd now, scan will do it at the end of all internal
@@ -549,7 +540,7 @@ udf_call_init(udf_call * call, as_transaction * tr)
 	if (tr->udata.req_udata) {
 		udf_call *ucall = NULL;
 		if (tr->udata.req_type == UDF_SCAN_REQUEST) {
-			ucall = &((tscan_job *)(tr->udata.req_udata))->call;
+			ucall = as_scan_get_udf_call(tr->udata.req_udata);
 		} else if (tr->udata.req_type == UDF_QUERY_REQUEST) {
 			ucall = as_query_get_udf_call(tr->udata.req_udata);
 		}
@@ -1283,11 +1274,6 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 			udata->res                =  res;
 			cf_detail(AS_UDF, "Setting UDF Request Response data=%p with udf op %d", udata, *op);
 			udf_rw_addresponse(tr, udata);
-		}
-
-		// TODO this is not the right place for counter, put it at proper place
-		if(tr->udata.req_udata && tr->udata.req_type == UDF_SCAN_REQUEST) {
-			cf_atomic_int_add(&((tscan_job*)(tr->udata.req_udata))->n_obj_udf_updated, (*op == UDF_OPTYPE_WRITE));
 		}
 
 	} else {

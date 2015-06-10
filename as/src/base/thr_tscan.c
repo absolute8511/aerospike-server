@@ -20,6 +20,7 @@
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
 
+#include "base/scan.h"
 #include "base/thr_scan.h"
 
 #include <errno.h>

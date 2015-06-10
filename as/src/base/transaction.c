@@ -40,8 +40,8 @@
 
 #include "base/datamodel.h"
 #include "base/proto.h"
+#include "base/scan.h"
 #include "base/security.h"
-#include "base/thr_scan.h"
 #include "base/udf_rw.h"
 
 

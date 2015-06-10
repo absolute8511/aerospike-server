@@ -43,15 +43,6 @@
 #include "base/udf_rw.h"
 
 
-// Scan udf types.
-// Client can send either background or client udf (response for every udf).
-typedef enum as_scan_udf_op {
-	AS_SCAN_UDF_NONE,
-	AS_SCAN_UDF_OP_AGGREGATE,
-	AS_SCAN_UDF_OP_BACKGROUND,
-	AS_SCAN_UDF_OP_UDF
-} as_scan_udf_op;
-
 typedef enum as_scan_state_logged {
 	AS_SCAN_STARTED,
 	AS_SCAN_IN_PROGRESS,

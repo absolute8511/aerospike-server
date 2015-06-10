@@ -133,8 +133,11 @@ cfg_set_defaults()
 	c->proto_fd_idle_ms = 60000; // 1 minute reaping of proto file descriptors
 	c->proto_slow_netio_sleep_ms = 1; // 1 ms sleep between retry for slow queries
 	c->run_as_daemon = true; // set false only to run in debugger & see console output
+	c->scan_max_active = 100;
+	c->scan_max_done = 100;
 	c->scan_priority = 200; // # of rows between a quick context switch?
 	c->scan_sleep = 1; // amount of time scan thread will sleep between two context switch
+	c->scan_threads = 4;
 	c->storage_benchmarks = false;
 	c->ticker_interval = 10;
 	c->transaction_max_ns = 1000 * 1000 * 1000; // 1 second
@@ -294,7 +297,10 @@ typedef enum {
 	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET,
 	CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION,
 	CASE_SERVICE_RUN_AS_DAEMON,
+	CASE_SERVICE_SCAN_MAX_ACTIVE,
+	CASE_SERVICE_SCAN_MAX_DONE,
 	CASE_SERVICE_SCAN_PRIORITY,
+	CASE_SERVICE_SCAN_THREADS,
 	CASE_SERVICE_SINDEX_DATA_MAX_MEMORY,
 	CASE_SERVICE_SNUB_NODES,
 	CASE_SERVICE_STORAGE_BENCHMARKS,
@@ -662,7 +668,10 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "replication-fire-and-forget",	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET },
 		{ "respond-client-on-master-completion", CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION },
 		{ "run-as-daemon",					CASE_SERVICE_RUN_AS_DAEMON },
+		{ "scan-max-active",				CASE_SERVICE_SCAN_MAX_ACTIVE },
+		{ "scan-max-done",					CASE_SERVICE_SCAN_MAX_DONE },
 		{ "scan-priority",					CASE_SERVICE_SCAN_PRIORITY },
+		{ "scan-threads",					CASE_SERVICE_SCAN_THREADS },
 		{ "sindex-data-max-memory",			CASE_SERVICE_SINDEX_DATA_MAX_MEMORY },
 		{ "snub-nodes",						CASE_SERVICE_SNUB_NODES },
 		{ "storage-benchmarks",				CASE_SERVICE_STORAGE_BENCHMARKS },
@@ -1963,8 +1972,17 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_RUN_AS_DAEMON:
 				c->run_as_daemon = cfg_bool_no_value_is_true(&line);
 				break;
+			case CASE_SERVICE_SCAN_MAX_ACTIVE:
+				c->scan_max_active = cfg_u32(&line, 0, 200);
+				break;
+			case CASE_SERVICE_SCAN_MAX_DONE:
+				c->scan_max_done = cfg_u32(&line, 0, 1000);
+				break;
 			case CASE_SERVICE_SCAN_PRIORITY:
 				c->scan_priority = cfg_u32_no_checks(&line);
+				break;
+			case CASE_SERVICE_SCAN_THREADS:
+				c->scan_threads = cfg_u32(&line, 0, 32);
 				break;
 			case CASE_SERVICE_SINDEX_DATA_MAX_MEMORY:
 				config_val = cfg_u64_no_checks(&line);

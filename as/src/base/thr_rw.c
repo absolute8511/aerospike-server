@@ -60,7 +60,6 @@
 #include "base/rec_props.h"
 #include "base/secondary_index.h"
 #include "base/thr_proxy.h"
-#include "base/thr_scan.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "base/udf_rw.h"

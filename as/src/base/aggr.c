@@ -45,7 +45,8 @@
 
 #include "base/datamodel.h"
 #include "base/proto.h"
-#include "base/thr_scan.h"
+#include "base/scan.h"
+#include "base/secondary_index.h"
 #include "base/transaction.h"
 #include "base/udf_memtracker.h"
 #include "base/udf_record.h"

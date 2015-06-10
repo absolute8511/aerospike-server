@@ -36,7 +36,7 @@
 
 #include "base/secondary_index.h"
 #include "base/monitor.h"
-#include "base/thr_scan.h"
+#include "base/scan.h"
 
 
 #define AS_MON_MAX_MODULE 10
@@ -111,11 +111,11 @@ as_mon_register(char *module)
 	}
 	else if (!strcmp(module, "scan"))
 	{
-		cb->get_jobstat     = as_tscan_get_jobstat;
-		cb->get_jobstat_all = as_tscan_get_jobstat_all;
+		cb->get_jobstat     = as_scan_get_jobstat;
+		cb->get_jobstat_all = as_scan_get_jobstat_all;
 
 		cb->set_priority    = NULL;
-		cb->kill            = as_tscan_abort;
+		cb->kill            = as_scan_abort;
 		cb->suspend         = NULL;
 		cb->set_pendingmax  = NULL;
 		cb->set_maxinflight = NULL;

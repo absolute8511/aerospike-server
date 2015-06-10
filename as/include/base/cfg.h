@@ -235,6 +235,9 @@ typedef struct as_config_s {
 	/* enables node snubbing - this code caused a Paxos issue in the past */
 	bool				snub_nodes;
 
+	uint32_t			scan_max_active;
+	uint32_t			scan_max_done;
+	uint32_t			scan_threads;
 	// number of records between an enforced context switch - thus 1 is very low priority, 1000000 would be very high
 	uint32_t			scan_priority;
 	// amount of time a thread will sleep after yielding scan_priority amount of data. (in microseconds)
@@ -375,6 +378,9 @@ typedef struct as_config_s {
 	cf_atomic_int		proxy_unproxy;
 	cf_atomic_int		proxy_retry_same_dest;
 	cf_atomic_int		proxy_retry_new_dest;
+	cf_atomic_int		scans_initiated;
+	cf_atomic_int		scans_succeeded;
+	cf_atomic_int		scans_abandoned;
 	cf_atomic_int		tscan_initiate;
 	cf_atomic_int		tscan_succeeded;
 	cf_atomic_int		tscan_aborted;

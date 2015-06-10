@@ -46,6 +46,7 @@
 #include "base/datamodel.h"
 #include "base/json_init.h"
 #include "base/monitor.h"
+#include "base/scan.h"
 #include "base/secondary_index.h"
 #include "base/security.h"
 #include "base/system_metadata.h"
@@ -421,6 +422,7 @@ main(int argc, char **argv)
 	as_write_init();			// write service
 	as_query_init();			// query transaction handling
 	as_udf_init();				// apply user-defined functions
+	as_scan_init();				// scan a namespace or set
 	as_tscan_init();			// scan a namespace or set
 	as_batch_init();			// batch transaction handling
 	as_xdr_init();				// cross data-center replication
