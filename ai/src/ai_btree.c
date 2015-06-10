@@ -50,7 +50,6 @@
 #include "util.h"
 
 #define DIG_ARRAY_QUEUE_HIGHWATER 512
-#define SKV_ARRAY_QUEUE_HIGHWATER 512
 
 #define AI_ARR_MAX_USED 32
 
@@ -66,7 +65,6 @@ bool g_use_arr = true;
 
 // AI_BTREE GLOBALS
 static cf_queue *g_q_dig_arr       = NULL;
-static cf_queue *g_q_sindex_kv_arr = NULL;
 
 extern pthread_rwlock_t g_ai_rwlock;
 
@@ -106,10 +104,6 @@ ai_btree_init(void) {
 	if (!g_q_dig_arr) {
 		g_q_dig_arr = cf_queue_create(sizeof(void *), true);
 	}
-
-	if (!g_q_sindex_kv_arr) {
-		g_q_sindex_kv_arr = cf_queue_create(sizeof(void *), true);
-	}
 }
 
 dig_arr_t *
@@ -130,29 +124,6 @@ releaseDigArrToQueue(void *v)
 	if (cf_queue_sz(g_q_dig_arr) < DIG_ARRAY_QUEUE_HIGHWATER) {
 		cf_queue_push(g_q_dig_arr, &dt);
 	} else cf_free(dt);
-}
-
-sindex_kv_arr *
-get_skv_arr(void)
-{
-	sindex_kv_arr *skv_arr;
-	if (cf_queue_pop(g_q_sindex_kv_arr, &skv_arr, CF_QUEUE_NOWAIT) == CF_QUEUE_EMPTY) {
-		skv_arr = cf_malloc(sizeof(sindex_kv_arr));
-	}
-	skv_arr->num = 0;
-	return skv_arr;
-}
-
-void
-release_skv_arr_to_queue(sindex_kv_arr *v)
-{
-	sindex_kv_arr * skv_arr = (sindex_kv_arr *)v;
-	if (cf_queue_sz(g_q_sindex_kv_arr) < SKV_ARRAY_QUEUE_HIGHWATER) {
-		cf_queue_push(g_q_sindex_kv_arr, &skv_arr);
-	} 
-	else {
-		cf_free(skv_arr);
-	}
 }
 
 const byte INIT_CAPACITY = 1;
@@ -730,36 +701,36 @@ btree_addsinglerec(as_sindex_metadata *imd, ai_obj * key, cf_digest *dig, cf_ll 
 	}
 
 	bool create                     = (cf_ll_size(recl) == 0) ? true : false;
-	sindex_kv_arr * skv_arr         = NULL;
+	as_index_keys_arr * keys_arr    = NULL;
 	if (!create) {
 		cf_ll_element * ele         = cf_ll_get_tail(recl);
-		skv_arr                     = ((ll_sindex_kv_element*)ele)->skv_arr;
-		if (skv_arr->num == NUM_SINDEX_KV_PER_ARR) {
+		keys_arr                    = ((as_index_keys_ll_element*)ele)->keys_arr;
+		if (keys_arr->num == AS_INDEX_KEYS_PER_ARR) {
 			create = true;
 		}
 	}
 	if (create) {
-		skv_arr                     = get_skv_arr();
-		if (!skv_arr) {
+		keys_arr                    = as_index_get_keys_arr();
+		if (!keys_arr) {
 			cf_warning(AS_SINDEX, "Fail to allocate sindex key value array");
 			return -1;
 		}
-		ll_sindex_kv_element * node =  cf_malloc(sizeof(ll_sindex_kv_element));
-		node->skv_arr               = skv_arr;
+		as_index_keys_ll_element * node =  cf_malloc(sizeof(as_index_keys_ll_element));
+		node->keys_arr                  = keys_arr;
 		cf_ll_append(recl, (cf_ll_element *)node);
 	}
 	// Copy the digest (value)
-	memcpy(&skv_arr->digs[skv_arr->num], dig, CF_DIGEST_KEY_SZ);
+	memcpy(&keys_arr->pindex_digs[keys_arr->num], dig, CF_DIGEST_KEY_SZ);
 
 	// Copy the key
 	if (C_IS_Y(imd->dtype)) {
-		memcpy(&skv_arr->skeys[skv_arr->num].key.str_key, &key->y, CF_DIGEST_KEY_SZ);
+		memcpy(&keys_arr->sindex_keys[keys_arr->num].key.str_key, &key->y, CF_DIGEST_KEY_SZ);
 	}
 	else {
-		skv_arr->skeys[skv_arr->num].key.int_key = key->l;
+		keys_arr->sindex_keys[keys_arr->num].key.int_key = key->l;
 	}
 
-	skv_arr->num++;
+	keys_arr->num++;
 	*n_bdigs = *n_bdigs + 1;
 	return 0;
 }

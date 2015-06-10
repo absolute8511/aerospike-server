@@ -1115,76 +1115,38 @@ as_internal_scan_udf_txn_setup(tr_create_data * d)
 	return 0;
 }
 
-void
-tscan_ll_recl_destroy_fn(cf_ll_element *ele)
-{
-	ll_recl_element * node = (ll_recl_element *) ele;
-	if (node) {
-		if (node->dig_arr) {
-			cf_free(node->dig_arr);
-		}
-		cf_free(node);
-	}
-}
-
-extern dig_arr_t * getDigestArray(void);
-
 int
 tscan_add_digest_list(cf_ll * recl, cf_digest * digest, int * dnum)
 {
 	cf_ll_element *ele = recl->tail;
 	bool create = ele == NULL;
-	dig_arr_t *dt;
+	as_index_keys_arr * keys_arr = NULL;
 	if (!create) {
-		dt = ((ll_recl_element*)ele)->dig_arr;
-		if (dt->num == NUM_SINDEX_KV_PER_ARR) {
+		keys_arr = ((as_index_keys_ll_element*)ele)->keys_arr;
+		if (keys_arr->num == AS_INDEX_KEYS_PER_ARR) {
 			create = true;
 		}
 	}
 	if (create) {
-		dt = getDigestArray();
-		if (!dt) {
+		keys_arr = as_index_get_keys_arr();
+		if (!keys_arr) {
+			// HARD CODE return values should not be encouraged.
 			return -1;
 		}
-		ll_recl_element * node;
-		node = cf_malloc(sizeof(ll_recl_element));
-		node->dig_arr = dt;
+		as_index_keys_ll_element * node;
+		node          = cf_malloc(sizeof(as_index_keys_ll_element));
+		node->keys_arr = keys_arr;
 		cf_ll_append(recl, (cf_ll_element *)node);
 	}
-	memcpy(&dt->digs[dt->num], digest, CF_DIGEST_KEY_SZ);
-	dt->num++;
+	// Not using the keys part of sindex_kv
+	// This will waste some memory but will not cause any ugliness while handling this 
+	// at query engine
+	memcpy(&keys_arr->pindex_digs[keys_arr->num], digest, CF_DIGEST_KEY_SZ);
+	keys_arr->num++;
 	if (dnum) {
 		*dnum = *dnum + 1;
 	}
 	return 0;
-}
-
-void
-tscan_recl_cleanup(cf_ll *recl)
-{
-	if (recl) {
-		cf_ll_iterator * iter = NULL;
-		iter                  = cf_ll_getIterator(recl, true /*forward*/);
-		if (iter) {
-			cf_ll_element *ele;
-			while ((ele = cf_ll_getNext(iter))) {
-				ll_recl_element * node;
-				node = (ll_recl_element *) ele;
-				dig_arr_t * dt = node->dig_arr;
-				node->dig_arr =  NULL;
-				if (dt) {
-					releaseDigArrToQueue((void *)dt);
-				}
-			}
-		}
-		cf_ll_releaseIterator(iter);
-	}
-}
-
-int
-tscan_ll_recl_reduce_fn(cf_ll_element *ele, void *udata)
-{
-	return CF_LL_REDUCE_DELETE;
 }
 
 void
@@ -1961,7 +1923,7 @@ tscan_partition_thr(void *q_to_wait_on)
 				job_early_terminate = true;
 			}
 			else {
-				cf_ll_init(recl, tscan_ll_recl_destroy_fn, false /*no lock*/);
+				cf_ll_init(recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 
 				tscan_aggr_tr_udata_t tree_reduce_udata = {
 					.recl = recl,
@@ -1989,9 +1951,10 @@ tscan_partition_thr(void *q_to_wait_on)
 				}
 
 				as_result_destroy(res);
-				tscan_recl_cleanup(recl);
-				cf_ll_reduce(recl, true /*forward*/, tscan_ll_recl_reduce_fn, NULL);
-				cf_free(recl);
+				cf_ll_reduce(recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
+				if (recl) {
+					cf_free(recl);
+				}
 			}
 		}
 		else {

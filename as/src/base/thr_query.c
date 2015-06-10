@@ -406,43 +406,6 @@ as_query__update_stats(as_query_transaction *qtr)
 	: false
 
 // INTERNAL FUNCTIONS:
-int
-ll_recl_reduce_fn(cf_ll_element *ele, void *udata)
-{
-	return CF_LL_REDUCE_DELETE;
-}
-
-void
-ll_recl_destroy_fn(cf_ll_element *ele)
-{
-	ll_recl_element * node = (ll_recl_element *) ele;
-	if (node) {
-		if (node->dig_arr) {
-			cf_free(node->dig_arr);
-		}
-		cf_free(node);
-	}
-}
-
-int
-ll_sindex_kv_reduce_fn(cf_ll_element *ele, void *udata)
-{
-	return CF_LL_REDUCE_DELETE;
-}
-
-void
-ll_sindex_kv_destroy_fn(cf_ll_element *ele)
-{
-	ll_sindex_kv_element * node = (ll_sindex_kv_element *) ele;
-	if (node) {
-		if (node->skv_arr) {
-			release_skv_arr_to_queue(node->skv_arr);
-			node->skv_arr = NULL;
-		}
-		cf_free(node);
-	}
-}
-
 void
 as_query_histogram_dumpall()
 {
@@ -1175,7 +1138,7 @@ as_query__process_aggreq(as_query_request *qagg)
 
 Cleanup:
 	if (qagg->recl) {
-		cf_ll_reduce(qagg->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		cf_ll_reduce(qagg->recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		if (qagg->recl ) {
 			cf_free(qagg->recl);
 		}
@@ -1632,21 +1595,21 @@ as_query__process_udfreq(as_query_request *qudf)
 	}
 
 	while((ele = cf_ll_getNext(iter))) {
-		ll_sindex_kv_element * node;
-		node                     = (ll_sindex_kv_element *) ele;
-		sindex_kv_arr * skv_arr  = node->skv_arr;
-		if (!skv_arr) {
+		as_index_keys_ll_element * node;
+		node                         = (as_index_keys_ll_element *) ele;
+		as_index_keys_arr * keys_arr  = node->keys_arr;
+		if (!keys_arr) {
 			continue;
 		}
-		node->skv_arr   =  NULL;
-		cf_detail(AS_QUERY, "NUMBER OF DIGESTS = %d", skv_arr->num);
-		for (int i = 0; i < skv_arr->num; i++) {
+		node->keys_arr   =  NULL;
+		cf_detail(AS_QUERY, "NUMBER OF DIGESTS = %d", keys_arr->num);
+		for (int i = 0; i < keys_arr->num; i++) {
 			cf_detail(AS_QUERY, "LOOOPING FOR NUMBER OF DIGESTS %d", i);
 
 			// Fill the structure needed by internal transaction create
 			tr_create_data d;
 			memset(&d, 0, sizeof(tr_create_data));
-			d.digest   = skv_arr->digs[i];
+			d.digest   = keys_arr->pindex_digs[i];
 			d.ns       = qtr->ns;
 			d.call     = &(qtr->call);
 			d.msg_type = AS_MSG_INFO2_WRITE;
@@ -1661,7 +1624,7 @@ as_query__process_udfreq(as_query_request *qudf)
 				usleep(g_config.query_sleep);
 			}
 		}
-		release_skv_arr_to_queue(skv_arr);
+		as_index_keys_release_arr_to_queue(keys_arr);
 	}
 Cleanup:
 	if(iter) {
@@ -1670,7 +1633,7 @@ Cleanup:
 	}
 
 	if (qudf->recl) {
-		cf_ll_reduce(qudf->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		cf_ll_reduce(qudf->recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		if (qudf->recl) {
 			cf_free(qudf->recl);
 		}
@@ -1706,19 +1669,19 @@ as_query__process_ioreq(as_query_request *qio)
 	}
 
 	while((ele = cf_ll_getNext(iter))) {
-		ll_sindex_kv_element * node;
-		node                   = (ll_sindex_kv_element *) ele;
-		sindex_kv_arr *skv_arr = node->skv_arr;
-		if (!skv_arr) {
+		as_index_keys_ll_element * node;
+		node                       = (as_index_keys_ll_element *) ele;
+		as_index_keys_arr *keys_arr = node->keys_arr;
+		if (!keys_arr) {
 			continue;
 		}
-		node->skv_arr     = NULL;
-		for (int i = 0; i < skv_arr->num; i++) {
-			cf_digest *dig  = &skv_arr->digs[i];
-			as_sindex_key * skey = &skv_arr->skeys[i];
+		node->keys_arr     = NULL;
+		for (int i = 0; i < keys_arr->num; i++) {
+			cf_digest *dig       = &keys_arr->pindex_digs[i];
+			as_sindex_key * skey = &keys_arr->sindex_keys[i];
 			ret             = as_query__io(qtr, dig, skey);
 			if (ret != AS_QUERY_OK) {
-				release_skv_arr_to_queue(skv_arr);
+				as_index_keys_release_arr_to_queue(keys_arr);
 				goto Cleanup;
 			}
 
@@ -1727,12 +1690,12 @@ as_query__process_ioreq(as_query_request *qio)
 				usleep(g_config.query_sleep);
 				as_query__check_timeout(qtr);
 				if (QTR_FAILED(qtr)) {
-					release_skv_arr_to_queue(skv_arr);
+					as_index_keys_release_arr_to_queue(keys_arr);
 					goto Cleanup;
 				}
 			}
 		}
-		release_skv_arr_to_queue(skv_arr);
+		as_index_keys_release_arr_to_queue(keys_arr);
 	}
 Cleanup:
 
@@ -1742,7 +1705,7 @@ Cleanup:
 	}
 
 	if (qio->recl) {
-		cf_ll_reduce(qio->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		cf_ll_reduce(qio->recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		if (qio->recl) {
 			cf_free(qio->recl);
 		}
@@ -1853,7 +1816,7 @@ as_query__generator_get_nextbatch(as_query_transaction *qtr)
 	as_sindex_range *srange  = qtr->srange;
 	if (!qctx->recl) {
 		qctx->recl = cf_malloc(sizeof(cf_ll));
-		cf_ll_init(qctx->recl, ll_sindex_kv_destroy_fn, false /*no lock*/);
+		cf_ll_init(qctx->recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 		if (!qctx->recl) {
 			qtr->result_code = AS_SINDEX_ERR_NO_MEMORY;
 			qctx->n_bdigs        = 0;
@@ -2114,7 +2077,7 @@ as_query__generator(as_query_transaction *qtr)
 Cleanup:
 
 	if (qtr->qctx.recl) {
-		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		if (qtr->qctx.recl) cf_free(qtr->qctx.recl);
 		qtr->qctx.recl = NULL;
 	}

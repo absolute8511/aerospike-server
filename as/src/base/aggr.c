@@ -243,7 +243,7 @@ as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_resul
 	as_rec_init(&l_qrec, &l_qrecord, &query_record_hooks);
 
 	as_aggr_istream l_aggr_istream = {
-		.skv_arr     = NULL,
+		.keys_arr     = NULL,
 		.rec         = &l_qrec,
 		.iter        = cf_ll_getIterator(ap_recl, true /*forward*/),
 		.ns          = ap_call->ns,
@@ -431,25 +431,25 @@ as_aggr_istream_read(const as_stream *s)
 	}
 
 	//Sumit: taking out query_record from istream->rec->data
-	// skv_arr has sindex keys in it.
+	// keys_arr has sindex keys in it.
 	// This is used by query engine to validate the query results.
 	// Ideally aggregation should use a different structure.
 
-	if (!aggr_istream->skv_arr) {
+	if (!aggr_istream->keys_arr) {
 		cf_ll_element * ele       = cf_ll_getNext(aggr_istream->iter);
 		if (!ele) {
-			aggr_istream->skv_arr = NULL;
+			aggr_istream->keys_arr = NULL;
 			cf_detail(AS_AGGR, "No more digests found in agg stream");	
 		}
 		else {
-			aggr_istream-> skv_arr = ((ll_sindex_kv_element*)ele)->skv_arr;
+			aggr_istream->keys_arr = ((as_index_keys_ll_element*)ele)->keys_arr;
 		}
 		aggr_istream->skv_offset  = 0;
 	}
-	sindex_kv_arr  * skv_arr      = aggr_istream->skv_arr;
+	as_index_keys_arr  * keys_arr  = aggr_istream->keys_arr;
 
 
-	if (!skv_arr) {
+	if (!keys_arr) {
 		cf_debug(AS_AGGR, "No digests found in agg stream");
 		return NULL;
 	}
@@ -457,22 +457,22 @@ as_aggr_istream_read(const as_stream *s)
 	// Iterate through stream to get next digest and
 	// populate record with it
 	while (!qrecord->read) {
-		if (skv_arr->num == aggr_istream->skv_offset) {
-			if (skv_arr) {
+		if (keys_arr->num == aggr_istream->skv_offset) {
+			if (keys_arr) {
 				// Not releasing here.. will be released
 				// by the query_agg_apply_stream in the end
 			}
-			skv_arr = NULL;
-			while (!skv_arr) {
+			keys_arr = NULL;
+			while (!keys_arr) {
 				cf_ll_element * ele  = cf_ll_getNext(aggr_istream->iter);
 				if (!ele) {
 					cf_detail(AS_AGGR, "No More Nodes for this Lua Call");
 					return NULL;
 				}
-				skv_arr              = ((ll_sindex_kv_element*)ele)->skv_arr;
+				keys_arr              = ((as_index_keys_ll_element*)ele)->keys_arr;
 			}
 			aggr_istream->skv_offset = 0;
-			aggr_istream->skv_arr    = skv_arr;
+			aggr_istream->keys_arr    = keys_arr;
 			cf_detail(AS_AGGR, "Moving to next node of digest list");
 		}
 
@@ -481,9 +481,9 @@ as_aggr_istream_read(const as_stream *s)
 		as_index_ref   * r_ref =  qrecord->urecord->r_ref;
 
 		cf_detail(AS_AGGR, "Open Record (%p,%d %"PRIu64", %"PRIu64")", 
-						aggr_istream->skv_arr, aggr_istream->skv_offset);
+						aggr_istream->keys_arr, aggr_istream->skv_offset);
 		
-		qrecord->urecord->keyd = skv_arr->digs[aggr_istream->skv_offset];
+		qrecord->urecord->keyd = keys_arr->pindex_digs[aggr_istream->skv_offset];
 		int pid                = as_partition_getid(qrecord->urecord->keyd);
 
 		as_transaction * tr    =  qrecord->urecord->tr;
@@ -518,8 +518,8 @@ as_aggr_istream_read(const as_stream *s)
 			as_aggr_release_qnode(qrecord, aggr_istream->get_type());
 		} else {
 			if (aggr_istream->get_type() == AS_AGGR_QUERY) {
-				if (!as_query_aggr_match_record(qrecord, &skv_arr->skeys[aggr_istream->skv_offset])) {
-					cf_debug(AS_AGGR, "Close Record with invalid selection (%p,%d)", aggr_istream->skv_arr, aggr_istream->skv_offset);
+				if (!as_query_aggr_match_record(qrecord, &keys_arr->sindex_keys[aggr_istream->skv_offset])) {
+					cf_debug(AS_AGGR, "Close Record with invalid selection (%p,%d)", aggr_istream->keys_arr, aggr_istream->skv_offset);
 					udf_record_close(qrecord->urecord);
 					as_aggr_release_qnode(qrecord, aggr_istream->get_type());
 					qrecord->read = false;
