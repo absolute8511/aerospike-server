@@ -218,7 +218,7 @@ is_embedded_particle_type(as_particle_type type)
 	return type == AS_PARTICLE_TYPE_INTEGER || type == AS_PARTICLE_TYPE_FLOAT;
 }
 
-extern int32_t as_particle_size_from_client(const as_msg_op *op);
+extern int32_t as_particle_size_from_client(const as_msg_op *op); // TODO - will we ever need this?
 extern int32_t as_particle_size_from_pickled(uint8_t **p_pickled);
 extern uint32_t as_particle_size_from_mem(as_particle_type type, const uint8_t *value, uint32_t value_size);
 extern int32_t as_particle_size_from_flat(const uint8_t *flat, uint32_t flat_size); // TODO - will we ever need this?
@@ -234,13 +234,14 @@ extern uint32_t as_bin_particle_size(as_bin *b);
 extern uint32_t as_bin_particle_ptr(as_bin *b, uint8_t **p_value);
 
 // wire:
-extern int32_t as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op);
+extern int32_t as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op); // TODO - will we ever need this?
 extern int as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op);
 extern int as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op);
 extern int as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op);
 extern int as_bin_particle_stack_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op);
 extern int as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled);
 extern int32_t as_bin_particle_stack_from_pickled(as_bin *b, uint8_t* stack, uint8_t **p_pickled);
+extern int as_bin_particle_compare_from_pickled(const as_bin *b, uint8_t **p_pickled);
 extern uint32_t as_bin_particle_client_value_size(as_bin *b);
 extern uint32_t as_bin_particle_to_client(const as_bin *b, as_msg_op *op);
 extern uint32_t as_bin_particle_pickled_size(as_bin *b);
