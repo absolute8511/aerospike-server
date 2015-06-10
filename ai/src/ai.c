@@ -767,6 +767,7 @@ int ai_drop_index(char *iname)
 
 /*
  *  Shut Down the Aerospike Index Module.
+ *  This is not thread safe
  */
 void ai_shutdown(void)
 {
