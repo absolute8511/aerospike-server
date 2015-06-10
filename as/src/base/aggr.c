@@ -418,29 +418,7 @@ as_aggr_istream_read(const as_stream *s)
 	}
 
 	query_record   * qrecord      = (query_record *) aggr_istream->rec->data;
-	//Sumit: taking out query_record from istream->rec->data
-	// skv_arr has sindex keys in it.
-	// This is used by query engine to validate the query results.
-	// Ideally aggregation should use a different structure.
-	sindex_kv_arr  * skv_arr      = aggr_istream->skv_arr;
-
-	if (!skv_arr) {
-		cf_ll_element * ele       = cf_ll_getNext(aggr_istream->iter);
-		if (!ele) {
-			aggr_istream->skv_arr = NULL;
-			skv_arr = NULL;
-			cf_detail(AS_AGGR, "No more digests found in agg stream");	
-		}
-		else {
-			skv_arr               = ((ll_sindex_kv_element*)ele)->skv_arr;
-		}
-		aggr_istream->skv_arr     = skv_arr;
-		aggr_istream->skv_offset  = 0;
-	}
-
 	if (qrecord->read) {
-		cf_detail(AS_AGGR, "Close Record (%p,%d)", aggr_istream->skv_arr,
-				aggr_istream->skv_offset - 1);
 		// Bypassing doing the direct destroy because we need to
 		// avoid reducing the ref count. This rec (query_record
 		// implementation of as_rec) is ref counted when passed from
@@ -451,6 +429,25 @@ as_aggr_istream_read(const as_stream *s)
 		as_aggr_release_qnode(qrecord, aggr_istream->get_type());
 		qrecord->read = false;
 	}
+
+	//Sumit: taking out query_record from istream->rec->data
+	// skv_arr has sindex keys in it.
+	// This is used by query engine to validate the query results.
+	// Ideally aggregation should use a different structure.
+
+	if (!aggr_istream->skv_arr) {
+		cf_ll_element * ele       = cf_ll_getNext(aggr_istream->iter);
+		if (!ele) {
+			aggr_istream->skv_arr = NULL;
+			cf_detail(AS_AGGR, "No more digests found in agg stream");	
+		}
+		else {
+			aggr_istream-> skv_arr = ((ll_sindex_kv_element*)ele)->skv_arr;
+		}
+		aggr_istream->skv_offset  = 0;
+	}
+	sindex_kv_arr  * skv_arr      = aggr_istream->skv_arr;
+
 
 	if (!skv_arr) {
 		cf_debug(AS_AGGR, "No digests found in agg stream");
