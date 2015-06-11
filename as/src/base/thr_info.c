@@ -4772,8 +4772,6 @@ as_info_set(const char *name, const char *value, bool def)
 	return(as_info_set_buf(name, (const uint8_t *) value, strlen(value), def ) );
 }
 
-static pthread_t info_debug_ticker_th;
-
 void *
 info_debug_ticker_fn(void *gcc_is_ass)
 {
@@ -5101,8 +5099,13 @@ void
 info_debug_ticker_start()
 {
 	// Create a debug thread to pump out some statistics
-	if (g_config.ticker_interval)
-		pthread_create(&info_debug_ticker_th, 0, info_debug_ticker_fn, 0);
+	if (g_config.ticker_interval) {
+		pthread_attr_t thr_attr;
+		pthread_attr_init(&thr_attr);
+		pthread_attr_setdetachstate(&thr_attr, PTHREAD_CREATE_DETACHED);
+		pthread_t info_debug_ticker_th;
+		pthread_create(&info_debug_ticker_th, &thr_attr, info_debug_ticker_fn, 0);
+	}
 }
 
 
@@ -5123,9 +5126,6 @@ info_debug_ticker_start()
 // But that's all that we can think of at the moment - the paxos communication method
 // makes sure that the distributed key system is properly distributed
 //
-
-static pthread_t info_interfaces_th;
-
 
 int
 interfaces_compar(const void *a, const void *b)
@@ -7216,11 +7216,11 @@ as_info_init()
 	// Spin up the Info threads *after* all static and dynamic Info commands have been added
 	// so we can guarantee that the static and dynamic lists will never again be changed.
 	pthread_attr_t thr_attr;
-	pthread_t tid;
-	if (0 != pthread_attr_init(&thr_attr))
-		cf_crash(AS_INFO, "pthread_attr_init: %s", cf_strerror(errno));
+	pthread_attr_init(&thr_attr);
+	pthread_attr_setdetachstate(&thr_attr, PTHREAD_CREATE_DETACHED);
 
 	for (int i = 0; i < g_config.n_info_threads; i++) {
+		pthread_t tid;
 		if (0 != pthread_create(&tid, &thr_attr, thr_info_fn, (void *) 0 )) {
 			cf_crash(AS_INFO, "pthread_create: %s", cf_strerror(errno));
 		}
@@ -7243,13 +7243,15 @@ as_info_init()
 		}
 	}
 
+	pthread_t info_interfaces_th;
 	// if there's a statically configured external interface, use this simple function to monitor
 	// and transmit
-	if (g_config.external_address)
-		pthread_create(&info_interfaces_th, 0, info_interfaces_static_fn, 0);
-	// Or if we've got interfaces, monitor and transmit
-	else
-		pthread_create(&info_interfaces_th, 0, info_interfaces_fn, 0);
+	if (g_config.external_address) {
+		pthread_create(&info_interfaces_th, &thr_attr, info_interfaces_static_fn, 0);
+	} else {
+		// Or if we've got interfaces, monitor and transmit
+		pthread_create(&info_interfaces_th, &thr_attr, info_interfaces_fn, 0);
+	}
 
 	return(0);
 }
