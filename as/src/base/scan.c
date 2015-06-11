@@ -238,6 +238,7 @@ bool scan_manager_abort_job(scan_manager* manager, uint64_t trid);
 int scan_manager_abort_all_jobs(scan_manager* manager);
 bool scan_manager_change_job_priority(scan_manager* manager, uint64_t trid, int priority);
 void scan_manager_limit_finished_jobs(scan_manager* manager);
+void scan_manager_resize_thread_pool(scan_manager* manager, uint32_t n_threads);
 as_mon_jobstat* scan_manager_get_job_info(scan_manager* manager, uint64_t trid);
 as_mon_jobstat* scan_manager_get_info(scan_manager* manager, int* size);
 int scan_manager_get_active_job_count(scan_manager* manager);
@@ -350,6 +351,12 @@ as_scan(as_transaction *tr)
 	}
 
 	return result;
+}
+
+void
+as_scan_resize_thread_pool(uint32_t n_threads)
+{
+	scan_manager_resize_thread_pool(&g_scan_manager, n_threads);
 }
 
 int
@@ -884,7 +891,6 @@ typedef struct info_item_s {
 	scan_job**	p_job;
 } info_item;
 
-void scan_manager_add_finished_job(scan_manager* manager, scan_job* job);
 void scan_manager_evict_finished_jobs(scan_manager* manager);
 int scan_manager_find_cb(void* buf, void* udata);
 scan_job* scan_manager_find_job(cf_queue* scans, uint64_t trid, bool remove);
@@ -946,7 +952,14 @@ void
 scan_manager_finish_job(scan_manager* manager, scan_job* job)
 {
 	pthread_mutex_lock(&manager->lock);
-	scan_manager_add_finished_job(manager, job);
+
+	scan_manager_remove_active(manager, job->trid);
+	job->finish_ms = cf_getms();
+	cf_queue_push(manager->finished_scans, &job);
+	scan_manager_evict_finished_jobs(manager);
+
+	cf_atomic_int_incr(job->abandoned == 0 ? &g_config.scans_succeeded : &g_config.scans_abandoned);
+
 	pthread_mutex_unlock(&manager->lock);
 }
 
@@ -1057,6 +1070,12 @@ scan_manager_limit_finished_jobs(scan_manager* manager)
 	pthread_mutex_unlock(&manager->lock);
 }
 
+void
+scan_manager_resize_thread_pool(scan_manager* manager, uint32_t n_threads)
+{
+	scan_thread_pool_resize(&manager->thread_pool, n_threads);
+}
+
 as_mon_jobstat*
 scan_manager_get_job_info(scan_manager* manager, uint64_t trid)
 {
@@ -1132,17 +1151,6 @@ scan_manager_get_active_job_count(scan_manager* manager)
 //----------------------------------------------------------
 // scan_manager utilities.
 //
-
-void
-scan_manager_add_finished_job(scan_manager* manager, scan_job* job)
-{
-	scan_manager_remove_active(manager, job->trid);
-	job->finish_ms = cf_getms();
-	cf_queue_push(manager->finished_scans, &job);
-	scan_manager_evict_finished_jobs(manager);
-
-	cf_atomic_int_incr(job->abandoned == 0 ? &g_config.scans_succeeded : &g_config.scans_abandoned);
-}
 
 void
 scan_manager_evict_finished_jobs(scan_manager* manager)

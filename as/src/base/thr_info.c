@@ -2707,6 +2707,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			}
 			cf_info(AS_INFO, "Changing value of scan-threads from %d to %d ", g_config.scan_threads, val);
 			g_config.scan_threads = val;
+			as_scan_resize_thread_pool(g_config.scan_threads);
 		}
 		else if (0 == as_info_parameter_get(params, "batch-max-requests", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
