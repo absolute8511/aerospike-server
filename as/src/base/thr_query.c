@@ -2261,7 +2261,6 @@ as_query_init()
 	}
 
 	g_config.query_enable_histogram	= false;
-	g_config.qnodes_pre_reserved    = true;
 }
 
 /*
@@ -2978,6 +2977,8 @@ as_query_gconfig_default(as_config *c)
 	c->query_rec_count_bound     = UINT_MAX; // Unlimited
 	c->query_req_in_query_thread = 0;
 	c->query_untracked_time_ns   = AS_QUERY_UNTRACKED_TIME;
+
+	c->qnodes_pre_reserved    = true;
 
 	// Aggregation
 	c->udf_runtime_max_memory    = ULONG_MAX;
