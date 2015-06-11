@@ -46,8 +46,6 @@
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_digest.h"
 #include "citrusleaf/cf_ll.h"
-#include "citrusleaf/cf_queue.h"
-#include "citrusleaf/cf_queue_priority.h"
 #include "citrusleaf/cf_vector.h"
 
 #include "dynbuf.h"
@@ -60,6 +58,7 @@ extern dig_arr_t* getDigestArray(void);
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/index.h"
+#include "base/job_manager.h"
 #include "base/monitor.h"
 #include "base/proto.h"
 #include "base/thr_tsvc.h"
@@ -100,57 +99,6 @@ scan_type_str(scan_type type)
 }
 
 //----------------------------------------------------------
-// scan_job - base class header.
-//
-
-struct scan_job_s;
-struct scan_job_info_s;
-typedef void (*scan_job_slice_fn)(struct scan_job_s* _job, as_partition_reservation* rsv);
-typedef void (*scan_job_finish_fn)(struct scan_job_s* _job);
-typedef void (*scan_job_destroy_fn)(struct scan_job_s* _job);
-typedef void (*scan_job_info_fn)(struct scan_job_s* _job, as_mon_jobstat* stat);
-
-typedef struct scan_job_vtable_s {
-	scan_job_slice_fn	slice_fn;
-	scan_job_finish_fn	finish_fn;
-	scan_job_destroy_fn	destroy_fn;
-	scan_job_info_fn	info_mon_fn;
-} scan_job_vtable;
-
-typedef struct scan_job_s {
-	// Mandatory interface for derived classes:
-	scan_job_vtable		vtable;
-
-	// Unique identifier:
-	uint64_t			trid;
-
-	// Scan scope:
-	as_namespace*		ns;
-	uint16_t			set_id;
-
-	// Handle active phase:
-	pthread_mutex_t		requeue_lock;
-	int					priority; // TODO - as_thread_pool_priority
-	cf_atomic32			active_rc;
-	volatile int		next_pid;
-	volatile int		abandoned;
-
-	// For tracking:
-	uint64_t			start_ms;
-	uint64_t			finish_ms;
-	cf_atomic64			n_records_read;
-} scan_job;
-
-void scan_job_init(scan_job* job, const scan_job_vtable* vtable, uint64_t trid,
-		as_namespace* ns, uint16_t set_id, int priority);
-void scan_job_destroy(scan_job* job);
-void scan_job_finish(scan_job* job);
-static inline void scan_job_active_reserve(scan_job* job);
-static inline void scan_job_active_release(scan_job* job);
-void scan_job_slice(void* task);
-void scan_job_info(scan_job* job, as_mon_jobstat* stat);
-
-//----------------------------------------------------------
 // scan_job - derived classes' public methods.
 //
 
@@ -164,86 +112,6 @@ struct udf_bg_scan_job_s;
 struct udf_bg_scan_job_s* udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id);
 
 //----------------------------------------------------------
-// scan_thread_pool - class header.
-//
-
-typedef struct scan_thread_pool_s {
-	pthread_mutex_t		lock;
-	cf_queue_priority*	dispatch_queue;
-	cf_queue*			complete_queue;
-	uint32_t			n_threads;
-} scan_thread_pool;
-
-typedef void (*scan_thread_pool_task_fn)(void* task);
-
-// Same as cf_queue_priority scheme, so no internal conversion needed:
-typedef enum {
-	THREAD_POOL_PRIORITY_HIGH	= 1,
-	THREAD_POOL_PRIORITY_MEDIUM	= 2,
-	THREAD_POOL_PRIORITY_LOW	= 3
-} scan_thread_pool_priority;
-
-static inline const char*
-thread_pool_priority_str(scan_thread_pool_priority priority)
-{
-	switch (priority) {
-	case THREAD_POOL_PRIORITY_LOW:
-		return "low";
-	case THREAD_POOL_PRIORITY_MEDIUM:
-		return "medium";
-	case THREAD_POOL_PRIORITY_HIGH:
-		return "high";
-	default:
-		return "?";
-	}
-}
-
-static inline scan_thread_pool_priority
-thread_pool_priority(int proto_priority)
-{
-	switch (proto_priority) {
-	case 1:
-		return THREAD_POOL_PRIORITY_LOW;
-	default:
-	case 2:
-		return THREAD_POOL_PRIORITY_MEDIUM;
-	case 3:
-		return THREAD_POOL_PRIORITY_HIGH;
-	}
-}
-
-bool scan_thread_pool_init(scan_thread_pool* pool, uint32_t n_threads);
-void scan_thread_pool_shutdown(scan_thread_pool* pool);
-bool scan_thread_pool_resize(scan_thread_pool* pool, uint32_t n_threads);
-bool scan_thread_pool_queue_task(scan_thread_pool* pool, scan_thread_pool_task_fn task_fn, void* task, scan_thread_pool_priority priority);
-bool scan_thread_pool_remove_task(scan_thread_pool* pool, void* task);
-
-//----------------------------------------------------------
-// scan_manager - class header.
-//
-
-typedef struct scan_manager_s {
-	pthread_mutex_t		lock;
-	scan_thread_pool	thread_pool;
-	cf_queue*			active_scans;
-	cf_queue*			finished_scans;
-} scan_manager;
-
-void scan_manager_init(scan_manager* manager);
-int scan_manager_start_job(scan_manager* manager, scan_job* job);
-static inline void scan_manager_requeue_job(scan_manager* manager, scan_job* job);
-void scan_manager_finish_job(scan_manager* manager, scan_job* job);
-void scan_manager_abandon_job(scan_manager* manager, scan_job* job, int reason);
-bool scan_manager_abort_job(scan_manager* manager, uint64_t trid);
-int scan_manager_abort_all_jobs(scan_manager* manager);
-bool scan_manager_change_job_priority(scan_manager* manager, uint64_t trid, int priority);
-void scan_manager_limit_finished_jobs(scan_manager* manager);
-void scan_manager_resize_thread_pool(scan_manager* manager, uint32_t n_threads);
-as_mon_jobstat* scan_manager_get_job_info(scan_manager* manager, uint64_t trid);
-as_mon_jobstat* scan_manager_get_info(scan_manager* manager, int* size);
-int scan_manager_get_active_job_count(scan_manager* manager);
-
-//----------------------------------------------------------
 // Non-class-specific utilities.
 //
 
@@ -252,23 +120,6 @@ typedef struct scan_options_s {
 	bool		fail_on_cluster_change;
 	uint32_t	sample_pct;
 } scan_options;
-
-static inline const char*
-scan_result_str(int result_code)
-{
-	switch (result_code) {
-	case 0:
-		return "ok";
-	case AS_PROTO_RESULT_FAIL_UNKNOWN:
-		return "abandoned-unknown";
-	case AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH:
-		return "abandoned-cluster-key";
-	case AS_PROTO_RESULT_FAIL_SCAN_ABORT:
-		return "user-aborted";
-	default:
-		return "abandoned-?";
-	}
-}
 
 int get_scan_ns(as_msg* m, as_namespace** p_ns);
 int get_scan_set_id(as_msg* m, as_namespace* ns, uint16_t* p_set_id);
@@ -294,8 +145,7 @@ const uint32_t MAX_UDF_ACTIVE_TRANSACTIONS = 256; // TODO - what ???
 // Globals.
 //
 
-static scan_manager g_scan_manager;
-static cf_atomic32 g_scan_trid = 0;
+static as_job_manager g_scan_manager;
 
 
 
@@ -307,7 +157,8 @@ void
 as_scan_init()
 {
 	// TODO - check for failure and cf_crash?
-	scan_manager_init(&g_scan_manager);
+	as_job_manager_init(&g_scan_manager, g_config.scan_threads,
+			g_config.scan_max_active, g_config.scan_max_done);
 }
 
 int
@@ -325,17 +176,17 @@ as_scan(as_transaction *tr)
 		return result;
 	}
 
-	scan_job* job = NULL;
+	as_job* job = NULL;
 
 	switch (get_scan_type(tr)) {
 	case SCAN_TYPE_BASIC:
-		job = (scan_job*)basic_scan_job_create(tr, ns, set_id);
+		job = (as_job*)basic_scan_job_create(tr, ns, set_id);
 		break;
 	case SCAN_TYPE_AGGR:
-		job = (scan_job*)aggr_scan_job_create(tr, ns, set_id);
+		job = (as_job*)aggr_scan_job_create(tr, ns, set_id);
 		break;
 	case SCAN_TYPE_UDF_BG:
-		job = (scan_job*)udf_bg_scan_job_create(tr, ns, set_id);
+		job = (as_job*)udf_bg_scan_job_create(tr, ns, set_id);
 		break;
 	default:
 		break;
@@ -346,23 +197,35 @@ as_scan(as_transaction *tr)
 		return tr->result_code;
 	}
 
-	if ((result = scan_manager_start_job(&g_scan_manager, job)) != 0) {
-		scan_job_destroy(job);
+	if ((result = as_job_manager_start_job(&g_scan_manager, job)) != 0) {
+		as_job_destroy(job);
 	}
 
 	return result;
 }
 
 void
+as_scan_limit_active_jobs(uint32_t max_active)
+{
+	as_job_manager_limit_active_jobs(&g_scan_manager, max_active);
+}
+
+void
+as_scan_limit_finished_jobs(uint32_t max_done)
+{
+	as_job_manager_limit_finished_jobs(&g_scan_manager, max_done);
+}
+
+void
 as_scan_resize_thread_pool(uint32_t n_threads)
 {
-	scan_manager_resize_thread_pool(&g_scan_manager, n_threads);
+	as_job_manager_resize_thread_pool(&g_scan_manager, n_threads);
 }
 
 int
 as_scan_get_active_job_count()
 {
-	return scan_manager_get_active_job_count(&g_scan_manager);
+	return as_job_manager_get_active_job_count(&g_scan_manager);
 }
 
 int
@@ -375,25 +238,25 @@ as_scan_list(char* name, cf_dyn_buf* db)
 as_mon_jobstat*
 as_scan_get_jobstat(uint64_t trid)
 {
-	return scan_manager_get_job_info(&g_scan_manager, trid);
+	return as_job_manager_get_job_info(&g_scan_manager, trid);
 }
 
 as_mon_jobstat*
 as_scan_get_jobstat_all(int* size)
 {
-	return scan_manager_get_info(&g_scan_manager, size);
+	return as_job_manager_get_info(&g_scan_manager, size);
 }
 
 int
 as_scan_abort(uint64_t trid)
 {
-	return scan_manager_abort_job(&g_scan_manager, trid) ? 0 : -1;
+	return as_job_manager_abort_job(&g_scan_manager, trid) ? 0 : -1;
 }
 
 int
 as_scan_abort_all()
 {
-	return scan_manager_abort_all_jobs(&g_scan_manager);
+	return as_job_manager_abort_all_jobs(&g_scan_manager);
 }
 
 
@@ -558,675 +421,6 @@ send_blocking_response_fin(int fd, int result_code)
 
 
 //==============================================================================
-// scan_job base class implementation.
-//
-
-//----------------------------------------------------------
-// scan_job typedefs and forward declarations.
-//
-
-static inline const char* scan_job_safe_set_name(scan_job* job);
-static inline uint32_t scan_job_progress(scan_job* job);
-
-//----------------------------------------------------------
-// scan_job public API.
-//
-
-void
-scan_job_init(scan_job* job, const scan_job_vtable* vtable, uint64_t trid,
-		as_namespace* ns, uint16_t set_id, int priority)
-{
-	memset(job, 0, sizeof(job));
-
-	job->vtable		= *vtable;
-
-	job->trid		= trid != 0 ? trid : (uint64_t)cf_atomic32_incr(&g_scan_trid);
-	job->ns			= ns;
-	job->set_id		= set_id;
-	job->priority	= thread_pool_priority(priority);
-
-	pthread_mutex_init(&job->requeue_lock, NULL);
-}
-
-void
-scan_job_destroy(scan_job* job)
-{
-	job->vtable.destroy_fn(job);
-
-	pthread_mutex_destroy(&job->requeue_lock);
-	cf_free(job);
-}
-
-void
-scan_job_finish(scan_job* job)
-{
-	job->vtable.finish_fn(job);
-	scan_manager_finish_job(&g_scan_manager, job);
-}
-
-static inline void
-scan_job_active_reserve(scan_job* job)
-{
-	cf_atomic32_incr(&job->active_rc);
-}
-
-static inline void
-scan_job_active_release(scan_job* job)
-{
-	if (cf_atomic32_decr(&job->active_rc) == 0) {
-		scan_job_finish(job);
-	}
-}
-
-void
-scan_job_slice(void* task)
-{
-	scan_job* job = (scan_job*)task;
-
-	int pid = job->next_pid;
-	as_partition_reservation rsv;
-
-	while (pid < AS_PARTITIONS &&
-			as_partition_reserve_write(job->ns, pid, &rsv, NULL, NULL) != 0) {
-		pid++;
-	}
-
-	if (pid == AS_PARTITIONS) {
-		scan_job_active_release(job);
-		return;
-	}
-
-	pthread_mutex_lock(&job->requeue_lock);
-
-	if (job->abandoned != 0) {
-		pthread_mutex_unlock(&job->requeue_lock);
-		as_partition_release(&rsv);
-		scan_job_active_release(job);
-		return;
-	}
-
-	if ((job->next_pid = pid + 1) < AS_PARTITIONS) {
-		scan_job_active_reserve(job);
-		scan_manager_requeue_job(&g_scan_manager, job);
-	}
-
-	pthread_mutex_unlock(&job->requeue_lock);
-
-	job->vtable.slice_fn(job, &rsv);
-
-	as_partition_release(&rsv);
-	scan_job_active_release(job);
-}
-
-void
-scan_job_info(scan_job* job, as_mon_jobstat* stat)
-{
-	uint64_t now = cf_getms();
-	bool done = job->finish_ms != 0;
-	uint64_t since_start_ms = now - job->start_ms;
-	uint64_t since_finish_ms = done ? now - job->finish_ms : 0; // TODO - incorporate this ???
-	uint64_t active_ms = done ? job->finish_ms - job->start_ms : since_start_ms;
-
-	stat->trid		= job->trid;
-	stat->run_time	= active_ms;
-	stat->recs_read	= cf_atomic64_get(job->n_records_read);
-	stat->priority	= job->priority; // TODO - flip to proto priority or make them the same!
-
-	strcpy(stat->ns, job->ns->name);
-	strcpy(stat->set, scan_job_safe_set_name(job));
-
-	char status[64];
-	sprintf(status, "%s(%s)", done ? "done" : "active", scan_result_str(job->abandoned));
-	as_strncpy(stat->status, status, sizeof(stat->status));
-
-	sprintf(stat->jdata, "job-progress=%u", scan_job_progress(job));
-
-	job->vtable.info_mon_fn(job, stat);
-}
-
-//----------------------------------------------------------
-// scan_job utilities.
-//
-
-static inline const char*
-scan_job_safe_set_name(scan_job* job)
-{
-	const char* set_name = as_namespace_get_set_name(job->ns, job->set_id);
-
-	return set_name ? set_name : "null";
-}
-
-static inline uint32_t
-scan_job_progress(scan_job* job)
-{
-	return ((uint32_t)job->next_pid * 100) / AS_PARTITIONS;
-}
-
-
-
-//==============================================================================
-// scan_thread_pool class implementation.
-//
-
-//----------------------------------------------------------
-// scan_thread_pool typedefs and forward declarations.
-//
-
-typedef struct scan_thread_pool_qtask_s {
-	scan_thread_pool_task_fn	task_fn;
-	void*						task;
-} scan_thread_pool_qtask;
-
-uint32_t scan_thread_pool_create_threads(scan_thread_pool* pool, uint32_t count);
-void scan_thread_pool_shutdown_threads(scan_thread_pool* pool, uint32_t count);
-void* scan_thread_pool_run(void* udata);
-int scan_thread_pool_delete_cb(void* buf, void* task);
-
-//----------------------------------------------------------
-// scan_thread_pool public API.
-//
-
-bool
-scan_thread_pool_init(scan_thread_pool* pool, uint32_t n_threads)
-{
-	pthread_mutex_init(&pool->lock, NULL);
-
-	// Initialize queues.
-	pool->dispatch_queue = cf_queue_priority_create(sizeof(scan_thread_pool_qtask), true);
-	pool->complete_queue = cf_queue_create(sizeof(uint32_t), true);
-
-	// Start detached threads.
-	pool->n_threads = scan_thread_pool_create_threads(pool, n_threads);
-
-	return pool->n_threads == n_threads;
-}
-
-void
-scan_thread_pool_shutdown(scan_thread_pool* pool)
-{
-	scan_thread_pool_shutdown_threads(pool, pool->n_threads);
-	cf_queue_priority_destroy(pool->dispatch_queue);
-	cf_queue_destroy(pool->complete_queue);
-	pthread_mutex_destroy(&pool->lock);
-}
-
-bool
-scan_thread_pool_resize(scan_thread_pool* pool, uint32_t n_threads)
-{
-	pthread_mutex_lock(&pool->lock);
-
-	bool result = true;
-
-	if (n_threads != pool->n_threads) {
-		if (n_threads < pool->n_threads) {
-			// Shutdown excess threads.
-			scan_thread_pool_shutdown_threads(pool, pool->n_threads - n_threads);
-			pool->n_threads = n_threads;
-		}
-		else {
-			// Start new detached threads.
-			pool->n_threads += scan_thread_pool_create_threads(pool, n_threads - pool->n_threads);
-			result = pool->n_threads == n_threads;
-		}
-	}
-
-	pthread_mutex_unlock(&pool->lock);
-
-	return result;
-}
-
-bool
-scan_thread_pool_queue_task(scan_thread_pool* pool, scan_thread_pool_task_fn task_fn, void* task, scan_thread_pool_priority priority)
-{
-	if (pool->n_threads == 0) {
-		// No threads are running to process task.
-		// TODO - warning
-	}
-
-	scan_thread_pool_qtask qtask = { task_fn, task };
-
-	return cf_queue_priority_push(pool->dispatch_queue, &qtask, priority) == CF_QUEUE_OK;
-}
-
-bool
-scan_thread_pool_remove_task(scan_thread_pool* pool, void* task)
-{
-	scan_thread_pool_qtask qtask = { NULL, NULL };
-
-	cf_queue_priority_reduce_pop(pool->dispatch_queue, &qtask, scan_thread_pool_delete_cb, task);
-
-	return qtask.task != NULL;
-}
-
-//----------------------------------------------------------
-// scan_thread_pool utilities.
-//
-
-uint32_t
-scan_thread_pool_create_threads(scan_thread_pool* pool, uint32_t count)
-{
-	pthread_attr_t attrs;
-
-	pthread_attr_init(&attrs);
-	pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_DETACHED);
-
-	uint32_t n_threads_created = 0;
-	pthread_t thread;
-
-	for (uint32_t i = 0; i < count; i++) {
-		if (pthread_create(&thread, &attrs, scan_thread_pool_run, pool) == 0) {
-			n_threads_created++;
-		}
-	}
-
-	return n_threads_created;
-}
-
-void
-scan_thread_pool_shutdown_threads(scan_thread_pool* pool, uint32_t count)
-{
-	// Send terminator tasks to kill 'count' threads.
-	scan_thread_pool_qtask task = { NULL, NULL };
-
-	for (uint32_t i = 0; i < count; i++) {
-		cf_queue_priority_push(pool->dispatch_queue, &task, CF_QUEUE_PRIORITY_HIGH);
-	}
-
-	// Wait till threads finish.
-	uint32_t complete;
-
-	for (uint32_t i = 0; i < count; i++) {
-		cf_queue_pop(pool->complete_queue, &complete, CF_QUEUE_FOREVER);
-	}
-}
-
-void*
-scan_thread_pool_run(void* udata)
-{
-	scan_thread_pool* pool = (scan_thread_pool*)udata;
-	scan_thread_pool_qtask qtask;
-
-	// Retrieve tasks from queue and execute.
-	while (cf_queue_priority_pop(pool->dispatch_queue, &qtask, CF_QUEUE_FOREVER) == CF_QUEUE_OK) {
-		// A null task indicates thread should be shut down.
-		if (! qtask.task_fn) {
-			break;
-		}
-
-		// Run task.
-		qtask.task_fn(qtask.task);
-	}
-
-	// Send thread completion event back to caller.
-	uint32_t complete = 1;
-
-	cf_queue_push(pool->complete_queue, &complete);
-
-	return NULL;
-}
-
-int
-scan_thread_pool_delete_cb(void* buf, void* task)
-{
-	return ((scan_thread_pool_qtask*)buf)->task == task ? -1 : 0;
-}
-
-
-
-//==============================================================================
-// scan_manager class implementation.
-//
-
-//----------------------------------------------------------
-// scan_manager typedefs and forward declarations.
-//
-
-typedef struct find_item_s {
-	uint64_t	trid;
-	scan_job*	job;
-	bool		remove;
-} find_item;
-
-typedef struct info_item_s {
-	scan_job**	p_job;
-} info_item;
-
-void scan_manager_evict_finished_jobs(scan_manager* manager);
-int scan_manager_find_cb(void* buf, void* udata);
-scan_job* scan_manager_find_job(cf_queue* scans, uint64_t trid, bool remove);
-static inline scan_job* scan_manager_find_any(scan_manager* manager, uint64_t trid);
-static inline scan_job* scan_manager_find_active(scan_manager* manager, uint64_t trid);
-static inline scan_job* scan_manager_remove_active(scan_manager* manager, uint64_t trid);
-int scan_manager_info_cb(void* buf, void* udata);
-
-//----------------------------------------------------------
-// scan_manager public API.
-//
-
-void
-scan_manager_init(scan_manager* manager)
-{
-	pthread_mutex_init(&manager->lock, NULL);
-
-	scan_thread_pool_init(&manager->thread_pool, g_config.scan_threads);
-
-	// Initialize queues.
-	manager->active_scans = cf_queue_create(sizeof(scan_job*), false);
-	manager->finished_scans = cf_queue_create(sizeof(scan_job*), false);
-}
-
-int
-scan_manager_start_job(scan_manager* manager, scan_job* job)
-{
-	pthread_mutex_lock(&manager->lock);
-
-	if (cf_queue_sz(manager->active_scans) >= g_config.scan_max_active) {
-		pthread_mutex_unlock(&manager->lock);
-		return AS_PROTO_RESULT_FAIL_FORBIDDEN;
-	}
-
-	// Make sure trid is unique.
-	if (scan_manager_find_any(manager, job->trid)) {
-		pthread_mutex_unlock(&manager->lock);
-		return AS_PROTO_RESULT_FAIL_PARAMETER;
-	}
-
-	job->start_ms = cf_getms();
-	scan_job_active_reserve(job);
-	cf_queue_push(manager->active_scans, &job);
-	scan_thread_pool_queue_task(&manager->thread_pool, scan_job_slice, job, job->priority);
-
-	cf_atomic_int_incr(&g_config.scans_initiated);
-
-	pthread_mutex_unlock(&manager->lock);
-	return 0;
-}
-
-static inline void
-scan_manager_requeue_job(scan_manager* manager, scan_job* job)
-{
-	scan_thread_pool_queue_task(&manager->thread_pool, scan_job_slice, job, job->priority);
-}
-
-void
-scan_manager_finish_job(scan_manager* manager, scan_job* job)
-{
-	pthread_mutex_lock(&manager->lock);
-
-	scan_manager_remove_active(manager, job->trid);
-	job->finish_ms = cf_getms();
-	cf_queue_push(manager->finished_scans, &job);
-	scan_manager_evict_finished_jobs(manager);
-
-	cf_atomic_int_incr(job->abandoned == 0 ? &g_config.scans_succeeded : &g_config.scans_abandoned);
-
-	pthread_mutex_unlock(&manager->lock);
-}
-
-void
-scan_manager_abandon_job(scan_manager* manager, scan_job* job, int reason)
-{
-	pthread_mutex_lock(&job->requeue_lock);
-	job->abandoned = reason;
-	bool found = scan_thread_pool_remove_task(&manager->thread_pool, job);
-	pthread_mutex_unlock(&job->requeue_lock);
-
-	if (found) {
-		scan_job_active_release(job);
-	}
-}
-
-bool
-scan_manager_abort_job(scan_manager* manager, uint64_t trid)
-{
-	pthread_mutex_lock(&manager->lock);
-
-	scan_job* job = scan_manager_find_active(manager, trid);
-
-	if (! job) {
-		pthread_mutex_unlock(&manager->lock);
-		return false;
-	}
-
-	pthread_mutex_lock(&job->requeue_lock);
-	job->abandoned = AS_PROTO_RESULT_FAIL_SCAN_ABORT;
-	bool found = scan_thread_pool_remove_task(&manager->thread_pool, job);
-	pthread_mutex_unlock(&job->requeue_lock);
-
-	pthread_mutex_unlock(&manager->lock);
-
-	if (found) {
-		scan_job_active_release(job);
-	}
-
-	return true;
-}
-
-int
-scan_manager_abort_all_jobs(scan_manager* manager)
-{
-	pthread_mutex_lock(&manager->lock);
-
-	int n_jobs = cf_queue_sz(manager->active_scans);
-
-	if (n_jobs == 0) {
-		pthread_mutex_unlock(&manager->lock);
-		return 0;
-	}
-
-	scan_job* jobs[n_jobs];
-	info_item item = { jobs };
-
-	cf_queue_reduce(manager->active_scans, scan_manager_info_cb, &item);
-
-	bool found[n_jobs];
-
-	for (int i = 0; i < n_jobs; i++) {
-		scan_job* job = jobs[i];
-
-		pthread_mutex_lock(&job->requeue_lock);
-		job->abandoned = AS_PROTO_RESULT_FAIL_SCAN_ABORT;
-		found[i] = scan_thread_pool_remove_task(&manager->thread_pool, job);
-		pthread_mutex_unlock(&job->requeue_lock);
-	}
-
-	pthread_mutex_unlock(&manager->lock);
-
-	for (int i = 0; i < n_jobs; i++) {
-		if (found[i]) {
-			scan_job_active_release(jobs[i]);
-		}
-	}
-
-	return n_jobs;
-}
-
-bool
-scan_manager_change_job_priority(scan_manager* manager, uint64_t trid, int priority)
-{
-	pthread_mutex_lock(&manager->lock);
-
-	scan_job* job = scan_manager_find_active(manager, trid);
-
-	if (! job) {
-		pthread_mutex_unlock(&manager->lock);
-		return false;
-	}
-
-	pthread_mutex_lock(&job->requeue_lock);
-	job->priority = thread_pool_priority(priority);
-	// TODO - implement priority change for thread pool.
-	pthread_mutex_unlock(&job->requeue_lock);
-
-	pthread_mutex_unlock(&manager->lock);
-	return true;
-}
-
-void
-scan_manager_limit_finished_jobs(scan_manager* manager)
-{
-	pthread_mutex_lock(&manager->lock);
-	scan_manager_evict_finished_jobs(manager);
-	pthread_mutex_unlock(&manager->lock);
-}
-
-void
-scan_manager_resize_thread_pool(scan_manager* manager, uint32_t n_threads)
-{
-	scan_thread_pool_resize(&manager->thread_pool, n_threads);
-}
-
-as_mon_jobstat*
-scan_manager_get_job_info(scan_manager* manager, uint64_t trid)
-{
-	pthread_mutex_lock(&manager->lock);
-
-	scan_job* job = scan_manager_find_any(manager, trid);
-
-	if (! job) {
-		pthread_mutex_unlock(&manager->lock);
-		return NULL;
-	}
-
-	as_mon_jobstat* stat = cf_malloc(sizeof(as_mon_jobstat));
-
-	if (stat) {
-		scan_job_info(job, stat);
-	}
-
-	pthread_mutex_unlock(&manager->lock);
-	return stat; // caller must free this
-}
-
-as_mon_jobstat*
-scan_manager_get_info(scan_manager* manager, int* size)
-{
-	*size = 0;
-
-	pthread_mutex_lock(&manager->lock);
-
-	int n_jobs = cf_queue_sz(manager->active_scans) + cf_queue_sz(manager->finished_scans);
-
-	if (n_jobs == 0) {
-		pthread_mutex_unlock(&manager->lock);
-		return NULL;
-	}
-
-	size_t stats_size = sizeof(as_mon_jobstat) * n_jobs;
-	as_mon_jobstat* stats = cf_malloc(stats_size);
-
-	if (! stats) {
-		pthread_mutex_unlock(&manager->lock);
-		return NULL;
-	}
-
-	scan_job* jobs[n_jobs];
-	info_item item = { jobs };
-
-	cf_queue_reduce(manager->active_scans, scan_manager_info_cb, &item);
-	cf_queue_reduce(manager->finished_scans, scan_manager_info_cb, &item);
-
-	memset(stats, 0, stats_size);
-
-	for (int i = 0; i < n_jobs; i++) {
-		scan_job_info(jobs[i], &stats[i]);
-	}
-
-	pthread_mutex_unlock(&manager->lock);
-
-	*size = n_jobs;
-	return stats; // caller must free this
-}
-
-int
-scan_manager_get_active_job_count(scan_manager* manager)
-{
-	pthread_mutex_lock(&manager->lock);
-	int n_jobs = cf_queue_sz(manager->active_scans);
-	pthread_mutex_unlock(&manager->lock);
-
-	return n_jobs;
-}
-
-//----------------------------------------------------------
-// scan_manager utilities.
-//
-
-void
-scan_manager_evict_finished_jobs(scan_manager* manager)
-{
-	int max_allowed = (int)g_config.scan_max_done;
-
-	while (cf_queue_sz(manager->finished_scans) > max_allowed) {
-		scan_job* evict_job;
-
-		cf_queue_pop(manager->finished_scans, &evict_job, 0);
-		scan_job_destroy(evict_job);
-	}
-}
-
-int
-scan_manager_find_cb(void* buf, void* udata)
-{
-	scan_job* job = *(scan_job**)buf;
-	find_item* match = (find_item*)udata;
-
-	if (match->trid == job->trid) {
-		match->job = job;
-		return match->remove ? -2 : -1;
-	}
-
-	return 0;
-}
-
-scan_job*
-scan_manager_find_job(cf_queue* scans, uint64_t trid, bool remove)
-{
-	find_item item = { trid, NULL, remove };
-
-	cf_queue_reduce(scans, scan_manager_find_cb, &item);
-
-	return item.job;
-}
-
-static inline scan_job*
-scan_manager_find_any(scan_manager* manager, uint64_t trid)
-{
-	scan_job* job = scan_manager_find_job(manager->active_scans, trid, false);
-
-	if (! job) {
-		job = scan_manager_find_job(manager->finished_scans, trid, false);
-	}
-
-	return job;
-}
-
-static inline scan_job*
-scan_manager_find_active(scan_manager* manager, uint64_t trid)
-{
-	return scan_manager_find_job(manager->active_scans, trid, false);
-}
-
-static inline scan_job*
-scan_manager_remove_active(scan_manager* manager, uint64_t trid)
-{
-	return scan_manager_find_job(manager->active_scans, trid, true);
-}
-
-int
-scan_manager_info_cb(void* buf, void* udata)
-{
-	scan_job* job = *(scan_job**)buf;
-	info_item* item = (info_item*)udata;
-
-	*item->p_job++ = job;
-
-	return 0;
-}
-
-
-
-//==============================================================================
 // conn_scan_job derived class implementation - not final class.
 //
 
@@ -1236,7 +430,7 @@ scan_manager_info_cb(void* buf, void* udata)
 
 typedef struct conn_scan_job_s {
 	// Base object must be first:
-	scan_job		_base;
+	as_job			_base;
 
 	// Derived class data:
 	pthread_mutex_t	fd_lock;
@@ -1270,7 +464,7 @@ conn_scan_job_init(conn_scan_job* job, as_transaction* tr)
 void
 conn_scan_job_finish(conn_scan_job* job)
 {
-	scan_job* _job = (scan_job*)job;
+	as_job* _job = (as_job*)job;
 
 	if (job->fd_h) {
 		job->net_io_bytes += send_blocking_response_fin(job->fd_h->fd, _job->abandoned);
@@ -1283,6 +477,8 @@ conn_scan_job_finish(conn_scan_job* job)
 bool
 conn_scan_job_send_response(conn_scan_job* job, uint8_t* buf, size_t size)
 {
+	as_job* _job = (as_job*)job;
+
 	pthread_mutex_lock(&job->fd_lock);
 
 	if (! job->fd_h) {
@@ -1296,7 +492,7 @@ conn_scan_job_send_response(conn_scan_job* job, uint8_t* buf, size_t size)
 	if (size_sent == 0) {
 		conn_scan_job_release_fd(job);
 		pthread_mutex_unlock(&job->fd_lock);
-		scan_manager_abandon_job(&g_scan_manager, (scan_job*)job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
 		return false;
 	}
 
@@ -1344,12 +540,12 @@ typedef struct basic_scan_job_s {
 	cf_vector*		bin_names;
 } basic_scan_job;
 
-void basic_scan_job_slice(scan_job* _job, as_partition_reservation* rsv);
-void basic_scan_job_finish(scan_job* _job);
-void basic_scan_job_destroy(scan_job* _job);
-void basic_scan_job_info(scan_job* _job, as_mon_jobstat* stat);
+void basic_scan_job_slice(as_job* _job, as_partition_reservation* rsv);
+void basic_scan_job_finish(as_job* _job);
+void basic_scan_job_destroy(as_job* _job);
+void basic_scan_job_info(as_job* _job, as_mon_jobstat* stat);
 
-static const scan_job_vtable basic_scan_job_vtable = {
+const as_job_vtable basic_scan_job_vtable = {
 		basic_scan_job_slice,
 		basic_scan_job_finish,
 		basic_scan_job_destroy,
@@ -1381,8 +577,8 @@ basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	scan_options options = { 0, false, 100 };
 	get_scan_options(&tr->msgp->msg, &options);
 
-	scan_job_init((scan_job*)job, &basic_scan_job_vtable, tr->trid, ns, set_id,
-			options.priority);
+	as_job_init((as_job*)job, &basic_scan_job_vtable, &g_scan_manager,
+			RSV_WRITE, tr->trid, ns, set_id, options.priority);
 
 	job->cluster_key = as_paxos_get_cluster_key();
 	job->fail_on_cluster_change = options.fail_on_cluster_change;
@@ -1391,7 +587,7 @@ basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	job->bin_names = bin_names_from_op(&tr->msgp->msg, &tr->result_code);
 
 	if (! job->bin_names && tr->result_code != AS_PROTO_RESULT_OK) {
-		scan_job_destroy((scan_job*)job);
+		as_job_destroy((as_job*)job);
 		return NULL;
 	}
 
@@ -1399,7 +595,7 @@ basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	if (options.fail_on_cluster_change && cf_atomic_int_get(g_config.migrate_progress_send) != 0) {
 		// TODO - was AS_PROTO_RESULT_FAIL_UNAVAILABLE - ok?
 		tr->result_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
-		scan_job_destroy((scan_job*)job);
+		as_job_destroy((as_job*)job);
 		return NULL;
 	}
 
@@ -1416,14 +612,14 @@ basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 //
 
 void
-basic_scan_job_slice(scan_job* _job, as_partition_reservation* rsv)
+basic_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 {
 	basic_scan_job* job = (basic_scan_job*)_job;
 	as_index_tree* tree = rsv->p->vp;
 	cf_buf_builder* bb = cf_buf_builder_create_size(INIT_BUF_BUILDER_SIZE);
 
 	if (! bb) {
-		scan_manager_abandon_job(&g_scan_manager, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
 		return;
 	}
 
@@ -1446,13 +642,13 @@ basic_scan_job_slice(scan_job* _job, as_partition_reservation* rsv)
 }
 
 void
-basic_scan_job_finish(scan_job* _job)
+basic_scan_job_finish(as_job* _job)
 {
 	conn_scan_job_finish((conn_scan_job*)_job);
 }
 
 void
-basic_scan_job_destroy(scan_job* _job)
+basic_scan_job_destroy(as_job* _job)
 {
 	basic_scan_job* job = (basic_scan_job*)_job;
 
@@ -1462,7 +658,7 @@ basic_scan_job_destroy(scan_job* _job)
 }
 
 void
-basic_scan_job_info(scan_job* _job, as_mon_jobstat* stat)
+basic_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 {
 	conn_scan_job_info((conn_scan_job*)_job, stat);
 
@@ -1480,7 +676,7 @@ basic_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 {
 	basic_scan_slice* slice = (basic_scan_slice*)udata;
 	basic_scan_job* job = slice->job;
-	scan_job* _job = (scan_job*)job;
+	as_job* _job = (as_job*)job;
 	as_namespace* ns = _job->ns;
 
 	if (_job->abandoned != 0) {
@@ -1490,7 +686,7 @@ basic_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	if (job->fail_on_cluster_change && job->cluster_key != as_paxos_get_cluster_key()) {
 		as_record_done(r_ref, ns);
-		scan_manager_abandon_job(&g_scan_manager, _job, AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH);
+		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH);
 		return;
 	}
 
@@ -1542,8 +738,6 @@ basic_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 		cf_buf_builder_reset(bb);
 	}
-
-	// TODO - throttling config ???
 }
 
 cf_vector*
@@ -1595,12 +789,12 @@ typedef struct aggr_scan_job_s {
 	as_aggr_call	aggr_call;
 } aggr_scan_job;
 
-void aggr_scan_job_slice(scan_job* _job, as_partition_reservation* rsv);
-void aggr_scan_job_finish(scan_job* _job);
-void aggr_scan_job_destroy(scan_job* _job);
-void aggr_scan_job_info(scan_job* _job, as_mon_jobstat* stat);
+void aggr_scan_job_slice(as_job* _job, as_partition_reservation* rsv);
+void aggr_scan_job_finish(as_job* _job);
+void aggr_scan_job_destroy(as_job* _job);
+void aggr_scan_job_info(as_job* _job, as_mon_jobstat* stat);
 
-static const scan_job_vtable aggr_scan_job_vtable = {
+const as_job_vtable aggr_scan_job_vtable = {
 		aggr_scan_job_slice,
 		aggr_scan_job_finish,
 		aggr_scan_job_destroy,
@@ -1659,8 +853,8 @@ aggr_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	scan_options options = { 0, false, 100 };
 	get_scan_options(&tr->msgp->msg, &options);
 
-	scan_job_init((scan_job*)job, &aggr_scan_job_vtable, tr->trid, ns, set_id,
-			options.priority);
+	as_job_init((as_job*)job, &aggr_scan_job_vtable, &g_scan_manager,
+			RSV_WRITE, tr->trid, ns, set_id, options.priority);
 
 	if (as_aggr_call_init(&job->aggr_call, tr, job, &aggr_scan_caller_qintf,
 			&aggr_scan_istream_hooks, &aggr_scan_ostream_hooks, ns, true) != 0) {
@@ -1680,7 +874,7 @@ aggr_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 //
 
 void
-aggr_scan_job_slice(scan_job* _job, as_partition_reservation* rsv)
+aggr_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 {
 	aggr_scan_job* job = (aggr_scan_job*)_job;
 	as_index_tree* tree = rsv->p->vp;
@@ -1688,7 +882,7 @@ aggr_scan_job_slice(scan_job* _job, as_partition_reservation* rsv)
 	cf_buf_builder* bb = cf_buf_builder_create_size(INIT_BUF_BUILDER_SIZE);
 
 	if (! bb) {
-		scan_manager_abandon_job(&g_scan_manager, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
 		return;
 	}
 
@@ -1721,7 +915,7 @@ aggr_scan_job_slice(scan_job* _job, as_partition_reservation* rsv)
 		aggr_scan_add_val_response(&slice, v, true);
 		as_val_destroy(v);
 		cf_free(rs);
-		scan_manager_abandon_job(&g_scan_manager, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
 	}
 
 	cf_ll_reduce(&ll, true, aggr_scan_ll_reduce_fn, NULL);
@@ -1735,7 +929,7 @@ aggr_scan_job_slice(scan_job* _job, as_partition_reservation* rsv)
 }
 
 void
-aggr_scan_job_finish(scan_job* _job)
+aggr_scan_job_finish(as_job* _job)
 {
 	aggr_scan_job* job = (aggr_scan_job*)_job;
 
@@ -1746,7 +940,7 @@ aggr_scan_job_finish(scan_job* _job)
 }
 
 void
-aggr_scan_job_destroy(scan_job* _job)
+aggr_scan_job_destroy(as_job* _job)
 {
 	aggr_scan_job* job = (aggr_scan_job*)_job;
 
@@ -1756,7 +950,7 @@ aggr_scan_job_destroy(scan_job* _job)
 }
 
 void
-aggr_scan_job_info(scan_job* _job, as_mon_jobstat* stat)
+aggr_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 {
 	conn_scan_job_info((conn_scan_job*)_job, stat);
 
@@ -1774,7 +968,7 @@ aggr_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 {
 	aggr_scan_slice* slice = (aggr_scan_slice*)udata;
 	aggr_scan_job* job = slice->job;
-	scan_job* _job = (scan_job*)job;
+	as_job* _job = (as_job*)job;
 	as_namespace* ns = _job->ns;
 
 	if (_job->abandoned != 0) {
@@ -1796,7 +990,7 @@ aggr_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	if (! aggr_scan_add_digest(slice->ll, &r->key)) {
 		as_record_done(r_ref, ns);
-		scan_manager_abandon_job(&g_scan_manager, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
 		return;
 	}
 
@@ -1916,7 +1110,7 @@ aggr_scan_add_val_response(aggr_scan_slice* slice, const as_val* val, bool succe
 
 typedef struct udf_bg_scan_job_s {
 	// Base object must be first:
-	scan_job		_base;
+	as_job			_base;
 
 	// Derived class data:
 	cl_msg*			msgp;
@@ -1927,12 +1121,12 @@ typedef struct udf_bg_scan_job_s {
 	cf_atomic64		n_failed_tr;
 } udf_bg_scan_job;
 
-void udf_bg_scan_job_slice(scan_job* _job, as_partition_reservation* rsv);
-void udf_bg_scan_job_finish(scan_job* _job);
-void udf_bg_scan_job_destroy(scan_job* _job);
-void udf_bg_scan_job_info(scan_job* _job, as_mon_jobstat* stat);
+void udf_bg_scan_job_slice(as_job* _job, as_partition_reservation* rsv);
+void udf_bg_scan_job_finish(as_job* _job);
+void udf_bg_scan_job_destroy(as_job* _job);
+void udf_bg_scan_job_info(as_job* _job, as_mon_jobstat* stat);
 
-static const scan_job_vtable udf_bg_scan_job_vtable = {
+const as_job_vtable udf_bg_scan_job_vtable = {
 		udf_bg_scan_job_slice,
 		udf_bg_scan_job_finish,
 		udf_bg_scan_job_destroy,
@@ -1971,8 +1165,12 @@ udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	scan_options options = { 0, false, 100 };
 	get_scan_options(&tr->msgp->msg, &options);
 
-	scan_job_init((scan_job*)job, &udf_bg_scan_job_vtable, tr->trid, ns, set_id,
-			options.priority);
+	as_job_init((as_job*)job, &udf_bg_scan_job_vtable, &g_scan_manager,
+			RSV_WRITE, tr->trid, ns, set_id, options.priority);
+
+	job->n_active_tr = 0;
+	job->n_successful_tr = 0;
+	job->n_failed_tr = 0;
 
 	if (udf_call_init(&job->call, tr) != 0) {
 		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
@@ -1998,13 +1196,13 @@ udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 //
 
 void
-udf_bg_scan_job_slice(scan_job* _job, as_partition_reservation* rsv)
+udf_bg_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 {
 	as_index_reduce(rsv->p->vp, udf_bg_scan_job_reduce_cb, (void*)_job);
 }
 
 void
-udf_bg_scan_job_finish(scan_job* _job)
+udf_bg_scan_job_finish(as_job* _job)
 {
 	udf_bg_scan_job* job = (udf_bg_scan_job*)_job;
 
@@ -2017,7 +1215,7 @@ udf_bg_scan_job_finish(scan_job* _job)
 }
 
 void
-udf_bg_scan_job_destroy(scan_job* _job)
+udf_bg_scan_job_destroy(as_job* _job)
 {
 	udf_bg_scan_job* job = (udf_bg_scan_job*)_job;
 
@@ -2027,7 +1225,7 @@ udf_bg_scan_job_destroy(scan_job* _job)
 }
 
 void
-udf_bg_scan_job_info(scan_job* _job, as_mon_jobstat* stat)
+udf_bg_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 {
 	udf_bg_scan_job* job = (udf_bg_scan_job*)_job;
 	char *extra = stat->jdata + strlen(stat->jdata);
@@ -2049,7 +1247,7 @@ udf_bg_scan_job_info(scan_job* _job, as_mon_jobstat* stat)
 void
 udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 {
-	scan_job* _job = (scan_job*)udata;
+	as_job* _job = (as_job*)udata;
 	udf_bg_scan_job* job = (udf_bg_scan_job*)_job;
 	as_namespace* ns = _job->ns;
 
@@ -2070,8 +1268,9 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 		return;
 	}
 
+	// TODO - replace this mechanism with signal-based counter?
 	while (cf_atomic32_get(job->n_active_tr) > MAX_UDF_ACTIVE_TRANSACTIONS) {
-		usleep(50); // TODO - what ???
+		usleep(50);
 	}
 
 	tr_create_data d;
@@ -2091,7 +1290,7 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 	as_transaction tr;
 
 	if (as_transaction_create(&tr, &d) != 0) {
-		scan_manager_abandon_job(&g_scan_manager, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
 		return;
 	}
 

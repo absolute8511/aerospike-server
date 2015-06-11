@@ -2677,6 +2677,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			}
 			cf_info(AS_INFO, "Changing value of scan-max-active from %d to %d ", g_config.scan_max_active, val);
 			g_config.scan_max_active = val;
+			as_scan_limit_active_jobs(g_config.scan_max_active);
 		}
 		else if (0 == as_info_parameter_get(params, "scan-max-done", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
@@ -2686,6 +2687,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			}
 			cf_info(AS_INFO, "Changing value of scan-max-done from %d to %d ", g_config.scan_max_done, val);
 			g_config.scan_max_done = val;
+			as_scan_limit_finished_jobs(g_config.scan_max_done);
 		}
 		else if (0 == as_info_parameter_get(params, "scan-priority", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))

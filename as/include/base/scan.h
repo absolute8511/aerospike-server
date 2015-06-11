@@ -39,6 +39,8 @@ typedef enum as_scan_udf_op {
 
 void as_scan_init();
 int as_scan(as_transaction *tr);
+void as_scan_limit_active_jobs(uint32_t max_active);
+void as_scan_limit_finished_jobs(uint32_t max_done);
 void as_scan_resize_thread_pool(uint32_t n_threads);
 int as_scan_get_active_job_count();
 int as_scan_list(char* name, cf_dyn_buf* db);
