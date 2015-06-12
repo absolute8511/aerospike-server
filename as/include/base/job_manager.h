@@ -57,6 +57,7 @@ void as_priority_thread_pool_shutdown(as_priority_thread_pool* pool);
 bool as_priority_thread_pool_resize(as_priority_thread_pool* pool, uint32_t n_threads);
 bool as_priority_thread_pool_queue_task(as_priority_thread_pool* pool, as_priority_thread_pool_task_fn task_fn, void* task, int priority);
 bool as_priority_thread_pool_remove_task(as_priority_thread_pool* pool, void* task);
+void as_priority_thread_pool_change_task_priority(as_priority_thread_pool* pool, void* task, int new_priority);
 
 //----------------------------------------------------------
 // as_job - base class header.

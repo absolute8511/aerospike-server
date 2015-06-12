@@ -78,6 +78,13 @@ scan_result_str(int result_code)
 	}
 }
 
+static inline int
+safe_priority(int priority) {
+	// Handles priority 0, the 'auto' priority.
+	return priority < AS_JOB_PRIORITY_LOW || priority > AS_JOB_PRIORITY_HIGH ?
+			AS_JOB_PRIORITY_MEDIUM : priority;
+}
+
 
 
 //==============================================================================
@@ -97,7 +104,7 @@ typedef struct scan_thread_pool_qtask_s {
 static uint32_t create_threads(as_priority_thread_pool* pool, uint32_t count);
 static void shutdown_threads(as_priority_thread_pool* pool, uint32_t count);
 static void* run(void* udata);
-static int delete_cb(void* buf, void* task);
+static int compare_cb(void* buf, void* task);
 
 //----------------------------------------------------------
 // as_priority_thread_pool public API.
@@ -165,9 +172,15 @@ as_priority_thread_pool_remove_task(as_priority_thread_pool* pool, void* task)
 {
 	queue_task qtask = { NULL, NULL };
 
-	cf_queue_priority_reduce_pop(pool->dispatch_queue, &qtask, delete_cb, task);
+	cf_queue_priority_reduce_pop(pool->dispatch_queue, &qtask, compare_cb, task);
 
 	return qtask.task != NULL;
+}
+
+void
+as_priority_thread_pool_change_task_priority(as_priority_thread_pool* pool, void* task, int new_priority)
+{
+	cf_queue_priority_reduce_change(pool->dispatch_queue, new_priority, compare_cb, task);
 }
 
 //----------------------------------------------------------
@@ -238,7 +251,7 @@ run(void* udata)
 }
 
 static int
-delete_cb(void* buf, void* task)
+compare_cb(void* buf, void* task)
 {
 	return ((queue_task*)buf)->task == task ? -1 : 0;
 }
@@ -274,7 +287,7 @@ as_job_init(as_job* _job, const as_job_vtable* vtable,
 	_job->trid		= trid != 0 ? trid : (uint64_t)cf_atomic32_incr(&g_job_trid);
 	_job->ns		= ns;
 	_job->set_id	= set_id;
-	_job->priority	= priority;
+	_job->priority	= safe_priority(priority);
 
 	pthread_mutex_init(&_job->requeue_lock, NULL);
 }
@@ -594,8 +607,8 @@ as_job_manager_change_job_priority(as_job_manager* mgr, uint64_t trid, int prior
 	}
 
 	pthread_mutex_lock(&_job->requeue_lock);
-	_job->priority = priority;
-	// TODO - implement priority change for thread pool.
+	_job->priority = safe_priority(priority);
+	as_priority_thread_pool_change_task_priority(&mgr->thread_pool, _job, _job->priority);
 	pthread_mutex_unlock(&_job->requeue_lock);
 
 	pthread_mutex_unlock(&mgr->lock);
@@ -670,8 +683,8 @@ as_job_manager_get_info(as_job_manager* mgr, int* size)
 	as_job* _jobs[n_jobs];
 	info_item item = { _jobs };
 
-	cf_queue_reduce(mgr->active_scans, as_job_manager_info_cb, &item);
-	cf_queue_reduce(mgr->finished_scans, as_job_manager_info_cb, &item);
+	cf_queue_reduce_reverse(mgr->active_scans, as_job_manager_info_cb, &item);
+	cf_queue_reduce_reverse(mgr->finished_scans, as_job_manager_info_cb, &item);
 
 	memset(stats, 0, stats_size);
 
