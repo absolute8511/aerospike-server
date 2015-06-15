@@ -444,7 +444,7 @@ as_aggr_istream_read(const as_stream *s)
 		else {
 			aggr_istream->keys_arr = ((as_index_keys_ll_element*)ele)->keys_arr;
 		}
-		aggr_istream->skv_offset  = 0;
+		aggr_istream->keys_arr_offset  = 0;
 	}
 	as_index_keys_arr  * keys_arr  = aggr_istream->keys_arr;
 
@@ -457,7 +457,7 @@ as_aggr_istream_read(const as_stream *s)
 	// Iterate through stream to get next digest and
 	// populate record with it
 	while (!qrecord->read) {
-		if (keys_arr->num == aggr_istream->skv_offset) {
+		if (keys_arr->num == aggr_istream->keys_arr_offset) {
 			if (keys_arr) {
 				// Not releasing here.. will be released
 				// by the query_agg_apply_stream in the end
@@ -471,7 +471,7 @@ as_aggr_istream_read(const as_stream *s)
 				}
 				keys_arr              = ((as_index_keys_ll_element*)ele)->keys_arr;
 			}
-			aggr_istream->skv_offset = 0;
+			aggr_istream->keys_arr_offset = 0;
 			aggr_istream->keys_arr    = keys_arr;
 			cf_detail(AS_AGGR, "Moving to next node of digest list");
 		}
@@ -481,9 +481,9 @@ as_aggr_istream_read(const as_stream *s)
 		as_index_ref   * r_ref =  qrecord->urecord->r_ref;
 
 		cf_detail(AS_AGGR, "Open Record (%p,%d %"PRIu64", %"PRIu64")", 
-						aggr_istream->keys_arr, aggr_istream->skv_offset);
+						aggr_istream->keys_arr, aggr_istream->keys_arr_offset);
 		
-		qrecord->urecord->keyd = keys_arr->pindex_digs[aggr_istream->skv_offset];
+		qrecord->urecord->keyd = keys_arr->pindex_digs[aggr_istream->keys_arr_offset];
 		int pid                = as_partition_getid(qrecord->urecord->keyd);
 
 		as_transaction * tr    =  qrecord->urecord->tr;
@@ -492,7 +492,7 @@ as_aggr_istream_read(const as_stream *s)
 		qrecord->rsv           = as_aggr_reserve_qnode(ns, qrecord, pid, aggr_istream->get_type());
 		if (!qrecord->rsv){
 			cf_debug(AS_AGGR, "Reservation not done for partition %d", pid);
-			aggr_istream->skv_offset++;
+			aggr_istream->keys_arr_offset++;
 			continue;
 		}
 
@@ -518,8 +518,8 @@ as_aggr_istream_read(const as_stream *s)
 			as_aggr_release_qnode(qrecord, aggr_istream->get_type());
 		} else {
 			if (aggr_istream->get_type() == AS_AGGR_QUERY) {
-				if (!as_query_aggr_match_record(qrecord, &keys_arr->sindex_keys[aggr_istream->skv_offset])) {
-					cf_debug(AS_AGGR, "Close Record with invalid selection (%p,%d)", aggr_istream->keys_arr, aggr_istream->skv_offset);
+				if (!as_query_aggr_match_record(qrecord, &keys_arr->sindex_keys[aggr_istream->keys_arr_offset])) {
+					cf_debug(AS_AGGR, "Close Record with invalid selection (%p,%d)", aggr_istream->keys_arr, aggr_istream->keys_arr_offset);
 					udf_record_close(qrecord->urecord);
 					as_aggr_release_qnode(qrecord, aggr_istream->get_type());
 					qrecord->read = false;
@@ -529,7 +529,7 @@ as_aggr_istream_read(const as_stream *s)
 				}
 			} 
 		}
-		aggr_istream->skv_offset++;
+		aggr_istream->keys_arr_offset++;
 	}
 	return (as_val *)aggr_istream->rec;
 }
