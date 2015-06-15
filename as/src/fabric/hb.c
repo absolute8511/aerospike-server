@@ -1517,7 +1517,7 @@ as_hb_tcp_send(int fd, byte * buff, size_t msg_size)
 	} while ( ((start + g_config.hb_mesh_rw_retry_timeout) > cf_getus()) && (retry < max_retry) );
 
 	if ( (msg_size != 0)  && (msg_size != orig_size) ) {
-		cf_warning(AS_HB, "as_hb_tcp_send cf_socket_sendto() fd %d incomplete msg sent", fd);
+		cf_warning(AS_HB, "as_hb_tcp_send cf_socket_sendto() fd %d incomplete msg sent. %d bytes left out of %d bytes.", fd, msg_size, orig_size);
 		as_hb_tcp_close(fd); //closing fd
 		return -1;
 	}
@@ -1909,6 +1909,7 @@ as_hb_thr(void *arg)
 	msg *mt, *mr;
 	struct epoll_event events[EPOLL_SZ];
 	int nevents, sock = -1;
+	cf_clock last_fd_print = 0;
 
 	cf_debug(AS_HB, "starting heartbeat control: mode %d", g_config.hb_mode);
 
@@ -2007,8 +2008,21 @@ as_hb_thr(void *arg)
 				socklen_t clen = sizeof(caddr);
 				char cpaddr[24];
 
-				if (-1 == (csock = accept(fd, (struct sockaddr *) &caddr, &clen)))
-					cf_crash(AS_HB, "accept failed: %s", cf_strerror(errno));
+				if (-1 == (csock = accept(fd, (struct sockaddr *) &caddr, &clen))) {
+					if ((errno == EMFILE) || (errno == ENFILE) || (errno == ENOMEM) || (errno == ENOBUFS)) {
+						if (last_fd_print != (cf_getms() / 1000L)) {
+							cf_warning(AS_HB, "Failed to accept heartbeat connection due to error : %s", cf_strerror(errno));
+							last_fd_print = cf_getms() / 1000L;
+						}
+						// We are in an extreme situation where we ran out of system resources (file/mem).
+						// We should rather lie low and not do too much activity. So, sleep.
+						// We should not sleep too long as this same function is supposed to send heartbeat also.
+						usleep(MAX(g_config.hb_interval/2, 1) * 1000);
+						continue;
+					} else {
+						cf_crash(AS_HB, "accept failed: %s", cf_strerror(errno));
+					}
+				}
 				if (NULL == inet_ntop(AF_INET, &caddr.sin_addr.s_addr, (char *) cpaddr, sizeof(cpaddr)))
 					cf_crash(AS_HB, "inet_ntop failed: %s", cf_strerror(errno));
 				cf_debug(AS_HB, "new connection from %s:%d", cpaddr, caddr.sin_port);
