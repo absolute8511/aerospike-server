@@ -235,13 +235,10 @@ typedef struct as_config_s {
 	/* enables node snubbing - this code caused a Paxos issue in the past */
 	bool				snub_nodes;
 
-	uint32_t			scan_max_active;
-	uint32_t			scan_max_done;
-	uint32_t			scan_threads;
-	// number of records between an enforced context switch - thus 1 is very low priority, 1000000 would be very high
-	uint32_t			scan_priority;
-	// amount of time a thread will sleep after yielding scan_priority amount of data. (in microseconds)
-	uint32_t			scan_sleep;
+	uint32_t			scan_max_active;	// maximum number of active scans allowed
+	uint32_t			scan_max_done;		// maximum number of finished scans kept for monitoring
+	uint32_t			scan_threads;		// size of scan thread pool
+
 	// maximum count of database requests in a single batch
 	uint32_t			batch_max_requests;
 	// number of records between an enforced context switch - thus 1 is very low priority, 1000000 would be very high
@@ -298,7 +295,7 @@ typedef struct as_config_s {
 	// per namespace configured value
 	uint64_t		sindex_data_max_memory;   // Maximum memory for secondary index trees
 	cf_atomic_int	sindex_data_memory_used;  // Maximum memory for secondary index trees
-	uint32_t		sindex_populator_scan_priority;
+	uint32_t		sindex_populator_threads; // Secondary index populator thread pool size
 	cf_atomic_int   sindex_gc_timedout;           // Number of time sindex gc iteration timed out waiting for partition lock
 	uint64_t        sindex_gc_inactivity_dur;     // Commulative sum of sindex GC thread inactivity.
 	uint64_t        sindex_gc_activity_dur;       // Commulative sum of sindex gc thread activity.

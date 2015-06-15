@@ -135,8 +135,6 @@ cfg_set_defaults()
 	c->run_as_daemon = true; // set false only to run in debugger & see console output
 	c->scan_max_active = 100;
 	c->scan_max_done = 100;
-	c->scan_priority = 200; // # of rows between a quick context switch?
-	c->scan_sleep = 1; // amount of time scan thread will sleep between two context switch
 	c->scan_threads = 4;
 	c->storage_benchmarks = false;
 	c->ticker_interval = 10;
@@ -1978,9 +1976,6 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_SCAN_MAX_DONE:
 				c->scan_max_done = cfg_u32(&line, 0, 1000);
 				break;
-			case CASE_SERVICE_SCAN_PRIORITY:
-				c->scan_priority = cfg_u32_no_checks(&line);
-				break;
 			case CASE_SERVICE_SCAN_THREADS:
 				c->scan_threads = cfg_u32(&line, 0, 32);
 				break;
@@ -2075,6 +2070,7 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_NSUP_REDUCE_SLEEP:
 			case CASE_SERVICE_NSUP_THREADS:
 			case CASE_SERVICE_SCAN_MEMORY:
+			case CASE_SERVICE_SCAN_PRIORITY:
 			case CASE_SERVICE_SCAN_RETRANSMIT:
 			case CASE_SERVICE_SCHEDULER_PRIORITY:
 			case CASE_SERVICE_SCHEDULER_TYPE:

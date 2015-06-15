@@ -2043,10 +2043,6 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_int(db, g_config.scan_max_active);
 	cf_dyn_buf_append_string(db, ";scan-max-done=");
 	cf_dyn_buf_append_int(db, g_config.scan_max_done);
-	cf_dyn_buf_append_string(db, ";scan-priority=");
-	cf_dyn_buf_append_int(db, g_config.scan_priority);
-	cf_dyn_buf_append_string(db, ";scan-sleep=");
-	cf_dyn_buf_append_int(db, g_config.scan_sleep);
 	cf_dyn_buf_append_string(db, ";scan-threads=");
 	cf_dyn_buf_append_int(db, g_config.scan_threads);
 
@@ -2137,8 +2133,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";udf-runtime-max-memory=");
 	cf_dyn_buf_append_uint64(db, g_config.udf_runtime_max_memory);
 
-	cf_dyn_buf_append_string(db, ";sindex-populator-scan-priority=");
-	cf_dyn_buf_append_uint64(db, g_config.sindex_populator_scan_priority);
+	cf_dyn_buf_append_string(db, ";sindex-populator-threads=");
+	cf_dyn_buf_append_uint64(db, g_config.sindex_populator_threads);
 	cf_dyn_buf_append_string(db, ";sindex-data-max-memory=");
 	if (g_config.sindex_data_max_memory == ULONG_MAX) {
 		cf_dyn_buf_append_uint64(db, g_config.sindex_data_max_memory);
@@ -2689,18 +2685,6 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			g_config.scan_max_done = val;
 			as_scan_limit_finished_jobs(g_config.scan_max_done);
 		}
-		else if (0 == as_info_parameter_get(params, "scan-priority", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val))
-				goto Error;
-			cf_info(AS_INFO, "Changing value of scan-priority from %d to %d ", g_config.scan_priority, val);
-			g_config.scan_priority = val;
-		}
-		else if (0 == as_info_parameter_get(params, "scan-sleep", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val) || val < 0)
-				goto Error;
-			cf_info(AS_INFO, "Changing value of scan-sleep from %d to %d ", g_config.scan_sleep, val);
-			g_config.scan_sleep = val;
-		}
 		else if (0 == as_info_parameter_get(params, "scan-threads", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
 				goto Error;
@@ -3051,14 +3035,15 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of query-rec-count-bound from %"PRIu64" to %"PRIu64" ", g_config.query_rec_count_bound, val);
 			g_config.query_rec_count_bound = val;
 		}
-		else if ( 0 == as_info_parameter_get(params, "sindex-populator-scan-priority", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "sindex-populator-threads", context, &context_len)) {
 			int val = 0;
-			if (0 != cf_str_atoi(context, &val) || (val != 1 && val != 3 && val != 5)) {
-				cf_warning(AS_INFO, "sindex-populator-scan-priority: value must be among (1, 3, 5), Current is: %s", context);
+			if (0 != cf_str_atoi(context, &val) || (val > MAX_POPULATOR_THREADS)) {
+				cf_warning(AS_INFO, "sindex-populator-threads: value must be <= %d, not %s", MAX_POPULATOR_THREADS, context);
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of sindex-populator-scan-priority from %"PRIu64" to %"PRIu64" ", g_config.sindex_populator_scan_priority, val);
-			g_config.sindex_populator_scan_priority = val;
+			cf_info(AS_INFO, "Changing value of sindex-populator-threads from %u to %d", g_config.sindex_populator_threads, val);
+			g_config.sindex_populator_threads = (uint32_t)val;
+			as_spop_resize_thread_pool(g_config.sindex_populator_threads);
 		}
 		else if (0 == as_info_parameter_get(params, "sindex-data-max-memory", context, &context_len)) {
 			uint64_t val = atoll(context);

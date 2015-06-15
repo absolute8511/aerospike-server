@@ -33,15 +33,32 @@
  *
  */
 
-#include <errno.h>
-
 #include "base/thr_sindex.h"
-#include "base/secondary_index.h"
-#include "base/thr_scan.h"
+
+#include <errno.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "citrusleaf/alloc.h"
+#include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_clock.h"
 
 #include "ai_obj.h"
 #include "ai_btree.h"
+#include "fault.h"
 #include "hist.h"
+
+#include "base/cfg.h"
+#include "base/datamodel.h"
+#include "base/index.h"
+#include "base/job_manager.h"
+#include "base/monitor.h"
+#include "base/secondary_index.h"
+
+int as_spop_populate(as_sindex* si);
 
 #define RELEASE_ITERATORS(icol) \
 do {                                \
@@ -139,7 +156,7 @@ as_sindex__populate_fn(void *param)
 		} else {
 			cf_debug(AS_SINDEX, "Populating index %s", si->imd->iname);
 			si->flag |= AS_SINDEX_FLAG_POPULATING;
-			as_tscan_sindex_populate(si);
+			as_spop_populate(si);
 		}
 	}
 	return NULL;
@@ -505,4 +522,243 @@ as_sindex_thr_init()
 	g_sindex_boot_done = false;
 
 	ai_btree_init();
+}
+
+
+
+//==============================================================================
+// Secondary index populator.
+//
+
+// spop_job - derived class header:
+typedef struct spop_job_s {
+	// Base object must be first:
+	as_job			_base;
+
+	// Derived class data:
+	as_sindex*		si;
+	uint64_t		si_desync_cnt;
+
+	cf_atomic64		n_reduced;
+} spop_job;
+
+spop_job* spop_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si);
+
+// as_job_manager instance for secondary index populator:
+static as_job_manager g_spop_manager;
+
+
+//------------------------------------------------
+// Sindex populator public API.
+//
+
+void
+as_spop_init()
+{
+	// TODO - check for failure and cf_crash?
+	// TODO - config for max counts?
+	// Initialize with maximum threads since first use is always populate-all at
+	// startup. The thread pool will be down-sized right after that.
+	as_job_manager_init(&g_spop_manager, MAX_POPULATOR_THREADS, 100, 100);
+}
+
+int
+as_spop_populate(as_sindex* si)
+{
+	as_sindex_metadata *imd = si->imd;
+	as_namespace *ns = as_namespace_get_byname(imd->ns_name);
+
+	if (! ns) {
+		cf_warning(AS_SINDEX, "sindex populate %s ns %s - unrecognized namespace", imd->iname, imd->ns_name);
+		as_sindex_populate_done(si);
+		AS_SINDEX_RELEASE(si);
+		return -1;
+	}
+
+	uint16_t set_id = INVALID_SET_ID;
+
+	if (imd->set && (set_id = as_namespace_get_set_id(ns, imd->set)) == INVALID_SET_ID) {
+		cf_warning(AS_SCAN, "sindex populate %s ns %s - set %s not found", imd->iname, imd->ns_name, imd->set);
+		as_sindex_populate_done(si);
+		AS_SINDEX_RELEASE(si);
+		return -3;
+	}
+
+	spop_job* job = spop_job_create(ns, set_id, si);
+
+	if (! job) {
+		cf_warning(AS_SCAN, "sindex populate %s ns %s set %s - job alloc failed", imd->iname, imd->ns_name, imd->set);
+		as_sindex_populate_done(si);
+		AS_SINDEX_RELEASE(si);
+		return -2;
+	}
+
+	// Can't fail for this kind of job.
+	as_job_manager_start_job(&g_spop_manager, (as_job*)job);
+
+	return 0;
+}
+
+int
+as_spop_populate_all(as_namespace* ns)
+{
+	spop_job* job = spop_job_create(ns, INVALID_SET_ID, NULL);
+
+	if (! job) {
+		cf_warning(AS_SCAN, "sindex populate-all ns %s - job alloc failed", ns->name);
+		return -2;
+	}
+
+	// Can't fail for this kind of job.
+	as_job_manager_start_job(&g_spop_manager, (as_job*)job);
+
+	return 0;
+}
+
+void
+as_spop_resize_thread_pool(uint32_t n_threads)
+{
+	as_job_manager_resize_thread_pool(&g_spop_manager, n_threads);
+}
+
+
+//------------------------------------------------
+// spop_job derived class implementation.
+//
+
+void spop_job_slice(as_job* _job, as_partition_reservation* rsv);
+void spop_job_finish(as_job* _job);
+void spop_job_destroy(as_job* _job);
+void spop_job_info(as_job* _job, as_mon_jobstat* stat);
+
+const as_job_vtable spop_job_vtable = {
+		spop_job_slice,
+		spop_job_finish,
+		spop_job_destroy,
+		spop_job_info
+};
+
+void spop_job_reduce_cb(as_index_ref* r_ref, void* udata);
+
+//
+// spop_job creation.
+//
+
+spop_job*
+spop_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
+{
+	spop_job* job = cf_malloc(sizeof(spop_job));
+
+	if (! job) {
+		return NULL;
+	}
+
+	as_job_init((as_job*)job, &spop_job_vtable, &g_spop_manager,
+			RSV_MIGRATE, 0, ns, set_id, AS_JOB_PRIORITY_MEDIUM);
+
+	job->si = si;
+	job->si_desync_cnt = si->desync_cnt;
+	job->n_reduced = 0;
+
+	return job;
+}
+
+//
+// spop_job mandatory scan_job interface.
+//
+
+void
+spop_job_slice(as_job* _job, as_partition_reservation* rsv)
+{
+	as_index_reduce(rsv->p->vp, spop_job_reduce_cb, (void*)_job);
+}
+
+void
+spop_job_finish(as_job* _job)
+{
+	spop_job* job = (spop_job*)_job;
+
+	as_sindex_ticker_done(_job->ns, job->si, _job->start_ms);
+
+	if (job->si) {
+		as_sindex_populate_done(job->si);
+		job->si->stats.loadtime = cf_getms() - _job->start_ms;
+		AS_SINDEX_RELEASE(job->si);
+	}
+	else {
+		as_sindex_boot_populateall_done(_job->ns);
+	}
+}
+
+void
+spop_job_destroy(as_job* _job)
+{
+}
+
+void
+spop_job_info(as_job* _job, as_mon_jobstat* stat)
+{
+	strcat(stat->jdata, ":job-type=sindex-populator");
+}
+
+//
+// spop_job utilities.
+//
+
+void
+spop_job_reduce_cb(as_index_ref* r_ref, void* udata)
+{
+	as_job* _job = (as_job*)udata;
+	spop_job* job = (spop_job*)_job;
+	as_namespace* ns = _job->ns;
+
+	if (_job->abandoned != 0) {
+		as_record_done(r_ref, ns);
+		return;
+	}
+
+	if (job->si) {
+		if (! as_sindex_isactive(job->si) || job->si->desync_cnt > job->si_desync_cnt) {
+			as_record_done(r_ref, ns);
+			as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+			return;
+		}
+
+		cf_atomic64_decr(&job->si->stats.recs_pending);
+	}
+
+	as_sindex_ticker(ns, job->si, cf_atomic64_incr(&job->n_reduced), _job->start_ms);
+
+	as_index *r = r_ref->r;
+
+	if (_job->set_id != INVALID_SET_ID && as_index_get_set_id(r) != _job->set_id) {
+		as_record_done(r_ref, ns);
+		return;
+	}
+
+	if (r->void_time != 0 && r->void_time < as_record_void_time_get()) {
+		as_record_done(r_ref, ns);
+		return;
+	}
+
+	as_storage_rd rd;
+	as_storage_record_open(ns, r, &rd, &r->key);
+	rd.n_bins = as_bin_get_n_bins(r, &rd);
+	as_bin stack_bins[rd.ns->storage_data_in_memory ? 0 : rd.n_bins];
+	rd.bins = as_bin_get_all(r, &rd, stack_bins);
+
+	if (job->si) {
+		SINDEX_GRLOCK();
+		AS_SINDEX_RESERVE(job->si);
+		SINDEX_GUNLOCK();
+		as_sindex_put_rd(job->si, &rd);
+	}
+	else {
+		as_sindex_putall_rd(ns, &rd);
+	}
+
+	as_storage_record_close(r, &rd);
+	as_record_done(r_ref, ns);
+
+	cf_atomic64_incr(&_job->n_records_read);
 }

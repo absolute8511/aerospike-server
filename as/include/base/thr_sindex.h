@@ -28,11 +28,14 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "queue.h"
 #include "ai_obj.h"
 #include "hist.h"
 #include "citrusleaf/cf_digest.h"
+
+#include "base/datamodel.h"
 
 #define SET_TIME_FOR_SINDEX_GC_HIST(start_time)                                           \
 do {                                                                                      \
@@ -76,3 +79,9 @@ extern bool      g_sindex_boot_done;
 void as_sindex_thr_init();
 void as_sindex_gc_histogram_dumpall();
 objs_to_defrag_arr * as_sindex_gc_get_defrag_arr(void);
+
+#define MAX_POPULATOR_THREADS 32
+
+void as_spop_init();
+int as_spop_populate_all(as_namespace* ns);
+void as_spop_resize_thread_pool(uint32_t n_threads);

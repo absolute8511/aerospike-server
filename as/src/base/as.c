@@ -53,7 +53,6 @@
 #include "base/thr_batch.h"
 #include "base/thr_info.h"
 #include "base/thr_proxy.h"
-#include "base/thr_scan.h"
 #include "base/thr_sindex.h"
 #include "base/thr_tsvc.h"
 #include "base/thr_write.h"
@@ -408,6 +407,9 @@ main(int argc, char **argv)
 	// defrag subsystem starts operating at the end of this call.
 	as_storage_init();
 
+	// Populate all secondary indexes. This may block for a long time.
+	as_sindex_boot_populateall();
+
 	cf_info(AS_AS, "initializing services...");
 
 	as_netio_init();
@@ -423,14 +425,9 @@ main(int argc, char **argv)
 	as_query_init();			// query transaction handling
 	as_udf_init();				// apply user-defined functions
 	as_scan_init();				// scan a namespace or set
-	as_tscan_init();			// scan a namespace or set
 	as_batch_init();			// batch transaction handling
 	as_xdr_init();				// cross data-center replication
 	as_mon_init();				// monitor
-
-	// Trigger namespace scan to load index after scan module is initialized.
-	// This may block for a long time.
-	as_sindex_boot_populateall();
 
 	// Wait for enough available storage. We've been defragging all along, but
 	// here we wait until it's enough. This may block for a long time.
