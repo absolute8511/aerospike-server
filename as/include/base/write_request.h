@@ -31,6 +31,7 @@
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_digest.h"
 
+#include "dynbuf.h"
 #include "msg.h"
 #include "util.h"
 
@@ -95,6 +96,9 @@ typedef struct write_request_s {
 	size_t               pickled_sz;
 	uint32_t             pickled_void_time;
 	as_rec_props         pickled_rec_props;
+
+	// Store ops' responses here.
+	cf_dyn_buf           response_db;
 
 	cf_atomic32          trans_complete; // make sure transaction gets processed only once
 	cf_atomic32          dupl_trans_complete; // if 0, we are in 'dup' phase (and use atomic to only-once

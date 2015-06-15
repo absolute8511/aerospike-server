@@ -984,14 +984,12 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 	}
 #endif
 
-	uint8_t pbytes = 0;
+	int pbytes = 0;
 	if (rd->ns->storage_data_in_memory) {
-		as_particle_frombuf(binp, AS_PARTICLE_TYPE_HIDDEN_MAP, (uint8_t *) buf.data, buf.size, NULL, true);
+		as_bin_particle_replace_from_mem(binp, AS_PARTICLE_TYPE_HIDDEN_MAP, buf.data, buf.size);
 	}
 	else {
-		pbytes = buf.size + as_particle_get_base_size(AS_PARTICLE_TYPE_HIDDEN_MAP);
-		as_particle_frombuf(binp, AS_PARTICLE_TYPE_HIDDEN_MAP, (uint8_t *) buf.data,
-					buf.size, pp_stack_particles, rd->ns->storage_data_in_memory);
+		pbytes = (int)as_bin_particle_stack_from_mem(binp, pp_stack_particles, AS_PARTICLE_TYPE_HIDDEN_MAP, buf.data, buf.size);
 	}
 	as_serializer_destroy(&s);
 	as_buffer_destroy(&buf);

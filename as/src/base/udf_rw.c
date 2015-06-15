@@ -78,11 +78,11 @@ static bool
 make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 			  const char *key, size_t klen, int  vtype,  void *val, size_t vlen)
 {
-	uint32_t        sz          = 0;
-	uint32_t        tsz         = sz + vlen + as_particle_get_base_size(vtype);
 	uint8_t *   v           = NULL;
-	int64_t     swapped_int = 0;
+	int64_t     unswapped_int = 0;
 	uint8_t     *sp_p = *sp_pp;
+
+	uint32_t tsz = as_particle_size_from_mem((as_particle_type)vtype, (uint8_t *)val, (uint32_t)vlen);
 
 	if (tsz > sp_sz) {
 		sp_p = cf_malloc(tsz);
@@ -105,8 +105,8 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 			if (vlen != 8) {
 				cf_crash(AS_UDF, "unexpected int %d", vlen);
 			}
-			swapped_int = __be64_to_cpup(val);
-			v = (uint8_t *) &swapped_int;
+            unswapped_int = * (int64_t *) val;
+			v = (uint8_t *) &unswapped_int;
 			break;
 		}
 		case AS_PARTICLE_TYPE_BLOB:
@@ -122,7 +122,8 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 		}
 	}
 
-	as_particle_frombuf(bin, vtype, v, vlen, sp_p, ns->storage_data_in_memory);
+	as_bin_particle_stack_from_mem(bin, sp_p, vtype, v, vlen);
+
 	*sp_pp = sp_p;
 	return 0;
 }
@@ -188,13 +189,6 @@ send_response(udf_call *call, const char *key, size_t klen, int vtype, void *val
 	single_transaction_response(
 		tr, ns, NULL/*ops*/, &bin, 1,
 		generation, void_time, &written_sz, NULL);
-
-	// clean up.
-	// TODO: check: is bin_inuse valid only when data_in_memory?
-	// There must be another way to determine if the particle is used?
-	if ( as_bin_inuse(bin) ) {
-		as_particle_destroy(&stack_bin, ns->storage_data_in_memory);
-	}
 
 	if (sp_p != stack_particle_buf) {
 		cf_free(sp_p);
@@ -681,6 +675,33 @@ udf_rw_getop(udf_record *urecord, udf_optype *urecord_op)
 	}
 }
 
+/*
+ * Helper for udf_rw_post_processing().
+ */
+void
+udf_rw_write_post_processing(as_transaction *tr, as_storage_rd *rd,
+		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
+		as_rec_props *p_pickled_rec_props, int64_t memory_bytes)
+{
+	update_metadata_in_index(tr, true, rd->r);
+
+	pickle_info pickle;
+
+	pickle_all(rd, &pickle);
+
+	*pickled_buf = pickle.buf;
+	*pickled_sz = pickle.buf_size;
+	*pickled_void_time = pickle.void_time;
+	p_pickled_rec_props->p_data = pickle.rec_props_data;
+	p_pickled_rec_props->size = pickle.rec_props_size;
+
+	tr->generation = rd->r->generation;
+
+	if (tr->rsv.ns->storage_data_in_memory) {
+		account_memory(tr, rd, memory_bytes);
+	}
+}
+
 /* Internal Function: Does the post processing for the UDF record after the
  *					  UDF execution. Does the following:
  *		1. Record is closed
@@ -728,10 +749,9 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 			as_storage_record_set_rec_props(rd, rec_props_data);
 		}
 
-		write_local_post_processing(tr, tr->rsv.ns, NULL, &urecord->pickled_buf,
+		udf_rw_write_post_processing(tr, rd, &urecord->pickled_buf,
 			&urecord->pickled_sz, &urecord->pickled_void_time,
-			&urecord->pickled_rec_props, true/*increment_generation*/,
-			NULL, r_ref->r, rd, urecord->starting_memory_bytes);
+			&urecord->pickled_rec_props, urecord->starting_memory_bytes);
 
 		// Now ok to accommodate a new stored key...
 		if (! as_index_is_flag_set(r_ref->r, AS_INDEX_FLAG_KEY_STORED) && rd->key) {
@@ -1536,23 +1556,20 @@ as_val_frombin(as_bin *bb)
 		case AS_PARTICLE_TYPE_INTEGER:
 		{
 			int64_t     i = 0;
-			uint32_t    sz = 8;
-			as_particle_tobuf(bb, (uint8_t *) &i, &sz);
-			i = cf_swap_from_be64(i);
+			as_bin_particle_to_mem(bb, (uint8_t *) &i);
 			value = (as_val *) as_integer_new(i);
 			break;
 		}
 		case AS_PARTICLE_TYPE_STRING:
 		{
-			uint32_t psz = 32;
-			as_particle_tobuf(bb, NULL, &psz);
+			uint32_t psz = as_bin_particle_mem_size(bb);
 
 			char * buf = cf_malloc(psz + 1);
 			if (!buf) {
 				return value;
 			}
 
-			as_particle_tobuf(bb, (uint8_t *) buf, &psz);
+			as_bin_particle_to_mem(bb, (uint8_t *) buf);
 
 			buf[psz] = '\0';
 
@@ -1563,9 +1580,7 @@ as_val_frombin(as_bin *bb)
 		{
 
 			uint8_t *pbuf;
-			uint32_t psz;
-
-			as_particle_p_get(bb, &pbuf, &psz);
+			uint32_t psz = as_bin_particle_ptr(bb, &pbuf);
 
 			uint8_t *buf = cf_malloc(psz);
 			if (!buf) {
@@ -1586,9 +1601,7 @@ as_val_frombin(as_bin *bb)
 			as_serializer s;
 			as_msgpack_init(&s);
 
-			uint32_t      sz = 0;
-
-			as_particle_p_get(bb, (uint8_t **) &buf.data, &sz);
+			uint32_t sz = as_bin_particle_ptr(bb, (uint8_t **) &buf.data);
 			buf.capacity = sz;
 			buf.size = sz;
 

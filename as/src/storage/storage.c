@@ -238,9 +238,6 @@ as_storage_record_create(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_d
 	rd->write_to_device = false;
 	rd->key_size = 0;
 	rd->key = NULL;
-	rd->n_bins_to_write = 0;
-	rd->particles_flat_size = 0;
-	rd->flat_size = 0;
 
 	if (as_storage_record_create_table[ns->storage_type]) {
 		return as_storage_record_create_table[ns->storage_type](ns, r, rd, keyd);
@@ -277,9 +274,6 @@ as_storage_record_open(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_dig
 	rd->write_to_device = false;
 	rd->key_size = 0;
 	rd->key = NULL;
-	rd->n_bins_to_write = 0;
-	rd->particles_flat_size = 0;
-	rd->flat_size = 0;
 
 	if (as_storage_record_open_table[ns->storage_type]) {
 		return as_storage_record_open_table[ns->storage_type](ns, r, rd, keyd);
@@ -292,7 +286,7 @@ as_storage_record_open(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_dig
 // as_storage_record_close
 //
 
-typedef void (*as_storage_record_close_fn)(as_record *ns, as_storage_rd *rd);
+typedef int (*as_storage_record_close_fn)(as_record *ns, as_storage_rd *rd);
 static const as_storage_record_close_fn as_storage_record_close_table[AS_STORAGE_ENGINE_TYPES] = {
 	NULL,
 	0, // memory has no record close
@@ -300,12 +294,14 @@ static const as_storage_record_close_fn as_storage_record_close_table[AS_STORAGE
 	as_storage_record_close_kv
 };
 
-void
+int
 as_storage_record_close(as_record *r, as_storage_rd *rd)
 {
 	if (as_storage_record_close_table[rd->storage_type]) {
-		as_storage_record_close_table[rd->storage_type](r, rd);
+		return as_storage_record_close_table[rd->storage_type](r, rd);
 	}
+
+	return 0;
 }
 
 //--------------------------------------
@@ -372,28 +368,6 @@ as_storage_particle_read_all(as_storage_rd *rd)
 	}
 
 	return 0;
-}
-
-//--------------------------------------
-// as_storage_record_can_fit
-//
-
-typedef bool (*as_storage_record_can_fit_fn)(as_storage_rd *rd);
-static const as_storage_record_can_fit_fn as_storage_record_can_fit_table[AS_STORAGE_ENGINE_TYPES] = {
-	NULL,
-	0, // no limit if no persistent storage - flat size is irrelevant
-	as_storage_record_can_fit_ssd,
-	0
-};
-
-bool
-as_storage_record_can_fit(as_storage_rd *rd)
-{
-	if (as_storage_record_can_fit_table[rd->ns->storage_type]) {
-		return as_storage_record_can_fit_table[rd->ns->storage_type](rd);
-	}
-
-	return true;
 }
 
 //--------------------------------------
@@ -687,13 +661,7 @@ as_storage_record_get_n_bytes_memory(as_storage_rd *rd)
 	uint64_t n_bytes_memory = 0;
 
 	for (uint16_t i = 0; i < rd->n_bins; i++) {
-		as_bin *b = &rd->bins[i];
-
-		if (as_bin_inuse(b) && ! as_bin_is_integer(b)) {
-			n_bytes_memory +=
-					as_particle_get_base_size(as_bin_get_particle_type(b)) +
-					as_bin_get_particle_size(b);
-		}
+		n_bytes_memory += as_bin_particle_size(&rd->bins[i]);
 	}
 
 	if (! rd->ns->single_bin) {

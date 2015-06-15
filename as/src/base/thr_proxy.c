@@ -776,6 +776,41 @@ as_proxy_send_response(cf_node dst, msg *m, uint32_t result_code, uint32_t gener
 	return 0;
 } // end as_proxy_send_response()
 
+int
+as_proxy_send_ops_response(cf_node dst, msg *m, cf_dyn_buf *db)
+{
+	uint32_t tid;
+	msg_get_uint32(m, PROXY_FIELD_TID, &tid);
+
+#ifdef DEBUG
+	cf_debug(AS_PROXY, "proxy send response: message %p bytearray %p tid %d", m, result_code, tid);
+#endif
+
+	msg_reset(m);
+
+	msg_set_uint32(m, PROXY_FIELD_OP, PROXY_OP_RESPONSE);
+	msg_set_uint32(m, PROXY_FIELD_TID, tid);
+
+	uint8_t *msgp = db->buf;
+	size_t msg_sz = db->used_sz;
+
+	if (db->is_stack) {
+		msg_set_buf(m, PROXY_FIELD_AS_PROTO, msgp, msg_sz, MSG_SET_COPY);
+	}
+	else {
+		msg_set_buf(m, PROXY_FIELD_AS_PROTO, msgp, msg_sz, MSG_SET_HANDOFF_MALLOC);
+		db->buf = NULL; // the fabric owns the buffer now
+	}
+
+	int rv = as_fabric_send(dst, m, AS_FABRIC_PRIORITY_MEDIUM);
+	if (rv != 0) {
+		cf_debug(AS_PROXY, "sending proxy response: fabric send err %d, catch you on the retry", rv);
+		as_fabric_msg_put(m);
+	}
+
+	return 0;
+} // end as_proxy_send_ops_response()
+
 
 //
 // RETRANSMIT FUNCTIONS

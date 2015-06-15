@@ -31,15 +31,6 @@
 
 #include "base/transaction.h"
 
-
-// Does a read and sends the response.
-// If you've already done the record lookup, such as in the case of a read,
-// pass in the as_record info - or pass null if you don't have it.
-//
-// record_get_rv - if you have previously called as_record_get, the return value
-//                 from that call, otherwise set to 0.
-extern int thr_tsvc_read(as_transaction *tr, as_record_lock *rl, int record_get_rv);
-
 // A rather heavyweight way to get a record generation during the initial
 // phase of a write request. Does a tree lookup.
 extern int thr_tsvc_get_generation(as_transaction *tr, uint32_t *generation);

@@ -1329,9 +1329,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			}
 
 			int64_t   i = 0;
-			uint32_t sz = 8;
-			as_particle_tobuf(b, (uint8_t *) &i, &sz);
-			i = __be64_to_cpu(i);
+			as_bin_particle_to_mem(b, (uint8_t *) &i);
 			if (skey->key.int_key != i) {
 				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
 						"not matches bin value in record. bin value %ld skey value %ld", i, skey->key.int_key);
@@ -1352,10 +1350,9 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 				break;
 			}
 
-			uint32_t psz = 32;
-			as_particle_tobuf(b, NULL, &psz);
+			uint32_t psz = as_bin_particle_mem_size(b);
 			char buf[psz + 1];
-			as_particle_tobuf(b, (uint8_t *) buf, &psz);
+			as_bin_particle_to_mem(b, (uint8_t *) buf);
 			buf[psz]     = '\0';
 			cf_digest bin_digest;
 			cf_digest_compute( buf, psz, &bin_digest);

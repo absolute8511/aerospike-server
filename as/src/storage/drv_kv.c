@@ -965,7 +965,7 @@ as_storage_record_open_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_
 	return(0);
 }
 
-void
+int
 as_storage_record_close_kv(as_record *r, as_storage_rd *rd)
 {
 	cf_detail(AS_DRV_KV, "record close: r %p rd %p", r, rd);
@@ -976,6 +976,8 @@ as_storage_record_close_kv(as_record *r, as_storage_rd *rd)
 	if (rd->u.kv.block && rd->u.kv.must_free_block) {
 		cf_free(rd->u.kv.block);
 	}
+
+	return 0;
 }
 
 static int
@@ -993,7 +995,7 @@ kv_populate_bin(as_bin *bin, drv_kv_bin *kv_bin, uint8_t *block_head, bool singl
 		}
 
 		// destroy old particle
-		as_particle_frombuf(bin, AS_PARTICLE_TYPE_NULL, 0, 0, 0, true);
+		as_particle_fromflat(bin, AS_PARTICLE_TYPE_NULL, 0, 0, 0, true);
 
 		// copy the integer particle in-place to the bin.
 		bin->ivalue = pi->i;
@@ -1002,7 +1004,7 @@ kv_populate_bin(as_bin *bin, drv_kv_bin *kv_bin, uint8_t *block_head, bool singl
 	else {
 		if (allocate_memory) {
 			uint32_t base_size = as_particle_get_base_size(p->metadata);
-			as_particle_frombuf(bin, p->metadata, (uint8_t *)p + base_size, kv_bin->len - base_size, 0, true);
+			as_particle_fromflat(bin, p->metadata, (uint8_t *)p + base_size, kv_bin->len - base_size, 0, true);
 		}
 		else {
 			bin->particle = p;
@@ -1235,10 +1237,12 @@ as_storage_record_open_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_
 	return 0;
 }
 
-void
+int
 as_storage_record_close_kv(as_record *r, as_storage_rd *rd)
 {
 	error_out();
+
+	return 0;
 }
 
 uint16_t

@@ -251,8 +251,11 @@ typedef struct index_metadata_t {
 
 #define AS_MSG_OP_READ 1			// read the value in question
 #define AS_MSG_OP_WRITE 2			// write the value in question
-// Unused - 3
-// Unused - 4
+
+// Prospective CDT top-level ops:
+#define AS_MSG_OP_CDT_READ 3
+#define AS_MSG_OP_CDT_MODIFY 4
+
 #define AS_MSG_OP_INCR 5			// arithmetically add a value to an existing value, works only on integers
 // Unused - 6
 // Unused - 7
@@ -292,7 +295,7 @@ static inline uint8_t * as_msg_op_get_value_p(as_msg_op *op)
 	return (uint8_t*)op + sizeof(as_msg_op) + op->name_sz;
 }
 
-static inline uint32_t as_msg_op_get_value_sz(as_msg_op *op)
+static inline uint32_t as_msg_op_get_value_sz(const as_msg_op *op)
 {
 	return op->op_sz - (4 + op->name_sz);
 }
@@ -378,7 +381,7 @@ typedef struct cl_msg_s {
 #define AS_MSG_INFO2_GENERATION_DUP		(1 << 4) // if a generation collision, create a duplicate
 #define AS_MSG_INFO2_CREATE_ONLY		(1 << 5) // write record only if it doesn't exist
 #define AS_MSG_INFO2_BIN_CREATE_ONLY	(1 << 6) // write bin only if it doesn't exist
-#define AS_MSG_INFO2_WRITE_MERGE		(1 << 7) // merge this with current
+#define AS_MSG_INFO2_RESPOND_ALL_OPS	(1 << 7) // all bin ops (read, write, or modify) require a response, in request order
 
 #define AS_MSG_INFO3_LAST				(1 << 0) // this is the last of a multi-part message
 #define AS_MSG_INFO3_COMMIT_LEVEL_B0  	(1 << 1) // write commit level - bit 0
@@ -491,6 +494,7 @@ extern int as_msg_send_reply(struct as_file_handle_s *fd_h, uint32_t result_code
 		uint32_t generation, uint32_t void_time, as_msg_op **ops,
 		struct as_bin_s **bins, uint16_t bin_count, struct as_namespace_s *ns,
 		uint *written_sz, uint64_t trid, const char *setname);
+extern int as_msg_send_ops_reply(struct as_file_handle_s *fd_h, cf_dyn_buf *db);
 
 extern cl_msg *as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 		uint32_t void_time, as_msg_op **ops, struct as_bin_s **bins,

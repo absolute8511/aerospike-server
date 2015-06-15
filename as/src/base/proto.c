@@ -37,10 +37,8 @@
 #include <sys/socket.h>
 
 #include "aerospike/as_val.h"
-#include "aerospike/as_buffer.h"
-#include "aerospike/as_msgpack.h"
-#include "aerospike/as_serializer.h"
 #include "citrusleaf/alloc.h"
+#include "citrusleaf/cf_byte_order.h"
 #include "citrusleaf/cf_digest.h"
 #include "citrusleaf/cf_vector.h"
 
@@ -51,7 +49,6 @@
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/thr_tsvc.h"
-#include "base/ldt.h"
 #include "base/transaction.h"
 #include "base/udf_rw.h"
 #include "storage/storage.h"
@@ -169,67 +166,69 @@ as_msg_swap_fields_and_ops(as_msg *m, void *limit)
 // Either way it returns what it filled in.
 //
 
-//PROTOTYPE
-int _as_particle_tobuf(as_bin *b, byte *buf, uint32_t *sz, bool tojson);
-
 cl_msg *
-as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t void_time,
-		as_msg_op **ops, as_bin **bins, uint16_t bin_count, as_namespace *ns,
-		cl_msg *msgp_in, size_t *msg_sz_in, uint64_t trid, const char *setname)
+as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
+		uint32_t void_time, as_msg_op **ops, as_bin **bins, uint16_t bin_count,
+		as_namespace *ns, cl_msg *msgp_in, size_t *msg_sz_in, uint64_t trid,
+		const char *setname)
 {
-	int setname_len = 0;
-	// figure out the size of the entire buffer
-	int msg_sz = sizeof(cl_msg);
-	msg_sz += sizeof(as_msg_op) * bin_count; // the bin headers
+	size_t msg_sz = sizeof(cl_msg);
+
+	msg_sz += sizeof(as_msg_op) * bin_count;
+
 	for (uint16_t i = 0; i < bin_count; i++) {
-		if (bins[i]) {
-			msg_sz += ns->single_bin ? 0 :
-					  strlen(as_bin_get_name_from_id(ns, bins[i]->id));
-			uint32_t psz;
-			if (as_bin_is_hidden(bins[i])) {
-				psz = 0;
-			} else {
-				_as_particle_tobuf(bins[i], 0, &psz, false); // get size
-			}
-			msg_sz += psz;
-		}
-		else if (ops[i])  // no bin, only op, no particle size
+		if (ops) {
 			msg_sz += ops[i]->name_sz;
-		else
-			cf_warning(AS_PROTO, "internal error!");
+		}
+		else if (bins[i]) {
+			msg_sz += ns->single_bin ?
+					0 : strlen(as_bin_get_name_from_id(ns, bins[i]->id));
+		}
+		else {
+			cf_crash(AS_PROTO, "making response message with null bin and op");
+		}
+
+		if (bins[i]) {
+			msg_sz += as_bin_particle_client_value_size(bins[i]);
+		}
 	}
 
-	//If a transaction-id is sent by the client, we should send it back in a field
 	if (trid != 0) {
-		msg_sz += (sizeof(as_msg_field) + sizeof(trid));
+		msg_sz += sizeof(as_msg_field) + sizeof(trid);
 	}
 
-	// If setname is present, we will send it as a field. Account for its space overhead.
-	if (setname != 0) {
+	uint32_t setname_len = 0;
+
+	if (setname) {
 		setname_len = strlen(setname);
-		msg_sz += (sizeof(as_msg_field) + setname_len);
+		msg_sz += sizeof(as_msg_field) + setname_len;
 	}
 
-	// most cases are small messages - try to stack alloc if we can
-	byte *b;
-	if ((0 == msgp_in) || (*msg_sz_in < msg_sz)) {
+	uint8_t *b;
+
+	if (! msgp_in || *msg_sz_in < msg_sz) {
 		b = cf_malloc(msg_sz);
-		if (!b)	return(0);
+
+		if (! b) {
+			return NULL;
+		}
 	}
 	else {
-		b = (byte *) msgp_in;
+		b = (uint8_t *)msgp_in;
 	}
+
 	*msg_sz_in = msg_sz;
 
-	// set up the header
-	byte *buf = b; // current buffer pointer
-	cl_msg *msgp = (cl_msg *) buf;
+	uint8_t *buf = b;
+	cl_msg *msgp = (cl_msg *)buf;
+
 	msgp->proto.version = PROTO_VERSION;
 	msgp->proto.type = PROTO_TYPE_AS_MSG;
 	msgp->proto.sz = msg_sz - sizeof(as_proto);
 	as_proto_swap(&msgp->proto);
 
 	as_msg *m = &msgp->msg;
+
 	m->header_sz = sizeof(as_msg);
 	m->info1 = 0;
 	m->info2 = 0;
@@ -242,102 +241,109 @@ as_msg_make_response_msg( uint32_t result_code, uint32_t generation, uint32_t vo
 	m->n_ops = bin_count;
 	m->n_fields = 0;
 
-	// Count the number of fields that we are going to send back
-	if (trid != 0) {
-		m->n_fields++;
-	}
-	if (setname != NULL) {
-		m->n_fields++;
-	}
-	as_msg_swap_header(m);
-
 	buf += sizeof(cl_msg);
 
-	//If we have to send back the transaction-id, we have fields to send back
 	if (trid != 0) {
-		as_msg_field *trfield = (as_msg_field *) buf;
-		//Allow space for the message field header
-		buf += sizeof(as_msg_field);
+		m->n_fields++;
 
-		//Fill the field header
+		as_msg_field *trfield = (as_msg_field *)buf;
+
+		trfield->field_sz = 1 + sizeof(uint64_t);
 		trfield->type = AS_MSG_FIELD_TYPE_TRID;
-		//Copy the transaction-id as field data in network byte order (big-endian)
-		uint64_t trid_nbo = __cpu_to_be64(trid);
-		trfield->field_sz = sizeof(trid_nbo);
-		memcpy(trfield->data, &trid_nbo, sizeof(trid_nbo));
-		as_msg_swap_field(trfield);
+		*(uint64_t *)trfield->data = cf_swap_to_be64(trid);
 
-		//Allow space for the message field data
-		buf += sizeof(trid_nbo);
+		buf += sizeof(as_msg_field) + sizeof(uint64_t);
+		as_msg_swap_field(trfield);
 	}
 
-	// If we have to send back the setname, we have fields to send back
-	if (setname != NULL) {
-		as_msg_field *trfield = (as_msg_field *) buf;
-		// Allow space for the message field header
-		buf += sizeof(as_msg_field);
+	if (setname) {
+		m->n_fields++;
 
-		// Fill the field header
+		as_msg_field *trfield = (as_msg_field *)buf;
+
+		trfield->field_sz = 1 + setname_len;
 		trfield->type = AS_MSG_FIELD_TYPE_SET;
-		trfield->field_sz = setname_len + 1;
 		memcpy(trfield->data, setname, setname_len);
-		as_msg_swap_field(trfield);
 
-		// Allow space for the message field data
-		buf += setname_len;
+		buf += sizeof(as_msg_field) + setname_len;
+		as_msg_swap_field(trfield);
 	}
 
-	// over all bins, copy into the buffer
+	as_msg_swap_header(m);
+
 	for (uint16_t i = 0; i < bin_count; i++) {
-
 		as_msg_op *op = (as_msg_op *)buf;
-		buf += sizeof(as_msg_op);
 
-		op->op = AS_MSG_OP_READ;
+		op->version = 0;
 
-		if (bins[i]) {
-			op->version = as_bin_get_version(bins[i], ns->single_bin);
-			op->name_sz = as_bin_memcpy_name(ns, op->name, bins[i]);
-		}
-		else {
-			op->version = 0;
+		if (ops) {
+			op->op = ops[i]->op;
 			memcpy(op->name, ops[i]->name, ops[i]->name_sz);
 			op->name_sz = ops[i]->name_sz;
 		}
+		else {
+			op->op = AS_MSG_OP_READ;
+			op->name_sz = as_bin_memcpy_name(ns, op->name, bins[i]);
+		}
 
-		buf += op->name_sz;
-
-		// cf_detail(AS_PROTO, "make response: bin %d %s : version %d",i,bins[i]->name,op->version);
-
-		// Since there are two variable bits, the size is everything after the
-		// data bytes - and this is only the head, we're patching up the rest
-		// in a minute.
 		op->op_sz = 4 + op->name_sz;
 
-		if (bins[i] && as_bin_inuse(bins[i])) {
-			op->particle_type = as_particle_type_convert(as_bin_get_particle_type(bins[i]));
-
-			uint32_t psz = msg_sz - (buf - b); // size remaining in buffer, for safety
-			if (as_bin_is_hidden(bins[i])) {
-				op->particle_type = AS_PARTICLE_TYPE_NULL;
-				psz = 0; // packet of size NULL
-			} else {
-				if (0 != _as_particle_tobuf(bins[i], buf, &psz, false)) {
-					cf_warning(AS_PROTO, "particle to buf: could not copy data!");
-				}
-			}
-			buf += psz;
-			op->op_sz += psz;
-		}
-		else {
-			op->particle_type = AS_PARTICLE_TYPE_NULL;
-		}
+		buf += sizeof(as_msg_op) + op->name_sz;
+		buf += as_bin_particle_to_client(bins[i], op);
 
 		as_msg_swap_op(op);
-
 	}
 
-	return((cl_msg *) b);
+	return (cl_msg *)b;
+}
+
+
+// Send a response made by write_local().
+// TODO - refactor and share with as_msg_send_reply().
+int
+as_msg_send_ops_reply(as_file_handle *fd_h, cf_dyn_buf *db)
+{
+	int rv = 0;
+
+	if (fd_h->fd == 0) {
+		cf_crash(AS_PROTO, "fd is 0");
+	}
+
+	uint8_t *msgp = db->buf;
+	size_t msg_sz = db->used_sz;
+	size_t pos = 0;
+
+	while (pos < msg_sz) {
+		int result = send(fd_h->fd, msgp + pos, msg_sz - pos, MSG_NOSIGNAL);
+
+		if (result > 0) {
+			pos += result;
+		}
+		else if (result < 0) {
+			if (errno != EWOULDBLOCK) {
+				// Common when a client aborts.
+				cf_debug(AS_PROTO, "protocol write fail: fd %d sz %zd pos %zd rv %d errno %d", fd_h->fd, msg_sz, pos, rv, errno);
+				shutdown(fd_h->fd, SHUT_RDWR);
+				rv = -1;
+				goto Exit;
+			}
+
+			usleep(1); // yield
+		}
+		else {
+			cf_info(AS_PROTO, "protocol write fail zero return: fd %d sz %d pos %d ", fd_h->fd, msg_sz, pos);
+			shutdown(fd_h->fd, SHUT_RDWR);
+			rv = -1;
+			goto Exit;
+		}
+	}
+
+Exit:
+
+	fd_h->t_inprogress = false;
+	AS_RELEASE_FILE_HANDLE(fd_h);
+
+	return rv;
 }
 
 
@@ -387,7 +393,7 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 		msg_sz += sizeof(as_msg_field) + set_name_len;
 	}
 
-	int num_bins = as_bin_inuse_count(rd);
+	int in_use_bins = as_bin_inuse_count(rd);
 	int list_bins   = 0;
 
 	if (nobindata == false) {
@@ -396,30 +402,26 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 			for(uint16_t i = 0; i < binlist_sz; i++) {
 				char binname[AS_ID_BIN_SZ];
 				cf_vector_get(binlist, i, (void*)&binname);
-				cf_debug(AS_PROTO, " Binname projected inside is |%s| \n", binname);
+				cf_debug(AS_PROTO, " Binname projected inside is |%s|", binname);
 				as_bin *p_bin = as_bin_get (rd, (uint8_t*)binname, strlen(binname));
 				if (!p_bin)
 				{
-					cf_debug(AS_PROTO, "To be projected bin |%s| not found \n", binname);
+					cf_debug(AS_PROTO, "To be projected bin |%s| not found", binname);
 					continue;
 				}
-				cf_debug(AS_PROTO, "Adding bin |%s| to projected bins |%s| \n", binname);
+				cf_debug(AS_PROTO, "Adding bin |%s| to projected bins", binname);
 				list_bins++;
 				msg_sz += sizeof(as_msg_op);
 				msg_sz += rd->ns->single_bin ? 0 : strlen(binname);
-				uint32_t psz;
-				as_particle_tobuf(p_bin, 0, &psz); // get size
-				msg_sz += psz;
+				msg_sz += (int)as_bin_particle_client_value_size(p_bin);
 			}
 		}
 		else {
-			msg_sz += sizeof(as_msg_op) * num_bins; // the bin headers
-			for (uint16_t i = 0; i < num_bins; i++) {
+			msg_sz += sizeof(as_msg_op) * in_use_bins; // the bin headers
+			for (uint16_t i = 0; i < in_use_bins; i++) {
 				as_bin *p_bin = &rd->bins[i];
 				msg_sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, p_bin->id));
-				uint32_t psz;
-				as_particle_tobuf(p_bin, 0, &psz); // get size
-				msg_sz += psz;
+				msg_sz += (int)as_bin_particle_client_value_size(p_bin);
 			}
 		}
 	}
@@ -488,47 +490,35 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 	}
 
 	int list_bins   = 0;
-	int num_bins = 0;
-	if (rd) {
-		num_bins = as_bin_inuse_count(rd);
-	}
-	if (binlist) {
-		num_bins = cf_vector_size(binlist);
-	}
-	
-	as_val *ldtBinVal[num_bins];
-	as_particle_type ldtBinParticleType[num_bins];
+	int in_use_bins = rd ? (int)as_bin_inuse_count(rd) : 0;
+	as_val *ldt_bin_vals[in_use_bins];
 
-	if (nobindata == false) {
+	if (! nobindata) {
 		if (binlist) {
-			for(uint16_t i = 0; i < num_bins; i++) {
+			int binlist_sz = cf_vector_size(binlist);
+
+			for (uint16_t i = 0; i < binlist_sz; i++) {
 				char binname[AS_ID_BIN_SZ];
+
 				cf_vector_get(binlist, i, (void*)&binname);
-				cf_debug(AS_PROTO, " Binname projected inside is |%s| \n", binname);
-				as_bin *p_bin = as_bin_get (rd, (uint8_t*)binname, strlen(binname));
-				if (!p_bin)
-				{
-					cf_debug(AS_PROTO, "To be projected bin |%s| not found \n", binname);
+
+				as_bin *p_bin = as_bin_get(rd, (uint8_t*)binname, strlen(binname));
+
+				if (! p_bin) {
 					continue;
 				}
-				cf_debug(AS_PROTO, "Adding bin |%s| to projected bins |%s| \n", binname);
+
 				msg_sz += sizeof(as_msg_op);
 				msg_sz += rd->ns->single_bin ? 0 : strlen(binname);
-				uint32_t psz;
+
 				if (as_bin_is_hidden(p_bin)) {
-					ldtBinVal[list_bins] = as_llist_scan(rd->ns, rd->ns->partitions[as_partition_getid(rd->keyd)].sub_vp, rd, p_bin);
-					if (ldtBinVal[list_bins]) {
-						ldtBinParticleType[list_bins] = AS_PARTICLE_TYPE_HIDDEN_LIST;
-					}
-					as_serializer s;
-					as_msgpack_init(&s);
-					psz = as_serializer_serialize_getsize(&s, (as_val *)ldtBinVal[list_bins]);
-					as_serializer_destroy(&s);
-				} else {
-					as_particle_tobuf(p_bin, 0, &psz); // get size
+					msg_sz += (int)as_ldt_particle_client_value_size(rd, p_bin, &ldt_bin_vals[list_bins]);
 				}
+				else {
+					msg_sz += (int)as_bin_particle_client_value_size(p_bin);
+				}
+
 				list_bins++;
-				msg_sz += psz;
 			}
 
 			// Don't return an empty record.
@@ -537,25 +527,19 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 			}
 		}
 		else {
-			msg_sz += sizeof(as_msg_op) * num_bins; // the bin headers
-			for (uint16_t i = 0; i < num_bins; i++) {
+			msg_sz += sizeof(as_msg_op) * in_use_bins;
+
+			for (uint16_t i = 0; i < in_use_bins; i++) {
 				as_bin *p_bin = &rd->bins[i];
+
 				msg_sz += rd->ns->single_bin ? 0 : strlen(as_bin_get_name_from_id(rd->ns, p_bin->id));
-				uint32_t psz;
+
 				if (as_bin_is_hidden(p_bin)) {
-					ldtBinVal[list_bins] = as_llist_scan(rd->ns, rd->ns->partitions[as_partition_getid(rd->keyd)].sub_vp, rd, p_bin);
-					if (ldtBinVal[list_bins]) {
-						ldtBinParticleType[list_bins] = AS_PARTICLE_TYPE_HIDDEN_LIST;
-					}
-					as_serializer s;
-					as_msgpack_init(&s);
-					psz = as_serializer_serialize_getsize(&s, (as_val *)ldtBinVal[list_bins]);
-					as_serializer_destroy(&s);
-				} else {
-					as_particle_tobuf(p_bin, 0, &psz); // get size
+					msg_sz += (int)as_ldt_particle_client_value_size(rd, p_bin, &ldt_bin_vals[i]);
 				}
-				msg_sz += psz;
-				list_bins++;
+				else {
+					msg_sz += (int)as_bin_particle_client_value_size(p_bin);
+				}
 			}
 		}
 	}
@@ -581,7 +565,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 		if (binlist)
 			msgp->n_ops = list_bins;
 		else
-			msgp->n_ops = num_bins;
+			msgp->n_ops = in_use_bins;
 	} else {
 		msgp->n_ops = 0;
 	}
@@ -630,127 +614,68 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 	}
 
 	if (nobindata) {
-		goto Out;
+		return 0;
 	}
-	list_bins = 0;
 
 	if (binlist) {
-		for (uint16_t i = 0; i < num_bins; i++) {
+		list_bins = 0;
 
+		int binlist_sz = cf_vector_size(binlist);
+
+		for (uint16_t i = 0; i < binlist_sz; i++) {
 			char binname[AS_ID_BIN_SZ];
 			cf_vector_get(binlist, i, (void*)&binname);
-			cf_debug(AS_PROTO, " Binname projected inside is |%s| \n", binname);
-			as_bin *p_bin = as_bin_get (rd, (uint8_t*)binname, strlen(binname));
-			if (!p_bin) // should it be checked before ???
+
+			as_bin *p_bin = as_bin_get(rd, (uint8_t*)binname, strlen(binname));
+
+			if (! p_bin) {
 				continue;
+			}
 
 			as_msg_op *op = (as_msg_op *)buf;
-			buf += sizeof(as_msg_op);
 
 			op->op = AS_MSG_OP_READ;
-
+			op->version = as_bin_inuse(p_bin) ? as_bin_get_version(p_bin, rd->ns->single_bin) : 0;
 			op->name_sz = as_bin_memcpy_name(rd->ns, op->name, p_bin);
-			buf += op->name_sz;
-
-			// Since there are two variable bits, the size is everything after
-			// the data bytes - and this is only the head, we're patching up
-			// the rest in a minute.
 			op->op_sz = 4 + op->name_sz;
 
-			if (as_bin_inuse(p_bin)) {
-				op->particle_type = as_particle_type_convert(as_bin_get_particle_type(p_bin));
-				op->version = as_bin_get_version(p_bin, rd->ns->single_bin);
+			buf += sizeof(as_msg_op) + op->name_sz;
 
-				uint32_t psz = msg_sz - (buf - b); // size remaining in buffer, for safety
-				if (as_bin_is_hidden(p_bin)) {
-					if (!ldtBinVal[list_bins]) {
-						op->particle_type = AS_PARTICLE_TYPE_NULL;
-						psz = 0;
-					} else {
-						op->particle_type = ldtBinParticleType[list_bins];
-						as_buffer abuf;
-						as_buffer_init(&abuf);
-						as_serializer s;
-						as_msgpack_init(&s);
-						as_serializer_serialize(&s, (as_val *)ldtBinVal[list_bins], &abuf);
-						psz = abuf.size;
-						memcpy(buf, abuf.data, abuf.size);
-						as_serializer_destroy(&s);
-						as_buffer_destroy(&abuf);
-						as_val_destroy(ldtBinVal[list_bins]);
-					}
-				} else {
-					if (0 != as_particle_tobuf(p_bin, buf, &psz)) {
-						cf_warning(AS_PROTO, "particle to buf: could not copy data!");
-					}
-				}
-				list_bins++;
-				buf += psz;
-				op->op_sz += psz;
+			if (as_bin_is_hidden(p_bin)) {
+				buf += as_ldt_particle_to_client(ldt_bin_vals[list_bins], op);
 			}
 			else {
-				cf_debug(AS_PROTO, "Whoops !! bin not in use");
-				op->particle_type = AS_PARTICLE_TYPE_NULL;
+				buf += as_bin_particle_to_client(p_bin, op);
 			}
+
+			list_bins++;
+
 			as_msg_swap_op(op);
 		}
 	}
 	else {
-		// over all bins, copy into the buffer
-		for (uint16_t i = 0; i < num_bins; i++) {
-
+		for (uint16_t i = 0; i < in_use_bins; i++) {
 			as_msg_op *op = (as_msg_op *)buf;
-			buf += sizeof(as_msg_op);
 
 			op->op = AS_MSG_OP_READ;
-
+			op->version = as_bin_inuse(&rd->bins[i]) ? as_bin_get_version(&rd->bins[i], rd->ns->single_bin) : 0;
 			op->name_sz = as_bin_memcpy_name(rd->ns, op->name, &rd->bins[i]);
-			buf += op->name_sz;
-
-			// Since there are two variable bits, the size is everything after
-			// the data bytes - and this is only the head, we're patching up
-			// the rest in a minute.
 			op->op_sz = 4 + op->name_sz;
 
-			if (as_bin_inuse(&rd->bins[i])) {
-				op->particle_type = as_particle_type_convert(as_bin_get_particle_type(&rd->bins[i]));
-				op->version = as_bin_get_version(&rd->bins[i], rd->ns->single_bin);
+			buf += sizeof(as_msg_op) + op->name_sz;
 
-				uint32_t psz = msg_sz - (buf - b); // size remaining in buffer, for safety
-				if (as_bin_is_hidden(&rd->bins[i])) {
-					if (!ldtBinVal[list_bins]) {
-						op->particle_type = AS_PARTICLE_TYPE_NULL;
-						psz = 0;
-					} else {
-						op->particle_type = ldtBinParticleType[list_bins];
-						as_buffer abuf;
-						as_buffer_init(&abuf);
-						as_serializer s;
-						as_msgpack_init(&s);
-						as_serializer_serialize(&s, (as_val *)ldtBinVal[list_bins], &abuf);
-						psz = abuf.size;
-						memcpy(buf, abuf.data, abuf.size);
-						as_serializer_destroy(&s);
-						as_buffer_destroy(&abuf);
-						as_val_destroy(ldtBinVal[list_bins]);
-					}
-				} else {
-					if (0 != as_particle_tobuf(&rd->bins[i], buf, &psz)) {
-						cf_warning(AS_PROTO, "particle to buf: could not copy data!");
-					}
-				}
-				list_bins++;
-				buf += psz;
-				op->op_sz += psz;
+			if (as_bin_is_hidden(&rd->bins[i])) {
+				buf += as_ldt_particle_to_client(ldt_bin_vals[i], op);
 			}
 			else {
-				op->particle_type = AS_PARTICLE_TYPE_NULL;
+				buf += as_bin_particle_to_client(&rd->bins[i], op);
 			}
+
 			as_msg_swap_op(op);
 		}
 	}
-Out:
-	return(0);
+
+	return 0;
 }
 
 int

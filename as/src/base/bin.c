@@ -216,49 +216,13 @@ as_bin_get_all(as_record *r, as_storage_rd *rd, as_bin *stack_bins)
 
 // - Seems like an as_storage_record method, but leaving it here for now.
 // - sets rd->bins!
-// - for data-in-memory, assumes rd->n_bins is already set!
-bool
-as_bin_get_and_size_all(as_storage_rd *rd, as_bin *stack_bins)
+int
+as_storage_rd_load_bins(as_storage_rd *rd, as_bin *stack_bins)
 {
 	if (rd->ns->storage_data_in_memory) {
 		rd->bins = rd->ns->single_bin ? as_index_get_single_bin(rd->r) :
 				safe_bins(rd->r);
-
-		if (! rd->bins) {
-			// i.e. multi-bin when record just created.
-			return true;
-		}
-
-		if (rd->ns->storage_type != AS_STORAGE_ENGINE_SSD) {
-			// Not interested in calculating flat-sizing info.
-			return true;
-		}
-
-		// Calculate starting values for rd->n_bins_to_write and
-		// rd->particles_flat_size.
-
-		uint16_t i;
-
-		for (i = 0; i < rd->n_bins; i++) {
-			as_bin *b = &rd->bins[i];
-
-			if (! as_bin_inuse(b)) {
-				// i.e. single-bin when record just created.
-				break;
-			}
-
-			size_t flat_size;
-
-			if (0 != as_particle_get_flat_size(b, &flat_size)) {
-				return false;
-			}
-
-			rd->particles_flat_size += flat_size;
-		}
-
-		rd->n_bins_to_write = (uint32_t)i;
-
-		return true;
+		return 0;
 	}
 
 	// Data NOT in-memory.
@@ -267,13 +231,14 @@ as_bin_get_and_size_all(as_storage_rd *rd, as_bin *stack_bins)
 	as_bin_set_all_empty(rd);
 
 	if (rd->record_on_device && ! rd->ignore_record_on_device) {
-		// Sets rd->n_bins_to_write and rd->particles_flat_size:
-		if (0 != as_storage_particle_read_and_size_all_ssd(rd)) {
-			return false;
+		int result = as_storage_particle_read_all_ssd(rd);
+
+		if (result < 0) {
+			return result;
 		}
 	}
 
-	return true;
+	return 0;
 }
 
 // utility function to convert a pointer to the bin space to an array of pointers to each (used) bin
@@ -350,53 +315,6 @@ as_bin_get(as_storage_rd *rd, byte *name, size_t namesz)
 		}
 
 		if ((uint32_t)b->id == id) {
-			return b;
-		}
-	}
-
-	return NULL;
-}
-
-as_bin *
-as_bin_get_and_reserve_name(as_storage_rd *rd, byte *name, size_t namesz,
-		bool *p_reserved, uint32_t *p_idx)
-{
-	*p_reserved = true;
-
-	if (rd->ns->single_bin) {
-		return as_bin_inuse_has(rd) ? rd->bins : NULL;
-	}
-
-	char zname[namesz + 1];
-
-	memcpy(zname, name, namesz);
-	zname[namesz] = 0;
-
-	if (cf_vmapx_get_index(rd->ns->p_bin_name_vmap, zname, p_idx) != CF_VMAPX_OK) {
-		if (cf_vmapx_count(rd->ns->p_bin_name_vmap) >= BIN_NAMES_QUOTA) {
-			cf_warning(AS_BIN, "{%s} bin-name quota full - can't add new bin-name %s", rd->ns->name, zname);
-			*p_reserved = false;
-		}
-		else {
-			cf_vmapx_err result = cf_vmapx_put_unique(rd->ns->p_bin_name_vmap, zname, p_idx);
-
-			if (! (result == CF_VMAPX_OK || result == CF_VMAPX_ERR_NAME_EXISTS)) {
-				cf_warning(AS_BIN, "{%s} can't add new bin name %s, vmap err %d", rd->ns->name, zname, result);
-				*p_reserved = false;
-			}
-		}
-
-		return NULL;
-	}
-
-	for (uint16_t i = 0; i < rd->n_bins; i++) {
-		as_bin *b = &rd->bins[i];
-
-		if (! as_bin_inuse(b)) {
-			break;
-		}
-
-		if ((uint32_t)b->id == *p_idx) {
 			return b;
 		}
 	}
@@ -528,7 +446,7 @@ as_bin_allocate_bin_space(as_record *r, as_storage_rd *rd, int32_t delta) {
 void
 as_bin_destroy(as_storage_rd *rd, uint16_t i)
 {
-	as_particle_destroy(&rd->bins[i], rd->ns->storage_data_in_memory);
+	as_bin_particle_destroy(&rd->bins[i], rd->ns->storage_data_in_memory);
 	as_bin_set_empty_shift(rd, i);
 }
 
@@ -540,7 +458,7 @@ as_bin_destroy_from(as_storage_rd *rd, uint16_t from)
 			break;
 		}
 
-		as_particle_destroy(&rd->bins[i], rd->ns->storage_data_in_memory);
+		as_bin_particle_destroy(&rd->bins[i], rd->ns->storage_data_in_memory);
 	}
 
 	as_bin_set_empty_from(rd, from);

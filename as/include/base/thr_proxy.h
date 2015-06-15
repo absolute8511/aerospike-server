@@ -29,6 +29,7 @@
 
 #include <stdint.h>
 
+#include "dynbuf.h"
 #include "msg.h"
 #include "util.h"
 
@@ -44,6 +45,7 @@ extern int as_proxy_send_response(cf_node dst, msg *m, uint32_t result_code,
 		uint32_t generation, uint32_t void_time, as_msg_op **ops, as_bin **bins,
 		uint16_t bin_count, as_namespace *ns, uint64_t trid,
 		const char *setname);
+extern int as_proxy_send_ops_response(cf_node dst, msg *m, cf_dyn_buf *db);
 extern int as_proxy_send_redirect(cf_node dst, msg *m, cf_node rdst);
 
 // Get a rough estimate of the in progress size for statistics.
