@@ -462,10 +462,10 @@ process_transaction(as_transaction *tr)
 				if (! as_security_check_data_op(tr, &msgp->msg, ns, PERM_READ)) {
 					goto Cleanup;
 				}
-				if (0 != as_batch(tr)) {
-					cf_info(AS_TSVC, "error from batch function");
-					as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
-					cf_atomic_int_incr(&g_config.batch_errors);
+				rv = as_batch_direct_queue_task(tr);
+				if (rv != 0) {
+					as_transaction_error(tr, rv);
+					cf_atomic_int_incr(&g_config.batch_direct_errors);
 				}
 			} else if (rv == -4) {
 				cf_info(AS_TSVC, "bailed due to bad protocol. Returning failure to client");
@@ -790,8 +790,8 @@ process_transaction(as_transaction *tr)
 	cf_detail(AS_TSVC, "message service complete tr %p", tr);
 
 Cleanup:
-
-	if (free_msgp) {
+	// Batch transactions should never free msgp.
+	if (free_msgp && !tr->batch_shared) {
 		cf_free(msgp);
 	}
 } // end process_transaction()

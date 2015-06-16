@@ -56,6 +56,7 @@
 #include "ai_btree.h"
 
 #include "base/asm.h"
+#include "base/batch.h"
 #include "base/datamodel.h"
 #include "base/thr_batch.h"
 #include "base/thr_proxy.h"
@@ -531,13 +532,26 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";batch_initiate=");
 	APPEND_STAT_COUNTER(db, g_config.batch_initiate);
 	cf_dyn_buf_append_string(db, ";batch_queue=");
-	cf_dyn_buf_append_int(db, as_batch_queue_size());
-	cf_dyn_buf_append_string(db, ";batch_tree_count=");
-	APPEND_STAT_COUNTER(db, g_config.batch_tree_count);
+	as_batch_queues_info(db);
+	cf_dyn_buf_append_string(db, ";batch_complete=");
+	APPEND_STAT_COUNTER(db, g_config.batch_complete);
 	cf_dyn_buf_append_string(db, ";batch_timeout=");
 	APPEND_STAT_COUNTER(db, g_config.batch_timeout);
 	cf_dyn_buf_append_string(db, ";batch_errors=");
 	APPEND_STAT_COUNTER(db, g_config.batch_errors);
+	cf_dyn_buf_append_string(db, ";batch_unused_buffers=");
+	cf_dyn_buf_append_int(db, as_batch_unused_buffers());
+
+	cf_dyn_buf_append_string(db, ";batch_direct_initiate=");
+	APPEND_STAT_COUNTER(db, g_config.batch_direct_initiate);
+	cf_dyn_buf_append_string(db, ";batch_direct_queue=");
+	cf_dyn_buf_append_int(db, as_batch_direct_queue_size());
+	cf_dyn_buf_append_string(db, ";batch_direct_tree_count=");
+	APPEND_STAT_COUNTER(db, g_config.batch_direct_tree_count);
+	cf_dyn_buf_append_string(db, ";batch_direct_timeout=");
+	APPEND_STAT_COUNTER(db, g_config.batch_direct_timeout);
+	cf_dyn_buf_append_string(db, ";batch_direct_errors=");
+	APPEND_STAT_COUNTER(db, g_config.batch_direct_errors);
 
 	cf_dyn_buf_append_string(db, ";info_queue=");
 	cf_dyn_buf_append_int(db, as_info_queue_get_size());
@@ -2077,10 +2091,16 @@ info_service_config_get(cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";batch-threads=");
 	cf_dyn_buf_append_int(db, g_config.n_batch_threads);
+	cf_dyn_buf_append_string(db, ";batch-direct-threads=");
+	cf_dyn_buf_append_int(db, g_config.n_batch_direct_threads);
 	cf_dyn_buf_append_string(db, ";batch-max-requests=");
-	cf_dyn_buf_append_int(db, g_config.batch_max_requests);
+	cf_dyn_buf_append_uint32(db, g_config.batch_max_requests);
+	cf_dyn_buf_append_string(db, ";batch-max-buffers-per-queue=");
+	cf_dyn_buf_append_uint32(db, g_config.batch_max_buffers_per_queue);
+	cf_dyn_buf_append_string(db, ";batch-max-unused-buffers=");
+	cf_dyn_buf_append_uint32(db, g_config.batch_max_unused_buffers);
 	cf_dyn_buf_append_string(db, ";batch-priority=");
-	cf_dyn_buf_append_int(db, g_config.batch_priority);
+	cf_dyn_buf_append_uint32(db, g_config.batch_priority);
 
 	cf_dyn_buf_append_string(db, ";nsup-delete-sleep=");
 	cf_dyn_buf_append_int(db, g_config.nsup_delete_sleep);
@@ -2708,11 +2728,35 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of scan-sleep from %d to %d ", g_config.scan_sleep, val);
 			g_config.scan_sleep = val;
 		}
+		else if (0 == as_info_parameter_get(params, "batch-threads", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val))
+				goto Error;
+			if (0 != as_batch_threads_resize(val))
+				goto Error;
+		}
+		else if (0 == as_info_parameter_get(params, "batch-direct-threads", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val))
+				goto Error;
+			if (0 != as_batch_direct_threads_resize(val))
+				goto Error;
+		}
 		else if (0 == as_info_parameter_get(params, "batch-max-requests", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
 				goto Error;
 			cf_info(AS_INFO, "Changing value of batch-max-requests from %d to %d ", g_config.batch_max_requests, val);
 			g_config.batch_max_requests = val;
+		}
+		else if (0 == as_info_parameter_get(params, "batch-max-buffers-per-queue", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val))
+				goto Error;
+			cf_info(AS_INFO, "Changing value of batch-max-buffers-per-queue from %d to %d ", g_config.batch_max_buffers_per_queue, val);
+			g_config.batch_max_buffers_per_queue = val;
+		}
+		else if (0 == as_info_parameter_get(params, "batch-max-unused-buffers", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val))
+				goto Error;
+			cf_info(AS_INFO, "Changing value of batch-max-unused-buffers from %d to %d ", g_config.batch_max_unused_buffers, val);
+			g_config.batch_max_unused_buffers = val;
 		}
 		else if (0 == as_info_parameter_get(params, "batch-priority", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
@@ -4817,8 +4861,8 @@ info_debug_ticker_fn(void *gcc_is_ass)
 					cf_atomic_int_get(g_config.err_sync_copy_null_master)
 					);
 
-			cf_info(AS_INFO, "   trans_in_progress: wr %d prox %d wait %d ::: q %d ::: bq %d ::: iq %d ::: dq %d : fds - proto (%d, %"PRIu64", %"PRIu64") : hb (%d, %"PRIu64", %"PRIu64") : fab (%d, %"PRIu64", %"PRIu64")",
-					as_write_inprogress(), as_proxy_inprogress(), g_config.n_waiting_transactions, thr_tsvc_queue_get_size(), as_batch_queue_size(), as_info_queue_get_size(), as_nsup_queue_get_size(),
+			cf_info(AS_INFO, "   trans_in_progress: wr %d prox %d wait %d ::: q %d ::: iq %d ::: dq %d : fds - proto (%d, %"PRIu64", %"PRIu64") : hb (%d, %"PRIu64", %"PRIu64") : fab (%d, %"PRIu64", %"PRIu64")",
+					as_write_inprogress(), as_proxy_inprogress(), g_config.n_waiting_transactions, thr_tsvc_queue_get_size(), as_info_queue_get_size(), as_nsup_queue_get_size(),
 					g_config.proto_connections_opened - g_config.proto_connections_closed,
 					g_config.proto_connections_opened, g_config.proto_connections_closed,
 					g_config.heartbeat_connections_opened - g_config.heartbeat_connections_closed,
@@ -4830,10 +4874,9 @@ info_debug_ticker_fn(void *gcc_is_ass)
 			cf_info(AS_INFO, "   heartbeat_received: self %lu : foreign %lu", g_config.heartbeat_received_self, g_config.heartbeat_received_foreign);
 			cf_info(AS_INFO, "   heartbeat_stats: %s", as_hb_stats(false));
 
-			cf_info(AS_INFO, "   tree_counts: nsup %"PRIu64" scan %"PRIu64" batch %"PRIu64" dup %"PRIu64" wprocess %"PRIu64" migrx %"PRIu64" migtx %"PRIu64" ssdr %"PRIu64" ssdw %"PRIu64" rw %"PRIu64"",
+			cf_info(AS_INFO, "   tree_counts: nsup %"PRIu64" scan %"PRIu64" dup %"PRIu64" wprocess %"PRIu64" migrx %"PRIu64" migtx %"PRIu64" ssdr %"PRIu64" ssdw %"PRIu64" rw %"PRIu64"",
 					cf_atomic_int_get(g_config.nsup_tree_count),
 					cf_atomic_int_get(g_config.scan_tree_count),
-					cf_atomic_int_get(g_config.batch_tree_count),
 					cf_atomic_int_get(g_config.dup_tree_count),
 					cf_atomic_int_get(g_config.wprocess_tree_count),
 					cf_atomic_int_get(g_config.migrx_tree_count),
@@ -4965,8 +5008,10 @@ info_debug_ticker_fn(void *gcc_is_ass)
 					histogram_dump(g_config.wt_resolve_wait_hist);
 				if (g_config.error_hist)
 					histogram_dump(g_config.error_hist);
-				if (g_config.batch_q_process_hist)
-					histogram_dump(g_config.batch_q_process_hist);
+				if (g_config.batch_read_hist)
+					histogram_dump(g_config.batch_read_hist);
+				if (g_config.batch_direct_read_hist)
+					histogram_dump(g_config.batch_direct_read_hist);
 				if (g_config.info_tr_q_process_hist)
 					histogram_dump(g_config.info_tr_q_process_hist);
 				if (g_config.info_q_wait_hist)
@@ -6203,7 +6248,8 @@ clear_microbenchmark_histograms()
 	histogram_clear(g_config.rt_resolve_wait_hist);
 	histogram_clear(g_config.wt_resolve_wait_hist);
 	histogram_clear(g_config.error_hist);
-	histogram_clear(g_config.batch_q_process_hist);
+	histogram_clear(g_config.batch_read_hist);
+	histogram_clear(g_config.batch_direct_read_hist);
 	histogram_clear(g_config.info_tr_q_process_hist);
 	histogram_clear(g_config.info_q_wait_hist);
 	histogram_clear(g_config.info_post_lock_hist);
@@ -7079,7 +7125,7 @@ as_info_init()
 	as_info_set("node", istr, true);                     // Node ID. Unique 15 character hex string for each node based on the mac address and port.
 	as_info_set("name", istr, false);                    // Alias to 'node'.
 	// Returns list of features supported by this server
-	as_info_set("features", "replicas-all;replicas-master;replicas-prole;udf", true);
+	as_info_set("features", "batch-index;replicas-all;replicas-master;replicas-prole;udf", true);
 	if (g_config.hb_mode == AS_HB_MODE_MCAST) {
 		sprintf(istr, "%s:%d", g_config.hb_addr, g_config.hb_port);
 		as_info_set("mcast", istr, false);               // Returns the multicast heartbeat address and port used by this server. Only available in multicast heartbeat mode.

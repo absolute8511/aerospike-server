@@ -38,6 +38,7 @@
 
 #include "fault.h"
 
+#include "base/batch.h"
 #include "base/datamodel.h"
 #include "base/proto.h"
 #include "base/security.h"
@@ -99,6 +100,8 @@ as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
 
 	tr->incoming_cluster_key      = 0;
 	UREQ_DATA_INIT(&tr->udata);
+	tr->batch_shared              = 0;
+	tr->batch_index               = 0;
 }
 
 /*
@@ -334,6 +337,8 @@ as_transaction_create( as_transaction *tr, tr_create_data *  trc_data)
 	AS_PARTITION_RESERVATION_INIT(tr->rsv);
 	tr->result_code  = AS_PROTO_RESULT_OK;
 	UREQ_DATA_INIT(&tr->udata);
+	tr->batch_shared = 0;
+	tr->batch_index = 0;
 	return 0;
 }
 
@@ -341,10 +346,17 @@ void
 as_transaction_error(as_transaction* tr, uint32_t error_code)
 {
 	if (tr->proto_fd_h) {
-		as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL);
-		tr->proto_fd_h = 0;
-		MICROBENCHMARK_HIST_INSERT_P(error_hist);
-		cf_atomic_int_incr(&g_config.err_tsvc_requests);
+		if (tr->batch_shared) {
+			as_batch_add_error(tr->batch_shared, tr->batch_index, error_code);
+			// Clear this transaction's msgp so calling code does not free it.
+			tr->msgp = 0;
+		}
+		else {
+			as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL);
+			tr->proto_fd_h = 0;
+			MICROBENCHMARK_HIST_INSERT_P(error_hist);
+			cf_atomic_int_incr(&g_config.err_tsvc_requests);
+		}
 	}
 }
 
