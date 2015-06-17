@@ -392,7 +392,7 @@ as_batch_find_queue(int queue_index)
 	for (int index = queue_index - 1; index >= 0; index--) {
 		as_batch_queue* bq = &batch_queues[queue_index];
 
-		if (bq->active && CF_Q_SZ(bq->response_queue) <= g_config.batch_max_buffers_per_queue) {
+		if (bq->active && cf_queue_sz(bq->response_queue) <= g_config.batch_max_buffers_per_queue) {
 			return bq;
 		}
 	}
@@ -406,7 +406,7 @@ as_batch_find_queue(int queue_index)
 			break;
 		}
 
-		if (CF_Q_SZ(bq->response_queue) <= g_config.batch_max_buffers_per_queue) {
+		if (cf_queue_sz(bq->response_queue) <= g_config.batch_max_buffers_per_queue) {
 			return bq;
 		}
 	}
@@ -677,11 +677,10 @@ as_batch_queue_task(as_transaction* btr)
 	// Find batch queue to send transaction responses.
 	as_batch_queue* batch_queue = &batch_queues[queue_index];
 
-	// Do not check queue size under lock for performance reasons.
-	// batch_max_buffers_per_queue is a soft limit.
-	if (! (batch_queue->active && CF_Q_SZ(batch_queue->response_queue) <= g_config.batch_max_buffers_per_queue)) {
+	// batch_max_buffers_per_queue is a soft limit, but still must be checked under lock.
+	if (! (batch_queue->active && cf_queue_sz(batch_queue->response_queue) <= g_config.batch_max_buffers_per_queue)) {
 		// Queue buffer limit has been exceeded or thread has been shutdown (probably due to
-		// downwards thread resize).  Search backwards for an available queue.
+		// downwards thread resize).  Search for an available queue.
 		batch_queue = as_batch_find_queue(queue_index);
 
 		if (! batch_queue) {
@@ -1050,7 +1049,7 @@ as_batch_queues_info(cf_dyn_buf* db)
 		as_batch_queue* bq = &batch_queues[i];
 		cf_dyn_buf_append_uint32(db, bq->count);  // Batch count
 		cf_dyn_buf_append_char(db, ':');
-		cf_dyn_buf_append_uint32(db, CF_Q_SZ(bq->response_queue));  // Buffer count
+		cf_dyn_buf_append_uint32(db, cf_queue_sz(bq->response_queue));  // Buffer count
 	}
 }
 
