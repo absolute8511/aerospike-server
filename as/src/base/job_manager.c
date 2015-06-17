@@ -279,7 +279,7 @@ as_job_init(as_job* _job, const as_job_vtable* vtable,
 		as_job_manager* mgr, as_job_rsv_type rsv_type, uint64_t trid,
 		as_namespace* ns, uint16_t set_id, int priority)
 {
-	memset(_job, 0, sizeof(_job));
+	memset(_job, 0, sizeof(as_job));
 
 	_job->vtable	= *vtable;
 	_job->mgr		= mgr;
