@@ -390,7 +390,7 @@ as_batch_find_queue(int queue_index)
 {
 	// Search backwards for an active queue.
 	for (int index = queue_index - 1; index >= 0; index--) {
-		as_batch_queue* bq = &batch_queues[queue_index];
+		as_batch_queue* bq = &batch_queues[index];
 
 		if (bq->active && cf_queue_sz(bq->response_queue) <= g_config.batch_max_buffers_per_queue) {
 			return bq;
@@ -399,7 +399,7 @@ as_batch_find_queue(int queue_index)
 	
 	// Search forwards.
 	for (int index = queue_index + 1; index < MAX_BATCH_THREADS; index++) {
-		as_batch_queue* bq = &batch_queues[queue_index];
+		as_batch_queue* bq = &batch_queues[index];
 		
 		// If current queue is not active, future queues will not be active either.
 		if (! bq->active) {
@@ -681,6 +681,7 @@ as_batch_queue_task(as_transaction* btr)
 	if (! (batch_queue->active && cf_queue_sz(batch_queue->response_queue) <= g_config.batch_max_buffers_per_queue)) {
 		// Queue buffer limit has been exceeded or thread has been shutdown (probably due to
 		// downwards thread resize).  Search for an available queue.
+		// cf_warning(AS_BATCH, "Queue %u full %d", queue_index, cf_queue_sz(batch_queue->response_queue));
 		batch_queue = as_batch_find_queue(queue_index);
 
 		if (! batch_queue) {
@@ -1049,7 +1050,7 @@ as_batch_queues_info(cf_dyn_buf* db)
 		as_batch_queue* bq = &batch_queues[i];
 		cf_dyn_buf_append_uint32(db, bq->count);  // Batch count
 		cf_dyn_buf_append_char(db, ':');
-		cf_dyn_buf_append_uint32(db, cf_queue_sz(bq->response_queue));  // Buffer count
+		cf_dyn_buf_append_int(db, cf_queue_sz(bq->response_queue));  // Buffer count
 	}
 }
 
