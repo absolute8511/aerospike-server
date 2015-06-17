@@ -807,7 +807,7 @@ extern cf_node as_partition_getreplica_write(as_namespace *ns, as_partition_id p
 
 // reserve_qnode - *consumes* the ns reservation if success
 extern int as_partition_reserve_qnode(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv);
-extern void as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_partition_reservation rsv[]);
+extern uint32_t as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_partition_reservation rsv[]);
 // reserve_write - *consumes* the ns reservation if success
 extern int as_partition_reserve_write(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv, cf_node *node, uint64_t *cluster_key);
 // reserve_migrate - *consumes* the ns reservation if success
