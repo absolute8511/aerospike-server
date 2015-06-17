@@ -167,6 +167,8 @@ typedef struct udf_request_data {
 // Set if this transaction has touched secondary index
 #define AS_TRANSACTION_FLAG_SINDEX_TOUCHED  0x0010
 
+struct as_batch_shared;
+
 /* as_transaction
  * The basic unit of work
  *
@@ -227,6 +229,10 @@ typedef struct as_transaction_s {
 	/* incoming cluster key passed in a proxy request */
 	uint64_t          incoming_cluster_key;
 
+	// Batch
+	struct as_batch_shared* batch_shared;
+	uint32_t batch_index;
+	
 	// RESPONSE RESPONSE RESPONSE
 
 } as_transaction;

@@ -55,6 +55,7 @@
 
 #include "jem.h"
 
+#include "base/batch.h"
 #include "base/datamodel.h"
 #include "base/ldt.h"
 #include "base/rec_props.h"
@@ -246,6 +247,8 @@ write_request_create(void) {
 	UREQ_DATA_INIT(&wr->udata);
 	memset((void *) & (wr->dup_msg[0]), 0, sizeof(wr->dup_msg));
 
+	wr->batch_shared = 0;
+	wr->batch_index = 0;
 	return (wr);
 }
 
@@ -281,6 +284,8 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	UREQ_DATA_COPY(&tr->udata, &wr->udata);
 	UREQ_DATA_RESET(&wr->udata);
 	tr->microbenchmark_time = wr->microbenchmark_time;
+	tr->batch_shared = wr->batch_shared;
+	tr->batch_index = wr->batch_index;
 
 #if 0
 	if (wr->is_read) {
@@ -1232,6 +1237,9 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 	//   unless the corresponding server's namespace override is enabled.
 	wr->read_consistency_level = TRANSACTION_CONSISTENCY_LEVEL(tr);
 	wr->write_commit_level = TRANSACTION_COMMIT_LEVEL(tr);
+	
+	wr->batch_shared = tr->batch_shared;
+	wr->batch_index = tr->batch_index;
 
 	// Fetching the write_request out of the hash table
 	global_keyd gk;
@@ -1314,6 +1322,8 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			e->tr.preprocessed = true;
 			e->tr.flag = 0;
 			UREQ_DATA_COPY(&e->tr.udata, &tr->udata);
+			e->tr.batch_shared = tr->batch_shared;
+			e->tr.batch_index = tr->batch_index;
 
 			// add this transactions to the queue
 			e->next = wr2->wait_queue_head;
@@ -2082,6 +2092,10 @@ rw_complete(write_request *wr, as_transaction *tr, as_index_ref *r_ref)
 	}
 	else {
 		read_local(tr, r_ref);
+
+		if (wr && (m->info1 & AS_MSG_INFO1_BATCH)) {
+			wr->msgp = NULL;
+		}
 	}
 
 	if (tr->proto_fd_h != 0) {
@@ -5558,9 +5572,14 @@ rw_retransmit_reduce_fn(void *key, uint32_t keylen, void *data, void *udata)
 				AS_RELEASE_FILE_HANDLE(tr.proto_fd_h);
 			}
 		} else {
-			if (wr->proto_fd_h) {
-				release_proto_fd_h(wr->proto_fd_h);
-				wr->proto_fd_h = 0;
+			if (wr->batch_shared) {
+				as_batch_add_error(wr->batch_shared, wr->batch_index, AS_PROTO_RESULT_FAIL_TIMEOUT);
+			}
+			else {
+				if (wr->proto_fd_h) {
+					release_proto_fd_h(wr->proto_fd_h);
+					wr->proto_fd_h = 0;
+				}
 			}
 		}
 		pthread_mutex_unlock(&wr->lock);
@@ -5900,11 +5919,17 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 	cf_detail_digest(AS_RW, NULL, "[ENTER] NS(%s)", ns->name );
 
 	if (tr->proto_fd_h) {
-		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-				generation, void_time, ops, response_bins, n_bins, ns,
-				written_sz, tr->trid, setname)) {
-			cf_info(AS_RW, "rw: can't send reply, fd %d rc %d",
-					tr->proto_fd_h->fd, tr->result_code);
+		if (tr->batch_shared) {
+			as_batch_add_result(tr, ns, setname, generation, void_time, 
+				n_bins, response_bins, ops);
+		}
+		else {
+			if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
+					generation, void_time, ops, response_bins, n_bins, ns,
+					written_sz, tr->trid, setname)) {
+				cf_info(AS_RW, "rw: can't send reply, fd %d rc %d",
+						tr->proto_fd_h->fd, tr->result_code);
+			}
 		}
 		tr->proto_fd_h = 0;
 	} else if (tr->proxy_msg) {

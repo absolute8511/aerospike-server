@@ -8,7 +8,7 @@ ifeq ($(USE_EE),1)
   include $(EEREPO)/as/make_in/Makefile.vars
 endif
 
-BASE_HEADERS += aggr.h asm.h cfg.h cluster_config.h datamodel.h feature.h index.h job_manager.h json_init.h
+BASE_HEADERS += aggr.h asm.h batch.h cfg.h cluster_config.h datamodel.h feature.h index.h job_manager.h json_init.h
 BASE_HEADERS += ldt.h ldt_aerospike.h ldt_record.h monitor.h packet_compression.h
 BASE_HEADERS += proto.h rec_props.h scan.h secondary_index.h security.h security_config.h system_metadata.h
 BASE_HEADERS += thr_batch.h thr_info.h thr_proxy.h thr_rw_internal.h thr_sindex.h
@@ -17,7 +17,7 @@ BASE_HEADERS += udf_aerospike.h udf_arglist.h udf_cask.h
 BASE_HEADERS += udf_memtracker.h udf_record.h udf_rw.h udf_timer.h
 BASE_HEADERS += write_request.h xdr_serverside.h
 
-BASE_SOURCES += aggr.c as.c asm.c bin.c cfg.c cluster_config.c index.c job_manager.c json_init.c
+BASE_SOURCES += aggr.c as.c asm.c batch.c bin.c cfg.c cluster_config.c index.c job_manager.c json_init.c
 BASE_SOURCES += ldt.c ldt_record.c ldt_aerospike.c monitor.c namespace.c packet_compression.c
 BASE_SOURCES += particle.c proto.c rec_props.c record.c scan.c signal.c secondary_index.c system_metadata.c
 BASE_SOURCES += thr_batch.c thr_demarshal.c thr_info.c thr_info_port.c thr_nsup.c thr_proxy.c
