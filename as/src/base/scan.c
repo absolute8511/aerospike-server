@@ -124,7 +124,7 @@ typedef struct scan_options_s {
 int get_scan_ns(as_msg* m, as_namespace** p_ns);
 int get_scan_set_id(as_msg* m, as_namespace* ns, uint16_t* p_set_id);
 scan_type get_scan_type(as_transaction* tr);
-void get_scan_options(as_msg* m, scan_options* options);
+bool get_scan_options(as_msg* m, scan_options* options);
 void set_blocking(int fd, bool block);
 size_t send_blocking_response_chunk(int fd, uint8_t* buf, size_t size);
 size_t send_blocking_response_fin(int fd, int result_code);
@@ -164,8 +164,6 @@ as_scan_init()
 int
 as_scan(as_transaction *tr)
 {
-	cf_info(AS_SCAN, "scan job received");
-
 	int result;
 	as_namespace* ns = NULL;
 	uint16_t set_id = INVALID_SET_ID;
@@ -176,29 +174,31 @@ as_scan(as_transaction *tr)
 		return result;
 	}
 
-	as_job* job = NULL;
+	as_job* _job = NULL;
 
 	switch (get_scan_type(tr)) {
 	case SCAN_TYPE_BASIC:
-		job = (as_job*)basic_scan_job_create(tr, ns, set_id);
+		_job = (as_job*)basic_scan_job_create(tr, ns, set_id);
 		break;
 	case SCAN_TYPE_AGGR:
-		job = (as_job*)aggr_scan_job_create(tr, ns, set_id);
+		_job = (as_job*)aggr_scan_job_create(tr, ns, set_id);
 		break;
 	case SCAN_TYPE_UDF_BG:
-		job = (as_job*)udf_bg_scan_job_create(tr, ns, set_id);
+		_job = (as_job*)udf_bg_scan_job_create(tr, ns, set_id);
 		break;
 	default:
+		cf_warning(AS_SCAN, "can't identify scan type");
 		break;
 	}
 
-	if (! job) {
+	if (! _job) {
 		cf_free(tr->msgp);
 		return tr->result_code;
 	}
 
-	if ((result = as_job_manager_start_job(&g_scan_manager, job)) != 0) {
-		as_job_destroy(job);
+	if ((result = as_job_manager_start_job(&g_scan_manager, _job)) != 0) {
+		cf_warning(AS_SCAN, "scan job %lu failed to start (%d)", _job->trid, result);
+		as_job_destroy(_job);
 	}
 
 	return result;
@@ -270,12 +270,14 @@ get_scan_ns(as_msg* m, as_namespace** p_ns)
 	as_msg_field *f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_NAMESPACE);
 
 	if (! f) {
+		cf_warning(AS_SCAN, "scan msg has no namespace");
 		return AS_PROTO_RESULT_FAIL_NAMESPACE;
 	}
 
 	as_namespace* ns = as_namespace_get_bymsgfield(f);
 
 	if (! ns) {
+		cf_warning(AS_SCAN, "scan msg has unrecognized namespace");
 		return AS_PROTO_RESULT_FAIL_NAMESPACE;
 	}
 
@@ -299,6 +301,7 @@ get_scan_set_id(as_msg* m, as_namespace* ns, uint16_t* p_set_id)
 		set_id = as_namespace_get_set_id(ns, set_name);
 
 		if (set_id == INVALID_SET_ID) {
+			cf_warning(AS_SCAN, "scan msg has unrecognized set %s", set_name);
 			return AS_PROTO_RESULT_FAIL_NOTFOUND;
 		}
 	}
@@ -330,16 +333,23 @@ get_scan_type(as_transaction* tr)
 	return SCAN_TYPE_UNKNOWN;
 }
 
-void
+bool
 get_scan_options(as_msg* m, scan_options* options)
 {
 	as_msg_field *f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SCAN_OPTIONS);
 
 	if (f) {
+		if (as_msg_field_get_value_sz(f) != 2) {
+			cf_warning(AS_SCAN, "scan msg options field size not 2");
+			return false;
+		}
+
 		options->priority = AS_MSG_FIELD_SCAN_PRIORITY(f->data[0]);
 		options->fail_on_cluster_change = (AS_MSG_FIELD_SCAN_FAIL_ON_CLUSTER_CHANGE & f->data[0]) != 0;
 		options->sample_pct = f->data[1];
 	}
+
+	return true;
 }
 
 void
@@ -373,12 +383,12 @@ send_blocking_response_chunk(int fd, uint8_t* buf, size_t size)
 	int rv = send(fd, (uint8_t*)&proto, sizeof(as_proto), MSG_NOSIGNAL | MSG_MORE);
 
 	if (rv != sizeof(as_proto)) {
-		// TODO - warning
+		cf_warning(AS_SCAN, "send error - fd %d rv %d %s", fd, rv, rv < 0 ? cf_strerror(errno) : "");
 		return 0;
 	}
 
 	if ((rv = send(fd, buf, size, MSG_NOSIGNAL)) != size) {
-		// TODO - warning
+		cf_warning(AS_SCAN, "send error - fd %d sz %lu rv %d %s", fd, size, rv, rv < 0 ? cf_strerror(errno) : "");
 		return 0;
 	}
 
@@ -411,7 +421,7 @@ send_blocking_response_fin(int fd, int result_code)
 	int rv = send(fd, (uint8_t*)&m, sizeof(cl_msg), MSG_NOSIGNAL);
 
 	if (rv != sizeof(cl_msg)) {
-		// TODO - warning
+		cf_warning(AS_SCAN, "send error - fd %d rv %d %s", fd, rv, rv < 0 ? cf_strerror(errno) : "");
 		return 0;
 	}
 
@@ -568,17 +578,24 @@ basic_scan_job*
 basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 {
 	basic_scan_job* job = cf_malloc(sizeof(basic_scan_job));
+	as_job* _job = (as_job*)job;
 
 	if (! job) {
+		cf_warning(AS_SCAN, "basic scan job failed alloc");
 		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		return NULL;
 	}
 
 	scan_options options = { 0, false, 100 };
-	get_scan_options(&tr->msgp->msg, &options);
 
-	as_job_init((as_job*)job, &basic_scan_job_vtable, &g_scan_manager,
-			RSV_WRITE, tr->trid, ns, set_id, options.priority);
+	if (! get_scan_options(&tr->msgp->msg, &options)) {
+		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
+		cf_free(job);
+		return NULL;
+	}
+
+	as_job_init(_job, &basic_scan_job_vtable, &g_scan_manager, RSV_WRITE,
+			tr->trid, ns, set_id, options.priority);
 
 	job->cluster_key = as_paxos_get_cluster_key();
 	job->fail_on_cluster_change = options.fail_on_cluster_change;
@@ -587,15 +604,16 @@ basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	job->bin_names = bin_names_from_op(&tr->msgp->msg, &tr->result_code);
 
 	if (! job->bin_names && tr->result_code != AS_PROTO_RESULT_OK) {
-		as_job_destroy((as_job*)job);
+		as_job_destroy(_job);
 		return NULL;
 	}
 
 	// TODO - detect migrations more rigorously!
-	if (options.fail_on_cluster_change && cf_atomic_int_get(g_config.migrate_progress_send) != 0) {
+	if (job->fail_on_cluster_change && cf_atomic_int_get(g_config.migrate_progress_send) != 0) {
 		// TODO - was AS_PROTO_RESULT_FAIL_UNAVAILABLE - ok?
+		cf_warning(AS_SCAN, "basic scan job not started - migration");
 		tr->result_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
-		as_job_destroy((as_job*)job);
+		as_job_destroy(_job);
 		return NULL;
 	}
 
@@ -603,6 +621,12 @@ basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 
 	// Normal scans don't need anything in the message beyond here.
 	cf_free(tr->msgp);
+
+	cf_info(AS_SCAN, "starting basic scan job %lu {%s:%s} priority %u, sample-pct %u%s%s",
+			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
+			_job->priority, job->sample_pct,
+			job->metadata_only ? ", metadata-only" : "",
+			job->fail_on_cluster_change ? ", fail-on-cluster-change" : "");
 
 	return job;
 }
@@ -645,6 +669,8 @@ void
 basic_scan_job_finish(as_job* _job)
 {
 	conn_scan_job_finish((conn_scan_job*)_job);
+
+	cf_info(AS_SCAN, "finished basic scan job %lu (%d)", _job->trid, _job->abandoned);
 }
 
 void
@@ -755,6 +781,7 @@ bin_names_from_op(as_msg* m, int* result)
 
 	while ((op = as_msg_op_iterate(m, op, &n)) != NULL) {
 		if (op->name_sz >= AS_ID_BIN_SZ) {
+			cf_warning(AS_SCAN, "basic scan job bin name too long");
 			*result = AS_PROTO_RESULT_FAIL_BIN_NAME;
 			cf_vector_destroy(v);
 			return NULL;
@@ -844,20 +871,28 @@ aggr_scan_job*
 aggr_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 {
 	aggr_scan_job* job = cf_malloc(sizeof(aggr_scan_job));
+	as_job* _job = (as_job*)job;
 
 	if (! job) {
+		cf_warning(AS_SCAN, "aggregation scan job failed alloc");
 		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		return NULL;
 	}
 
 	scan_options options = { 0, false, 100 };
-	get_scan_options(&tr->msgp->msg, &options);
 
-	as_job_init((as_job*)job, &aggr_scan_job_vtable, &g_scan_manager,
-			RSV_WRITE, tr->trid, ns, set_id, options.priority);
+	if (! get_scan_options(&tr->msgp->msg, &options)) {
+		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
+		cf_free(job);
+		return NULL;
+	}
+
+	as_job_init(_job, &aggr_scan_job_vtable, &g_scan_manager, RSV_WRITE,
+			tr->trid, ns, set_id, options.priority);
 
 	if (as_aggr_call_init(&job->aggr_call, tr, job, &aggr_scan_caller_qintf,
 			&aggr_scan_istream_hooks, &aggr_scan_ostream_hooks, ns, true) != 0) {
+		cf_warning(AS_SCAN, "aggregation scan job failed call init");
 		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
 		return NULL;
 	}
@@ -865,6 +900,10 @@ aggr_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	conn_scan_job_init((conn_scan_job*)job, tr);
 
 	job->msgp = tr->msgp;
+
+	cf_info(AS_SCAN, "starting aggregation scan job %lu {%s:%s} priority %u",
+			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
+			_job->priority);
 
 	return job;
 }
@@ -937,6 +976,8 @@ aggr_scan_job_finish(as_job* _job)
 
 	cf_free(job->msgp);
 	job->msgp = NULL;
+
+	cf_info(AS_SCAN, "finished aggregation scan job %lu (%d)", _job->trid, _job->abandoned);
 }
 
 void
@@ -1156,28 +1197,37 @@ udf_bg_scan_job*
 udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 {
 	udf_bg_scan_job* job = cf_malloc(sizeof(udf_bg_scan_job));
+	as_job* _job = (as_job*)job;
 
 	if (! job) {
+		cf_warning(AS_SCAN, "udf-bg scan job failed alloc");
 		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		return NULL;
 	}
 
 	scan_options options = { 0, false, 100 };
-	get_scan_options(&tr->msgp->msg, &options);
 
-	as_job_init((as_job*)job, &udf_bg_scan_job_vtable, &g_scan_manager,
-			RSV_WRITE, tr->trid, ns, set_id, options.priority);
+	if (! get_scan_options(&tr->msgp->msg, &options)) {
+		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
+		cf_free(job);
+		return NULL;
+	}
+
+	as_job_init(_job, &udf_bg_scan_job_vtable, &g_scan_manager, RSV_WRITE,
+			tr->trid, ns, set_id, options.priority);
 
 	job->n_active_tr = 0;
 	job->n_successful_tr = 0;
 	job->n_failed_tr = 0;
 
 	if (udf_call_init(&job->call, tr) != 0) {
+		cf_warning(AS_SCAN, "udf-bg scan job failed call init");
 		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
 		return NULL;
 	}
 
 	if (as_msg_send_fin(tr->proto_fd_h->fd, AS_PROTO_RESULT_OK) != 0) {
+		cf_warning(AS_SCAN, "udf-bg scan job error sending fin");
 		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		return NULL;
 	}
@@ -1187,6 +1237,10 @@ udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	tr->proto_fd_h = NULL;
 
 	job->msgp = tr->msgp;
+
+	cf_info(AS_SCAN, "starting udf-bg scan job %lu {%s:%s} priority %u",
+			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
+			_job->priority);
 
 	return job;
 }
@@ -1212,6 +1266,8 @@ udf_bg_scan_job_finish(as_job* _job)
 
 	cf_free(job->msgp);
 	job->msgp = NULL;
+
+	cf_info(AS_SCAN, "finished udf-bg scan job %lu (%d)", _job->trid, _job->abandoned);
 }
 
 void
