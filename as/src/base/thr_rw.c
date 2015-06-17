@@ -1323,6 +1323,8 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			e->tr.preprocessed = true;
 			e->tr.flag = 0;
 			UREQ_DATA_COPY(&e->tr.udata, &tr->udata);
+			e->tr.batch_shared = tr->batch_shared;
+			e->tr.batch_index = tr->batch_index;
 
 			// add this transactions to the queue
 			e->next = wr2->wait_queue_head;
