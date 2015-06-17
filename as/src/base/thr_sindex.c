@@ -657,7 +657,7 @@ spop_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
 			RSV_MIGRATE, 0, ns, set_id, AS_JOB_PRIORITY_MEDIUM);
 
 	job->si = si;
-	job->si_desync_cnt = si->desync_cnt;
+	job->si_desync_cnt = si ? si->desync_cnt : 0;
 	job->n_reduced = 0;
 
 	return job;
