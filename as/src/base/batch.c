@@ -715,6 +715,11 @@ as_batch_queue_task(as_transaction* btr)
 	uint32_t tran_row = 0;
 	uint8_t info1;
 	
+	bool allow_inline = (g_config.allow_inline_transactions && g_config.n_namespaces_in_memory != 0 &&
+						tran_count < g_config.batch_max_inline);
+	bool check_inline = (allow_inline && g_config.n_namespaces_not_in_memory != 0);
+	bool should_inline = (allow_inline && g_config.n_namespaces_not_in_memory == 0);
+	
 	while (tran_row < tran_count && data + BATCH_REPEAT_SIZE <= limit) {
 		// Copy transaction data before memory gets overwritten.
 		in = (as_batch_input*)data;
@@ -745,6 +750,10 @@ as_batch_queue_task(as_transaction* btr)
 			data += sizeof(cl_msg);
 			mf = (as_msg_field*)data;
 			as_msg_swap_field(mf);
+			if (check_inline) {
+				as_namespace* ns = as_namespace_get_bymsgfield(mf);
+				should_inline = ns && ns->storage_data_in_memory;
+			}
 			mf = as_msg_field_get_next(mf);
 			data = (uint8_t*)mf;
 			
@@ -780,9 +789,18 @@ as_batch_queue_task(as_transaction* btr)
 		}
 		
 		// Submit transaction.
-		if (thr_tsvc_enqueue(&tr)) {
-			cf_warning(AS_BATCH, "Batch enqueue %u failed", tran_row);
-			as_batch_add_error(tr.batch_shared, tr.batch_index, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		if (should_inline) {
+			// Must copy generic transaction before processing inline.
+			as_transaction tmp;
+			memcpy(&tmp, &tr, sizeof(as_transaction));
+			process_transaction(&tmp);
+		}
+		else {
+			// Queue transaction to be processed by a transaction thread.
+			if (thr_tsvc_enqueue(&tr)) {
+				cf_warning(AS_BATCH, "Batch enqueue %u failed", tr.batch_index);
+				as_batch_add_error(tr.batch_shared, tr.batch_index, AS_PROTO_RESULT_FAIL_UNKNOWN);
+			}
 		}
 		tran_row++;
 	}
