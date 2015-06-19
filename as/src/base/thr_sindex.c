@@ -504,16 +504,16 @@ as_sindex_thr_init()
 
 	g_sindex_populate_q = cf_queue_create(sizeof(as_sindex *), true);
 	if (0 != pthread_create(&g_sindex_populate_th, 0, as_sindex__populate_fn, 0)) {
-		cf_crash(AS_INDEX, " Could not create sindex populate thread ");
+		cf_crash(AS_SINDEX, " Could not create sindex populate thread ");
 	}
 
 	g_sindex_destroy_q = cf_queue_create(sizeof(as_sindex *), true);
 	if (0 != pthread_create(&g_sindex_destroy_th, 0, as_sindex__destroy_fn, 0)) {
-		cf_crash(AS_INDEX, " Could not create sindex destroy thread ");
+		cf_crash(AS_SINDEX, " Could not create sindex destroy thread ");
 	}
 
 	if (0 != pthread_create(&g_sindex_defrag_th, 0, as_sindex__defrag_fn, 0)) {
-		cf_crash(AS_INDEX, " Could not create sindex defrag thread ");
+		cf_crash(AS_SINDEX, " Could not create sindex defrag thread ");
 	}
 
 	g_sindex_populateall_done_q = cf_queue_create(sizeof(int), true);
@@ -555,11 +555,10 @@ static as_job_manager g_spop_manager;
 void
 as_spop_init()
 {
-	// TODO - check for failure and cf_crash?
 	// TODO - config for max counts?
 	// Initialize with maximum threads since first use is always populate-all at
 	// startup. The thread pool will be down-sized right after that.
-	as_job_manager_init(&g_spop_manager, MAX_POPULATOR_THREADS, 100, 100);
+	as_job_manager_init(&g_spop_manager, 100, 100, MAX_POPULATOR_THREADS);
 }
 
 int
@@ -578,7 +577,7 @@ as_spop_populate(as_sindex* si)
 	uint16_t set_id = INVALID_SET_ID;
 
 	if (imd->set && (set_id = as_namespace_get_set_id(ns, imd->set)) == INVALID_SET_ID) {
-		cf_warning(AS_SCAN, "sindex populate %s ns %s - set %s not found", imd->iname, imd->ns_name, imd->set);
+		cf_warning(AS_SINDEX, "sindex populate %s ns %s - set %s not found", imd->iname, imd->ns_name, imd->set);
 		as_sindex_populate_done(si);
 		AS_SINDEX_RELEASE(si);
 		return -3;
@@ -587,7 +586,7 @@ as_spop_populate(as_sindex* si)
 	spop_job* job = spop_job_create(ns, set_id, si);
 
 	if (! job) {
-		cf_warning(AS_SCAN, "sindex populate %s ns %s set %s - job alloc failed", imd->iname, imd->ns_name, imd->set);
+		cf_warning(AS_SINDEX, "sindex populate %s ns %s set %s - job alloc failed", imd->iname, imd->ns_name, imd->set);
 		as_sindex_populate_done(si);
 		AS_SINDEX_RELEASE(si);
 		return -2;
@@ -605,7 +604,7 @@ as_spop_populate_all(as_namespace* ns)
 	spop_job* job = spop_job_create(ns, INVALID_SET_ID, NULL);
 
 	if (! job) {
-		cf_warning(AS_SCAN, "sindex populate-all ns %s - job alloc failed", ns->name);
+		cf_warning(AS_SINDEX, "sindex populate-all ns %s - job alloc failed", ns->name);
 		return -2;
 	}
 

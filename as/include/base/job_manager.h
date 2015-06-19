@@ -134,17 +134,16 @@ void as_job_active_release(as_job* _job);
 
 typedef struct as_job_manager_s {
 	pthread_mutex_t			lock;
-	as_priority_thread_pool	thread_pool;
 	cf_queue*				active_scans;
 	cf_queue*				finished_scans;
+	as_priority_thread_pool	thread_pool;
 
 	// Manager configuration:
-	uint32_t				n_threads;
 	uint32_t				max_active;
 	uint32_t				max_done;
 } as_job_manager;
 
-void as_job_manager_init(as_job_manager* mgr, uint32_t n_threads, uint32_t max_active, uint32_t max_done);
+void as_job_manager_init(as_job_manager* mgr, uint32_t max_active, uint32_t max_done, uint32_t n_threads);
 int as_job_manager_start_job(as_job_manager* mgr, as_job* _job);
 void as_job_manager_requeue_job(as_job_manager* mgr, as_job* _job);
 void as_job_manager_finish_job(as_job_manager* mgr, as_job* _job);

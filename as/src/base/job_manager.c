@@ -355,7 +355,7 @@ as_job_info(as_job* _job, as_mon_jobstat* stat)
 	stat->trid		= _job->trid;
 	stat->run_time	= active_ms;
 	stat->recs_read	= cf_atomic64_get(_job->n_records_read);
-	stat->priority	= _job->priority; // TODO - flip to proto priority or make them the same!
+	stat->priority	= _job->priority;
 
 	strcpy(stat->ns, _job->ns->name);
 	strcpy(stat->set, as_job_safe_set_name(_job));
@@ -414,7 +414,7 @@ as_job_partition_reserve(as_job* _job, int pid, as_partition_reservation* rsv)
 		as_partition_reserve_migrate(_job->ns, pid++, rsv, NULL);
 	}
 	else {
-		// TODO - what?
+		cf_crash(AS_JOB, "bad job rsv type %d", _job->rsv_type);
 	}
 
 	return pid;
@@ -453,19 +453,26 @@ int as_job_manager_info_cb(void* buf, void* udata);
 //
 
 void
-as_job_manager_init(as_job_manager* mgr, uint32_t n_threads, uint32_t max_active, uint32_t max_done)
+as_job_manager_init(as_job_manager* mgr, uint32_t max_active, uint32_t max_done, uint32_t n_threads)
 {
-	mgr->n_threads	= n_threads;
 	mgr->max_active	= max_active;
 	mgr->max_done	= max_done;
 
-	pthread_mutex_init(&mgr->lock, NULL);
+	if (pthread_mutex_init(&mgr->lock, NULL) != 0) {
+		cf_crash(AS_JOB, "job manager failed mutex init");
+	}
 
-	as_priority_thread_pool_init(&mgr->thread_pool, mgr->n_threads);
+	if (! (mgr->active_scans = cf_queue_create(sizeof(as_job*), false))) {
+		cf_crash(AS_JOB, "job manager failed active scans queue create");
+	}
 
-	// Initialize queues.
-	mgr->active_scans = cf_queue_create(sizeof(as_job*), false);
-	mgr->finished_scans = cf_queue_create(sizeof(as_job*), false);
+	if (! (mgr->finished_scans = cf_queue_create(sizeof(as_job*), false))) {
+		cf_crash(AS_JOB, "job manager failed finished scans queue create");
+	}
+
+	if (! as_priority_thread_pool_init(&mgr->thread_pool, n_threads)) {
+		cf_crash(AS_JOB, "job manager failed thread pool init");
+	}
 }
 
 int

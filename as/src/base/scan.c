@@ -156,9 +156,8 @@ static as_job_manager g_scan_manager;
 void
 as_scan_init()
 {
-	// TODO - check for failure and cf_crash?
-	as_job_manager_init(&g_scan_manager, g_config.scan_threads,
-			g_config.scan_max_active, g_config.scan_max_done);
+	as_job_manager_init(&g_scan_manager, g_config.scan_max_active,
+			g_config.scan_max_done, g_config.scan_threads);
 }
 
 int
