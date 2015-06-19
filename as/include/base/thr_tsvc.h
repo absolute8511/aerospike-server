@@ -41,6 +41,7 @@ extern int thr_tsvc_get_generation(as_transaction *tr, uint32_t *generation);
 
 int thr_tsvc_process_or_enqueue(as_transaction *tr);
 int thr_tsvc_enqueue(as_transaction *tr);
+void process_transaction(as_transaction *tr);
 
 // Statistics function for monitoring server load.
 extern int thr_tsvc_queue_get_size();

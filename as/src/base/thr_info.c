@@ -2099,6 +2099,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_uint32(db, g_config.batch_max_buffers_per_queue);
 	cf_dyn_buf_append_string(db, ";batch-max-unused-buffers=");
 	cf_dyn_buf_append_uint32(db, g_config.batch_max_unused_buffers);
+	cf_dyn_buf_append_string(db, ";batch-max-inline=");
+	cf_dyn_buf_append_uint32(db, g_config.batch_max_inline);
 	cf_dyn_buf_append_string(db, ";batch-priority=");
 	cf_dyn_buf_append_uint32(db, g_config.batch_priority);
 
@@ -2757,6 +2759,12 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 				goto Error;
 			cf_info(AS_INFO, "Changing value of batch-max-unused-buffers from %d to %d ", g_config.batch_max_unused_buffers, val);
 			g_config.batch_max_unused_buffers = val;
+		}
+		else if (0 == as_info_parameter_get(params, "batch-max-inline", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val))
+				goto Error;
+			cf_info(AS_INFO, "Changing value of batch-max-inline from %d to %d ", g_config.batch_max_inline, val);
+			g_config.batch_max_inline = val;
 		}
 		else if (0 == as_info_parameter_get(params, "batch-priority", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))

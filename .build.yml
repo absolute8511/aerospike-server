@@ -26,6 +26,7 @@ build:
     script:
       - make
       - make $PKG
+      - make tar
       - make source
     artifact:
       - pkg/packages/*

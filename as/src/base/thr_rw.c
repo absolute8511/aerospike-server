@@ -493,23 +493,23 @@ rw_msg_setup_infobits(msg *m, as_transaction *tr, int ldt_rectype_bits, bool has
 }
 
 void
-rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd, uint16_t ldt_rectype_bits) 
+rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd, uint16_t ldt_rectype_bits)
 {
-	// Send the Partition version info and current ldt outgoing migration version 
-	// at the master .. 
-	// only specific to LDT used to decide whether to write source version or 
-	// prole version. When doing replication .. 
+	// Send the Partition version info and current ldt outgoing migration version
+	// at the master ..
+	// only specific to LDT used to decide whether to write source version or
+	// prole version. When doing replication ..
 	// -- In case the prole node has partition version same
 	//    as master the ldt version in the destination version stamped in LDT rec
 	//    and subrec.
 	// -- in case the prole node has partition version different from master this
 	//    is replication while migration is still going on and versions have not
-	//    consolidated. In those cases version at the source node is replicated 
+	//    consolidated. In those cases version at the source node is replicated
 	msg_set_buf(m, RW_FIELD_VINFOSET, (uint8_t *)&tr->rsv.p->version_info, sizeof(as_partition_vinfo), MSG_SET_COPY);
 	cf_detail_digest(AS_RW, keyd,
 			"MULTI_OP : Set Up Replication Message for the LDT current outgoing "
 			" migrate version %ld for partition %d", tr->rsv.p->current_outgoing_ldt_version, tr->rsv.p->partition_id);
-	msg_set_uint64(m, RW_FIELD_LDT_VERSION, tr->rsv.p->current_outgoing_ldt_version); 
+	msg_set_uint64(m, RW_FIELD_LDT_VERSION, tr->rsv.p->current_outgoing_ldt_version);
 }
 
 int
@@ -639,18 +639,18 @@ write_request_setup(write_request *wr, as_transaction *tr, int optype)
 	return 0;
 }
 
-// Write Requese standard cleanup functions. This is used to cleanup request when they 
-// are finished. The associated cleanup done is freeing up as_msg releasing partition 
+// Write Requese standard cleanup functions. This is used to cleanup request when they
+// are finished. The associated cleanup done is freeing up as_msg releasing partition
 // reservation etc, release proto_fd if it is not released.
 //
-// Parameter: 
-//    wr or tr: Never called with both tr and wr set to NULL. 
+// Parameter:
+//    wr or tr: Never called with both tr and wr set to NULL.
 //
-// Note: 
+// Note:
 //
 // 1. If called with first_time = true set that would mean wr is not setup at all.
 //
-// 2. If called with first_time = false then wr and tr both should be valid and 
+// 2. If called with first_time = false then wr and tr both should be valid and
 //    and certain field like msgp should be same.
 //
 // Caller:
@@ -661,9 +661,9 @@ write_request_setup(write_request *wr, as_transaction *tr, int optype)
 // Called in case some error has happened. In those cases the proto_fd is released
 // and the transaction msgp is freed. Nothing will be sent back to the client and
 // let the client timeout the request.
-int 
+int
 rw_cleanup(write_request *wr, as_transaction *tr, bool first_time,
-		bool release, int line) 
+		bool release, int line)
 {
 	if (!wr || !tr) {
 		cf_crash(AS_RW, "Invalid cleanup call [wr=%p tr=%p] .."
@@ -1000,16 +1000,16 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 		// node is master node. Writes should never happen from non
 		// master node unless it is shipped op.
 
-		// TODO: We are allowing write to go to non-master node prole here. 
+		// TODO: We are allowing write to go to non-master node prole here.
 		// At non-master it will fail but it has already been written at master.
 		// Ideally we should roll back.
 		if ((g_config.self_node != tr->rsv.p->replica[0])
 				&& (as_paxos_get_cluster_key() == tr->rsv.cluster_key)
 				&& !(tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP)
-				&& (tr->rsv.p->target == 0)) { 
+				&& (tr->rsv.p->target == 0)) {
 			cf_warning(AS_RW, "internal_rw_start called from non-master "
 				"node %"PRIx64", with TRANSACTION_FLAG_SHIPPED_OP not set and without any cluster key "
-				"mismatch too. Cluster key is %"PRIx64", cluster size = %d my id %"PRIx64"", 
+				"mismatch too. Cluster key is %"PRIx64", cluster size = %d my id %"PRIx64"",
 				g_config.self_node, tr->rsv.cluster_key, g_config.paxos->cluster_size , g_config.self_node);
 			//PRINT_STACK();
 		}
@@ -1238,7 +1238,7 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 	//   unless the corresponding server's namespace override is enabled.
 	wr->read_consistency_level = TRANSACTION_CONSISTENCY_LEVEL(tr);
 	wr->write_commit_level = TRANSACTION_COMMIT_LEVEL(tr);
-	
+
 	wr->batch_shared = tr->batch_shared;
 	wr->batch_index = tr->batch_index;
 
@@ -1323,6 +1323,8 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			e->tr.preprocessed = true;
 			e->tr.flag = 0;
 			UREQ_DATA_COPY(&e->tr.udata, &tr->udata);
+			e->tr.batch_shared = tr->batch_shared;
+			e->tr.batch_index = tr->batch_index;
 
 			// add this transactions to the queue
 			e->next = wr2->wait_queue_head;
@@ -1748,7 +1750,7 @@ finish_rw_process_dup_ack(write_request *wr)
 	bool must_delete = true;
 	rv = internal_rw_start(&tr, wr, &must_delete);
 	if (rv != 0) {
-		// This is second time call... internal_rw_start does need full in those cases. 
+		// This is second time call... internal_rw_start does need full in those cases.
 		// Simply return
 		cf_info(AS_RW,
 				"internal rw start returns error %d. No data will be sent to client. Possible resource leak.",
@@ -1783,10 +1785,10 @@ finish_rw_process_ack(write_request *wr, uint32_t result_code)
 		return finish_rw_process_prole_ack(wr, result_code);
 	}
 	return (false);
-} 
+}
 
 void
-rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk) 
+rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk)
 {
 	cf_debug(AS_RW,
 			"{%s:%d} rw_process_cluster_key_mismatch: CLUSTER KEY MISMATCH rsp %"PRIx64" %s",
@@ -1844,7 +1846,7 @@ rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk)
 // Read-Write Prole message Acknowledge code path. Either is response to prole write
 // request, or is dup (if !is_write)
 //
-void 
+void
 rw_process_ack(cf_node node, msg *m, bool is_write)
 {
 	cf_detail(AS_RW, "rw process ack: from %"PRIx64, node);
@@ -1940,7 +1942,7 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 
 	if (result_code == AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH) {
 		rw_process_cluster_key_mismatch(wr, &gk);
-	} 
+	}
 	else if (result_code != AS_PROTO_RESULT_OK) {
 		cf_debug_digest(AS_RW, "{%s:%d} rw_process_ack: Processing unexpected response(%d):",
 				wr->rsv.ns->name, wr->rsv.pid, result_code );
@@ -1951,8 +1953,8 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 
 	pthread_mutex_lock(&wr->lock);
 
-	// 2. Now check to see if all are complete. If not wait for all messages 
-	// to arrive 
+	// 2. Now check to see if all are complete. If not wait for all messages
+	// to arrive
 	uint32_t node_id;
 	for (node_id = 0; node_id < wr->dest_sz; node_id++) {
 		if (wr->tid != tid) {
@@ -2348,9 +2350,9 @@ int rw_dup_init() {
 
 // If the replication request is coming from partition version which
 // is different then
-// - For LDT parent record 
+// - For LDT parent record
 //
-//    - Skip replication unless there is incoming migration from replication source 
+//    - Skip replication unless there is incoming migration from replication source
 //      node and replication is in the RECORD mode.
 //
 //    - If not migrating it will either be happening in future in that case replicating
@@ -2358,14 +2360,14 @@ int rw_dup_init() {
 //      in this case replication partition would match.
 //
 // - For LDT Subrec
-//    - If Vs == Vd then write subrecord with the ldt version on the destination. 
-//    - if Vs != Vd then write the subrecord with the version at the source. 
+//    - If Vs == Vd then write subrecord with the ldt version on the destination.
+//    - if Vs != Vd then write the subrecord with the version at the source.
 //
 //  Look in function as_ldt_set_prole_subrec_version
 //
 // Note that the replication can only come from the winning node (it could either be
-// master/designate master or non-master node). So we need not track all the incoming 
-// migration states only current would do. If the data is coming from the node which 
+// master/designate master or non-master node). So we need not track all the incoming
+// migration states only current would do. If the data is coming from the node which
 // is _NOT_ migrating it is ok to overwrite the parent record without generation check.
 int
 as_ldt_check_and_get_prole_version(cf_digest *keyd, as_partition_reservation *rsv,
@@ -2390,27 +2392,27 @@ as_ldt_check_and_get_prole_version(cf_digest *keyd, as_partition_reservation *rs
 					linfo->ldt_prole_version_set = false;
 					cf_detail(AS_RW, "prole version not set because %p==NULL or %d != 0", rd, rv);
 				}
-			} else { 
+			} else {
 				if (as_migrate_is_incoming(keyd, linfo->ldt_source_version, rsv->p->partition_id, AS_MIGRATE_RX_STATE_RECORD)) {
-					cf_detail_digest(AS_RW, keyd, "MULTI_OP(%s:%d): Write Parent Record in Partition %d with version with %ld version [source:%ld prole:%ld]", 
-							fname, lineno, rsv->p->partition_id, 
+					cf_detail_digest(AS_RW, keyd, "MULTI_OP(%s:%d): Write Parent Record in Partition %d with version with %ld version [source:%ld prole:%ld]",
+							fname, lineno, rsv->p->partition_id,
 							linfo->replication_partition_version_match ? linfo->ldt_prole_version:linfo->ldt_source_version,
-							linfo->ldt_source_version, linfo->ldt_prole_version); 
+							linfo->ldt_source_version, linfo->ldt_prole_version);
 				} else {
-					cf_detail_digest(AS_RW, keyd, "MULTI_OP(%s:%d): Skip Write of Parent Record in Partition %d with version with %ld version [source:%ld prole:%ld]", 
-						fname, lineno, rsv->p->partition_id, 
+					cf_detail_digest(AS_RW, keyd, "MULTI_OP(%s:%d): Skip Write of Parent Record in Partition %d with version with %ld version [source:%ld prole:%ld]",
+						fname, lineno, rsv->p->partition_id,
 						linfo->replication_partition_version_match ? linfo->ldt_prole_version:linfo->ldt_source_version,
-						linfo->ldt_source_version, linfo->ldt_prole_version); 
+						linfo->ldt_source_version, linfo->ldt_prole_version);
 
 					// Should bail out way earlier than this
 					goto Out;
 				}
-			} 
+			}
 		}
-		cf_detail_digest(AS_RW, keyd, "MULTI_OP(%s:%d): Write %s %sRecord in Partition %d with %s Partition Version [create:%d source mig:%ld prole:%ld]", 
-				fname, lineno, (info & RW_INFO_LDT_ESR) ? "ESR" : "",  (is_ldt_parent) ? "" : "Sub", rsv->p->partition_id, 
+		cf_detail_digest(AS_RW, keyd, "MULTI_OP(%s:%d): Write %s %sRecord in Partition %d with %s Partition Version [create:%d source mig:%ld prole:%ld]",
+				fname, lineno, (info & RW_INFO_LDT_ESR) ? "ESR" : "",  (is_ldt_parent) ? "" : "Sub", rsv->p->partition_id,
 				linfo->replication_partition_version_match ? "Matching" : "Non Matching",
-				is_create, linfo->ldt_source_version, linfo->ldt_prole_version); 
+				is_create, linfo->ldt_source_version, linfo->ldt_prole_version);
 	}
 	return 0;
 Out:
@@ -2424,7 +2426,7 @@ as_ldt_set_prole_subrec_version(cf_digest *keyd, as_partition_reservation *rsv,
 	if (rsv->ns->ldt_enabled) {
 		bool is_subrec = ((info & RW_INFO_LDT_SUBREC) || (info & RW_INFO_LDT_ESR));
 		int type = 0;
-		if (is_subrec) { 
+		if (is_subrec) {
 			if (linfo->replication_partition_version_match) {
 				if (linfo->ldt_prole_version_set) {
 					// ldt_version should be set
@@ -2479,7 +2481,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 			is_subrec = true;
 		} else if (info & RW_INFO_LDT_REC) {
 			is_ldt_parent = true;
-		} 
+		}
 	}
 
 	int rv      = as_record_get_create(tree, keyd, &r_ref, rsv->ns, is_subrec);
@@ -2515,7 +2517,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 
 	uint32_t stack_particles_sz = rd.ns->storage_data_in_memory ? 0 : as_record_buf_get_stack_particles_sz(pickled_buf);
 	// 256 as upper bound on the LDT control bin, we may write version below
-	uint8_t stack_particles[stack_particles_sz + 256]; 
+	uint8_t stack_particles[stack_particles_sz + 256];
 	uint8_t *p_stack_particles = stack_particles;
 
 	// Check is duplication in case code is coming from multi op
@@ -2562,7 +2564,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		} else if (!linfo->replication_partition_version_match) {
 			version_to_set = linfo->ldt_source_version;
 			set_version    = true;
-		} 
+		}
 	}
 
 	if (set_version) {
@@ -2573,7 +2575,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		} else {
 			p_stack_particles += pbytes;
 		}
-		cf_detail_digest(AS_LDT, keyd, "Wrote the destination version match %s set version (%ld) out of prole (%d:%ld) source(%ld)", 
+		cf_detail_digest(AS_LDT, keyd, "Wrote the destination version match %s set version (%ld) out of prole (%d:%ld) source(%ld)",
 						linfo->replication_partition_version_match ? "true" : "false", version_to_set, linfo->ldt_prole_version_set, linfo->ldt_prole_version, linfo->ldt_source_version);
 	}
 
@@ -2596,7 +2598,7 @@ Out:
 
 	// Do XDR write if
 	// 1. If the write is not a migration write and
-	// 2. If the write is a non-XDR write or 
+	// 2. If the write is a non-XDR write or
 	// 3. If the write is a XDR write and forwarding is enabled (either globally or for namespace).
 	if ((info & RW_INFO_MIGRATION) != RW_INFO_MIGRATION) {
 		if (   ((info & RW_INFO_XDR) != RW_INFO_XDR)
@@ -2618,7 +2620,7 @@ Out:
 }
 
 int
-as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv) 
+as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv)
 {
 	linfo->ldt_source_version = 0;
 	linfo->ldt_prole_version_set = false;
@@ -2627,7 +2629,7 @@ as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv)
 	int not_found = 0;
 	as_partition_vinfo *source_partition_version = NULL;
 	size_t vinfo_sz = 0;
-	if (0 != msg_get_buf(m, RW_FIELD_VINFOSET, (byte **) &source_partition_version, 
+	if (0 != msg_get_buf(m, RW_FIELD_VINFOSET, (byte **) &source_partition_version,
 			&vinfo_sz, MSG_GET_DIRECT)) {
 		not_found++;
 		cf_detail(AS_RW, "MULTI_OP: Message Without Partition Version");
@@ -5319,7 +5321,7 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_r
 		cf_warning(AS_LDT, "Could not find ldt info at prole");
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
-		
+
 	if (as_ldt_check_and_get_prole_version(keyd, rsvp, &linfo, info, NULL, false, __FILE__, __LINE__)) {
 		// If parent cannot be due to incoming migration it is ok
 		// continue and allow subrecords to be replicated
@@ -5370,7 +5372,7 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_r
 		result_code = write_process_op(&tr, msgp, node, generation);
 	} else {
 		rv = write_local_pickled(keyd, rsvp, pickled_buf, pickled_sz,
-				&rec_props, generation, void_time, node, info, &linfo); 
+				&rec_props, generation, void_time, node, info, &linfo);
 		if (rv == 0) {
 			result_code = AS_PROTO_RESULT_OK;
 		} else {
@@ -5919,7 +5921,7 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 
 	if (tr->proto_fd_h) {
 		if (tr->batch_shared) {
-			as_batch_add_result(tr, ns, setname, generation, void_time, 
+			as_batch_add_result(tr, ns, setname, generation, void_time,
 				n_bins, response_bins, ops);
 		}
 		else {

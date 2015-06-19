@@ -185,7 +185,9 @@ batch_send(int fd, uint8_t* buf, size_t len, int flags)
 
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
-				cf_info(AS_BATCH, "batch send response error returned %d errno %d fd %d", rv, errno, fd);
+				// This error may occur frequently if client is timing out transactions.
+				// Therefore, use debug level.
+				cf_debug(AS_BATCH, "batch send response error returned %d errno %d fd %d", rv, errno, fd);
 				return -1;
 			}
 		}
