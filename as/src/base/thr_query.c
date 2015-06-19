@@ -1051,6 +1051,7 @@ as_query_netio_finish_cb(void *data, int retcode)
 			cf_atomic32_incr(&qtr->pop_seq_number);
 			cf_detail(AS_QUERY, "Finished sequence number %p->%d", qtr, io->seq);
 			cf_atomic64_add(&qtr->net_io_bytes, io->bb_r->used_sz + 8);
+			QUERY_HIST_INSERT_DATA_POINT(query_net_io_hist, io->start_time);	
 		}
 
 		// If timed out override the decision
@@ -1119,6 +1120,7 @@ as_query__netio(as_query_transaction *qtr, bool final)
 
 	cf_atomic32_incr(&qtr->outstanding_net_io);
 	io.seq         = cf_atomic32_incr(&qtr->push_seq_number);
+	io.start_time  = cf_getns();
 
 	int ret        = as_netio_send(&io, NULL, qtr->blocking);
 	if (ret != AS_NETIO_CONTINUE) {
