@@ -49,7 +49,7 @@
 /* as_transaction_prepare
  * Prepare a transaction that has just been received from the wire.
  * NB: This should only be called once on any given transaction, because it swaps bytes! */
- 
+
 /*
 ** the layout for the digest is:
 ** type byte - set
@@ -63,7 +63,7 @@
 ** return -3 means batch digest request
 ** return -4 means bad protocol data  (but no longer used??)
 */
- 
+
 /*
  * Code to init the fields in a transaction.  Use this instead of memset.
  *
@@ -99,7 +99,9 @@ as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
 	tr->proxy_msg                 = 0;
 
 	tr->incoming_cluster_key      = 0;
+
 	UREQ_DATA_INIT(&tr->udata);
+
 	tr->batch_shared              = 0;
 	tr->batch_index               = 0;
 }
@@ -108,7 +110,7 @@ as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
   The transaction prepare function fills out the fields of the tr structure,
   using the information in the msg structure. It also swaps the fields in the
   message header (which are originally in network byte order).
-  
+
   Once the prepare function has been called on the transaction, the
   'preprocessed' flag is set and the transaction cannot be prepared again.
   Returns:
@@ -132,7 +134,7 @@ int as_transaction_prepare(as_transaction *tr) {
 	if (0 != cf_digest_compare(&tr->keyd, &cf_digest_zero)) {
 		cf_warning(AS_RW, "Internal inconsistency: transaction has keyd, but marked not swizzled");
 	}
-	
+
 	as_msg_swap_header(m);
 	if (0 != as_msg_swap_fields_and_ops(m, limit)) {
 		cf_info(AS_PROTO, "msg swap field and ops returned error");
@@ -141,14 +143,14 @@ int as_transaction_prepare(as_transaction *tr) {
 
 	if (m->n_fields>PROTO_NFIELDS_MAX_WARNING) {
 		cf_info(AS_PROTO, "received too many n_fields! %d",m->n_fields);
-    } 
+    }
 
 	// Set the transaction end time if available.
 	if (m->transaction_ttl) {
 //		cf_debug(AS_PROTO, "received non-zero transaction ttl: %d",m->transaction_ttl);
 		tr->end_time = tr->start_time + ((uint64_t)m->transaction_ttl * 1000000);
 	}
-	
+
 	// Set the preprocessed flag. All exits from here on out are considered
 	// processed since the msg header has been swapped and the transaction
 	// end time has been set.
@@ -178,7 +180,7 @@ int as_transaction_prepare(as_transaction *tr) {
 		if (as_msg_field_get_value_sz(dfp) != sizeof(cf_digest)) {
 			cf_info(AS_PROTO, "sent bad digest size %d, recomputing digest",as_msg_field_get_value_sz(dfp));
 			goto Compute;
-		}	
+		}
 		memcpy(&tr->keyd, dfp->data, sizeof(cf_digest));
 	}
 	// Not sent, so compute.
@@ -192,7 +194,7 @@ Compute:		;
         if (as_msg_field_get_value_sz(kfp)> PROTO_FIELD_LENGTH_MAX) {
 	        cf_info(AS_PROTO, "key field too big %d. Is it for real?",as_msg_field_get_value_sz(kfp));
         }
-		
+
 		as_msg_field *sfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
 		if (sfp == 0 || as_msg_field_get_value_sz(sfp) == 0) {
 			cf_digest_compute(kfp->data, as_msg_field_get_value_sz(kfp), &tr->keyd);
@@ -201,8 +203,8 @@ Compute:		;
 		else {
             if (as_msg_field_get_value_sz(sfp)> PROTO_FIELD_LENGTH_MAX) {
 		        cf_info(AS_PROTO, "set field too big %d. Is this for real?",as_msg_field_get_value_sz(sfp));
-            }		
-			cf_digest_compute2(sfp->data, as_msg_field_get_value_sz(sfp), 
+            }
+			cf_digest_compute2(sfp->data, as_msg_field_get_value_sz(sfp),
 						kfp->data, as_msg_field_get_value_sz(kfp),
 						&tr->keyd);
 			// cf_info(AS_PROTO, "computing set with key for sz %d %"PRIx64" bytes %d %d",as_msg_field_get_value_sz(kfp),*(uint64_t *)&tr->keyd,kfp->data[0],kfp->data[1],kfp->data[2],kfp->data[3]);
@@ -219,7 +221,7 @@ as_transaction_digest_validate(as_transaction *tr)
 	as_msg *m = &msgp->msg;
 
 	cf_info(AS_PROTO, "digest compare succeeded");
-	
+
 	// Can only validate if we have two things to compare.
 	as_msg_field *dfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_DIGEST_RIPE);
 	if (dfp == 0) {
@@ -229,11 +231,11 @@ as_transaction_digest_validate(as_transaction *tr)
 	if (as_msg_field_get_value_sz(dfp) != sizeof(cf_digest)) {
 		cf_info(AS_PROTO, "sent bad digest size %d, can't validate",as_msg_field_get_value_sz(dfp));
 		return(-1);
-	}	
-	
+	}
+
 	// Pull out the key and do the computation the same way as above.
 	cf_digest computed;
-	memset(&computed, 0, sizeof(cf_digest) );	
+	memset(&computed, 0, sizeof(cf_digest) );
 
 	as_msg_field *kfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_KEY);
 	if (!kfp) {
@@ -246,7 +248,7 @@ as_transaction_digest_validate(as_transaction *tr)
 		cf_digest_compute(kfp->data, as_msg_field_get_value_sz(kfp), &tr->keyd);
 	}
 	else {
-		cf_digest_compute2(sfp->data, as_msg_field_get_value_sz(sfp), 
+		cf_digest_compute2(sfp->data, as_msg_field_get_value_sz(sfp),
 					kfp->data, as_msg_field_get_value_sz(kfp),
 					&computed);
 	}
@@ -256,11 +258,10 @@ as_transaction_digest_validate(as_transaction *tr)
 			*(uint64_t *)&tr->keyd, *(uint64_t *) &computed );
 		return(-1);
 	}
-	
+
 	cf_info(AS_PROTO, "digest compare succeeded");
 
-	return(0);	
-	
+	return(0);
 }
 
 /* Create an internal transaction.
@@ -279,8 +280,8 @@ as_transaction_create( as_transaction *tr, tr_create_data *  trc_data)
 	uint64_t now       = cf_getns();
 
 	// Get namespace and set lengths.
-	int ns_len        = strlen(d->ns->name);	
-	int set_len       = strlen(d->set);	
+	int ns_len        = strlen(d->ns->name);
+	int set_len       = strlen(d->set);
 
 	// Figure out the size of the message.
 	size_t  msg_sz = sizeof(cl_msg);
@@ -296,7 +297,7 @@ as_transaction_create( as_transaction *tr, tr_create_data *  trc_data)
 
 	// Udf call structure will go as a part of the transaction udata.
 	// Do not pack it in the message.
-	cf_debug(AS_PROTO, "UDF : Msg size for internal transaction is %d", msg_sz);	
+	cf_debug(AS_PROTO, "UDF : Msg size for internal transaction is %d", msg_sz);
 
 	// Allocate space in the buffer.
 	uint8_t * buf   = cf_malloc(msg_sz); memset(buf, 0, msg_sz);
@@ -313,7 +314,7 @@ as_transaction_create( as_transaction *tr, tr_create_data *  trc_data)
 
 	// Now write the fields.
 	buf = as_msg_write_fields(buf, d->ns->name, ns_len, d->set, set_len, &(d->digest), 0, 0 , 0, 0);
-	
+
 	tr->incoming_cluster_key = 0;
 	// Using the scan job fd. Reservation of this fd takes place at the
 	// transaction service time, when the write_request is reserved.

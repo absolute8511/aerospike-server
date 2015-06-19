@@ -246,6 +246,8 @@ typedef struct as_config_s {
 	uint32_t			batch_max_buffers_per_queue;
 	// maximum number of buffers allowed in buffer pool at any one time.
 	uint32_t			batch_max_unused_buffers;
+	// batch inline cutoff.  Batch size <= batch_max_inline will process batch in demarshall thread.
+	uint32_t			batch_max_inline;
 	// number of records between an enforced context switch - thus 1 is very low priority, 1000000 would be very high
 	uint32_t			batch_priority;  // Used by old batch functionality only.
 

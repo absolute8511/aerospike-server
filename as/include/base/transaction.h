@@ -212,14 +212,14 @@ typedef struct as_transaction_s {
 	/* the reservation of the partition (and thus tree) I'm acting against */
 	as_partition_reservation rsv;
 
-	/******* In frequently or conditionally accessed Accessed Fields ************/
+	/******* Infrequently or conditionally accessed fields ************/
 	/* The origin of the transaction: either a file descriptor for a socket
 	 * or a node ID */
 	as_file_handle	* proto_fd_h;
 	cf_node 	      proxy_node;
 	msg 		    * proxy_msg;
 
-	/* User data corresponsing to the internally created transaction
+	/* User data corresponding to the internally created transaction
 	   first user is Scan UDF */
 	ureq_data         udata;
 
@@ -232,7 +232,7 @@ typedef struct as_transaction_s {
 	// Batch
 	struct as_batch_shared* batch_shared;
 	uint32_t batch_index;
-	
+
 	// RESPONSE RESPONSE RESPONSE
 
 } as_transaction;
