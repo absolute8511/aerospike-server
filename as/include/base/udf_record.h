@@ -81,6 +81,7 @@ typedef struct udf_record_s {
 	int8_t				ldt_rectype_bits; // ESR  / LDT / PARENT LDT / NOTHING
 
 	// FABRIC MESSAGE
+	uint8_t             op;
 	uint8_t				*pickled_buf;
 	size_t				pickled_sz;
 	uint32_t			pickled_void_time;

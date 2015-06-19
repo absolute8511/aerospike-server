@@ -325,6 +325,7 @@ udf_record_init(udf_record *urecord)
 
 	urecord->ldt_rectype_bits   = 0;
 	urecord->keyd               = cf_digest_zero;
+	urecord->op                 = UDF_OPTYPE_READ;
 	for (uint32_t i = 0; i < UDF_RECORD_BIN_ULIMIT; i++) {
 		urecord->updates[i].particle_buf = NULL;
 	}

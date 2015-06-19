@@ -1567,8 +1567,14 @@ as_ldt_record_pickle(ldt_record *lrecord,
 				goto Out;
 			}
 			cf_detail(AS_LDT, "MULTI_OP: Packing Write for LDT SUB Record %d", c_urecord->ldt_rectype_bits);
+			if (UDF_OP_IS_READ(c_urecord->op)) {
+				// Skip Reads
+				continue;
+			}
+
+
 			bool reset_flag = true;
-			if (!c_urecord->pickled_buf) {
+			if (UDF_OP_IS_DELETE(c_urecord->op)) {
 				// Fake it as delete
 				if (c_tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
 					reset_flag = false;	
