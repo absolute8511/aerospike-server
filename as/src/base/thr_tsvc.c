@@ -688,7 +688,7 @@ process_transaction(as_transaction *tr)
 			// -2 :: "try again"
 			// -3 :: "duplicate proxy request, drop"
 			if (0 != rv) {
-				rv = as_rw_process_result(rv, tr, &free_msgp); 
+				rv = as_rw_process_result(rv, tr, &free_msgp);
 			}
 			if (free_msgp == true) {
 				cf_free(msgp);
@@ -702,7 +702,7 @@ process_transaction(as_transaction *tr)
 			//
 			// Make sure that if it is shipped op it is not further redirected.
 			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
-		
+
 				int ret_code = 0;
 				if (!cluster_keys_match) {
 					ret_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;

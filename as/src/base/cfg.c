@@ -102,10 +102,10 @@ cfg_set_defaults()
 	c->n_proto_fd_max = 15000;
 	c->allow_inline_transactions = true; // allow data-in-memory namespaces to process transactions in service threads
 	c->n_batch_direct_threads = 4;
-	c->batch_max_buffers_per_queue = 255; // maximum number of buffers allowed in a single queue.
+	c->batch_max_buffers_per_queue = 255; // maximum number of buffers allowed in a single queue
+	c->batch_max_inline = 100000; // batch sizes lower than this will be processed inline for in-memory namespaces
 	c->batch_max_requests = 5000; // maximum requests/digests in a single batch
-	c->batch_max_unused_buffers = 256; // maximum number of buffers allowed in batch buffer pool.
-	c->batch_max_inline = 100000; // Batch sizes lower than this will be processed inline for in memory namespaces.
+	c->batch_max_unused_buffers = 256; // maximum number of buffers allowed in batch buffer pool
 	c->batch_priority = 200; // # of rows between a quick context switch?
 	c->n_batch_threads = 4;
 	c->n_fabric_workers = 16;

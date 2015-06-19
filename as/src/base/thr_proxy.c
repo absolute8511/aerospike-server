@@ -184,7 +184,7 @@ as_proxy_divert(cf_node dst, as_transaction *tr, as_namespace *ns, uint64_t clus
 	msg_set_uint32(m, PROXY_FIELD_OP, PROXY_OP_REQUEST);
 	msg_set_uint32(m, PROXY_FIELD_TID, tid);
 	msg_set_buf(m, PROXY_FIELD_DIGEST, (void *) &tr->keyd, sizeof(cf_digest), MSG_SET_COPY);
-	msg_set_type msettype = tr->batch_shared ? MSG_SET_COPY : MSG_SET_HANDOFF_MALLOC; 
+	msg_set_type msettype = tr->batch_shared ? MSG_SET_COPY : MSG_SET_HANDOFF_MALLOC;
 	msg_set_buf(m, PROXY_FIELD_AS_PROTO, (void *) tr->msgp, as_proto_size_get(&tr->msgp->proto), msettype);
 	msg_set_uint64(m, PROXY_FIELD_CLUSTER_KEY, cluster_key);
 	msg_set_uint32(m, PROXY_FIELD_TIMEOUT_MS, tr->msgp->msg.transaction_ttl);
@@ -423,7 +423,7 @@ as_proxy_shipop_response_hdlr(msg *m, proxy_request *pr, bool *free_msg)
 			cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP ORIG Missing proto_fd ");
 
 			// Note: This may be needed if this is node where internal scan or query
-			// UDF is initiated where it happens so that there is migration is going 
+			// UDF is initiated where it happens so that there is migration is going
 			// on and the request get routed to the remote node which is winning node
 			// This request may need the req_cb to be called.
 			if (udf_rw_needcomplete_wr(wr)) {
@@ -593,16 +593,16 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 					if (pr.batch_shared) {
 						cf_digest* digest;
 						size_t digest_sz = 0;
-						
+
 						if (msg_get_buf(pr.fab_msg, PROXY_FIELD_DIGEST, (byte **)&digest, &digest_sz, MSG_GET_DIRECT) == 0) {
-							as_batch_add_proxy_result(pr.batch_shared, pr.batch_index, digest, (cl_msg*)proto, proto_sz);	
+							as_batch_add_proxy_result(pr.batch_shared, pr.batch_index, digest, (cl_msg*)proto, proto_sz);
 							as_proxy_set_stat_counters(0);
 						}
 						else {
 							cf_warning(AS_PROXY, "Failed to find batch proxy digest %u", transaction_id);
 							as_batch_add_error(pr.batch_shared, pr.batch_index, AS_PROTO_RESULT_FAIL_UNKNOWN);
 							as_proxy_set_stat_counters(-1);
-						}					
+						}
 						cf_hist_track_insert_data_point(g_config.px_hist, pr.start_time);
 					}
 					else {
@@ -868,7 +868,7 @@ proxy_retransmit_reduce_fn(void *key, void *data, void *udata)
 				cf_atomic_int_incr(&g_config.ldt_proxy_timeout);
 				pthread_mutex_lock(&pr->wr->lock);
 				// Note: This may be needed if this is node where internal scan or query
-				// UDF is initiated where it happens so that there is migration is going 
+				// UDF is initiated where it happens so that there is migration is going
 				// on and the request get routed to the remote node which is winning node
 				// This request may need the req_cb to be called.
 				if (udf_rw_needcomplete_wr(pr->wr)) {

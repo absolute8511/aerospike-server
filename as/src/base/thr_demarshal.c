@@ -537,8 +537,8 @@ thr_demarshal(void *arg)
 								log_as_proto_and_peeked_data(&proto, peekbuf, peeked_data_sz);
 								goto NextEvent_FD_Cleanup;
 							}
-							
-							if (((as_msg*)peekbuf)->info1 & AS_MSG_INFO1_BATCH) {								
+
+							if (((as_msg*)peekbuf)->info1 & AS_MSG_INFO1_BATCH) {
 								jem_set_arena(orig_arena);
 							} else {
 								uint16_t n_fields = ntohs(((as_msg *) peekbuf)->n_fields), field_num = 0;
@@ -576,7 +576,7 @@ thr_demarshal(void *arg)
 								}
 							}
 						} else {
-							jem_set_arena(orig_arena);						
+							jem_set_arena(orig_arena);
 						}
 					} else {
 						jem_set_arena(orig_arena);
