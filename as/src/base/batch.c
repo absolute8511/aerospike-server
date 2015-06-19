@@ -713,10 +713,9 @@ as_batch_queue_task(as_transaction* btr)
 	cl_msg* out = 0;
 	as_msg_op* op;
 	uint32_t tran_row = 0;
-	uint8_t info1;
+	uint8_t info = *data++;  // allow transaction inline.
 
-	bool allow_inline = (g_config.allow_inline_transactions && g_config.n_namespaces_in_memory != 0 &&
-						tran_count < g_config.batch_max_inline);
+	bool allow_inline = (g_config.allow_inline_transactions && g_config.n_namespaces_in_memory != 0 && info);
 	bool check_inline = (allow_inline && g_config.n_namespaces_not_in_memory != 0);
 	bool should_inline = (allow_inline && g_config.n_namespaces_not_in_memory == 0);
 
@@ -739,9 +738,9 @@ as_batch_queue_task(as_transaction* btr)
 				break;
 			}
 
-			info1 = in->info1;
+			info = in->info1;
 			memcpy(&out->msg, bmsg, sizeof(as_msg) - sizeof(uint16_t) - sizeof(uint16_t));
-			out->msg.info1 = info1 | AS_MSG_INFO1_BATCH;
+			out->msg.info1 = info | AS_MSG_INFO1_BATCH;
 
 			// n_fields just contains namespace field.
 			out->msg.n_fields = 1;
@@ -790,7 +789,9 @@ as_batch_queue_task(as_transaction* btr)
 
 		// Submit transaction.
 		if (should_inline) {
-			// Must copy generic transaction before processing inline.
+			// Must copy generic transaction before processing inline, because some
+			// transaction fields are modified during the course of the transaction.
+			// We need each transaction to be initialized to proper values.
 			as_transaction tmp;
 			memcpy(&tmp, &tr, sizeof(as_transaction));
 			process_transaction(&tmp);
