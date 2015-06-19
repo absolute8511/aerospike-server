@@ -2504,7 +2504,7 @@ info_xdr_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, "enable-xdr=");
 	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_global_enabled ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";xdr-namedpipe-path=");
-	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_digestpipe_path);
+	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_digestpipe_path ? g_config.xdr_cfg.xdr_digestpipe_path : "NULL");
 	cf_dyn_buf_append_string(db, ";forward-xdr-writes=");
 	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_forward_xdrwrites ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";xdr-delete-shipping-enabled=");
