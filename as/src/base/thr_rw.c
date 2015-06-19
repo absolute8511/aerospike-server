@@ -639,7 +639,7 @@ write_request_setup(write_request *wr, as_transaction *tr, int optype)
 	return 0;
 }
 
-// Write Requese standard cleanup functions. This is used to cleanup request when they
+// Write request standard cleanup function. This is used to cleanup requests when they
 // are finished. The associated cleanup done is freeing up as_msg releasing partition
 // reservation etc, release proto_fd if it is not released.
 //
