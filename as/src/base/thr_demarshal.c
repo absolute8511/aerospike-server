@@ -42,6 +42,7 @@
 #include "queue.h"
 #include "socket.h"
 
+#include "base/batch.h"
 #include "base/cfg.h"
 #include "base/packet_compression.h"
 #include "base/proto.h"
@@ -517,7 +518,6 @@ thr_demarshal(void *arg)
 					size_t peekbuf_sz = 2048; // (Arbitrary "large enough" size for peeking the fields of "most" AS_MSGs.)
 					uint8_t peekbuf[peekbuf_sz];
 					if (PROTO_TYPE_AS_MSG == proto.type) {
-						bool found = false;
 						size_t offset = sizeof(as_msg);
 						// Number of bytes to peek from the socket.
 						size_t peek_sz = peekbuf_sz;                 // Peak up to the size of the peek buffer.
@@ -537,41 +537,48 @@ thr_demarshal(void *arg)
 								log_as_proto_and_peeked_data(&proto, peekbuf, peeked_data_sz);
 								goto NextEvent_FD_Cleanup;
 							}
-							uint16_t n_fields = ntohs(((as_msg *) peekbuf)->n_fields), field_num = 0;
-//							cf_debug(AS_DEMARSHAL, "Found %d AS_MSG fields", n_fields);
-							while (!found && (field_num < n_fields)) {
-								as_msg_field *field = (as_msg_field *) (&peekbuf[offset]);
-								uint32_t value_sz = ntohl(field->field_sz) - 1;
-//								cf_debug(AS_DEMARSHAL, "Field #%d offset: %lu", field_num, offset);
-//								cf_debug(AS_DEMARSHAL, "\tvalue_sz %u", value_sz);
-//								cf_debug(AS_DEMARSHAL, "\ttype %d", field->type);
-								if (AS_MSG_FIELD_TYPE_NAMESPACE == field->type) {
-									if (value_sz >= AS_ID_NAMESPACE_SZ) {
-										cf_warning(AS_DEMARSHAL, "namespace too long (%u) in as_msg", value_sz);
-										goto NextEvent_FD_Cleanup;
-									}
-									char ns[AS_ID_NAMESPACE_SZ];
-									found = true;
-									memcpy(ns, field->data, value_sz);
-									ns[value_sz] = '\0';
-//									cf_debug(AS_DEMARSHAL, "Found ns \"%s\" in field #%d.", ns, field_num);
-									jem_set_arena(as_namespace_get_jem_arena(ns));
-								} else {
-//									cf_debug(AS_DEMARSHAL, "Message field %d is not namespace (type %d) ~~ Reading next field", field_num, field->type);
-									field_num++;
-									offset += sizeof(as_msg_field) + value_sz;
-									if (offset >= peekbuf_sz) {
-										break;
+
+							if (((as_msg*)peekbuf)->info1 & AS_MSG_INFO1_BATCH) {
+								jem_set_arena(orig_arena);
+							} else {
+								uint16_t n_fields = ntohs(((as_msg *) peekbuf)->n_fields), field_num = 0;
+								bool found = false;
+	//							cf_debug(AS_DEMARSHAL, "Found %d AS_MSG fields", n_fields);
+								while (!found && (field_num < n_fields)) {
+									as_msg_field *field = (as_msg_field *) (&peekbuf[offset]);
+									uint32_t value_sz = ntohl(field->field_sz) - 1;
+	//								cf_debug(AS_DEMARSHAL, "Field #%d offset: %lu", field_num, offset);
+	//								cf_debug(AS_DEMARSHAL, "\tvalue_sz %u", value_sz);
+	//								cf_debug(AS_DEMARSHAL, "\ttype %d", field->type);
+									if (AS_MSG_FIELD_TYPE_NAMESPACE == field->type) {
+										if (value_sz >= AS_ID_NAMESPACE_SZ) {
+											cf_warning(AS_DEMARSHAL, "namespace too long (%u) in as_msg", value_sz);
+											goto NextEvent_FD_Cleanup;
+										}
+										char ns[AS_ID_NAMESPACE_SZ];
+										found = true;
+										memcpy(ns, field->data, value_sz);
+										ns[value_sz] = '\0';
+	//									cf_debug(AS_DEMARSHAL, "Found ns \"%s\" in field #%d.", ns, field_num);
+										jem_set_arena(as_namespace_get_jem_arena(ns));
+									} else {
+	//									cf_debug(AS_DEMARSHAL, "Message field %d is not namespace (type %d) ~~ Reading next field", field_num, field->type);
+										field_num++;
+										offset += sizeof(as_msg_field) + value_sz;
+										if (offset >= peekbuf_sz) {
+											break;
+										}
 									}
 								}
+								if (!found) {
+									cf_warning(AS_DEMARSHAL, "Can't get namespace from AS_MSG (peeked %zu bytes) ~~ Using default thr_demarshal arena.", peeked_data_sz);
+									jem_set_arena(orig_arena);
+								}
 							}
-						}
-						if (!found) {
-							cf_warning(AS_DEMARSHAL, "Can't get namespace from AS_MSG (peeked %zu bytes) ~~ Using default thr_demarshal arena.", peeked_data_sz);
+						} else {
 							jem_set_arena(orig_arena);
 						}
 					} else {
-//						cf_debug(AS_DEMARSHAL, "Non-AS_MSG ~~ Using default thr_demarshal arena.");
 						jem_set_arena(orig_arena);
 					}
 #endif
@@ -692,6 +699,15 @@ thr_demarshal(void *arg)
 						cf_debug(AS_DEMARSHAL, "[Sending Info request via fast path.]");
 						if (as_info(&tr)) {
 							cf_warning(AS_DEMARSHAL, "Info request failed to be enqueued ~~ Freeing protocol buffer");
+							goto NextEvent_FD_Cleanup;
+						}
+						cf_atomic_int_incr(&g_config.proto_transactions);
+						goto NextEvent;
+					}
+
+					// Fast path for batch requests.
+					if (tr.msgp->msg.info1 & AS_MSG_INFO1_BATCH) {
+						if (as_batch_queue_task(&tr)) {
 							goto NextEvent_FD_Cleanup;
 						}
 						cf_atomic_int_incr(&g_config.proto_transactions);
