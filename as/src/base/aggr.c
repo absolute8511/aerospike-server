@@ -53,6 +53,9 @@
 
 
 extern const as_list_hooks udf_arglist_hooks;
+extern as_partition_reservation *  as_query_reserve_qnode(as_namespace * ns, 
+						as_query_transaction * qtr, as_partition_id pid, as_partition_reservation * rsv);
+extern void as_query_release_qnode(as_query_transaction * qtr, as_partition_reservation * rsv);
 
 static int
 as_aggr_aerospike_log(const as_aerospike * a, const char * file, const int line, const int lvl, const char * msg)
@@ -73,6 +76,56 @@ static const as_aerospike_hooks as_aggr_aerospike_hooks = {
 	.get_current_time = NULL,
 	.destroy          = NULL
 };
+
+/* 
+ * Wrapper over query_release_node
+ */
+void
+as_aggr_release_qnode(query_record * qrecord, as_aggr_caller_type agg_type)
+{
+	if (!qrecord) {
+		cf_warning(AS_AGGR, "qrecord is null while releasing qnode");
+		return;
+	}
+	if (agg_type == AS_AGGR_QUERY) {
+		as_query_release_qnode(qrecord->caller, qrecord->rsv);
+	}
+	else if (agg_type == AS_AGGR_SCAN) {
+		if (!qrecord->rsv) {
+			cf_warning(AS_AGGR, "rsv is null while releasing qnode.");
+			return;
+		}
+		as_partition_release(qrecord->rsv);
+		cf_atomic_int_decr(&g_config.dup_tree_count);
+	}
+	else {
+		cf_warning(AS_AGGR, "Running unknown type of aggregation %d", agg_type);
+	}
+}
+
+/*
+ * Wrapper over query_reserve_node
+ */
+as_partition_reservation *
+as_aggr_reserve_qnode(as_namespace * ns, query_record * qrecord, as_partition_id pid, as_aggr_caller_type agg_type)
+{
+	if (!qrecord) {
+		cf_warning(AS_AGGR, "qrecord found as NULL while reserving qnode");
+		return NULL;
+	}
+
+	if (agg_type == AS_AGGR_QUERY) {
+		return as_query_reserve_qnode(ns, qrecord->caller, pid, qrecord->rsv);
+	}
+	else if (agg_type == AS_AGGR_SCAN) {
+		if (0 != as_partition_reserve_qnode(ns, pid, qrecord->rsv)) {
+			qrecord->rsv   = NULL;
+			return NULL;
+		}
+		cf_atomic_int_incr(&g_config.dup_tree_count);
+	}
+	return qrecord->rsv;
+}
 
 /**
  * Get a value for a bin of with the given key.
@@ -147,10 +200,6 @@ const as_rec_hooks query_record_hooks = {
 	.setname    = query_record_setname
 };
 
-extern as_partition_reservation *  as_query_reserve_qnode(as_namespace * ns, 
-						as_query_transaction * qtr, as_partition_id pid, as_partition_reservation * rsv);
-extern void as_query_release_qnode(as_query_transaction * qtr, as_partition_reservation * rsv);
-
 extern const as_rec_hooks udf_record_hooks;
 //extern const as_rec_hooks query_record_hooks;
 
@@ -161,9 +210,9 @@ int
 as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_result * ap_res)
 {
 	// input stream
-	int ret           = AS_QUERY_OK;
+	int ret           = AS_AGGR_OK;
 	as_index_ref    lr_ref;
-	lr_ref.skip_lock   = false;
+	lr_ref.skip_lock  = false;
 	as_storage_rd   l_rd;
 	bzero(&l_rd, sizeof(as_storage_rd));
 	as_transaction  l_tr;
@@ -194,7 +243,7 @@ as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_resul
 	as_rec_init(&l_qrec, &l_qrecord, &query_record_hooks);
 
 	as_aggr_istream l_aggr_istream = {
-		.skv_arr     = NULL,
+		.keys_arr     = NULL,
 		.rec         = &l_qrec,
 		.iter        = cf_ll_getIterator(ap_recl, true /*forward*/),
 		.ns          = ap_call->ns,
@@ -242,7 +291,7 @@ as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_resul
 	};
 	ret = as_module_apply_stream(&mod_lua, &l_ctx, ap_call->filename, ap_call->function, &l_istream, &l_arglist, &l_ostream, ap_res);
 
-	cf_debug(AS_QUERY, " Apply Stream with %s %s %p %p %p ret=%d", ap_call->filename, ap_call->function, &l_istream, &l_arglist, &l_ostream, ret);
+	cf_debug(AS_AGGR, " Apply Stream with %s %s %p %p %p ret=%d", ap_call->filename, ap_call->function, &l_istream, &l_arglist, &l_ostream, ret);
 	udf_memtracker_cleanup();
 
 	if (ret) {
@@ -259,7 +308,7 @@ Cleanup:
 	}
 	if (l_qrecord.read) {
 		udf_record_close(l_qrecord.urecord);
-		as_query_release_qnode(l_qrecord.caller, l_qrecord.rsv);
+		as_aggr_release_qnode(&l_qrecord, l_aggr_istream.get_type());
 		l_qrecord.read       = false;
 	}
 	return ret;
@@ -269,8 +318,8 @@ Cleanup:
  * Function as_aggr_call_init
  *
  * Returns -
- * 		AS_QUERY_OK  - On success
- *		AS_QUERY_ERR - On failure
+ * 		AS_AGGR_OK  - On success
+ *		AS_AGGR_ERR - On failure
  *
  * Notes -
  *
@@ -288,19 +337,21 @@ as_aggr_call_init(as_aggr_call * call, as_transaction * txn, void *caller,const 
 	as_msg_field *  op = NULL;
 	op = as_msg_field_get(&txn->msgp->msg, AS_MSG_FIELD_TYPE_UDF_OP);
 	if (!op) {
-		cf_detail(AS_QUERY, "not a aggregation 1");
+		cf_debug(AS_AGGR, "not a aggregation. op is null");
 		return AS_AGGR_ERR;
 	}
 	byte optype;
+	// Client is sending only 1 byte for optype
+	// Ugly : optype is used as two different enums.
 	memcpy(&optype, (byte *)op->data, sizeof(optype));
 	if(!is_scan) {
-		if (optype != AS_QUERY_UDF_OP_AGGREGATE) {
-			cf_detail(AS_QUERY, "not a aggregation 2");
+		if ((as_query_udf_op)optype != AS_QUERY_UDF_OP_AGGREGATE) {
+			cf_debug(AS_AGGR, "not a query aggregation");
 			return AS_AGGR_ERR;
 		}
 	} else {
-		if (optype != AS_SCAN_UDF_OP_AGGREGATE) {
-			cf_detail(AS_QUERY, "not a aggregation 3");
+		if ((as_scan_udf_op)optype != AS_SCAN_UDF_OP_AGGREGATE) {
+			cf_debug(AS_AGGR, "not a scan aggregation");
 			return AS_AGGR_ERR;
 		}
 	}
@@ -362,28 +413,12 @@ as_aggr_istream_read(const as_stream *s)
 	as_aggr_istream *aggr_istream = as_stream_source(s);
 
 	if (!aggr_istream->iter) {
+		cf_warning(AS_AGGR, "Iterator is not initialized in agg stream");
 		return NULL;
 	}
 
 	query_record   * qrecord      = (query_record *) aggr_istream->rec->data;
-	//Sumit: taking out query_record from istream->rec->data
-	sindex_kv_arr  * skv_arr      = aggr_istream->skv_arr;
-
-	if (!skv_arr) {
-		cf_ll_element * ele       = cf_ll_getNext(aggr_istream->iter);
-		if (!ele) {
-			aggr_istream->skv_arr = NULL;
-		}
-		else {
-			skv_arr               = ((ll_sindex_kv_element*)ele)->skv_arr;
-		}
-		aggr_istream->skv_arr     = skv_arr;
-		aggr_istream->skv_offset  = 0;
-	}
-
 	if (qrecord->read) {
-		cf_detail(AS_QUERY, "Close Record (%p,%d)", aggr_istream->skv_arr,
-				aggr_istream->skv_offset - 1);
 		// Bypassing doing the direct destroy because we need to
 		// avoid reducing the ref count. This rec (query_record
 		// implementation of as_rec) is ref counted when passed from
@@ -391,49 +426,73 @@ as_aggr_istream_read(const as_stream *s)
 		// element in the stream it does it at its own risk. Record
 		// may have changed under the hood.
 		udf_record_close(qrecord->urecord);
-		as_query_release_qnode(qrecord->caller, qrecord->rsv);
+		as_aggr_release_qnode(qrecord, aggr_istream->get_type());
 		qrecord->read = false;
 	}
 
-	if (!skv_arr) {
+	//Sumit: taking out query_record from istream->rec->data
+	// keys_arr has sindex keys in it.
+	// This is used by query engine to validate the query results.
+	// Ideally aggregation should use a different structure.
+
+	if (!aggr_istream->keys_arr) {
+		cf_ll_element * ele       = cf_ll_getNext(aggr_istream->iter);
+		if (!ele) {
+			aggr_istream->keys_arr = NULL;
+			cf_detail(AS_AGGR, "No more digests found in agg stream");	
+		}
+		else {
+			aggr_istream->keys_arr = ((as_index_keys_ll_element*)ele)->keys_arr;
+		}
+		aggr_istream->keys_arr_offset  = 0;
+	}
+	as_index_keys_arr  * keys_arr  = aggr_istream->keys_arr;
+
+
+	if (!keys_arr) {
+		cf_debug(AS_AGGR, "No digests found in agg stream");
 		return NULL;
 	}
 
 	// Iterate through stream to get next digest and
 	// populate record with it
 	while (!qrecord->read) {
-		if (skv_arr->num == aggr_istream->skv_offset) {
-			if (skv_arr) {
+		if (keys_arr->num == aggr_istream->keys_arr_offset) {
+			if (keys_arr) {
 				// Not releasing here.. will be released
 				// by the query_agg_apply_stream in the end
 			}
-			skv_arr = NULL;
-			while (!skv_arr) {
+			keys_arr = NULL;
+			while (!keys_arr) {
 				cf_ll_element * ele  = cf_ll_getNext(aggr_istream->iter);
 				if (!ele) {
-					cf_detail(AS_QUERY, "No More Nodes for this Lua Call");
+					cf_detail(AS_AGGR, "No More Nodes for this Lua Call");
 					return NULL;
 				}
-				skv_arr              = ((ll_sindex_kv_element*)ele)->skv_arr;
+				keys_arr              = ((as_index_keys_ll_element*)ele)->keys_arr;
 			}
-			aggr_istream->skv_offset = 0;
-			aggr_istream->skv_arr    = skv_arr;
-			cf_detail(AS_QUERY, "Moving Next List Node");
+			aggr_istream->keys_arr_offset = 0;
+			aggr_istream->keys_arr    = keys_arr;
+			cf_detail(AS_AGGR, "Moving to next node of digest list");
 		}
+
 		// NB: The offset moves forward here
-		as_transaction * tr    =  qrecord->urecord->tr;
 		as_namespace   * ns    =  aggr_istream->ns;
 		as_index_ref   * r_ref =  qrecord->urecord->r_ref;
 
-		AS_PARTITION_RESERVATION_INIT(tr->rsv);
-		cf_detail(AS_QUERY, "Open Record (%p,%d %"PRIu64", %"PRIu64")", aggr_istream->skv_arr, aggr_istream->skv_offset);
+		cf_detail(AS_AGGR, "Open Record (%p,%d %"PRIu64", %"PRIu64")", 
+						aggr_istream->keys_arr, aggr_istream->keys_arr_offset);
 		
-		tr->keyd     = skv_arr->digs[aggr_istream->skv_offset];
-		qrecord->urecord->keyd = tr->keyd;
-		int pid = as_partition_getid(tr->keyd);
-		qrecord->rsv = as_query_reserve_qnode(ns, qrecord->caller, pid, &tr->rsv);
+		qrecord->urecord->keyd = keys_arr->pindex_digs[aggr_istream->keys_arr_offset];
+		int pid                = as_partition_getid(qrecord->urecord->keyd);
+
+		as_transaction * tr    =  qrecord->urecord->tr;
+		AS_PARTITION_RESERVATION_INIT(tr->rsv);	
+		qrecord->rsv           = &tr->rsv;
+		qrecord->rsv           = as_aggr_reserve_qnode(ns, qrecord, pid, aggr_istream->get_type());
 		if (!qrecord->rsv){
-			aggr_istream->skv_offset++;
+			cf_debug(AS_AGGR, "Reservation not done for partition %d", pid);
+			aggr_istream->keys_arr_offset++;
 			continue;
 		}
 
@@ -448,28 +507,29 @@ as_aggr_istream_read(const as_stream *s)
 		tr->rsv.tree        = qrecord->rsv->tree;
 		tr->rsv.cluster_key = qrecord->rsv->cluster_key;
 		tr->rsv.sub_tree    = qrecord->rsv->sub_tree;
+		tr->keyd            = qrecord->urecord->keyd;
 
-		r_ref->skip_lock = false;
+		r_ref->skip_lock    = false;
 		if (0 == udf_record_open(qrecord->urecord)) { //Sumit record open
-			qrecord->read = true;
+			qrecord->read   = true;
 		}
 		if (!qrecord->read) {
-			cf_debug(AS_QUERY, "Failed to read record");
-			as_query_release_qnode(qrecord->caller, qrecord->rsv);
+			cf_debug(AS_AGGR, "Failed to read record");
+			as_aggr_release_qnode(qrecord, aggr_istream->get_type());
 		} else {
 			if (aggr_istream->get_type() == AS_AGGR_QUERY) {
-				if (!as_query_aggr_match_record(qrecord, &skv_arr->skeys[aggr_istream->skv_offset])) {
-					cf_debug(AS_QUERY, "Close Record with invalid selection (%p,%d)", aggr_istream->skv_arr, aggr_istream->skv_offset);
+				if (!as_query_aggr_match_record(qrecord, &keys_arr->sindex_keys[aggr_istream->keys_arr_offset])) {
+					cf_debug(AS_AGGR, "Close Record with invalid selection (%p,%d)", aggr_istream->keys_arr, aggr_istream->keys_arr_offset);
 					udf_record_close(qrecord->urecord);
-					as_query_release_qnode(qrecord->caller, &tr->rsv);
+					as_aggr_release_qnode(qrecord, aggr_istream->get_type());
 					qrecord->read = false;
 					cf_atomic64_incr(&g_config.query_false_positives);
 				} else {
-					cf_detail(AS_QUERY, "Successfully read record");
+					cf_detail(AS_AGGR, "Successfully read record");
 				}
 			} 
 		}
-		aggr_istream->skv_offset++;
+		aggr_istream->keys_arr_offset++;
 	}
 	return (as_val *)aggr_istream->rec;
 }

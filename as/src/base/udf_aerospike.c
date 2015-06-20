@@ -914,10 +914,18 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	if (rv == 1) {
 		is_create = true;
 	} else if (rv == 0) {
-		cf_warning(AS_UDF, "udf_aerospike_rec_create: Record Already Exists 2");
-		as_record_done(r_ref, tr->rsv.ns);
-		// DO NOT change it has special meaning for caller
-		return 1;
+		// If it's an expired record, pretend it's a fresh create.
+		if (as_record_is_expired(r_ref->r)) {
+			as_record_destroy(r_ref->r, tr->rsv.ns);
+			as_record_initialize(r_ref, tr->rsv.ns);
+			cf_atomic_int_incr(&tr->rsv.ns->n_objects);
+			is_create = true;
+		} else {
+			cf_warning(AS_UDF, "udf_aerospike_rec_create: Record Already Exists 2");
+			as_record_done(r_ref, tr->rsv.ns);
+			// DO NOT change it has special meaning for caller
+			return 1;
+		}
 	} else if (rv < 0) {
 		cf_warning(AS_UDF, "udf_aerospike_rec_create: Record Open Failed with rv=%d", rv);
 		return rv;
@@ -949,6 +957,17 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	cf_detail(AS_UDF, "as_storage_record_create: udf_aerospike_rec_create: r %p rd %p",
 		urecord->r_ref->r, urecord->rd);
 
+	// If the message has a key, apply it to the record.
+	if (! get_msg_key(&tr->msgp->msg, rd)) {
+		cf_warning(AS_UDF, "udf_aerospike_rec_create: Can't store key");
+		if (is_create) {
+			as_index_delete(tree, &tr->keyd);
+		}
+		as_record_done(r_ref, tr->rsv.ns);
+		urecord->flag &= ~UDF_RECORD_FLAG_OPEN;
+		return 4;
+	}
+
 	// if multibin storage, we will use urecord->stack_bins, so set the size appropriately
 	if ( ! rd->ns->storage_data_in_memory && ! rd->ns->single_bin ) {
 		rd->n_bins = sizeof(urecord->stack_bins) / sizeof(as_bin);
@@ -957,9 +976,6 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	// side effect: will set the unused bins to properly unused
 	rd->bins       = as_bin_get_all(r, rd, urecord->stack_bins);
 	urecord->flag |= UDF_RECORD_FLAG_STORAGE_OPEN;
-
-	// If the message has a key, apply it to the record.
-	get_msg_key(&tr->msgp->msg, rd);
 
 	cf_detail(AS_UDF, "Storage Open %p %x %"PRIx64"", urecord, urecord->flag, *(uint64_t *)&tr->keyd);
 	cf_detail(AS_UDF, "udf_aerospike_rec_create: Record created %d", urecord->flag);

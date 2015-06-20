@@ -225,8 +225,7 @@ udf_record_open(udf_record * urecord)
 	if (!rec_rv) {
 		as_index *r = r_ref->r;
 		// check to see this isn't an expired record waiting to die
-		if (r->void_time &&
-				r->void_time < as_record_void_time_get()) {
+		if (as_record_is_expired(r)) {
 			as_record_done(r_ref, tr->rsv.ns);
 			cf_detail(AS_UDF, "udf_record_open: Record has expired cannot read");
 			rec_rv = -2;
@@ -324,6 +323,7 @@ udf_record_init(udf_record *urecord)
 	as_rec_props_clear(&urecord->pickled_rec_props);
 
 	urecord->ldt_rectype_bits   = 0;
+	urecord->op                 = UDF_OPTYPE_READ;
 	urecord->keyd               = cf_digest_zero;
 	for (uint32_t i = 0; i < UDF_RECORD_BIN_ULIMIT; i++) {
 		urecord->updates[i].particle_buf = NULL;
@@ -917,15 +917,14 @@ udf_record_ttl(const as_rec * rec)
 	}
 
 	if ((urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN)) {
-		if (urecord->r_ref->r->void_time > 0) {
-			return (urecord->r_ref->r->void_time - as_record_void_time_get());
-		} else {
-			return 0;
-		}
+		uint32_t now = as_record_void_time_get();
+
+		return urecord->r_ref->r->void_time > now ?
+				urecord->r_ref->r->void_time - now : 0;
 	}
 	else {
 		cf_info(AS_UDF, "Error in getting ttl: no record found");
-		return -1;
+		return 0; // since we can't indicate the record doesn't exist
 	}
 	return 0;
 }

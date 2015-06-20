@@ -17,7 +17,11 @@ case "$1" in
 
   chown -R aerospike:aerospike /opt/aerospike /var/log/aerospike /var/run/aerospike
 
+  if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null 2>&1 || true
+  fi
+
   ;;
-esac    
+esac
 
 exit 0

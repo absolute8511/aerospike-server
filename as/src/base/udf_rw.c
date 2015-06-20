@@ -777,6 +777,7 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 		generation = r_ref->r->generation;
 		set_id = as_index_get_set_id(r_ref->r);
 	}
+	urecord->op = *urecord_op;
 	// Close the record for all the cases
 	udf_record_close(urecord);
 
@@ -1193,7 +1194,14 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 
 	// Step 2: Setup Storage Record
 	int rec_rv = as_record_get(tr->rsv.tree, &tr->keyd, &r_ref, tr->rsv.ns);
-	if (!rec_rv) {
+
+	if (rec_rv == 0 && as_record_is_expired(r_ref.r)) {
+		// If record is expired, pretend it was not found.
+		as_record_done(&r_ref, tr->rsv.ns);
+		rec_rv = -1;
+	}
+
+	if (rec_rv == 0) {
 		urecord.flag   |= UDF_RECORD_FLAG_OPEN;
 		urecord.flag   |= UDF_RECORD_FLAG_PREEXISTS;
 		cf_detail(AS_UDF, "Open %p %x %"PRIx64"", &urecord, urecord.flag, *(uint64_t *)&tr->keyd);
@@ -1218,7 +1226,15 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		}
 		else {
 			// If the message has a key, apply it to the record.
-			get_msg_key(m, &rd);
+			if (! get_msg_key(m, &rd)) {
+				udf_record_close(&urecord);
+				call->transaction->result_code = AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
+				send_response(call, "FAILURE", 7, AS_PARTICLE_TYPE_NULL, NULL, 0);
+				ldt_record_destroy(lrec);
+				as_rec_destroy(lrec);
+				return 0;
+			}
+
 			urecord.flag |= UDF_RECORD_FLAG_METADATA_UPDATED;
 		}
 

@@ -1411,8 +1411,13 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 					}
 					else {
 						// cf_info(AS_MIGRATE, "migrate rx: flatten insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
-						if (0 != as_record_flatten(&mc->rsv, key, 1, &c, &winner_idx)) {
-							cf_warning(AS_MIGRATE, "migrate: record flatten failed %"PRIx64, *(uint64_t *)key);
+						int rv = as_record_flatten(&mc->rsv, key, 1, &c, &winner_idx);
+						if (rv) {
+							if (rv != -3) {
+								// -3 is not a failure. It is get_create failure inside as_record_flatten which is 
+								// possible in case of race.
+								cf_warning_digest(AS_MIGRATE, key, "migrate: record flatten failed %d", rv);
+							}
 							migrate_recv_control_release(mc);
 							goto Done;
 						}

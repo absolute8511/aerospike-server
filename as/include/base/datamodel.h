@@ -36,6 +36,7 @@
 #include <string.h>
 
 #include <citrusleaf/cf_atomic.h>
+#include <citrusleaf/cf_clock.h>
 #include <citrusleaf/cf_digest.h>
 #include <citrusleaf/cf_shash.h>
 
@@ -629,7 +630,8 @@ extern as_partition_vinfo_mask as_record_vinfoset_mask_get( as_partition *p, as_
 extern bool as_record_vinfoset_mask_validate(as_partition_vinfoset *vinfoset, as_partition_vinfo_mask mask);
 
 // a simpler call that gives seconds in the right epoch
-extern uint32_t as_record_void_time_get();
+#define as_record_void_time_get() cf_clepoch_seconds()
+bool as_record_is_expired(as_record *r); // TODO - eventually inline
 
 
 /* as_partition_id
@@ -768,6 +770,18 @@ struct as_partition_reservation_s {
 	__rsv.reject_writes = false; \
 	__rsv.cluster_key = 0;
 
+#define AS_PARTITION_RESERVATION_INITP(__rsv)   \
+	__rsv->ns = NULL; \
+	__rsv->is_write = false; \
+	__rsv->pid = AS_PARTITION_ID_UNDEF; \
+	__rsv->p = 0; \
+	__rsv->state = AS_PARTITION_STATE_UNDEF; \
+	__rsv->tree = 0; \
+	__rsv->n_dupl = 0; \
+	__rsv->reject_writes = false; \
+	__rsv->cluster_key = 0;
+
+
 // This is a statistics function
 typedef struct as_partition_states_s {
 	int		sync_actual;
@@ -795,7 +809,7 @@ extern cf_node as_partition_getreplica_write(as_namespace *ns, as_partition_id p
 
 // reserve_qnode - *consumes* the ns reservation if success
 extern int as_partition_reserve_qnode(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv);
-extern void as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_partition_reservation rsv[]);
+extern uint32_t as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_partition_reservation rsv[]);
 // reserve_write - *consumes* the ns reservation if success
 extern int as_partition_reserve_write(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv, cf_node *node, uint64_t *cluster_key);
 // reserve_migrate - *consumes* the ns reservation if success
