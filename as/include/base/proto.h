@@ -103,6 +103,11 @@ struct as_file_handle_s;
 // LDT (and general collection) Errors (125 - 140)
 #define AS_PROTO_RESULT_FAIL_COLLECTION_ITEM_NOT_FOUND 125 // Item not found
 
+// Batch Errors (150 - 160)
+#define AS_PROTO_RESULT_FAIL_BATCH_DISABLED		150 // batch functionality has been disabled
+#define AS_PROTO_RESULT_FAIL_BATCH_MAX_REQUESTS	151 // batch-max-requests has been exceeded
+#define AS_PROTO_RESULT_FAIL_BATCH_QUEUES_FULL	152 // all batch queues are full
+
 // Secondary Index Query Failure Codes 200 - 230
 #define AS_PROTO_RESULT_FAIL_INDEX_FOUND       200
 #define AS_PROTO_RESULT_FAIL_INDEX_NOTFOUND    201
@@ -224,6 +229,7 @@ typedef struct as_msg_field_s {
 // #define AS_MSG_FIELD_TYPE_SPROC_RECORD_PARAMS	39
 
 #define AS_MSG_FIELD_TYPE_QUERY_BINLIST			40
+#define AS_MSG_FIELD_TYPE_BATCH					41
 
 	/* NB: field_sz is sizeof(type) + sizeof(data) */
 	uint32_t field_sz; // get the data size through the accessor function, don't worry, it's a small macro
@@ -368,7 +374,7 @@ typedef struct cl_msg_s {
 #define AS_MSG_INFO1_READ				(1 << 0) // contains a read operation
 #define AS_MSG_INFO1_GET_ALL			(1 << 1) // get all bins, period
 #define AS_MSG_INFO1_GET_ALL_NODATA		(1 << 2) // get all bins WITHOUT data (currently unimplemented)
-// (Note:  Bit 3 is unused.)
+#define AS_MSG_INFO1_BATCH				(1 << 3) // new batch protocol
 #define AS_MSG_INFO1_XDR				(1 << 4) // operation is being performed by XDR
 #define AS_MSG_INFO1_GET_NOBINDATA		(1 << 5) // Do not get information about bins and its data
 #define AS_MSG_INFO1_CONSISTENCY_LEVEL_B0	(1 << 6) // read consistency level - bit 0
@@ -488,6 +494,7 @@ extern void as_proto_swap(as_proto *m);
 extern void as_msg_swap_header(as_msg *m);
 extern void as_msg_swap_field(as_msg_field *mf);
 extern int as_msg_swap_fields(as_msg *m, void *limit);
+extern void as_msg_swap_op(as_msg_op *op);
 extern int as_msg_swap_ops(as_msg *m, void *limit);
 extern int as_msg_swap_fields_and_ops(as_msg *m, void *limit);
 extern int as_msg_send_reply(struct as_file_handle_s *fd_h, uint32_t result_code,

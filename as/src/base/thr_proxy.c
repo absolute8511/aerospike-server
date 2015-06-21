@@ -47,6 +47,7 @@
 #include "msg.h"
 #include "util.h"
 
+#include "base/batch.h"
 #include "base/datamodel.h"
 #include "base/proto.h"
 #include "base/thr_tsvc.h"
@@ -89,7 +90,6 @@ msg_template proxy_mt[] = {
 	{ PROXY_FIELD_INFO, M_FT_UINT32 },
 };
 
-
 typedef struct {
 
 	as_file_handle	*fd_h;       // holds the response fd we're going to have to send back to
@@ -106,6 +106,9 @@ typedef struct {
 	as_namespace    *ns;
 	// Write request on resolving node.
 	write_request   *wr;
+	// Common batch data.
+	struct as_batch_shared* batch_shared;
+	uint32_t batch_index;
 } proxy_request;
 
 
@@ -181,7 +184,8 @@ as_proxy_divert(cf_node dst, as_transaction *tr, as_namespace *ns, uint64_t clus
 	msg_set_uint32(m, PROXY_FIELD_OP, PROXY_OP_REQUEST);
 	msg_set_uint32(m, PROXY_FIELD_TID, tid);
 	msg_set_buf(m, PROXY_FIELD_DIGEST, (void *) &tr->keyd, sizeof(cf_digest), MSG_SET_COPY);
-	msg_set_buf(m, PROXY_FIELD_AS_PROTO, (void *) tr->msgp, as_proto_size_get(&tr->msgp->proto), MSG_SET_HANDOFF_MALLOC);
+	msg_set_type msettype = tr->batch_shared ? MSG_SET_COPY : MSG_SET_HANDOFF_MALLOC;
+	msg_set_buf(m, PROXY_FIELD_AS_PROTO, (void *) tr->msgp, as_proto_size_get(&tr->msgp->proto), msettype);
 	msg_set_uint64(m, PROXY_FIELD_CLUSTER_KEY, cluster_key);
 	msg_set_uint32(m, PROXY_FIELD_TIMEOUT_MS, tr->msgp->msg.transaction_ttl);
 
@@ -203,6 +207,8 @@ as_proxy_divert(cf_node dst, as_transaction *tr, as_namespace *ns, uint64_t clus
 	pr.pid = pid;
 	pr.ns = ns;
 	pr.wr = NULL;
+	pr.batch_shared = tr->batch_shared;
+	pr.batch_index = tr->batch_index;
 
 	if (0 != shash_put(g_proxy_hash, &tid, &pr)) {
 		cf_debug(AS_PROXY, " shash_put failed, need cleanup code");
@@ -268,6 +274,8 @@ as_proxy_shipop(cf_node dst, write_request *wr)
 	pr.dest        = dst;
 	pr.pid         = pid;
 	pr.fd_h        = NULL;
+	pr.batch_shared = NULL;
+	pr.batch_index = 0;
 
 	if (0 != shash_put(g_proxy_hash, &tid, &pr)) {
 		cf_info(AS_PROXY, " shash_put failed, need cleanup code");
@@ -415,7 +423,7 @@ as_proxy_shipop_response_hdlr(msg *m, proxy_request *pr, bool *free_msg)
 			cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP ORIG Missing proto_fd ");
 
 			// Note: This may be needed if this is node where internal scan or query
-			// UDF is initiated where it happens so that there is migration is going 
+			// UDF is initiated where it happens so that there is migration is going
 			// on and the request get routed to the remote node which is winning node
 			// This request may need the req_cb to be called.
 			if (udf_rw_needcomplete_wr(wr)) {
@@ -581,7 +589,23 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 					// Write to the file descriptor.
 					cf_detail(AS_PROXY, "direct write fd %d", pr.fd_h->fd);
 					cf_assert(pr.fd_h->fd, AS_PROXY, CF_WARNING, "attempted write to fd 0");
-					{
+
+					if (pr.batch_shared) {
+						cf_digest* digest;
+						size_t digest_sz = 0;
+
+						if (msg_get_buf(pr.fab_msg, PROXY_FIELD_DIGEST, (byte **)&digest, &digest_sz, MSG_GET_DIRECT) == 0) {
+							as_batch_add_proxy_result(pr.batch_shared, pr.batch_index, digest, (cl_msg*)proto, proto_sz);
+							as_proxy_set_stat_counters(0);
+						}
+						else {
+							cf_warning(AS_PROXY, "Failed to find batch proxy digest %u", transaction_id);
+							as_batch_add_error(pr.batch_shared, pr.batch_index, AS_PROTO_RESULT_FAIL_UNKNOWN);
+							as_proxy_set_stat_counters(-1);
+						}
+						cf_hist_track_insert_data_point(g_config.px_hist, pr.start_time);
+					}
+					else {
 						size_t pos = 0;
 						while (pos < proto_sz) {
 							rv = send(pr.fd_h->fd, (((uint8_t *)proto) + pos), proto_sz - pos, MSG_NOSIGNAL);
@@ -606,15 +630,15 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 							}
 						}
 						as_proxy_set_stat_counters(0);
-					}
 SendFin:
-					cf_hist_track_insert_data_point(g_config.px_hist, pr.start_time);
+						cf_hist_track_insert_data_point(g_config.px_hist, pr.start_time);
 
-					// Return the fabric message or the direct file descriptor -
-					// after write and complete.
-					pr.fd_h->t_inprogress = false;
-					AS_RELEASE_FILE_HANDLE(pr.fd_h);
-					pr.fd_h = 0;
+						// Return the fabric message or the direct file descriptor -
+						// after write and complete.
+						pr.fd_h->t_inprogress = false;
+						AS_RELEASE_FILE_HANDLE(pr.fd_h);
+						pr.fd_h = 0;
+					}
 					as_fabric_msg_put(pr.fab_msg);
 					pr.fab_msg = 0;
 				}
@@ -844,7 +868,7 @@ proxy_retransmit_reduce_fn(void *key, void *data, void *udata)
 				cf_atomic_int_incr(&g_config.ldt_proxy_timeout);
 				pthread_mutex_lock(&pr->wr->lock);
 				// Note: This may be needed if this is node where internal scan or query
-				// UDF is initiated where it happens so that there is migration is going 
+				// UDF is initiated where it happens so that there is migration is going
 				// on and the request get routed to the remote node which is winning node
 				// This request may need the req_cb to be called.
 				if (udf_rw_needcomplete_wr(pr->wr)) {
@@ -868,10 +892,15 @@ proxy_retransmit_reduce_fn(void *key, void *data, void *udata)
 				pr->ns = 0;
 			}
 			if (pr->fd_h) {
-				pr->fd_h->t_inprogress = false;
-				shutdown(pr->fd_h->fd, SHUT_RDWR);
-				AS_RELEASE_FILE_HANDLE(pr->fd_h);
-				pr->fd_h = 0;
+				if (pr->batch_shared) {
+					as_batch_add_error(pr->batch_shared, pr->batch_index, AS_PROTO_RESULT_FAIL_TIMEOUT);
+				}
+				else {
+					pr->fd_h->t_inprogress = false;
+					shutdown(pr->fd_h->fd, SHUT_RDWR);
+					AS_RELEASE_FILE_HANDLE(pr->fd_h);
+					pr->fd_h = 0;
+				}
 			}
 
 			return SHASH_REDUCE_DELETE;

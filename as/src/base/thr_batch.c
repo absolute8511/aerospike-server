@@ -1,7 +1,7 @@
 /*
  * thr_batch.c
  *
- * Copyright (C) 2012-2014 Aerospike, Inc.
+ * Copyright (C) 2012-2015 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 
+#include "aerospike/as_thread_pool.h"
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
@@ -47,7 +48,6 @@
 #include "base/proto.h"
 #include "base/transaction.h"
 #include "storage/storage.h"
-
 
 typedef struct {
 	cf_node node;
@@ -68,12 +68,10 @@ typedef struct {
 	batch_digests* digests;
 	cf_vector* binlist;
 	bool get_data;
+	bool complete;
 } batch_transaction;
 
-static pthread_t g_batch_threads[MAX_BATCH_THREADS];
-static cf_queue* g_batch_queue = 0;
-static cf_atomic32 g_batch_init = 0;
-
+static as_thread_pool batch_direct_thread_pool;
 
 // Build response to batch request.
 static void
@@ -102,7 +100,7 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 			int rv = as_partition_reserve_read(ns, as_partition_getid(bmd->keyd), &rsv, &other_node, &cluster_key);
 
 			if (rv == 0) {
-				cf_atomic_int_incr(&g_config.batch_tree_count);
+				cf_atomic_int_incr(&g_config.batch_direct_tree_count);
 
 				as_index_ref r_ref;
 				r_ref.skip_lock = false;
@@ -152,7 +150,7 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 				bmd->done = true;
 
 				as_partition_release(&rsv);
-				cf_atomic_int_decr(&g_config.batch_tree_count);
+				cf_atomic_int_decr(&g_config.batch_direct_tree_count);
 			}
 			else {
 				cf_debug(AS_BATCH, "batch_build_response: partition reserve read failed: rv %d", rv);
@@ -175,7 +173,6 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 	}
 }
 
-
 // Send response to client socket.
 static int
 batch_send(int fd, uint8_t* buf, size_t len, int flags)
@@ -188,7 +185,9 @@ batch_send(int fd, uint8_t* buf, size_t len, int flags)
 
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
-				cf_info(AS_BATCH, "batch send response error returned %d errno %d fd %d", rv, errno, fd);
+				// This error may occur frequently if client is timing out transactions.
+				// Therefore, use debug level.
+				cf_debug(AS_BATCH, "batch send response error returned %d errno %d fd %d", rv, errno, fd);
 				return -1;
 			}
 		}
@@ -199,7 +198,6 @@ batch_send(int fd, uint8_t* buf, size_t len, int flags)
 
 	return 0;
 }
-
 
 // Send protocol header to the requesting client.
 static int
@@ -213,7 +211,6 @@ batch_send_header(int fd, size_t len)
 
 	return batch_send(fd, (uint8_t*) &proto, 8, MSG_NOSIGNAL | MSG_MORE);
 }
-
 
 // Send protocol trailer to the requesting client.
 static int
@@ -261,7 +258,6 @@ batch_transaction_done(batch_transaction* btr)
 	}
 }
 
-
 // Process a batch request.
 static void
 batch_process_request(batch_transaction* btr)
@@ -294,58 +290,29 @@ batch_process_request(batch_transaction* btr)
 	batch_transaction_done(btr);
 }
 
-
 // Process one queue's batch requests.
-void*
-batch_process_queue(void* q_to_wait_on)
+static void
+batch_worker(void* udata)
 {
-	cf_queue* worker_queue = (cf_queue*)q_to_wait_on;
-	batch_transaction btr;
-	uint64_t start;
+	batch_transaction* btr = (batch_transaction*)udata;
+	
+	// Check for timeouts.
+	if (btr->end_time != 0 && cf_getns() > btr->end_time) {
+		cf_atomic_int_incr(&g_config.batch_direct_timeout);
 
-	while (1) {
-		if (cf_queue_pop(worker_queue, &btr, CF_QUEUE_FOREVER) != 0) {
-			cf_crash(AS_BATCH, "Failed to pop from batch worker queue.");
+		if (btr->fd_h) {
+			as_msg_send_reply(btr->fd_h, AS_PROTO_RESULT_FAIL_TIMEOUT,
+					0, 0, 0, 0, 0, 0, 0, btr->trid, NULL);
+			btr->fd_h = 0;
 		}
-
-		// Check for timeouts.
-		if (btr.end_time != 0 && cf_getns() > btr.end_time) {
-			cf_atomic_int_incr(&g_config.batch_timeout);
-
-			if (btr.fd_h) {
-				as_msg_send_reply(btr.fd_h, AS_PROTO_RESULT_FAIL_TIMEOUT,
-						0, 0, 0, 0, 0, 0, 0, btr.trid, NULL);
-				btr.fd_h = 0;
-			}
-			batch_transaction_done(&btr);
-			continue;
-		}
-
-		// Process batch request.
-		start = cf_getns();
-		batch_process_request(&btr);
-		histogram_insert_data_point(g_config.batch_q_process_hist, start);
-	}
-
-	return 0;
-}
-
-
-// Initialize batch queues and worker threads.
-void
-as_batch_init()
-{
-	if (cf_atomic32_incr(&g_batch_init) != 1) {
+		batch_transaction_done(btr);
 		return;
 	}
-
-	cf_info(AS_BATCH, "Initialize %d batch worker threads.", g_config.n_batch_threads);
-	g_batch_queue = cf_queue_create(sizeof(batch_transaction), true);
-	int max = g_config.n_batch_threads;
-
-	for (int i = 0; i < max; i++) {
-		pthread_create(&g_batch_threads[i], 0, batch_process_queue, (void*)g_batch_queue);
-	}
+	
+	// Process batch request.
+	uint64_t start = cf_getns();
+	batch_process_request(btr);
+	histogram_insert_data_point(g_config.batch_direct_read_hist, start);	
 }
 
 // Create bin name list from message.
@@ -371,47 +338,69 @@ as_binlist_from_op(as_msg* msg)
 	return binlist;
 }
 
+// Initialize batch queues and worker threads.
+int
+as_batch_direct_init()
+{
+	uint32_t threads = g_config.n_batch_direct_threads;
+	cf_info(AS_BATCH, "Initialize batch-direct-threads to %u", threads);
+	int status = as_thread_pool_init_fixed(&batch_direct_thread_pool, threads, batch_worker, sizeof(batch_transaction), offsetof(batch_transaction,complete));
+	
+	if (status) {
+		cf_warning(AS_BATCH, "Failed to initialize batch-direct-threads to %u: %d", threads, status);
+	}
+	return status;
+}
+
 // Put batch request on a separate batch queue.
 int
-as_batch(as_transaction* tr)
+as_batch_direct_queue_task(as_transaction* tr)
 {
+	cf_atomic_int_incr(&g_config.batch_direct_initiate);
+
+	if (g_config.n_batch_direct_threads <= 0) {
+		cf_warning(AS_BATCH, "batch-direct-threads has been disabled.");
+		return AS_PROTO_RESULT_FAIL_BATCH_DISABLED;
+	}
+
 	as_msg* msg = &tr->msgp->msg;
 
 	as_msg_field* nsfp = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_NAMESPACE);
 	if (! nsfp) {
 		cf_warning(AS_BATCH, "Batch namespace is required.");
-		return -1;
+		return AS_PROTO_RESULT_FAIL_NAMESPACE;
 	}
 
 	as_msg_field* dfp = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_DIGEST_RIPE_ARRAY);
 	if (! dfp) {
 		cf_warning(AS_BATCH, "Batch digests are required.");
-		return -1;
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	uint n_digests = dfp->field_sz / sizeof(cf_digest);
 
 	if (n_digests > g_config.batch_max_requests) {
 		cf_warning(AS_BATCH, "Batch request size %u exceeds max %u.", n_digests, g_config.batch_max_requests);
-		return -1;
+		return AS_PROTO_RESULT_FAIL_BATCH_MAX_REQUESTS;
 	}
 
 	batch_transaction btr;
 	btr.trid = tr->trid;
 	btr.end_time = tr->end_time;
 	btr.get_data = !(msg->info1 & AS_MSG_INFO1_GET_NOBINDATA);
+	btr.complete = false;
 
 	btr.ns = as_namespace_get_bymsgfield(nsfp);
 	if (! btr.ns) {
 		cf_warning(AS_BATCH, "Batch namespace is required.");
-		return -1;
+		return AS_PROTO_RESULT_FAIL_NAMESPACE;
 	}
 
 	// Create the master digest table.
 	btr.digests = (batch_digests*) cf_malloc(sizeof(batch_digests) + (sizeof(batch_digest) * n_digests));
 	if (! btr.digests) {
 		cf_warning(AS_BATCH, "Failed to allocate memory for batch digests.");
-		return -1;
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	batch_digests* bmd = btr.digests;
@@ -430,13 +419,36 @@ as_batch(as_transaction* tr)
 	tr->proto_fd_h = 0;
 	btr.fd_h->last_used = cf_getms();
 
-	cf_atomic_int_incr(&g_config.batch_initiate);
-	cf_queue_push(g_batch_queue, &btr);
+	int status = as_thread_pool_queue_task_fixed(&batch_direct_thread_pool, &btr);
+	
+	if (status) {
+		cf_warning(AS_BATCH, "Batch enqueue failed");
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;		
+	}
 	return 0;
 }
 
 int
-as_batch_queue_size()
+as_batch_direct_queue_size()
 {
-	return cf_queue_sz(g_batch_queue);
+	return batch_direct_thread_pool.dispatch_queue? cf_queue_sz(batch_direct_thread_pool.dispatch_queue) : 0;
+}
+
+int
+as_batch_direct_threads_resize(uint32_t threads)
+{
+	if (threads > MAX_BATCH_THREADS) {
+		cf_warning(AS_BATCH, "batch-direct-threads %u exceeds max %u", threads, MAX_BATCH_THREADS);
+		return -1;
+	}
+
+	cf_info(AS_BATCH, "Resize batch-direct-threads from %u to %u", g_config.n_batch_direct_threads, threads);
+	int status = as_thread_pool_resize(&batch_direct_thread_pool, threads);
+	g_config.n_batch_direct_threads = batch_direct_thread_pool.thread_size;
+
+	if (status) {
+		cf_warning(AS_BATCH, "Failed to resize batch-direct-threads. status=%d, batch-direct-threads=%d", 
+				status, g_config.n_batch_threads);
+	}
+	return status;
 }

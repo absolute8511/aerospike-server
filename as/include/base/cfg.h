@@ -54,7 +54,7 @@
 #define MAX_TRANSACTION_QUEUES 128
 #define MAX_DEMARSHAL_THREADS  256	// maximum number of demarshal worker threads
 #define MAX_FABRIC_WORKERS 128		// maximum fabric worker threads
-#define MAX_BATCH_THREADS 16		// maximum batch worker threads
+#define MAX_BATCH_THREADS 64		// maximum batch worker threads
 
 struct as_namespace_s;
 
@@ -97,6 +97,7 @@ typedef struct as_config_s {
 	int					n_migrate_threads;
 	int					n_info_threads;
 	int					n_batch_threads;
+	int					n_batch_direct_threads;
 
 	/* Query tunables */
 	uint32_t			query_threads;
@@ -241,8 +242,14 @@ typedef struct as_config_s {
 	uint32_t			scan_sleep;
 	// maximum count of database requests in a single batch
 	uint32_t			batch_max_requests;
+	// maximum number of buffers allowed in a buffer queue at any one time.  Fail batch if full.
+	uint32_t			batch_max_buffers_per_queue;
+	// maximum number of buffers allowed in buffer pool at any one time.
+	uint32_t			batch_max_unused_buffers;
+	// batch inline cutoff.  Batch size <= batch_max_inline will process batch in demarshall thread.
+	uint32_t			batch_max_inline;
 	// number of records between an enforced context switch - thus 1 is very low priority, 1000000 would be very high
-	uint32_t			batch_priority;
+	uint32_t			batch_priority;  // Used by old batch functionality only.
 
 	// nsup (expiration and eviction) tuning parameters
 	uint32_t			nsup_delete_sleep; // sleep this many microseconds between generating delete transactions, default 0
@@ -421,9 +428,14 @@ typedef struct as_config_s {
 	cf_atomic_int		reaper_count;
 
 	cf_atomic_int		batch_initiate;
-	cf_atomic_int		batch_tree_count;
+	cf_atomic_int		batch_complete;
 	cf_atomic_int		batch_timeout;
 	cf_atomic_int		batch_errors;
+
+	cf_atomic_int		batch_direct_initiate;
+	cf_atomic_int		batch_direct_tree_count;
+	cf_atomic_int		batch_direct_timeout;
+	cf_atomic_int		batch_direct_errors;
 
 	cf_hist_track *		rt_hist; // histogram that tracks read performance
 	cf_hist_track *		ut_hist; // histogram that tracks udf performance
@@ -458,7 +470,8 @@ typedef struct as_config_s {
 	histogram *			rt_resolve_wait_hist; // histogram that tracks the time the master waits for other nodes to complete duplicate resolution on reads
 	histogram *			wt_resolve_wait_hist; // histogram that tracks the time the master waits for other nodes to complete duplicate resolution on writes
 	histogram *			error_hist;  // histogram of error requests only
-	histogram *			batch_q_process_hist; // histogram of time spent processing batch messages in transaction q
+	histogram *			batch_read_hist;        // New batch index protocol latency histogram.
+	histogram *			batch_direct_read_hist; // Old batch direct protocol latency histogram.
 	histogram *			info_tr_q_process_hist;  // histogram of time spent processing info messages in transaction q
 	histogram *			info_q_wait_hist;  // histogram of time info transaction spends on info q
 	histogram *			info_post_lock_hist; // histogram of time spent processing the Info command under the mutex before sending the response on the network
