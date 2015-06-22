@@ -777,6 +777,7 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 		generation = r_ref->r->generation;
 		set_id = as_index_get_set_id(r_ref->r);
 	}
+	urecord->op = *urecord_op;
 	// Close the record for all the cases
 	udf_record_close(urecord);
 
