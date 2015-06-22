@@ -873,8 +873,8 @@ as_record_merge(as_partition_reservation *rsv, cf_digest *keyd, uint16_t n_compo
 
 	int rv = as_record_get_create(tree, keyd, &r_ref, rsv->ns, false);
 	if (rv == -1) {
-		cf_warning_digest(AS_RECORD, keyd, "{%s} record merge: could not get-create record ", rsv->ns->name);
-		return(-1);
+		cf_debug_digest(AS_RECORD, keyd, "{%s} record merge: could not get-create record ", rsv->ns->name);
+		return(-3);
 	}
 	as_record *r = r_ref.r;
 
@@ -1275,8 +1275,8 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 	as_index  *r        = NULL;
 	int ret             = as_record_get_create(tree, keyd, &r_ref, rsv->ns, is_subrec);
 	if (-1 == ret) {
-		cf_warning_digest(AS_RECORD, keyd, "{%s} record flatten: could not get-create record %b", rsv->ns->name, is_subrec);
-		return(-1);
+		cf_debug_digest(AS_RECORD, keyd, "{%s} record flatten: could not get-create record %b", rsv->ns->name, is_subrec);
+		return(-3);
 	} else if (ret) {
 		has_local_copy  = false;
 		r               = r_ref.r;
@@ -1314,7 +1314,7 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 				cf_warning(AS_RECORD, "DUMMY LDT Component in Non Duplicate Resolution Code");
 				rv = -1;
 			} else {
-					cf_detail(AS_LDT, "Ship Operation");
+				cf_detail(AS_LDT, "Ship Operation");
 				// NB: DO NOT CHANGE THIS RETURN. IT MEANS A SPECIAL THING TO THE CALLER
 				rv = -2;
 			}
