@@ -126,6 +126,7 @@ bool get_scan_options(as_msg* m, scan_options* options);
 void set_blocking(int fd, bool block);
 size_t send_blocking_response_chunk(int fd, uint8_t* buf, size_t size);
 size_t send_blocking_response_fin(int fd, int result_code);
+static inline bool excluded_set(as_index* r, uint16_t set_id);
 
 
 
@@ -426,6 +427,12 @@ send_blocking_response_fin(int fd, int result_code)
 	return sizeof(cl_msg);
 }
 
+static inline bool
+excluded_set(as_index* r, uint16_t set_id)
+{
+	return set_id != INVALID_SET_ID && set_id != as_index_get_set_id(r);
+}
+
 
 
 //==============================================================================
@@ -716,12 +723,7 @@ basic_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	as_index *r = r_ref->r;
 
-	if (_job->set_id != INVALID_SET_ID && as_index_get_set_id(r) != _job->set_id) {
-		as_record_done(r_ref, ns);
-		return;
-	}
-
-	if (r->void_time != 0 && r->void_time < as_record_void_time_get()) {
+	if (excluded_set(r, _job->set_id) || as_record_is_expired(r)) {
 		as_record_done(r_ref, ns);
 		return;
 	}
@@ -1017,12 +1019,7 @@ aggr_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	as_index* r = r_ref->r;
 
-	if (_job->set_id != INVALID_SET_ID && as_index_get_set_id(r) != _job->set_id) {
-		as_record_done(r_ref, ns);
-		return;
-	}
-
-	if (r->void_time != 0 && r->void_time < as_record_void_time_get()) {
+	if (excluded_set(r, _job->set_id) || as_record_is_expired(r)) {
 		as_record_done(r_ref, ns);
 		return;
 	}
@@ -1297,12 +1294,7 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	as_index* r = r_ref->r;
 
-	if (_job->set_id != INVALID_SET_ID && as_index_get_set_id(r) != _job->set_id) {
-		as_record_done(r_ref, ns);
-		return;
-	}
-
-	if (r->void_time != 0 && r->void_time < as_record_void_time_get()) {
+	if (excluded_set(r, _job->set_id) || as_record_is_expired(r)) {
 		as_record_done(r_ref, ns);
 		return;
 	}
