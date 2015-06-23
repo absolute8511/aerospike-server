@@ -1227,7 +1227,15 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		}
 		else {
 			// If the message has a key, apply it to the record.
-			get_msg_key(m, &rd);
+			if (! get_msg_key(m, &rd)) {
+				udf_record_close(&urecord);
+				call->transaction->result_code = AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
+				send_response(call, "FAILURE", 7, AS_PARTICLE_TYPE_NULL, NULL, 0);
+				ldt_record_destroy(lrec);
+				as_rec_destroy(lrec);
+				return 0;
+			}
+
 			urecord.flag |= UDF_RECORD_FLAG_METADATA_UPDATED;
 		}
 
