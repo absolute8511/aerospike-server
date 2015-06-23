@@ -234,7 +234,9 @@ struct as_query_transaction_s {
 	as_aggr_call             agg_call; // Stream UDF Details 
 	as_sindex_qctx           qctx;     // Secondary Index details
 
-	as_partition_reservation rsv[AS_PARTITIONS];
+	as_partition_reservation rsv_arr[AS_PARTITIONS];
+	cf_atomic32              partition_reserved;
+	cf_atomic32              partition_released;
 };
 
 typedef enum {
@@ -327,6 +329,8 @@ int                  as_qtr__reserve(as_query_transaction *qtr, char *fname, int
 as_partition_reservation *  as_query_reserve_qnode(as_namespace * ns, as_query_transaction * qtr, 
 										as_partition_id pid, as_partition_reservation * rsv);
 void                 as_query_release_qnode(as_query_transaction * qtr, as_partition_reservation * rsv);
+void                 as_query_pre_reserve_qnodes(as_query_transaction * qtr);
+void                 as_query_post_release_qnodes(as_query_transaction * qtr);
 int                  as_query__netio(as_query_transaction *qtr, bool final);
 int                  as_query__netio_wait(as_query_transaction *qtr);
 
@@ -406,43 +410,6 @@ as_query__update_stats(as_query_transaction *qtr)
 	: false
 
 // INTERNAL FUNCTIONS:
-int
-ll_recl_reduce_fn(cf_ll_element *ele, void *udata)
-{
-	return CF_LL_REDUCE_DELETE;
-}
-
-void
-ll_recl_destroy_fn(cf_ll_element *ele)
-{
-	ll_recl_element * node = (ll_recl_element *) ele;
-	if (node) {
-		if (node->dig_arr) {
-			cf_free(node->dig_arr);
-		}
-		cf_free(node);
-	}
-}
-
-int
-ll_sindex_kv_reduce_fn(cf_ll_element *ele, void *udata)
-{
-	return CF_LL_REDUCE_DELETE;
-}
-
-void
-ll_sindex_kv_destroy_fn(cf_ll_element *ele)
-{
-	ll_sindex_kv_element * node = (ll_sindex_kv_element *) ele;
-	if (node) {
-		if (node->skv_arr) {
-			release_skv_arr_to_queue(node->skv_arr);
-			node->skv_arr = NULL;
-		}
-		cf_free(node);
-	}
-}
-
 void
 as_query_histogram_dumpall()
 {
@@ -739,14 +706,16 @@ as_query__transaction_done(as_query_transaction *qtr)
 		cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
 	}
 
+
 	// Release all the qnodes
-	if (qtr->qctx.qnodes_pre_reserved) {
-		for (int i=0; i<AS_PARTITIONS; i++) {
-			if (qtr->qctx.is_partition_qnode[i]) {
-				as_partition_release(&qtr->rsv[i]);
-				cf_atomic_int_decr(&g_config.dup_tree_count);
-			}
-		}
+	as_query_post_release_qnodes(qtr);
+	if (qtr->partition_reserved == qtr->partition_released) {
+		cf_warning(AS_QUERY, "Partition leak by query trid- %"PRIu64""
+			"Partition reserved %ld Partition released %ld", "qtr->trid, qtr->partition_reserved, qtr->partition_released");
+	}
+	else {
+		cf_debug(AS_QUERY, "No Partition leak by query trid- %"PRIu64""
+			"Partition reserved %ld Partition released %ld", "qtr->trid, qtr->partition_reserved, qtr->partition_released");	
 	}
 
 	as_query__update_stats(qtr);
@@ -1153,7 +1122,14 @@ as_query__process_aggreq(as_query_request *qagg)
 	as_query_transaction *qtr = qagg->qtr;
 	if (!qtr)           goto Cleanup;
 	as_query__check_timeout(qtr);
-	if (QTR_FAILED(qtr))    goto Cleanup;
+	if (QTR_FAILED(qtr)) {
+		goto Cleanup;
+	}
+
+	if (!cf_ll_size(qagg->recl)) {
+		goto Cleanup;
+	}
+
 	as_result   *res    = as_result_new();
 	ret                 = as_aggr__process(&qtr->agg_call, qagg->recl, NULL, res);
 
@@ -1175,7 +1151,7 @@ as_query__process_aggreq(as_query_request *qagg)
 
 Cleanup:
 	if (qagg->recl) {
-		cf_ll_reduce(qagg->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		cf_ll_reduce(qagg->recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		if (qagg->recl ) {
 			cf_free(qagg->recl);
 		}
@@ -1468,7 +1444,7 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 	// query node anymore then no need to return anything
 	// Since we are reserving all the qnodes upfront, this is a defensive check
 	as_partition_id pid =  as_partition_getid(*dig);
-	rsv = as_query_reserve_qnode(ns, qtr, pid, rsv);
+	rsv                 = as_query_reserve_qnode(ns, qtr, pid, rsv);
 	if (!rsv) {
 		return AS_QUERY_OK;
 	}
@@ -1632,21 +1608,21 @@ as_query__process_udfreq(as_query_request *qudf)
 	}
 
 	while((ele = cf_ll_getNext(iter))) {
-		ll_sindex_kv_element * node;
-		node                     = (ll_sindex_kv_element *) ele;
-		sindex_kv_arr * skv_arr  = node->skv_arr;
-		if (!skv_arr) {
+		as_index_keys_ll_element * node;
+		node                         = (as_index_keys_ll_element *) ele;
+		as_index_keys_arr * keys_arr  = node->keys_arr;
+		if (!keys_arr) {
 			continue;
 		}
-		node->skv_arr   =  NULL;
-		cf_detail(AS_QUERY, "NUMBER OF DIGESTS = %d", skv_arr->num);
-		for (int i = 0; i < skv_arr->num; i++) {
+		node->keys_arr   =  NULL;
+		cf_detail(AS_QUERY, "NUMBER OF DIGESTS = %d", keys_arr->num);
+		for (int i = 0; i < keys_arr->num; i++) {
 			cf_detail(AS_QUERY, "LOOOPING FOR NUMBER OF DIGESTS %d", i);
 
 			// Fill the structure needed by internal transaction create
 			tr_create_data d;
 			memset(&d, 0, sizeof(tr_create_data));
-			d.digest   = skv_arr->digs[i];
+			d.digest   = keys_arr->pindex_digs[i];
 			d.ns       = qtr->ns;
 			d.call     = &(qtr->call);
 			d.msg_type = AS_MSG_INFO2_WRITE;
@@ -1661,7 +1637,7 @@ as_query__process_udfreq(as_query_request *qudf)
 				usleep(g_config.query_sleep);
 			}
 		}
-		release_skv_arr_to_queue(skv_arr);
+		as_index_keys_release_arr_to_queue(keys_arr);
 	}
 Cleanup:
 	if(iter) {
@@ -1670,7 +1646,7 @@ Cleanup:
 	}
 
 	if (qudf->recl) {
-		cf_ll_reduce(qudf->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		cf_ll_reduce(qudf->recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		if (qudf->recl) {
 			cf_free(qudf->recl);
 		}
@@ -1706,19 +1682,19 @@ as_query__process_ioreq(as_query_request *qio)
 	}
 
 	while((ele = cf_ll_getNext(iter))) {
-		ll_sindex_kv_element * node;
-		node                   = (ll_sindex_kv_element *) ele;
-		sindex_kv_arr *skv_arr = node->skv_arr;
-		if (!skv_arr) {
+		as_index_keys_ll_element * node;
+		node                       = (as_index_keys_ll_element *) ele;
+		as_index_keys_arr *keys_arr = node->keys_arr;
+		if (!keys_arr) {
 			continue;
 		}
-		node->skv_arr     = NULL;
-		for (int i = 0; i < skv_arr->num; i++) {
-			cf_digest *dig  = &skv_arr->digs[i];
-			as_sindex_key * skey = &skv_arr->skeys[i];
+		node->keys_arr     = NULL;
+		for (int i = 0; i < keys_arr->num; i++) {
+			cf_digest *dig       = &keys_arr->pindex_digs[i];
+			as_sindex_key * skey = &keys_arr->sindex_keys[i];
 			ret             = as_query__io(qtr, dig, skey);
 			if (ret != AS_QUERY_OK) {
-				release_skv_arr_to_queue(skv_arr);
+				as_index_keys_release_arr_to_queue(keys_arr);
 				goto Cleanup;
 			}
 
@@ -1727,12 +1703,12 @@ as_query__process_ioreq(as_query_request *qio)
 				usleep(g_config.query_sleep);
 				as_query__check_timeout(qtr);
 				if (QTR_FAILED(qtr)) {
-					release_skv_arr_to_queue(skv_arr);
+					as_index_keys_release_arr_to_queue(keys_arr);
 					goto Cleanup;
 				}
 			}
 		}
-		release_skv_arr_to_queue(skv_arr);
+		as_index_keys_release_arr_to_queue(keys_arr);
 	}
 Cleanup:
 
@@ -1742,7 +1718,7 @@ Cleanup:
 	}
 
 	if (qio->recl) {
-		cf_ll_reduce(qio->recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		cf_ll_reduce(qio->recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		if (qio->recl) {
 			cf_free(qio->recl);
 		}
@@ -1853,7 +1829,7 @@ as_query__generator_get_nextbatch(as_query_transaction *qtr)
 	as_sindex_range *srange  = qtr->srange;
 	if (!qctx->recl) {
 		qctx->recl = cf_malloc(sizeof(cf_ll));
-		cf_ll_init(qctx->recl, ll_sindex_kv_destroy_fn, false /*no lock*/);
+		cf_ll_init(qctx->recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 		if (!qctx->recl) {
 			qtr->result_code = AS_SINDEX_ERR_NO_MEMORY;
 			qctx->n_bdigs        = 0;
@@ -1975,9 +1951,7 @@ as_query__generator(as_query_transaction *qtr)
 		init_ai_obj(qtr->qctx.bkey);
 		bzero(&qtr->qctx.bdig, sizeof(cf_digest));
 		// Populate all the paritions for which this node is a qnode.
-		if (qtr->qctx.qnodes_pre_reserved) {
-			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
-		}
+		as_query_pre_reserve_qnodes(qtr);
 
 		qtr->priority                 = g_config.query_priority;
 		qtr->bb_r                     = as_query__bb_poolrequest();
@@ -2114,7 +2088,7 @@ as_query__generator(as_query_transaction *qtr)
 Cleanup:
 
 	if (qtr->qctx.recl) {
-		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, ll_sindex_kv_reduce_fn, NULL);
+		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		if (qtr->qctx.recl) cf_free(qtr->qctx.recl);
 		qtr->qctx.recl = NULL;
 	}
@@ -3126,14 +3100,15 @@ as_query_reserve_qnode(as_namespace * ns, as_query_transaction * qtr, as_partiti
 			cf_debug(AS_QUERY, "Getting digest in rec list which do not belong to qnode.");
 			return NULL;
 		}
-		return &qtr->rsv[pid];
+		return &qtr->rsv_arr[pid];
 	}
 	else {
-		// get the qnode reservation per record
-		// Good for unique sindex queries.
-		as_partition_reservation tmp_rsv = *rsv;
-
-		AS_PARTITION_RESERVATION_INIT(tmp_rsv);
+		// Works for scan aggregation
+		if (!rsv) {
+			cf_warning(AS_QUERY, "rsv is null while reserving qnode.");
+			return NULL;
+		}
+		AS_PARTITION_RESERVATION_INITP(rsv);
 		if (0 != as_partition_reserve_qnode(ns, pid, rsv)) {
 			return NULL;
 		}
@@ -3148,5 +3123,37 @@ as_query_release_qnode(as_query_transaction * qtr, as_partition_reservation * rs
 	if (!qtr->qctx.qnodes_pre_reserved) {
 		as_partition_release(rsv);
 		cf_atomic_int_decr(&g_config.dup_tree_count);
+	}
+}
+
+void
+as_query_pre_reserve_qnodes(as_query_transaction * qtr)
+{
+	if (!qtr) {
+		cf_warning(AS_QUERY, "qtr is NULL");
+		return;	
+	}
+	uint32_t reserved = 0;
+	if (qtr->qctx.qnodes_pre_reserved) {
+		reserved = as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv_arr);
+	}
+	cf_atomic32_add(&qtr->partition_reserved, reserved);
+}
+
+void
+as_query_post_release_qnodes(as_query_transaction * qtr)
+{
+	if (!qtr) {
+		cf_warning(AS_QUERY, "qtr is NULL");
+		return;
+	}
+	if (qtr->qctx.qnodes_pre_reserved) {
+		for (int i=0; i<AS_PARTITIONS; i++) {
+			if (qtr->qctx.is_partition_qnode[i]) {
+				as_partition_release(&qtr->rsv_arr[i]);
+				cf_atomic_int_decr(&g_config.dup_tree_count);
+				cf_atomic32_decr(&qtr->partition_released);
+			}
+		}
 	}
 }

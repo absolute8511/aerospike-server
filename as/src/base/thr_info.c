@@ -4442,7 +4442,7 @@ as_info_buffer(uint8_t *req_buf, size_t req_buf_len, cf_dyn_buf *rsp)
 //
 
 void *
-thr_info_fn(void *gcc_is_ass)
+thr_info_fn(void *unused)
 {
 	for ( ; ; ) {
 
@@ -4816,7 +4816,7 @@ as_info_set(const char *name, const char *value, bool def)
 }
 
 void *
-info_debug_ticker_fn(void *gcc_is_ass)
+info_debug_ticker_fn(void *unused)
 {
 	size_t total_ns_memory_inuse = 0;
 
@@ -5252,7 +5252,7 @@ build_service_list(cf_ifaddr * ifaddr, int ifaddr_sz, cf_dyn_buf *db) {
 // Note: if all my interfaces go down, service_str will be 0
 //
 void *
-info_interfaces_fn(void *gcc_is_ass)
+info_interfaces_fn(void *unused)
 {
 
 	uint8_t	buf[512];
@@ -5317,7 +5317,7 @@ info_interfaces_fn(void *gcc_is_ass)
 //
 
 void *
-info_interfaces_static_fn(void *gcc_is_ass)
+info_interfaces_static_fn(void *unused)
 {
 
 	cf_info(AS_INFO, " static external network definition ");
