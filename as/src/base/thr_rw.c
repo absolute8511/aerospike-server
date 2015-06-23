@@ -528,6 +528,25 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 	msg_set_uint32(m, RW_FIELD_OP, op);
 
 	if (op == RW_OP_WRITE) {
+		/*
+		 * if ldt_rectype bits not set. It is possibly direct manipulation of 
+		 * record with LDT bin. Try to fetch the ldt bit types from the 
+		 * pickled rec props
+		 *
+		 * NB: We sent both rec_props and ldt bits over the wire
+		 * this is redundant information. Can be improved by sending
+		 * only 1 and other inferred at the prole side.
+		 */
+		if (ldt_rectype_bits == 0) { 
+			uint16_t *ldt_bits = NULL;
+			as_rec_props_get_value((const as_rec_props *)p_pickled_rec_props, CL_REC_PROPS_FIELD_LDT_TYPE, NULL,
+					(uint8_t**)&ldt_bits);
+			if (ldt_bits) {
+				ldt_rectype_bits = *ldt_bits;
+			}
+		}
+
+
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
 		msg_set_uint32(m, RW_FIELD_VOID_TIME, pickled_void_time);
 
@@ -924,6 +943,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						return 0;
 					}
 				} else {
+					wr->has_udf = false;
 					cf_free(call);
 
 					write_local_generation wlg;

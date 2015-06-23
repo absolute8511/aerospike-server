@@ -1417,9 +1417,9 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 								// -3 is not a failure. It is get_create failure inside as_record_flatten which is 
 								// possible in case of race.
 								cf_warning_digest(AS_MIGRATE, key, "migrate: record flatten failed %d", rv);
-							}
-							migrate_recv_control_release(mc);
-							goto Done;
+								migrate_recv_control_release(mc);
+								goto Done;
+							} 
 						}
 					}
 				}
@@ -2794,7 +2794,7 @@ as_migrate_is_incoming(cf_digest *subrec_digest, uint64_t version, as_partition_
 			}
 		}
 	}
-	cf_detail(AS_LDT, "No Incoming for pid:%d, No mig item", partition_id);
+	cf_detail_digest(AS_LDT, subrec_digest, "No Incoming for pid:%d, version:%ld No mig item", partition_id, version);
 	return false;
 }
 
