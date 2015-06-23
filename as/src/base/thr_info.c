@@ -528,29 +528,29 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";scans_abandoned=");
 	APPEND_STAT_COUNTER(db, g_config.scans_abandoned);
 
+	cf_dyn_buf_append_string(db, ";batch_index_initiate=");
+	APPEND_STAT_COUNTER(db, g_config.batch_index_initiate);
+	cf_dyn_buf_append_string(db, ";batch_index_queue=");
+	as_batch_queues_info(db);
+	cf_dyn_buf_append_string(db, ";batch_index_complete=");
+	APPEND_STAT_COUNTER(db, g_config.batch_index_complete);
+	cf_dyn_buf_append_string(db, ";batch_index_timeout=");
+	APPEND_STAT_COUNTER(db, g_config.batch_index_timeout);
+	cf_dyn_buf_append_string(db, ";batch_index_errors=");
+	APPEND_STAT_COUNTER(db, g_config.batch_index_errors);
+	cf_dyn_buf_append_string(db, ";batch_index_unused_buffers=");
+	cf_dyn_buf_append_int(db, as_batch_unused_buffers());
+
 	cf_dyn_buf_append_string(db, ";batch_initiate=");
 	APPEND_STAT_COUNTER(db, g_config.batch_initiate);
 	cf_dyn_buf_append_string(db, ";batch_queue=");
-	as_batch_queues_info(db);
-	cf_dyn_buf_append_string(db, ";batch_complete=");
-	APPEND_STAT_COUNTER(db, g_config.batch_complete);
+	cf_dyn_buf_append_int(db, as_batch_direct_queue_size());
+	cf_dyn_buf_append_string(db, ";batch_tree_count=");
+	APPEND_STAT_COUNTER(db, g_config.batch_tree_count);
 	cf_dyn_buf_append_string(db, ";batch_timeout=");
 	APPEND_STAT_COUNTER(db, g_config.batch_timeout);
 	cf_dyn_buf_append_string(db, ";batch_errors=");
 	APPEND_STAT_COUNTER(db, g_config.batch_errors);
-	cf_dyn_buf_append_string(db, ";batch_unused_buffers=");
-	cf_dyn_buf_append_int(db, as_batch_unused_buffers());
-
-	cf_dyn_buf_append_string(db, ";batch_direct_initiate=");
-	APPEND_STAT_COUNTER(db, g_config.batch_direct_initiate);
-	cf_dyn_buf_append_string(db, ";batch_direct_queue=");
-	cf_dyn_buf_append_int(db, as_batch_direct_queue_size());
-	cf_dyn_buf_append_string(db, ";batch_direct_tree_count=");
-	APPEND_STAT_COUNTER(db, g_config.batch_direct_tree_count);
-	cf_dyn_buf_append_string(db, ";batch_direct_timeout=");
-	APPEND_STAT_COUNTER(db, g_config.batch_direct_timeout);
-	cf_dyn_buf_append_string(db, ";batch_direct_errors=");
-	APPEND_STAT_COUNTER(db, g_config.batch_direct_errors);
 
 	cf_dyn_buf_append_string(db, ";info_queue=");
 	cf_dyn_buf_append_int(db, as_info_queue_get_size());
@@ -2060,10 +2060,10 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";scan-threads=");
 	cf_dyn_buf_append_int(db, g_config.scan_threads);
 
+	cf_dyn_buf_append_string(db, ";batch-index-threads=");
+	cf_dyn_buf_append_int(db, g_config.n_batch_index_threads);
 	cf_dyn_buf_append_string(db, ";batch-threads=");
 	cf_dyn_buf_append_int(db, g_config.n_batch_threads);
-	cf_dyn_buf_append_string(db, ";batch-direct-threads=");
-	cf_dyn_buf_append_int(db, g_config.n_batch_direct_threads);
 	cf_dyn_buf_append_string(db, ";batch-max-requests=");
 	cf_dyn_buf_append_uint32(db, g_config.batch_max_requests);
 	cf_dyn_buf_append_string(db, ";batch-max-buffers-per-queue=");
@@ -2717,13 +2717,13 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			g_config.scan_threads = val;
 			as_scan_resize_thread_pool(g_config.scan_threads);
 		}
-		else if (0 == as_info_parameter_get(params, "batch-threads", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "batch-index-threads", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
 				goto Error;
 			if (0 != as_batch_threads_resize(val))
 				goto Error;
 		}
-		else if (0 == as_info_parameter_get(params, "batch-direct-threads", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "batch-threads", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
 				goto Error;
 			if (0 != as_batch_direct_threads_resize(val))
@@ -4998,10 +4998,10 @@ info_debug_ticker_fn(void *unused)
 					histogram_dump(g_config.wt_resolve_wait_hist);
 				if (g_config.error_hist)
 					histogram_dump(g_config.error_hist);
-				if (g_config.batch_read_hist)
-					histogram_dump(g_config.batch_read_hist);
-				if (g_config.batch_direct_read_hist)
-					histogram_dump(g_config.batch_direct_read_hist);
+				if (g_config.batch_index_reads_hist)
+					histogram_dump(g_config.batch_index_reads_hist);
+				if (g_config.batch_q_process_hist)
+					histogram_dump(g_config.batch_q_process_hist);
 				if (g_config.info_tr_q_process_hist)
 					histogram_dump(g_config.info_tr_q_process_hist);
 				if (g_config.info_q_wait_hist)
@@ -6238,8 +6238,8 @@ clear_microbenchmark_histograms()
 	histogram_clear(g_config.rt_resolve_wait_hist);
 	histogram_clear(g_config.wt_resolve_wait_hist);
 	histogram_clear(g_config.error_hist);
-	histogram_clear(g_config.batch_read_hist);
-	histogram_clear(g_config.batch_direct_read_hist);
+	histogram_clear(g_config.batch_index_reads_hist);
+	histogram_clear(g_config.batch_q_process_hist);
 	histogram_clear(g_config.info_tr_q_process_hist);
 	histogram_clear(g_config.info_q_wait_hist);
 	histogram_clear(g_config.info_post_lock_hist);

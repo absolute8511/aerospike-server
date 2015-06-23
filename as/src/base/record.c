@@ -31,7 +31,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <time.h> // for as_record_void_time_get() - TODO - replace with clock function
 #include <netinet/in.h>
 #include <sys/param.h>
 
@@ -1864,12 +1863,9 @@ as_partition_vinfo_dump(as_partition_vinfo *vinfo, char *msg)
 			vinfo->vtp[6], vinfo->vtp[7], vinfo->vtp[8], vinfo->vtp[9], vinfo->vtp[10], vinfo->vtp[11] );
 }
 
-
-// TOD0 - seems redundant, should use clock function.
-uint32_t
-as_record_void_time_get()
+// TODO - inline this, if/when we unravel header files.
+bool
+as_record_is_expired(as_record *r)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	return ts.tv_sec - CITRUSLEAF_EPOCH;
+	return r->void_time != 0 && r->void_time < as_record_void_time_get();
 }

@@ -455,7 +455,7 @@ process_transaction(as_transaction *tr)
 				rv = as_batch_direct_queue_task(tr);
 				if (rv != 0) {
 					as_transaction_error(tr, rv);
-					cf_atomic_int_incr(&g_config.batch_direct_errors);
+					cf_atomic_int_incr(&g_config.batch_errors);
 				}
 			} else if (rv == -4) {
 				cf_info(AS_TSVC, "bailed due to bad protocol. Returning failure to client");
