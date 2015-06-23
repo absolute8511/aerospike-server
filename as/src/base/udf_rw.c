@@ -1194,7 +1194,15 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 
 	// Step 2: Setup Storage Record
 	int rec_rv = as_record_get(tr->rsv.tree, &tr->keyd, &r_ref, tr->rsv.ns);
-	if (!rec_rv) {
+
+	if (rec_rv == 0 &&
+			// If record is expired, pretend it was not found.
+			(r_ref.r->void_time != 0 && r_ref.r->void_time < as_record_void_time_get())) {
+		as_record_done(&r_ref, tr->rsv.ns);
+		rec_rv = -1;
+	}
+
+	if (rec_rv == 0) {
 		urecord.flag   |= UDF_RECORD_FLAG_OPEN;
 		urecord.flag   |= UDF_RECORD_FLAG_PREEXISTS;
 		cf_detail(AS_UDF, "Open %p %x %"PRIx64"", &urecord, urecord.flag, *(uint64_t *)&tr->keyd);

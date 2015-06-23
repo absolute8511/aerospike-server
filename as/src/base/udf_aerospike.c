@@ -914,10 +914,19 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	if (rv == 1) {
 		is_create = true;
 	} else if (rv == 0) {
-		cf_warning(AS_UDF, "udf_aerospike_rec_create: Record Already Exists 2");
-		as_record_done(r_ref, tr->rsv.ns);
-		// DO NOT change it has special meaning for caller
-		return 1;
+		// If it's an expired record, pretend it's a fresh create.
+		if (r_ref->r->void_time != 0
+				&& r_ref->r->void_time < as_record_void_time_get()) {
+			as_record_destroy(r_ref->r, tr->rsv.ns);
+			as_record_initialize(r_ref, tr->rsv.ns);
+			cf_atomic_int_incr(&tr->rsv.ns->n_objects);
+			is_create = true;
+		} else {
+			cf_warning(AS_UDF, "udf_aerospike_rec_create: Record Already Exists 2");
+			as_record_done(r_ref, tr->rsv.ns);
+			// DO NOT change it has special meaning for caller
+			return 1;
+		}
 	} else if (rv < 0) {
 		cf_warning(AS_UDF, "udf_aerospike_rec_create: Record Open Failed with rv=%d", rv);
 		return rv;
