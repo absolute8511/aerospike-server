@@ -2099,8 +2099,6 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_uint32(db, g_config.batch_max_buffers_per_queue);
 	cf_dyn_buf_append_string(db, ";batch-max-unused-buffers=");
 	cf_dyn_buf_append_uint32(db, g_config.batch_max_unused_buffers);
-	cf_dyn_buf_append_string(db, ";batch-max-inline=");
-	cf_dyn_buf_append_uint32(db, g_config.batch_max_inline);
 	cf_dyn_buf_append_string(db, ";batch-priority=");
 	cf_dyn_buf_append_uint32(db, g_config.batch_priority);
 
@@ -2759,12 +2757,6 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 				goto Error;
 			cf_info(AS_INFO, "Changing value of batch-max-unused-buffers from %d to %d ", g_config.batch_max_unused_buffers, val);
 			g_config.batch_max_unused_buffers = val;
-		}
-		else if (0 == as_info_parameter_get(params, "batch-max-inline", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val))
-				goto Error;
-			cf_info(AS_INFO, "Changing value of batch-max-inline from %d to %d ", g_config.batch_max_inline, val);
-			g_config.batch_max_inline = val;
 		}
 		else if (0 == as_info_parameter_get(params, "batch-priority", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
@@ -4450,7 +4442,7 @@ as_info_buffer(uint8_t *req_buf, size_t req_buf_len, cf_dyn_buf *rsp)
 //
 
 void *
-thr_info_fn(void *gcc_is_ass)
+thr_info_fn(void *unused)
 {
 	for ( ; ; ) {
 
@@ -4824,7 +4816,7 @@ as_info_set(const char *name, const char *value, bool def)
 }
 
 void *
-info_debug_ticker_fn(void *gcc_is_ass)
+info_debug_ticker_fn(void *unused)
 {
 	size_t total_ns_memory_inuse = 0;
 
@@ -5260,7 +5252,7 @@ build_service_list(cf_ifaddr * ifaddr, int ifaddr_sz, cf_dyn_buf *db) {
 // Note: if all my interfaces go down, service_str will be 0
 //
 void *
-info_interfaces_fn(void *gcc_is_ass)
+info_interfaces_fn(void *unused)
 {
 
 	uint8_t	buf[512];
@@ -5325,7 +5317,7 @@ info_interfaces_fn(void *gcc_is_ass)
 //
 
 void *
-info_interfaces_static_fn(void *gcc_is_ass)
+info_interfaces_static_fn(void *unused)
 {
 
 	cf_info(AS_INFO, " static external network definition ");

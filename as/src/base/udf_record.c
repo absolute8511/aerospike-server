@@ -324,6 +324,7 @@ udf_record_init(udf_record *urecord)
 	as_rec_props_clear(&urecord->pickled_rec_props);
 
 	urecord->ldt_rectype_bits   = 0;
+	urecord->op                 = UDF_OPTYPE_READ;
 	urecord->keyd               = cf_digest_zero;
 	for (uint32_t i = 0; i < UDF_RECORD_BIN_ULIMIT; i++) {
 		urecord->updates[i].particle_buf = NULL;
@@ -917,15 +918,14 @@ udf_record_ttl(const as_rec * rec)
 	}
 
 	if ((urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN)) {
-		if (urecord->r_ref->r->void_time > 0) {
-			return (urecord->r_ref->r->void_time - as_record_void_time_get());
-		} else {
-			return 0;
-		}
+		uint32_t now = as_record_void_time_get();
+
+		return urecord->r_ref->r->void_time > now ?
+				urecord->r_ref->r->void_time - now : 0;
 	}
 	else {
 		cf_info(AS_UDF, "Error in getting ttl: no record found");
-		return -1;
+		return 0; // since we can't indicate the record doesn't exist
 	}
 	return 0;
 }

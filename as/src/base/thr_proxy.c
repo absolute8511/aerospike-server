@@ -1010,7 +1010,7 @@ Retry:
 
 
 void *
-proxy_retransmit_fn(void *gcc_is_ass)
+proxy_retransmit_fn(void *unused)
 {
 	while (1) {
 		usleep(75 * 1000);

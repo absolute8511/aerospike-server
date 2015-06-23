@@ -552,8 +552,7 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 				as_rec_props_clear(p_pickled_rec_props);
 			}
 		} else { // deletes come here
-			cf_detail(AS_RW, "Send delete to replica %"PRIx64"",
-							*(uint64_t*)keyd);
+			cf_detail_digest(AS_RW, keyd, "Send delete to replica ");
 			msg_set_buf(m, RW_FIELD_AS_MSG, (void *) tr->msgp,
 					as_proto_size_get(&tr->msgp->proto), MSG_SET_COPY);
 			msg_set_unset(m, RW_FIELD_RECORD);
@@ -639,7 +638,7 @@ write_request_setup(write_request *wr, as_transaction *tr, int optype)
 	return 0;
 }
 
-// Write Requese standard cleanup functions. This is used to cleanup request when they
+// Write request standard cleanup function. This is used to cleanup requests when they
 // are finished. The associated cleanup done is freeing up as_msg releasing partition
 // reservation etc, release proto_fd if it is not released.
 //
@@ -5363,9 +5362,8 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_r
 			if ((info & RW_INFO_LDT_SUBREC)
 					|| (info & RW_INFO_LDT_ESR)) {
 				tr.flag |= AS_TRANSACTION_FLAG_LDT_SUB;
-				cf_detail(AS_RW,
-						"LDT Subrecord Replication Request Received %"PRIx64"\n",
-						*(uint64_t* )keyd);
+				cf_detail_digest(AS_RW, keyd,
+						"LDT Subrecord Replication Request Received ");
 			}
 		}
 
@@ -6312,6 +6310,16 @@ rw_multi_process(cf_node node, msg *m)
 	as_partition_reserve_migrate(ns, as_partition_getid(*keyd), &rsv, 0);
 	cf_atomic_int_incr(&g_config.wprocess_tree_count);
 	reserved = true;
+	if (rsv.state == AS_PARTITION_STATE_ABSENT ||
+		rsv.state == AS_PARTITION_STATE_WAIT)
+	{
+		result_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
+		cf_atomic_int_incr(&g_config.stat_cluster_key_prole_retry);
+		cf_debug_digest(AS_RW, keyd,
+				"[PROLE STATE MISMATCH:2] TID(0) P PID(%u) State:ABSENT or other(%u). Return to Sender. :",
+				rsv.pid, rsv.state  );
+		goto Out;
+	}
 
 	int offset = 0;
 	int count = 0;

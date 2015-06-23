@@ -1115,76 +1115,38 @@ as_internal_scan_udf_txn_setup(tr_create_data * d)
 	return 0;
 }
 
-void
-tscan_ll_recl_destroy_fn(cf_ll_element *ele)
-{
-	ll_recl_element * node = (ll_recl_element *) ele;
-	if (node) {
-		if (node->dig_arr) {
-			cf_free(node->dig_arr);
-		}
-		cf_free(node);
-	}
-}
-
-extern dig_arr_t * getDigestArray(void);
-
-int
+as_scan_status
 tscan_add_digest_list(cf_ll * recl, cf_digest * digest, int * dnum)
 {
 	cf_ll_element *ele = recl->tail;
 	bool create = ele == NULL;
-	dig_arr_t *dt;
+	as_index_keys_arr * keys_arr = NULL;
 	if (!create) {
-		dt = ((ll_recl_element*)ele)->dig_arr;
-		if (dt->num == NUM_SINDEX_KV_PER_ARR) {
+		keys_arr = ((as_index_keys_ll_element*)ele)->keys_arr;
+		if (keys_arr->num == AS_INDEX_KEYS_PER_ARR) {
 			create = true;
 		}
 	}
 	if (create) {
-		dt = getDigestArray();
-		if (!dt) {
-			return -1;
+		keys_arr = as_index_get_keys_arr();
+		if (!keys_arr) {
+			cf_warning(AS_SCAN, "Not able to get keys arr.");
+			return AS_SCAN_ERR;
 		}
-		ll_recl_element * node;
-		node = cf_malloc(sizeof(ll_recl_element));
-		node->dig_arr = dt;
+		as_index_keys_ll_element * node;
+		node          = cf_malloc(sizeof(as_index_keys_ll_element));
+		node->keys_arr = keys_arr;
 		cf_ll_append(recl, (cf_ll_element *)node);
 	}
-	memcpy(&dt->digs[dt->num], digest, CF_DIGEST_KEY_SZ);
-	dt->num++;
+	// Not using the keys part of sindex_kv
+	// This will waste some memory but will not cause any ugliness while handling this 
+	// at query engine
+	memcpy(&keys_arr->pindex_digs[keys_arr->num], digest, CF_DIGEST_KEY_SZ);
+	keys_arr->num++;
 	if (dnum) {
 		*dnum = *dnum + 1;
 	}
-	return 0;
-}
-
-void
-tscan_recl_cleanup(cf_ll *recl)
-{
-	if (recl) {
-		cf_ll_iterator * iter = NULL;
-		iter                  = cf_ll_getIterator(recl, true /*forward*/);
-		if (iter) {
-			cf_ll_element *ele;
-			while ((ele = cf_ll_getNext(iter))) {
-				ll_recl_element * node;
-				node = (ll_recl_element *) ele;
-				dig_arr_t * dt = node->dig_arr;
-				node->dig_arr =  NULL;
-				if (dt) {
-					releaseDigArrToQueue((void *)dt);
-				}
-			}
-		}
-		cf_ll_releaseIterator(iter);
-	}
-}
-
-int
-tscan_ll_recl_reduce_fn(cf_ll_element *ele, void *udata)
-{
-	return CF_LL_REDUCE_DELETE;
+	return AS_SCAN_OK;
 }
 
 void
@@ -1221,7 +1183,11 @@ tscan_aggr_tree_reduce_fn(as_index_ref *r_ref, void *udata)
 			return;
 		}
 	}
-	tscan_add_digest_list (d_ptr->recl, &(r->key), NULL);
+	as_scan_status ret = tscan_add_digest_list (d_ptr->recl, &(r->key), NULL);
+	if (ret != AS_SCAN_OK) {
+		cf_warning(AS_SCAN, "tscan_add_digest_list failed with return value %d", ret);
+	}
+	
 	as_record_done(r_ref, d_ptr->task->ns);
 }
 
@@ -1961,7 +1927,7 @@ tscan_partition_thr(void *q_to_wait_on)
 				job_early_terminate = true;
 			}
 			else {
-				cf_ll_init(recl, tscan_ll_recl_destroy_fn, false /*no lock*/);
+				cf_ll_init(recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 
 				tscan_aggr_tr_udata_t tree_reduce_udata = {
 					.recl = recl,
@@ -1969,29 +1935,31 @@ tscan_partition_thr(void *q_to_wait_on)
 				};
 
 				as_index_reduce(rsv.tree, tscan_aggr_tree_reduce_fn, (void *)&tree_reduce_udata);
-
-				as_result   *res    = as_result_new();
-				int ret             = as_aggr__process(u.aggr_call, recl, &u, res);
-				if (ret != 0) {
-					char *rs = as_module_err_string(ret);
-					if (res->value != NULL) {
-						as_string * lua_s   = as_string_fromval(res->value);
-						char *      lua_err = (char *) as_string_tostring(lua_s);
-						if (lua_err != NULL) {
-							int l_rs_len = strlen(rs);
-							rs = cf_realloc(rs, l_rs_len + strlen(lua_err) + 4);
-							sprintf(&rs[l_rs_len], " : %s", lua_err);
+				if (cf_ll_size(recl)) {
+					as_result   *res    = as_result_new();
+					int ret             = as_aggr__process(u.aggr_call, recl, &u, res);
+					if (ret != 0) {
+						char *rs = as_module_err_string(ret);
+						if (res->value != NULL) {
+							as_string * lua_s   = as_string_fromval(res->value);
+							char *      lua_err = (char *) as_string_tostring(lua_s);
+							if (lua_err != NULL) {
+								int l_rs_len = strlen(rs);
+								rs = cf_realloc(rs, l_rs_len + strlen(lua_err) + 4);
+								sprintf(&rs[l_rs_len], " : %s", lua_err);
+							}
 						}
+						tscan_add_aggr_result(rs, &u, false);
+						cf_free(rs);
+						job_early_terminate = true;
 					}
-					tscan_add_aggr_result(rs, &u, false);
-					cf_free(rs);
-					job_early_terminate = true;
-				}
 
-				as_result_destroy(res);
-				tscan_recl_cleanup(recl);
-				cf_ll_reduce(recl, true /*forward*/, tscan_ll_recl_reduce_fn, NULL);
-				cf_free(recl);
+					as_result_destroy(res);
+				}			
+				cf_ll_reduce(recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
+				if (recl) {
+					cf_free(recl);
+				}
 			}
 		}
 		else {
