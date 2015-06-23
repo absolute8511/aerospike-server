@@ -873,18 +873,19 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 
 		FOR_EACH_SUBRECORD(i, j, lrecord) {
 			urecord_op = UDF_OPTYPE_READ;
-			is_ldt = true;
-			subrec_count++;
 			udf_record *c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
-			if (g_config.ldt_benchmarks) {
-				udf_rw_getop(c_urecord, &urecord_op);
-				if (UDF_OP_IS_WRITE(urecord_op)) {
+			udf_rw_getop(c_urecord, &urecord_op);
+
+			if (UDF_OP_IS_WRITE(urecord_op)) {
+				if (g_config.ldt_benchmarks) {
 					if (c_urecord->tr->rsv.ns
 						&& NAMESPACE_HAS_PERSISTENCE(c_urecord->tr->rsv.ns)
 						&& c_urecord->rd) {
 						total_flat_size += as_storage_record_size(c_urecord->rd);
 					}
 				}
+				is_ldt = true;
+				subrec_count++;
 			}
 			udf_rw_post_processing(c_urecord, &urecord_op, set_id);
 		}
