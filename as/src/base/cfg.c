@@ -103,7 +103,6 @@ cfg_set_defaults()
 	c->allow_inline_transactions = true; // allow data-in-memory namespaces to process transactions in service threads
 	c->n_batch_direct_threads = 4;
 	c->batch_max_buffers_per_queue = 255; // maximum number of buffers allowed in a single queue
-	c->batch_max_inline = 100000; // batch sizes lower than this will be processed inline for in-memory namespaces
 	c->batch_max_requests = 5000; // maximum requests/digests in a single batch
 	c->batch_max_unused_buffers = 256; // maximum number of buffers allowed in batch buffer pool
 	c->batch_priority = 200; // # of rows between a quick context switch?
@@ -264,7 +263,6 @@ typedef enum {
 	CASE_SERVICE_AUTO_UNDUN,
 	CASE_SERVICE_BATCH_DIRECT_THREADS,
 	CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE,
-	CASE_SERVICE_BATCH_MAX_INLINE,
 	CASE_SERVICE_BATCH_MAX_REQUESTS,
 	CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS,
 	CASE_SERVICE_BATCH_PRIORITY,
@@ -639,7 +637,6 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "auto-undun",						CASE_SERVICE_AUTO_UNDUN },
 		{ "batch-direct-threads",			CASE_SERVICE_BATCH_DIRECT_THREADS },
 		{ "batch-max-buffers-per-queue",	CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE },
-		{ "batch-max-inline",				CASE_SERVICE_BATCH_MAX_INLINE },
 		{ "batch-max-requests",				CASE_SERVICE_BATCH_MAX_REQUESTS },
 		{ "batch-max-unused-buffers",		CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS },
 		{ "batch-priority",					CASE_SERVICE_BATCH_PRIORITY },
@@ -1844,9 +1841,6 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE:
 				c->batch_max_buffers_per_queue = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_BATCH_MAX_INLINE:
-				c->batch_max_inline = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_BATCH_MAX_REQUESTS:
 				c->batch_max_requests = cfg_u32_no_checks(&line);

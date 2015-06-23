@@ -42,6 +42,11 @@
 #include "base/transaction.h"
 #include "base/udf_rw.h"
 
+// Function return values.
+typedef enum as_scan_status {
+	AS_SCAN_ERR = -1,
+	AS_SCAN_OK  = 0
+} as_scan_status;
 
 typedef enum as_scan_state_logged {
 	AS_SCAN_STARTED,

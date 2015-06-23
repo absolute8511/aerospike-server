@@ -1262,7 +1262,7 @@ as_partition_reserve_qnode(as_namespace *ns, as_partition_id pid, as_partition_r
 	return ret;
 }
 
-void
+uint32_t
 as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_partition_reservation rsv[])
 {
 	/*
@@ -1273,8 +1273,8 @@ as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_
 	 * Else 
 	 * 		Set the pid index in is_partition_qnode as false
 	 */
-	as_partition * p = NULL;
-
+	as_partition  * p = NULL;
+	uint32_t reserved = 0;
 	// Iterate through all the partitions in the namespace
 	for (int i=0; i<AS_PARTITIONS; i++) {
 		p = &ns->partitions[i];
@@ -1296,7 +1296,7 @@ as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_
 			AS_PARTITION_RESERVATION_INIT(rsv[i]);
 			as_partition_reserve_lockfree(ns, i, &rsv[i]);
 			is_partition_qnode[i] = true;
-	
+			reserved++;
 			// Theoretically, any partition which is qnode whould either belong to sync or 
 			// zombie state. Its better to know if some other state is becoming qnode.
 			if (AS_PARTITION_STATE_SYNC != p->state && AS_PARTITION_STATE_ZOMBIE != p->state) {
@@ -1310,8 +1310,8 @@ as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_
 
 		if (0 != pthread_mutex_unlock(&p->lock))
 			cf_crash(AS_PARTITION, "couldn't unlock partition state lock: %s", cf_strerror(errno));
-
 	}
+	return reserved;
 }
 /* as_partition_reserve_write
  * Obtain a write reservation on a partition, or get the address of a

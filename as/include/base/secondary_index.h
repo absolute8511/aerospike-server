@@ -57,8 +57,9 @@
 #define AS_SINDEX_MAX_PATH_LENGTH  256
 #define AS_SINDEX_MAX_DEPTH        10
 #define AS_SINDEX_TYPE_STR_SIZE    20
+#define AS_INDEX_KEYS_ARRAY_QUEUE_HIGHWATER  512
+#define AS_INDEX_KEYS_PER_ARR      51
 // **************************************************************************************************
-
 
 /* 
  * Return status codes for index object functions.
@@ -426,6 +427,25 @@ typedef struct as_sindex_range_s {
 	as_sindex_type      itype;
 	char                bin_path[AS_SINDEX_MAX_PATH_LENGTH];
 } as_sindex_range;
+
+/*
+ * sindex_keys  are used by Secondary index queries to validate the keys against
+ * the values of bins
+ * ALl the jobs which runs over these queries also uses them
+ * Like - Aggregation Query
+ */
+typedef struct as_index_keys_arr_s { 
+	uint32_t      num;
+	cf_digest     pindex_digs[AS_INDEX_KEYS_PER_ARR];	
+	as_sindex_key sindex_keys[AS_INDEX_KEYS_PER_ARR];
+} __attribute__ ((packed)) as_index_keys_arr;
+
+typedef struct as_index_keys_ll_element_s {
+	cf_ll_element       ele;
+	as_index_keys_arr * keys_arr;
+} as_index_keys_ll_element;
+
+
 // **************************************************************************************************
 
 
@@ -584,6 +604,8 @@ extern int         as_sindex_assert_query(as_sindex *si, as_sindex_range *srange
 extern as_sindex * as_sindex_from_msg(as_namespace *ns, as_msg *msgp); 
 extern as_sindex * as_sindex_from_range(as_namespace *ns, char *set, as_sindex_range *srange);
 extern bool        as_sindex_partition_isqnode(as_namespace *ns, cf_digest *digest);
+extern int         as_index_keys_reduce_fn(cf_ll_element *ele, void *udata);
+extern void        as_index_keys_destroy_fn(cf_ll_element *ele);
 // **************************************************************************************************
 
 
@@ -698,6 +720,10 @@ extern as_mon_jobstat     * as_query_get_jobstat(uint64_t trid);
 extern as_mon_jobstat     * as_query_get_jobstat_all(int * size);
 extern int                  as_query_set_priority(uint64_t trid, uint32_t priority);
 extern void                 as_query_histogram_dumpall();
+extern as_index_keys_arr  * as_index_get_keys_arr();
+extern void                 as_index_keys_release_arr_to_queue(as_index_keys_arr *v);
+extern int                  as_index_keys_ll_reduce_fn(cf_ll_element *ele, void *udata);
+extern void                 as_index_keys_ll_destroy_fn(cf_ll_element *ele);
 // **************************************************************************************************
 
 /*
