@@ -51,9 +51,6 @@
 #include "dynbuf.h"
 #include "fault.h"
 
-#include "ai_btree.h"
-extern dig_arr_t* getDigestArray(void);
-
 #include "base/aggr.h"
 #include "base/cfg.h"
 #include "base/datamodel.h"
@@ -61,6 +58,7 @@ extern dig_arr_t* getDigestArray(void);
 #include "base/job_manager.h"
 #include "base/monitor.h"
 #include "base/proto.h"
+#include "base/secondary_index.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "base/udf_memtracker.h"
@@ -835,8 +833,6 @@ typedef struct aggr_scan_slice_s {
 
 void aggr_scan_job_reduce_cb(as_index_ref* r_ref, void* udata);
 bool aggr_scan_add_digest(cf_ll* ll, cf_digest* keyd);
-void aggr_scan_ll_destroy_fn(cf_ll_element* e);
-int aggr_scan_ll_reduce_fn(cf_ll_element* e, void* udata);
 void aggr_scan_set_error(void* caller);
 bool aggr_scan_mem_op(mem_tracker* mt, uint32_t num_bytes, memtracker_op op);
 as_aggr_caller_type aggr_scan_get_type();
@@ -924,39 +920,41 @@ aggr_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 		return;
 	}
 
-	cf_ll_init(&ll, aggr_scan_ll_destroy_fn, false);
+	cf_ll_init(&ll, as_index_keys_ll_destroy_fn, false);
 
 	aggr_scan_slice slice = { job, &ll, &bb };
 
 	as_index_reduce(tree, aggr_scan_job_reduce_cb, (void*)&slice);
 
-	as_result* res = as_result_new();
-	int ret = as_aggr__process(&job->aggr_call, &ll, (void*)&slice, res);
+	if (cf_ll_size(&ll) != 0) {
+		as_result* res = as_result_new();
+		int ret = as_aggr__process(&job->aggr_call, &ll, (void*)&slice, res);
 
-	if (ret != 0) {
-		char* rs = as_module_err_string(ret);
+		if (ret != 0) {
+			char* rs = as_module_err_string(ret);
 
-		if (res->value) {
-			as_string* lua_s = as_string_fromval(res->value);
-			char* lua_err = (char*)as_string_tostring(lua_s);
+			if (res->value) {
+				as_string* lua_s = as_string_fromval(res->value);
+				char* lua_err = (char*)as_string_tostring(lua_s);
 
-			if (lua_err) {
-				int l_rs_len = strlen(rs);
+				if (lua_err) {
+					int l_rs_len = strlen(rs);
 
-				rs = cf_realloc(rs, l_rs_len + strlen(lua_err) + 4);
-				sprintf(&rs[l_rs_len], " : %s", lua_err);
+					rs = cf_realloc(rs, l_rs_len + strlen(lua_err) + 4);
+					sprintf(&rs[l_rs_len], " : %s", lua_err);
+				}
 			}
+
+			const as_val* v = (as_val*)as_string_new(rs, false);
+
+			aggr_scan_add_val_response(&slice, v, true);
+			as_val_destroy(v);
+			cf_free(rs);
+			as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
 		}
-
-		const as_val* v = (as_val*)as_string_new(rs, false);
-
-		aggr_scan_add_val_response(&slice, v, true);
-		as_val_destroy(v);
-		cf_free(rs);
-		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
 	}
 
-	cf_ll_reduce(&ll, true, aggr_scan_ll_reduce_fn, NULL);
+	cf_ll_reduce(&ll, true, as_index_keys_ll_reduce_fn, NULL);
 
 	if (bb->used_sz != 0) {
 		conn_scan_job_send_response((conn_scan_job*)job, bb->buf, bb->used_sz);
@@ -1041,49 +1039,34 @@ aggr_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 bool
 aggr_scan_add_digest(cf_ll* ll, cf_digest* keyd)
 {
-	ll_recl_element* tail_recl_e = (ll_recl_element*)ll->tail;
-	dig_arr_t* dig_arr;
+	as_index_keys_ll_element* tail_e = (as_index_keys_ll_element*)ll->tail;
+	as_index_keys_arr* keys_arr;
 
-	if (tail_recl_e) {
-		dig_arr = tail_recl_e->dig_arr;
+	if (tail_e) {
+		keys_arr = tail_e->keys_arr;
 
-		if (dig_arr->num == NUM_DIGS_PER_ARR) {
-			tail_recl_e = NULL;
+		if (keys_arr->num == AS_INDEX_KEYS_PER_ARR) {
+			tail_e = NULL;
 		}
 	}
 
-	if (! tail_recl_e) {
-		if ((dig_arr = getDigestArray()) == NULL) {
+	if (! tail_e) {
+		if (! (keys_arr = as_index_get_keys_arr())) {
 			return false;
 		}
 
-		if ((tail_recl_e = cf_malloc(sizeof(ll_recl_element))) == NULL) {
+		if (! (tail_e = cf_malloc(sizeof(as_index_keys_ll_element)))) {
 			return false;
 		}
 
-		tail_recl_e->dig_arr = dig_arr;
-		cf_ll_append(ll, (cf_ll_element *)tail_recl_e);
+		tail_e->keys_arr = keys_arr;
+		cf_ll_append(ll, (cf_ll_element *)tail_e);
 	}
 
-	dig_arr->digs[dig_arr->num] = *keyd;
-	dig_arr->num++;
+	keys_arr->pindex_digs[keys_arr->num] = *keyd;
+	keys_arr->num++;
 
 	return true;
-}
-
-void
-aggr_scan_ll_destroy_fn(cf_ll_element* e)
-{
-	ll_recl_element* recl_e = (ll_recl_element*)e;
-
-	releaseDigArrToQueue((void *)recl_e->dig_arr);
-	cf_free(recl_e);
-}
-
-int
-aggr_scan_ll_reduce_fn(cf_ll_element* e, void* udata)
-{
-	return CF_LL_REDUCE_DELETE;
 }
 
 void
