@@ -185,7 +185,8 @@ as_scan(as_transaction *tr)
 		break;
 	default:
 		cf_warning(AS_SCAN, "can't identify scan type");
-		break;
+		cf_free(tr->msgp);
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	if (! _job) {
