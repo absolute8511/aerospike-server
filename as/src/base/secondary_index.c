@@ -111,6 +111,9 @@
 #define SINDEX_CRASH(str, ...) \
 	cf_crash(AS_SINDEX, "SINDEX_ASSERT: "str, ##__VA_ARGS__);
 
+
+static cf_queue *g_q_index_keys_arr = NULL;
+
 // Internal Functions
 bool as_sindex__setname_match(as_sindex_metadata *imd, const char *setname);
 int  as_sindex__pre_op_assert(as_sindex *si, int op);
@@ -334,6 +337,47 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 	return AS_SINDEX_OK;
 }
 
+int
+as_index_keys_ll_reduce_fn(cf_ll_element *ele, void *udata)
+{
+	return CF_LL_REDUCE_DELETE;
+}
+
+void
+as_index_keys_ll_destroy_fn(cf_ll_element *ele)
+{
+	as_index_keys_ll_element * node = (as_index_keys_ll_element *) ele;
+	if (node) {
+		if (node->keys_arr) {
+			as_index_keys_release_arr_to_queue(node->keys_arr);
+			node->keys_arr = NULL;
+		}
+		cf_free(node);
+	}
+}
+
+as_index_keys_arr *
+as_index_get_keys_arr(void)
+{
+	as_index_keys_arr *keys_arr;
+	if (cf_queue_pop(g_q_index_keys_arr, &keys_arr, CF_QUEUE_NOWAIT) == CF_QUEUE_EMPTY) {
+		keys_arr = cf_malloc(sizeof(as_index_keys_arr));
+	}
+	keys_arr->num = 0;
+	return keys_arr;
+}
+
+void
+as_index_keys_release_arr_to_queue(as_index_keys_arr *v)
+{
+	as_index_keys_arr * keys_arr = (as_index_keys_arr *)v;
+	if (cf_queue_sz(g_q_index_keys_arr) < AS_INDEX_KEYS_ARRAY_QUEUE_HIGHWATER) {
+		cf_queue_push(g_q_index_keys_arr, &keys_arr);
+	} 
+	else {
+		cf_free(keys_arr);
+	}
+}
 /*
  * Should happen under SINDEX_GRLOCK if called directly.
  */
@@ -1138,6 +1182,9 @@ as_sindex_init(as_namespace *ns)
 
 	// Init binid_has_sindex to zero
 	memset(ns->binid_has_sindex, 0, sizeof(uint32_t)*AS_BINID_HAS_SINDEX_SIZE);	
+	if (!g_q_index_keys_arr) {
+		g_q_index_keys_arr = cf_queue_create(sizeof(void *), true);
+	}
 	return AS_SINDEX_OK;
 }
 
@@ -1708,7 +1755,7 @@ as_sindex_stats_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, "keys=");
 	cf_dyn_buf_append_uint64(db,  n_keys);
 	cf_dyn_buf_append_string(db, ";objects=");
-	cf_dyn_buf_append_int(   db,  si_objects);
+	cf_dyn_buf_append_uint64(db,  si_objects);
 	SINDEX_RLOCK(&si->imd->slock);
 	uint64_t i_size      = ai_btree_get_isize(si->imd);
 	uint64_t n_size      = ai_btree_get_nsize(si->imd);
@@ -1748,9 +1795,9 @@ as_sindex_stats_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db)
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(si->stats.delete_errs));
 	// defrag
 	cf_dyn_buf_append_string(db, ";stat_gc_recs=");
-	cf_dyn_buf_append_int(   db, cf_atomic64_get(si->stats.n_defrag_records));
+	cf_dyn_buf_append_uint64(db, cf_atomic64_get(si->stats.n_defrag_records));
 	cf_dyn_buf_append_string(db, ";stat_gc_time=");
-	cf_dyn_buf_append_int(   db, cf_atomic64_get(si->stats.defrag_time));
+	cf_dyn_buf_append_uint64(db, cf_atomic64_get(si->stats.defrag_time));
 
 	// Cache values
 	uint64_t agg        = cf_atomic64_get(si->stats.n_aggregation);

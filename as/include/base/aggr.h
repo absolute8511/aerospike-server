@@ -60,11 +60,11 @@ typedef struct query_record_s {
 } query_record;
 
 typedef struct as_aggr_istream_s {
-	cf_ll_iterator  *iter;
-	as_rec          *rec;
-	sindex_kv_arr   *skv_arr;
-	int              skv_offset;
-	as_namespace    *ns;
+	cf_ll_iterator     * iter;
+	as_rec             * rec;
+	as_index_keys_arr  * keys_arr;
+	int                  keys_arr_offset;
+	as_namespace       * ns;
 	as_aggr_caller_type (*get_type)();
 } as_aggr_istream;
 
