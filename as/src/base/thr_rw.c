@@ -4716,7 +4716,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 
 		r = r_ref.r;
 
-		if (r->void_time != 0 && r->void_time < as_record_void_time_get()) {
+		if (as_record_is_expired(r)) {
 			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_NOTFOUND);
 			return -1;
 		}
@@ -4734,8 +4734,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		record_created = rv == 1;
 
 		// If it's an expired record, pretend it's a fresh create.
-		if (! record_created && r->void_time != 0
-				&& r->void_time < as_record_void_time_get()) {
+		if (! record_created && as_record_is_expired(r)) {
 			as_record_destroy(r, ns);
 			as_record_initialize(&r_ref, ns);
 			cf_atomic_int_incr(&ns->n_objects);
@@ -6089,7 +6088,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_open_hist);
 
 	// Check if it's an expired record.
-	if (r->void_time && r->void_time < as_record_void_time_get()) {
+	if (as_record_is_expired(r)) {
 		read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_NOTFOUND);
 		return;
 	}

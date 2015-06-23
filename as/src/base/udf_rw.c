@@ -1195,9 +1195,8 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 	// Step 2: Setup Storage Record
 	int rec_rv = as_record_get(tr->rsv.tree, &tr->keyd, &r_ref, tr->rsv.ns);
 
-	if (rec_rv == 0 &&
-			// If record is expired, pretend it was not found.
-			(r_ref.r->void_time != 0 && r_ref.r->void_time < as_record_void_time_get())) {
+	if (rec_rv == 0 && as_record_is_expired(r_ref.r)) {
+		// If record is expired, pretend it was not found.
 		as_record_done(&r_ref, tr->rsv.ns);
 		rec_rv = -1;
 	}

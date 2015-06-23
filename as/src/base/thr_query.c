@@ -1456,8 +1456,7 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 	if (rec_rv == 0) {
 		as_index *r = r_ref.r;
 		// check to see this isn't an expired record waiting to die
-		if (r->void_time &&
-				r->void_time < as_record_void_time_get()) {
+		if (as_record_is_expired(r)) {
 			as_record_done(&r_ref, ns);
 			cf_debug(AS_QUERY,
 					"build_response: record expired. treat as not found");

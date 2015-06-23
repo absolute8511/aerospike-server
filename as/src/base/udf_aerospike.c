@@ -915,8 +915,7 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 		is_create = true;
 	} else if (rv == 0) {
 		// If it's an expired record, pretend it's a fresh create.
-		if (r_ref->r->void_time != 0
-				&& r_ref->r->void_time < as_record_void_time_get()) {
+		if (as_record_is_expired(r_ref->r)) {
 			as_record_destroy(r_ref->r, tr->rsv.ns);
 			as_record_initialize(r_ref, tr->rsv.ns);
 			cf_atomic_int_incr(&tr->rsv.ns->n_objects);

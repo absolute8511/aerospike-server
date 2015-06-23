@@ -225,8 +225,7 @@ udf_record_open(udf_record * urecord)
 	if (!rec_rv) {
 		as_index *r = r_ref->r;
 		// check to see this isn't an expired record waiting to die
-		if (r->void_time &&
-				r->void_time < as_record_void_time_get()) {
+		if (as_record_is_expired(r)) {
 			as_record_done(r_ref, tr->rsv.ns);
 			cf_detail(AS_UDF, "udf_record_open: Record has expired cannot read");
 			rec_rv = -2;

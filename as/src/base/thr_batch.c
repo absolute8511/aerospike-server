@@ -110,7 +110,7 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 					as_index *r = r_ref.r;
 
 					// Check to see this isn't an expired record waiting to die.
-					if (r->void_time && r->void_time < as_record_void_time_get()) {
+					if (as_record_is_expired(r)) {
 						as_msg_make_error_response_bufbuilder(&bmd->keyd, AS_PROTO_RESULT_FAIL_NOTFOUND, bb_r, ns->name);
 					}
 					else {
