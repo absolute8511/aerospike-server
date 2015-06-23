@@ -96,8 +96,8 @@ typedef struct as_config_s {
 	/* tuning parameters */
 	int					n_migrate_threads;
 	int					n_info_threads;
+	int					n_batch_index_threads;
 	int					n_batch_threads;
-	int					n_batch_direct_threads;
 
 	/* Query tunables */
 	uint32_t			query_threads;
@@ -425,15 +425,15 @@ typedef struct as_config_s {
 	cf_atomic_int		rw_tree_count;
 	cf_atomic_int		reaper_count;
 
+	cf_atomic_int		batch_index_initiate;
+	cf_atomic_int		batch_index_complete;
+	cf_atomic_int		batch_index_timeout;
+	cf_atomic_int		batch_index_errors;
+
 	cf_atomic_int		batch_initiate;
-	cf_atomic_int		batch_complete;
+	cf_atomic_int		batch_tree_count;
 	cf_atomic_int		batch_timeout;
 	cf_atomic_int		batch_errors;
-
-	cf_atomic_int		batch_direct_initiate;
-	cf_atomic_int		batch_direct_tree_count;
-	cf_atomic_int		batch_direct_timeout;
-	cf_atomic_int		batch_direct_errors;
 
 	cf_hist_track *		rt_hist; // histogram that tracks read performance
 	cf_hist_track *		ut_hist; // histogram that tracks udf performance
@@ -468,8 +468,8 @@ typedef struct as_config_s {
 	histogram *			rt_resolve_wait_hist; // histogram that tracks the time the master waits for other nodes to complete duplicate resolution on reads
 	histogram *			wt_resolve_wait_hist; // histogram that tracks the time the master waits for other nodes to complete duplicate resolution on writes
 	histogram *			error_hist;  // histogram of error requests only
-	histogram *			batch_read_hist;        // New batch index protocol latency histogram.
-	histogram *			batch_direct_read_hist; // Old batch direct protocol latency histogram.
+	histogram *			batch_index_reads_hist;        // New batch index protocol latency histogram.
+	histogram *			batch_q_process_hist; // Old batch direct protocol latency histogram.
 	histogram *			info_tr_q_process_hist;  // histogram of time spent processing info messages in transaction q
 	histogram *			info_q_wait_hist;  // histogram of time info transaction spends on info q
 	histogram *			info_post_lock_hist; // histogram of time spent processing the Info command under the mutex before sending the response on the network

@@ -165,10 +165,10 @@ as_batch_send_error(as_file_handle* fd_h, int result_code)
 	AS_RELEASE_FILE_HANDLE(fd_h);
 
 	if (result_code == AS_PROTO_RESULT_FAIL_TIMEOUT) {
-		cf_atomic_int_incr(&g_config.batch_timeout);
+		cf_atomic_int_incr(&g_config.batch_index_timeout);
 	}
 	else {
-		cf_atomic_int_incr(&g_config.batch_errors);
+		cf_atomic_int_incr(&g_config.batch_index_errors);
 	}
 	return status;
 }
@@ -190,7 +190,7 @@ as_batch_send_buffer(as_batch_shared* shared, as_batch_buffer* buffer)
 		// Socket error. Close socket.
 		AS_RELEASE_FILE_HANDLE(shared->fd_h);
 		shared->fd_h = 0;
-		cf_atomic_int_incr(&g_config.batch_errors);
+		cf_atomic_int_incr(&g_config.batch_index_errors);
 	}
 }
 
@@ -224,18 +224,18 @@ as_batch_send_final(as_batch_shared* shared)
 	AS_RELEASE_FILE_HANDLE(shared->fd_h);
 	shared->fd_h = 0;
 
-	histogram_insert_data_point(g_config.batch_read_hist, shared->start);
+	histogram_insert_data_point(g_config.batch_index_reads_hist, shared->start);
 
 	// Check final return code in order to update statistics.
 	if (status == 0 && shared->result_code == 0) {
-		cf_atomic_int_incr(&g_config.batch_complete);
+		cf_atomic_int_incr(&g_config.batch_index_complete);
 	}
 	else {
 		if (shared->result_code == AS_PROTO_RESULT_FAIL_TIMEOUT) {
-			cf_atomic_int_incr(&g_config.batch_timeout);
+			cf_atomic_int_incr(&g_config.batch_index_timeout);
 		}
 		else {
-			cf_atomic_int_incr(&g_config.batch_errors);
+			cf_atomic_int_incr(&g_config.batch_index_errors);
 		}
 	}
 }
@@ -558,12 +558,12 @@ as_batch_init()
 		return -1;
 	}
 
-	uint32_t threads = g_config.n_batch_threads;
-	cf_info(AS_BATCH, "Initialize batch-threads to %u", threads);
+	uint32_t threads = g_config.n_batch_index_threads;
+	cf_info(AS_BATCH, "Initialize batch-index-threads to %u", threads);
 	int rc = as_thread_pool_init_fixed(&batch_thread_pool, threads, as_batch_worker, sizeof(as_batch_work), offsetof(as_batch_work,complete));
 
 	if (rc) {
-		cf_warning(AS_BATCH, "Failed to initialize batch-threads to %u: %d", threads, rc);
+		cf_warning(AS_BATCH, "Failed to initialize batch-index-threads to %u: %d", threads, rc);
 		return rc;
 	}
 
@@ -580,11 +580,11 @@ as_batch_init()
 int
 as_batch_queue_task(as_transaction* btr)
 {
-	uint64_t counter = cf_atomic_int_incr(&g_config.batch_initiate);
+	uint64_t counter = cf_atomic_int_incr(&g_config.batch_index_initiate);
 	uint32_t thread_size = batch_thread_pool.thread_size;
 
 	if (thread_size == 0 || thread_size > MAX_BATCH_THREADS) {
-		cf_warning(AS_BATCH, "batch-threads has been disabled: %d", thread_size);
+		cf_warning(AS_BATCH, "batch-index-threads has been disabled: %d", thread_size);
 		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_BATCH_DISABLED);
 	}
 	uint32_t queue_index = counter % thread_size;
@@ -1002,7 +1002,7 @@ int
 as_batch_threads_resize(uint32_t threads)
 {
 	if (threads > MAX_BATCH_THREADS) {
-		cf_warning(AS_BATCH, "batch-threads %u exceeds max %u", threads, MAX_BATCH_THREADS);
+		cf_warning(AS_BATCH, "batch-index-threads %u exceeds max %u", threads, MAX_BATCH_THREADS);
 		return -1;
 	}
 
@@ -1013,7 +1013,7 @@ as_batch_threads_resize(uint32_t threads)
 
 	// Resize thread pool.  The threads will wait for graceful shutdown on downwards resize.
 	uint32_t threads_orig = batch_thread_pool.thread_size;
-	cf_info(AS_BATCH, "Resize batch-threads from %u to %u", threads_orig, threads);
+	cf_info(AS_BATCH, "Resize batch-index-threads from %u to %u", threads_orig, threads);
 	int status = 0;
 
 	if (threads != threads_orig) {
@@ -1022,18 +1022,18 @@ as_batch_threads_resize(uint32_t threads)
 			status = as_thread_pool_resize(&batch_thread_pool, threads);
 
 			if (status == 0) {
-				g_config.n_batch_threads = threads;
+				g_config.n_batch_index_threads = threads;
 				// Adjust queues to match new thread size.
 				status = as_batch_create_thread_queues(threads_orig, threads);
 			}
 			else {
 				// Show warning, but keep going as some threads may have been successfully added/removed.
-				cf_warning(AS_BATCH, "Failed to resize batch-threads. status=%d, batch-threads=%d",
-						status, g_config.n_batch_threads);
+				cf_warning(AS_BATCH, "Failed to resize batch-index-threads. status=%d, batch-index-threads=%d",
+						status, g_config.n_batch_index_threads);
 				threads = batch_thread_pool.thread_size;
 
 				if (threads > threads_orig) {
-					g_config.n_batch_threads = threads;
+					g_config.n_batch_index_threads = threads;
 					// Adjust queues to match new thread size.
 					status = as_batch_create_thread_queues(threads_orig, threads);
 				}
@@ -1046,11 +1046,11 @@ as_batch_threads_resize(uint32_t threads)
 			if (status == 0) {
 				// Adjust threads to match new queue size.
 				status = as_thread_pool_resize(&batch_thread_pool, threads);
-				g_config.n_batch_threads = batch_thread_pool.thread_size;
+				g_config.n_batch_index_threads = batch_thread_pool.thread_size;
 
 				if (status) {
-					cf_warning(AS_BATCH, "Failed to resize batch-threads. status=%d, batch-threads=%d",
-							status, g_config.n_batch_threads);
+					cf_warning(AS_BATCH, "Failed to resize batch-index-threads. status=%d, batch-index-threads=%d",
+							status, g_config.n_batch_index_threads);
 				}
 			}
 		}
