@@ -7243,10 +7243,11 @@ as_info_init()
 	as_info_set_dynamic("query-stat", as_query_stat, false);
 	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SCAN_MANAGE);            // Abort a scan with a given id.
 	as_info_set_command("scan-abort-all", info_command_abort_all_scans, PERM_SCAN_MANAGE);   // Abort all scans.
-	as_info_set_dynamic("scan-list", as_scan_list, false);                                   // List job ids of all scans.
+	as_info_set_dynamic("scan-list", as_scan_list, false);                                   // List info for all scan jobs.
 	as_info_set_command("sindex-describe", info_command_sindex_describe, PERM_NONE);
 	as_info_set_command("sindex-stat", info_command_sindex_stat, PERM_NONE);
 	as_info_set_command("sindex-list", info_command_sindex_list, PERM_NONE);
+	as_info_set_dynamic("sindex-builder-list", as_spop_list, false);                         // List info for all secondary index population jobs.
 
 	// Spin up the Info threads *after* all static and dynamic Info commands have been added
 	// so we can guarantee that the static and dynamic lists will never again be changed.

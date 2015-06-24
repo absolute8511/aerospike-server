@@ -37,15 +37,23 @@
 #include "base/secondary_index.h"
 #include "base/monitor.h"
 #include "base/scan.h"
+#include "base/thr_sindex.h"
 
 
 #define AS_MON_MAX_MODULE 10
+
+// Indexed by as_mon_module_slot - keep in sync.
+const char * AS_MON_MODULES[] = {
+		"query",
+		"scan",
+		"sindex-builder"
+};
 
 // functional declaration
 int    as_mon_populate_jobstat(as_mon_jobstat * stat, cf_dyn_buf *db);
 static as_mon * g_as_mon_module[AS_MON_MAX_MODULE];
 static uint32_t g_as_mon_curr_mod_count;
-int    as_mon_register(char *module);
+int    as_mon_register(const char *module);
 
 /*
  * This is called to init the mon subsystem.
@@ -54,8 +62,9 @@ int
 as_mon_init()
 {
 	g_as_mon_curr_mod_count = 0;
-	as_mon_register("query");
-	as_mon_register("scan");
+	as_mon_register(AS_MON_MODULES[QUERY_MOD]);
+	as_mon_register(AS_MON_MODULES[SCAN_MOD]);
+	as_mon_register(AS_MON_MODULES[SPOP_MOD]);
 
 	// TODO: Add more stuff if there is any locks needs some stats needed etc etc ...
 	return AS_MON_OK;
@@ -65,11 +74,14 @@ as_mon *
 as_mon_get_module(char * module)
 {
 	as_mon_module_slot mod;
-	if (strcmp(module, "query") == 0) {
+	if (strcmp(module, AS_MON_MODULES[QUERY_MOD]) == 0) {
 		mod = QUERY_MOD;
 	}
-	else if (strcmp(module, "scan") == 0) {
+	else if (strcmp(module, AS_MON_MODULES[SCAN_MOD]) == 0) {
 		mod = SCAN_MOD;
+	}
+	else if (strcmp(module, AS_MON_MODULES[SPOP_MOD]) == 0) {
+		mod = SPOP_MOD;
 	}
 	else {
 		return NULL;
@@ -85,7 +97,7 @@ as_mon_get_module(char * module)
  * 		AS_MON_ERROR - failure
  */
 int
-as_mon_register(char *module)
+as_mon_register(const char *module)
 {
 	if (!module) return AS_MON_ERR;
 	as_mon *mon_obj = (as_mon *) cf_rc_alloc(sizeof(as_mon));
@@ -97,7 +109,7 @@ as_mon_register(char *module)
 	as_mon_cb *cb = cf_malloc(sizeof(as_mon_cb));
 	as_mon_module_slot mod;
 
-	if(!strcmp(module, "query")) {
+	if(!strcmp(module, AS_MON_MODULES[QUERY_MOD])) {
 		cb->get_jobstat     = as_query_get_jobstat;
 		cb->get_jobstat_all = as_query_get_jobstat_all;
 
@@ -109,7 +121,7 @@ as_mon_register(char *module)
 		cb->set_maxpriority = NULL;
 		mod = QUERY_MOD;
 	}
-	else if (!strcmp(module, "scan"))
+	else if (!strcmp(module, AS_MON_MODULES[SCAN_MOD]))
 	{
 		cb->get_jobstat     = as_scan_get_jobstat;
 		cb->get_jobstat_all = as_scan_get_jobstat_all;
@@ -121,6 +133,19 @@ as_mon_register(char *module)
 		cb->set_maxinflight = NULL;
 		cb->set_maxpriority = NULL;
 		mod = SCAN_MOD;
+	}
+	else if (!strcmp(module, AS_MON_MODULES[SPOP_MOD]))
+	{
+		cb->get_jobstat     = as_spop_get_jobstat;
+		cb->get_jobstat_all = as_spop_get_jobstat_all;
+
+		cb->set_priority    = NULL;
+		cb->kill            = as_spop_abort;
+		cb->suspend         = NULL;
+		cb->set_pendingmax  = NULL;
+		cb->set_maxinflight = NULL;
+		cb->set_maxpriority = NULL;
+		mod = SPOP_MOD;
 	}
 	else {
 		cf_warning(AS_MON, "wrong module parameter.");

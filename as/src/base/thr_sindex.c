@@ -621,6 +621,31 @@ as_spop_resize_thread_pool(uint32_t n_threads)
 	as_job_manager_resize_thread_pool(&g_spop_manager, n_threads);
 }
 
+int
+as_spop_list(char* name, cf_dyn_buf* db)
+{
+	as_mon_info_cmd(AS_MON_MODULES[SPOP_MOD], NULL, 0, 0, db);
+	return 0;
+}
+
+as_mon_jobstat*
+as_spop_get_jobstat(uint64_t trid)
+{
+	return as_job_manager_get_job_info(&g_spop_manager, trid);
+}
+
+as_mon_jobstat*
+as_spop_get_jobstat_all(int* size)
+{
+	return as_job_manager_get_info(&g_spop_manager, size);
+}
+
+int
+as_spop_abort(uint64_t trid)
+{
+	return as_job_manager_abort_job(&g_spop_manager, trid) ? 0 : -1;
+}
+
 
 //------------------------------------------------
 // spop_job derived class implementation.
@@ -698,7 +723,15 @@ spop_job_destroy(as_job* _job)
 void
 spop_job_info(as_job* _job, as_mon_jobstat* stat)
 {
-	strcat(stat->jdata, ":job-type=sindex-populator");
+	spop_job* job = (spop_job*)_job;
+
+	if (job->si) {
+		strcat(stat->jdata, ":job-type=sindex-populate:sindex-name=");
+		strcat(stat->jdata, job->si->imd->iname);
+	}
+	else {
+		strcat(stat->jdata, ":job-type=sindex-populate-all");
+	}
 }
 
 //

@@ -47,8 +47,11 @@
 
 typedef enum {
 	QUERY_MOD	= 0,
-	SCAN_MOD	= 1
+	SCAN_MOD	= 1,
+	SPOP_MOD	= 2
 } as_mon_module_slot;
+
+extern const char * AS_MON_MODULES[];
 
 // Stat for currently running job
 typedef struct as_mon_jobstat_s {

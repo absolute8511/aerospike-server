@@ -30,12 +30,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "queue.h"
-#include "ai_obj.h"
-#include "hist.h"
 #include "citrusleaf/cf_digest.h"
 
+#include "ai_obj.h"
+#include "dynbuf.h"
+#include "hist.h"
+#include "queue.h"
+
 #include "base/datamodel.h"
+#include "base/monitor.h"
 
 #define SET_TIME_FOR_SINDEX_GC_HIST(start_time)                                           \
 do {                                                                                      \
@@ -85,3 +88,7 @@ objs_to_defrag_arr * as_sindex_gc_get_defrag_arr(void);
 void as_spop_init();
 int as_spop_populate_all(as_namespace* ns);
 void as_spop_resize_thread_pool(uint32_t n_threads);
+int as_spop_list(char* name, cf_dyn_buf* db);
+as_mon_jobstat* as_spop_get_jobstat(uint64_t trid);
+as_mon_jobstat* as_spop_get_jobstat_all(int* size);
+int as_spop_abort(uint64_t trid);
