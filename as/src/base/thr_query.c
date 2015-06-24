@@ -222,6 +222,8 @@ struct as_query_transaction_s {
 	bool                     track;
 	bool                     has_send_fin;
 	bool                     blocking;
+	cf_atomic32              partition_reserved;
+	cf_atomic32              partition_released;
 
 	// Record UDF Management
 	cf_atomic_int            uit_queued;    				// Throttling: max in flight scan
@@ -235,8 +237,6 @@ struct as_query_transaction_s {
 	as_sindex_qctx           qctx;     // Secondary Index details
 
 	as_partition_reservation rsv_arr[AS_PARTITIONS];
-	cf_atomic32              partition_reserved;
-	cf_atomic32              partition_released;
 };
 
 typedef enum {
@@ -709,13 +709,16 @@ as_query__transaction_done(as_query_transaction *qtr)
 
 	// Release all the qnodes
 	as_query_post_release_qnodes(qtr);
-	if (qtr->partition_reserved == qtr->partition_released) {
-		cf_warning(AS_QUERY, "Partition leak by query trid- %"PRIu64""
-			"Partition reserved %ld Partition released %ld", "qtr->trid, qtr->partition_reserved, qtr->partition_released");
+	uint32_t p_res = cf_atomic32_get(qtr->partition_reserved);
+	uint32_t p_rel = cf_atomic32_get(qtr->partition_released);
+
+	if (p_res != p_rel) {
+		cf_warning(AS_QUERY, "Partition leak by query trid- %"PRIu64" "
+			"Partition reserved %d Partition released %d",qtr->trid, p_res, p_rel);
 	}
 	else {
-		cf_debug(AS_QUERY, "No Partition leak by query trid- %"PRIu64""
-			"Partition reserved %ld Partition released %ld", "qtr->trid, qtr->partition_reserved, qtr->partition_released");	
+		cf_debug(AS_QUERY, "No Partition leak by query trid- %"PRIu64" "
+			"Partition reserved %d Partition released %d",qtr->trid, p_res, p_rel);
 	}
 
 	as_query__update_stats(qtr);
@@ -1456,8 +1459,7 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 	if (rec_rv == 0) {
 		as_index *r = r_ref.r;
 		// check to see this isn't an expired record waiting to die
-		if (r->void_time &&
-				r->void_time < as_record_void_time_get()) {
+		if (as_record_is_expired(r)) {
 			as_record_done(&r_ref, ns);
 			cf_debug(AS_QUERY,
 					"build_response: record expired. treat as not found");
@@ -3152,7 +3154,7 @@ as_query_post_release_qnodes(as_query_transaction * qtr)
 			if (qtr->qctx.is_partition_qnode[i]) {
 				as_partition_release(&qtr->rsv_arr[i]);
 				cf_atomic_int_decr(&g_config.dup_tree_count);
-				cf_atomic32_decr(&qtr->partition_released);
+				cf_atomic32_incr(&qtr->partition_released);
 			}
 		}
 	}

@@ -3566,7 +3566,8 @@ write_local_handle_msg_key(as_transaction *tr, as_storage_rd *rd)
 		// data-in-memory, don't allocate the key until we reach the point of no
 		// return. Also don't set AS_INDEX_FLAG_KEY_STORED flag until then.
 		if (! get_msg_key(m, rd)) {
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: ignoring key ", ns->name);
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: can't store key ", ns->name);
+			return AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
 		}
 	}
 
@@ -4715,7 +4716,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 
 		r = r_ref.r;
 
-		if (r->void_time != 0 && r->void_time < as_record_void_time_get()) {
+		if (as_record_is_expired(r)) {
 			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_NOTFOUND);
 			return -1;
 		}
@@ -4733,11 +4734,10 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 		record_created = rv == 1;
 
 		// If it's an expired record, pretend it's a fresh create.
-		if (! record_created && r->void_time != 0
-				&& r->void_time < as_record_void_time_get()) {
+		if (! record_created && as_record_is_expired(r)) {
 			as_record_destroy(r, ns);
 			as_record_initialize(&r_ref, ns);
-			cf_atomic_int_add(&ns->n_objects, 1);
+			cf_atomic_int_incr(&ns->n_objects);
 			record_created = true;
 		}
 	}
@@ -6088,7 +6088,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_open_hist);
 
 	// Check if it's an expired record.
-	if (r->void_time && r->void_time < as_record_void_time_get()) {
+	if (as_record_is_expired(r)) {
 		read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_NOTFOUND);
 		return;
 	}
