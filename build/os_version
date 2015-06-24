@@ -77,6 +77,9 @@ then
       echo "Unknown ubuntu version $ver"
       exit 1
     fi
+  elif [[ $os == "Amazon"* ]]
+  then
+    setPlatform ami ami
   else
     echo "Unknown platform $os"
     exit 1    
