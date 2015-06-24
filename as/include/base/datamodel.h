@@ -36,6 +36,7 @@
 #include <string.h>
 
 #include <citrusleaf/cf_atomic.h>
+#include <citrusleaf/cf_clock.h>
 #include <citrusleaf/cf_digest.h>
 #include <citrusleaf/cf_shash.h>
 
@@ -629,7 +630,8 @@ extern as_partition_vinfo_mask as_record_vinfoset_mask_get( as_partition *p, as_
 extern bool as_record_vinfoset_mask_validate(as_partition_vinfoset *vinfoset, as_partition_vinfo_mask mask);
 
 // a simpler call that gives seconds in the right epoch
-extern uint32_t as_record_void_time_get();
+#define as_record_void_time_get() cf_clepoch_seconds()
+bool as_record_is_expired(as_record *r); // TODO - eventually inline
 
 
 /* as_partition_id

@@ -101,12 +101,12 @@ cfg_set_defaults()
 	c->n_transaction_threads_per_queue = 4;
 	c->n_proto_fd_max = 15000;
 	c->allow_inline_transactions = true; // allow data-in-memory namespaces to process transactions in service threads
-	c->n_batch_direct_threads = 4;
+	c->n_batch_threads = 4;
 	c->batch_max_buffers_per_queue = 255; // maximum number of buffers allowed in a single queue
 	c->batch_max_requests = 5000; // maximum requests/digests in a single batch
 	c->batch_max_unused_buffers = 256; // maximum number of buffers allowed in batch buffer pool
 	c->batch_priority = 200; // # of rows between a quick context switch?
-	c->n_batch_threads = 4;
+	c->n_batch_index_threads = 4;
 	c->n_fabric_workers = 16;
 	c->fb_health_bad_pct = 0; // percent of successful messages in a burst at/below which node is deemed bad
 	c->fb_health_good_pct = 50; // percent of successful messages in a burst at/above which node is deemed ok
@@ -260,12 +260,12 @@ typedef enum {
 	CASE_SERVICE_ALLOW_INLINE_TRANSACTIONS,
 	CASE_SERVICE_AUTO_DUN,
 	CASE_SERVICE_AUTO_UNDUN,
-	CASE_SERVICE_BATCH_DIRECT_THREADS,
+	CASE_SERVICE_BATCH_THREADS,
 	CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE,
 	CASE_SERVICE_BATCH_MAX_REQUESTS,
 	CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS,
 	CASE_SERVICE_BATCH_PRIORITY,
-	CASE_SERVICE_BATCH_THREADS,
+	CASE_SERVICE_BATCH_INDEX_THREADS,
 	CASE_SERVICE_FABRIC_WORKERS,
 	CASE_SERVICE_FB_HEALTH_BAD_PCT,
 	CASE_SERVICE_FB_HEALTH_GOOD_PCT,
@@ -631,12 +631,12 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "allow-inline-transactions",		CASE_SERVICE_ALLOW_INLINE_TRANSACTIONS },
 		{ "auto-dun",						CASE_SERVICE_AUTO_DUN },
 		{ "auto-undun",						CASE_SERVICE_AUTO_UNDUN },
-		{ "batch-direct-threads",			CASE_SERVICE_BATCH_DIRECT_THREADS },
+		{ "batch-threads",					CASE_SERVICE_BATCH_THREADS },
 		{ "batch-max-buffers-per-queue",	CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE },
 		{ "batch-max-requests",				CASE_SERVICE_BATCH_MAX_REQUESTS },
 		{ "batch-max-unused-buffers",		CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS },
 		{ "batch-priority",					CASE_SERVICE_BATCH_PRIORITY },
-		{ "batch-threads",					CASE_SERVICE_BATCH_THREADS },
+		{ "batch-index-threads",			CASE_SERVICE_BATCH_INDEX_THREADS },
 		{ "fabric-workers",					CASE_SERVICE_FABRIC_WORKERS },
 		{ "fb-health-bad-pct",				CASE_SERVICE_FB_HEALTH_BAD_PCT },
 		{ "fb-health-good-pct",				CASE_SERVICE_FB_HEALTH_GOOD_PCT },
@@ -1829,8 +1829,8 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_AUTO_UNDUN:
 				c->auto_undun = cfg_bool(&line);
 				break;
-			case CASE_SERVICE_BATCH_DIRECT_THREADS:
-				c->n_batch_direct_threads = cfg_int(&line, 0, MAX_BATCH_THREADS);
+			case CASE_SERVICE_BATCH_THREADS:
+				c->n_batch_threads = cfg_int(&line, 0, MAX_BATCH_THREADS);
 				break;
 			case CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE:
 				c->batch_max_buffers_per_queue = cfg_u32_no_checks(&line);
@@ -1844,8 +1844,8 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_BATCH_PRIORITY:
 				c->batch_priority = cfg_u32_no_checks(&line);
 				break;
-			case CASE_SERVICE_BATCH_THREADS:
-				c->n_batch_threads = cfg_int(&line, 1, MAX_BATCH_THREADS);
+			case CASE_SERVICE_BATCH_INDEX_THREADS:
+				c->n_batch_index_threads = cfg_int(&line, 1, MAX_BATCH_THREADS);
 				break;
 			case CASE_SERVICE_FABRIC_WORKERS:
 				c->n_fabric_workers = cfg_int(&line, 1, MAX_FABRIC_WORKERS);
@@ -3367,8 +3367,8 @@ cfg_create_all_histograms()
 	create_and_check_hist(&c->rt_resolve_wait_hist, "reads_resolve_wait", HIST_MILLISECONDS);
 	create_and_check_hist(&c->wt_resolve_wait_hist, "writes_resolve_wait", HIST_MILLISECONDS);
 	create_and_check_hist(&c->error_hist, "error", HIST_MILLISECONDS);
-	create_and_check_hist(&c->batch_read_hist, "batch_reads", HIST_MILLISECONDS);
-	create_and_check_hist(&c->batch_direct_read_hist, "batch_direct_reads", HIST_MILLISECONDS);
+	create_and_check_hist(&c->batch_index_reads_hist, "batch_index_reads", HIST_MILLISECONDS);
+	create_and_check_hist(&c->batch_q_process_hist, "batch_q_process", HIST_MILLISECONDS);
 	create_and_check_hist(&c->info_tr_q_process_hist, "info_tr_q_process", HIST_MILLISECONDS);
 	create_and_check_hist(&c->info_q_wait_hist, "info_q_wait", HIST_MILLISECONDS);
 	create_and_check_hist(&c->info_post_lock_hist, "info_post_lock", HIST_MILLISECONDS);
