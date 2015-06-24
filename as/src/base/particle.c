@@ -1376,19 +1376,13 @@ as_bin_particle_size(as_bin *b)
 		return 0;
 	}
 
-	as_particle *p = as_bin_get_particle(b);
-	uint8_t type = as_bin_get_particle_type(b);
-
-	return g_particle_size_table[type](p);
+	return g_particle_size_table[as_bin_get_particle_type(b)](b->particle);
 }
 
 uint32_t
 as_bin_particle_ptr(as_bin *b, uint8_t **p_value)
 {
-	as_particle *p = as_bin_get_particle(b);
-	uint8_t type = as_bin_get_particle_type(b);
-
-	return g_particle_ptr_table[type](p, p_value);
+	return g_particle_ptr_table[as_bin_get_particle_type(b)](b->particle, p_value);
 }
 
 //------------------------------------------------
@@ -1764,8 +1758,7 @@ int
 as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled)
 {
 	uint8_t old_type = as_bin_get_particle_type(b);
-	uint32_t old_mem_size = as_bin_inuse(b) ?
-			g_particle_size_table[old_type](as_bin_get_particle(b)) : 0;
+	uint32_t old_mem_size = as_bin_inuse(b) ? g_particle_size_table[old_type](b->particle) : 0;
 
 	const uint8_t *pickled = (const uint8_t *)*p_pickled;
 	as_particle_type new_type = (as_particle_type)*pickled++;
@@ -2012,8 +2005,7 @@ int
 as_bin_particle_replace_from_mem(as_bin *b, as_particle_type type, const uint8_t *value, uint32_t value_size)
 {
 	uint8_t old_type = as_bin_get_particle_type(b);
-	uint32_t old_mem_size = as_bin_inuse(b) ?
-			g_particle_size_table[old_type](as_bin_get_particle(b)) : 0;
+	uint32_t old_mem_size = as_bin_inuse(b) ? g_particle_size_table[old_type](b->particle) : 0;
 
 	uint32_t new_mem_size = g_particle_size_from_mem_table[type](type, value, value_size);
 
