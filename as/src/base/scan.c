@@ -1321,7 +1321,7 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 	as_transaction tr;
 
 	if (as_transaction_create(&tr, &d) != 0) {
-		as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		as_job_manager_abandon_job(_job->mgr, _job, AS_JOB_FAIL_UNKNOWN);
 		return;
 	}
 

@@ -88,6 +88,13 @@ typedef enum {
 #define AS_JOB_PRIORITY_MEDIUM	THREAD_POOL_PRIORITY_MEDIUM
 #define AS_JOB_PRIORITY_HIGH	THREAD_POOL_PRIORITY_HIGH
 
+// Same as proto result codes so connected scans don't have to convert:
+#define AS_JOB_FAIL_UNKNOWN		AS_PROTO_RESULT_FAIL_UNKNOWN
+#define AS_JOB_FAIL_PARAMETER	AS_PROTO_RESULT_FAIL_PARAMETER
+#define AS_JOB_FAIL_CLUSTER_KEY	AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH
+#define AS_JOB_FAIL_USER_ABORT	AS_PROTO_RESULT_FAIL_SCAN_ABORT
+#define AS_JOB_FAIL_FORBIDDEN	AS_PROTO_RESULT_FAIL_FORBIDDEN
+
 typedef struct as_job_s {
 	// Mandatory interface for derived classes:
 	as_job_vtable				vtable;
@@ -101,7 +108,7 @@ typedef struct as_job_s {
 	// Unique identifier:
 	uint64_t					trid;
 
-	// Scan scope:
+	// Job scope:
 	as_namespace*				ns;
 	uint16_t					set_id;
 
@@ -134,8 +141,8 @@ void as_job_active_release(as_job* _job);
 
 typedef struct as_job_manager_s {
 	pthread_mutex_t			lock;
-	cf_queue*				active_scans;
-	cf_queue*				finished_scans;
+	cf_queue*				active_jobs;
+	cf_queue*				finished_jobs;
 	as_priority_thread_pool	thread_pool;
 
 	// Manager configuration:

@@ -149,7 +149,7 @@ as_sindex__populate_fn(void *param)
 		as_sindex *si;
 		cf_queue_pop(g_sindex_populate_q, &si, CF_QUEUE_FOREVER);
 		if (si->flag & AS_SINDEX_FLAG_POPULATING) {
-			// Earlier scan to populate index is still going on, push it back
+			// Earlier job to populate index is still going on, push it back
 			// into the queue to look at it later. this is problem only when
 			// there are multiple populating threads currently there is only 1.
 			cf_queue_push(g_sindex_populate_q, &si);
@@ -556,6 +556,7 @@ void
 as_spop_init()
 {
 	// TODO - config for max counts?
+	// TODO - and what to do if we did exceed the max active count?
 	// Initialize with maximum threads since first use is always populate-all at
 	// startup. The thread pool will be down-sized right after that.
 	as_job_manager_init(&g_spop_manager, 100, 100, MAX_POPULATOR_THREADS);
@@ -663,7 +664,7 @@ spop_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
 }
 
 //
-// spop_job mandatory scan_job interface.
+// spop_job mandatory as_job interface.
 //
 
 void
@@ -719,7 +720,7 @@ spop_job_reduce_cb(as_index_ref* r_ref, void* udata)
 	if (job->si) {
 		if (! as_sindex_isactive(job->si) || job->si->desync_cnt > job->si_desync_cnt) {
 			as_record_done(r_ref, ns);
-			as_job_manager_abandon_job(_job->mgr, _job, AS_PROTO_RESULT_FAIL_UNKNOWN);
+			as_job_manager_abandon_job(_job->mgr, _job, AS_JOB_FAIL_UNKNOWN);
 			return;
 		}
 

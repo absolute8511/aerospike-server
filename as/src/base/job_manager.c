@@ -45,7 +45,6 @@
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/monitor.h"
-#include "base/proto.h"
 
 
 
@@ -62,16 +61,16 @@ static cf_atomic32 g_job_trid = 0;
 //
 
 static inline const char*
-scan_result_str(int result_code)
+job_result_str(int result_code)
 {
 	switch (result_code) {
 	case 0:
 		return "ok";
-	case AS_PROTO_RESULT_FAIL_UNKNOWN:
+	case AS_JOB_FAIL_UNKNOWN:
 		return "abandoned-unknown";
-	case AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH:
+	case AS_JOB_FAIL_CLUSTER_KEY:
 		return "abandoned-cluster-key";
-	case AS_PROTO_RESULT_FAIL_SCAN_ABORT:
+	case AS_JOB_FAIL_USER_ABORT:
 		return "user-aborted";
 	default:
 		return "abandoned-?";
@@ -96,7 +95,7 @@ safe_priority(int priority) {
 // as_priority_thread_pool typedefs and forward declarations.
 //
 
-typedef struct scan_thread_pool_qtask_s {
+typedef struct queue_task_s {
 	as_priority_thread_pool_task_fn	task_fn;
 	void*							task;
 } queue_task;
@@ -361,7 +360,7 @@ as_job_info(as_job* _job, as_mon_jobstat* stat)
 	strcpy(stat->set, as_job_safe_set_name(_job));
 
 	char status[64];
-	sprintf(status, "%s(%s)", done ? "done" : "active", scan_result_str(_job->abandoned));
+	sprintf(status, "%s(%s)", done ? "done" : "active", job_result_str(_job->abandoned));
 	as_strncpy(stat->status, status, sizeof(stat->status));
 
 	sprintf(stat->jdata, "job-progress=%u", as_job_progress(_job));
@@ -442,7 +441,7 @@ typedef struct info_item_s {
 
 void as_job_manager_evict_finished_jobs(as_job_manager* mgr);
 int as_job_manager_find_cb(void* buf, void* udata);
-as_job* as_job_manager_find_job(cf_queue* scans, uint64_t trid, bool remove);
+as_job* as_job_manager_find_job(cf_queue* jobs, uint64_t trid, bool remove);
 static inline as_job* as_job_manager_find_any(as_job_manager* mgr, uint64_t trid);
 static inline as_job* as_job_manager_find_active(as_job_manager* mgr, uint64_t trid);
 static inline as_job* as_job_manager_remove_active(as_job_manager* mgr, uint64_t trid);
@@ -462,12 +461,12 @@ as_job_manager_init(as_job_manager* mgr, uint32_t max_active, uint32_t max_done,
 		cf_crash(AS_JOB, "job manager failed mutex init");
 	}
 
-	if (! (mgr->active_scans = cf_queue_create(sizeof(as_job*), false))) {
-		cf_crash(AS_JOB, "job manager failed active scans queue create");
+	if (! (mgr->active_jobs = cf_queue_create(sizeof(as_job*), false))) {
+		cf_crash(AS_JOB, "job manager failed active jobs queue create");
 	}
 
-	if (! (mgr->finished_scans = cf_queue_create(sizeof(as_job*), false))) {
-		cf_crash(AS_JOB, "job manager failed finished scans queue create");
+	if (! (mgr->finished_jobs = cf_queue_create(sizeof(as_job*), false))) {
+		cf_crash(AS_JOB, "job manager failed finished jobs queue create");
 	}
 
 	if (! as_priority_thread_pool_init(&mgr->thread_pool, n_threads)) {
@@ -480,20 +479,20 @@ as_job_manager_start_job(as_job_manager* mgr, as_job* _job)
 {
 	pthread_mutex_lock(&mgr->lock);
 
-	if (cf_queue_sz(mgr->active_scans) >= mgr->max_active) {
+	if (cf_queue_sz(mgr->active_jobs) >= mgr->max_active) {
 		pthread_mutex_unlock(&mgr->lock);
-		return AS_PROTO_RESULT_FAIL_FORBIDDEN;
+		return AS_JOB_FAIL_FORBIDDEN;
 	}
 
 	// Make sure trid is unique.
 	if (as_job_manager_find_any(mgr, _job->trid)) {
 		pthread_mutex_unlock(&mgr->lock);
-		return AS_PROTO_RESULT_FAIL_PARAMETER;
+		return AS_JOB_FAIL_PARAMETER;
 	}
 
 	_job->start_ms = cf_getms();
 	as_job_active_reserve(_job);
-	cf_queue_push(mgr->active_scans, &_job);
+	cf_queue_push(mgr->active_jobs, &_job);
 	as_priority_thread_pool_queue_task(&mgr->thread_pool, as_job_slice, _job, _job->priority);
 
 	cf_atomic_int_incr(&g_config.scans_initiated);
@@ -515,7 +514,7 @@ as_job_manager_finish_job(as_job_manager* mgr, as_job* _job)
 
 	as_job_manager_remove_active(mgr, _job->trid);
 	_job->finish_ms = cf_getms();
-	cf_queue_push(mgr->finished_scans, &_job);
+	cf_queue_push(mgr->finished_jobs, &_job);
 	as_job_manager_evict_finished_jobs(mgr);
 
 	cf_atomic_int_incr(_job->abandoned == 0 ? &g_config.scans_succeeded : &g_config.scans_abandoned);
@@ -549,7 +548,7 @@ as_job_manager_abort_job(as_job_manager* mgr, uint64_t trid)
 	}
 
 	pthread_mutex_lock(&_job->requeue_lock);
-	_job->abandoned = AS_PROTO_RESULT_FAIL_SCAN_ABORT;
+	_job->abandoned = AS_JOB_FAIL_USER_ABORT;
 	bool found = as_priority_thread_pool_remove_task(&mgr->thread_pool, _job);
 	pthread_mutex_unlock(&_job->requeue_lock);
 
@@ -567,7 +566,7 @@ as_job_manager_abort_all_jobs(as_job_manager* mgr)
 {
 	pthread_mutex_lock(&mgr->lock);
 
-	int n_jobs = cf_queue_sz(mgr->active_scans);
+	int n_jobs = cf_queue_sz(mgr->active_jobs);
 
 	if (n_jobs == 0) {
 		pthread_mutex_unlock(&mgr->lock);
@@ -577,7 +576,7 @@ as_job_manager_abort_all_jobs(as_job_manager* mgr)
 	as_job* _jobs[n_jobs];
 	info_item item = { _jobs };
 
-	cf_queue_reduce(mgr->active_scans, as_job_manager_info_cb, &item);
+	cf_queue_reduce(mgr->active_jobs, as_job_manager_info_cb, &item);
 
 	bool found[n_jobs];
 
@@ -585,7 +584,7 @@ as_job_manager_abort_all_jobs(as_job_manager* mgr)
 		as_job* _job = _jobs[i];
 
 		pthread_mutex_lock(&_job->requeue_lock);
-		_job->abandoned = AS_PROTO_RESULT_FAIL_SCAN_ABORT;
+		_job->abandoned = AS_JOB_FAIL_USER_ABORT;
 		found[i] = as_priority_thread_pool_remove_task(&mgr->thread_pool, _job);
 		pthread_mutex_unlock(&_job->requeue_lock);
 	}
@@ -672,7 +671,7 @@ as_job_manager_get_info(as_job_manager* mgr, int* size)
 
 	pthread_mutex_lock(&mgr->lock);
 
-	int n_jobs = cf_queue_sz(mgr->active_scans) + cf_queue_sz(mgr->finished_scans);
+	int n_jobs = cf_queue_sz(mgr->active_jobs) + cf_queue_sz(mgr->finished_jobs);
 
 	if (n_jobs == 0) {
 		pthread_mutex_unlock(&mgr->lock);
@@ -690,8 +689,8 @@ as_job_manager_get_info(as_job_manager* mgr, int* size)
 	as_job* _jobs[n_jobs];
 	info_item item = { _jobs };
 
-	cf_queue_reduce_reverse(mgr->active_scans, as_job_manager_info_cb, &item);
-	cf_queue_reduce_reverse(mgr->finished_scans, as_job_manager_info_cb, &item);
+	cf_queue_reduce_reverse(mgr->active_jobs, as_job_manager_info_cb, &item);
+	cf_queue_reduce_reverse(mgr->finished_jobs, as_job_manager_info_cb, &item);
 
 	memset(stats, 0, stats_size);
 
@@ -709,7 +708,7 @@ int
 as_job_manager_get_active_job_count(as_job_manager* mgr)
 {
 	pthread_mutex_lock(&mgr->lock);
-	int n_jobs = cf_queue_sz(mgr->active_scans);
+	int n_jobs = cf_queue_sz(mgr->active_jobs);
 	pthread_mutex_unlock(&mgr->lock);
 
 	return n_jobs;
@@ -724,10 +723,10 @@ as_job_manager_evict_finished_jobs(as_job_manager* mgr)
 {
 	int max_allowed = (int)mgr->max_done;
 
-	while (cf_queue_sz(mgr->finished_scans) > max_allowed) {
+	while (cf_queue_sz(mgr->finished_jobs) > max_allowed) {
 		as_job* _job;
 
-		cf_queue_pop(mgr->finished_scans, &_job, 0);
+		cf_queue_pop(mgr->finished_jobs, &_job, 0);
 		as_job_destroy(_job);
 	}
 }
@@ -747,11 +746,11 @@ as_job_manager_find_cb(void* buf, void* udata)
 }
 
 as_job*
-as_job_manager_find_job(cf_queue* scans, uint64_t trid, bool remove)
+as_job_manager_find_job(cf_queue* jobs, uint64_t trid, bool remove)
 {
 	find_item item = { trid, NULL, remove };
 
-	cf_queue_reduce(scans, as_job_manager_find_cb, &item);
+	cf_queue_reduce(jobs, as_job_manager_find_cb, &item);
 
 	return item._job;
 }
@@ -759,10 +758,10 @@ as_job_manager_find_job(cf_queue* scans, uint64_t trid, bool remove)
 static inline as_job*
 as_job_manager_find_any(as_job_manager* mgr, uint64_t trid)
 {
-	as_job* _job = as_job_manager_find_job(mgr->active_scans, trid, false);
+	as_job* _job = as_job_manager_find_job(mgr->active_jobs, trid, false);
 
 	if (! _job) {
-		_job = as_job_manager_find_job(mgr->finished_scans, trid, false);
+		_job = as_job_manager_find_job(mgr->finished_jobs, trid, false);
 	}
 
 	return _job;
@@ -771,13 +770,13 @@ as_job_manager_find_any(as_job_manager* mgr, uint64_t trid)
 static inline as_job*
 as_job_manager_find_active(as_job_manager* mgr, uint64_t trid)
 {
-	return as_job_manager_find_job(mgr->active_scans, trid, false);
+	return as_job_manager_find_job(mgr->active_jobs, trid, false);
 }
 
 static inline as_job*
 as_job_manager_remove_active(as_job_manager* mgr, uint64_t trid)
 {
-	return as_job_manager_find_job(mgr->active_scans, trid, true);
+	return as_job_manager_find_job(mgr->active_jobs, trid, true);
 }
 
 int
