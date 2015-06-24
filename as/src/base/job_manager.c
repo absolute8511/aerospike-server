@@ -348,13 +348,15 @@ as_job_info(as_job* _job, as_mon_jobstat* stat)
 	uint64_t now = cf_getms();
 	bool done = _job->finish_ms != 0;
 	uint64_t since_start_ms = now - _job->start_ms;
-	uint64_t since_finish_ms = done ? now - _job->finish_ms : 0; // TODO - incorporate this ???
+	uint64_t since_finish_ms = done ? now - _job->finish_ms : 0;
 	uint64_t active_ms = done ? _job->finish_ms - _job->start_ms : since_start_ms;
 
-	stat->trid		= _job->trid;
-	stat->run_time	= active_ms;
-	stat->recs_read	= cf_atomic64_get(_job->n_records_read);
-	stat->priority	= _job->priority;
+	stat->trid				= _job->trid;
+	stat->priority			= (uint32_t)_job->priority;
+	stat->progress_pct		= as_job_progress(_job);
+	stat->run_time			= active_ms;
+	stat->time_since_done	= since_finish_ms;
+	stat->recs_read			= cf_atomic64_get(_job->n_records_read);
 
 	strcpy(stat->ns, _job->ns->name);
 	strcpy(stat->set, as_job_safe_set_name(_job));
@@ -362,8 +364,6 @@ as_job_info(as_job* _job, as_mon_jobstat* stat)
 	char status[64];
 	sprintf(status, "%s(%s)", done ? "done" : "active", job_result_str(_job->abandoned));
 	as_strncpy(stat->status, status, sizeof(stat->status));
-
-	sprintf(stat->jdata, "job-progress=%u", as_job_progress(_job));
 
 	_job->vtable.info_mon_fn(_job, stat);
 }
@@ -391,7 +391,7 @@ as_job_safe_set_name(as_job* _job)
 {
 	const char* set_name = as_namespace_get_set_name(_job->ns, _job->set_id);
 
-	return set_name ? set_name : "null";
+	return set_name ? set_name : ""; // empty string means no set name displayed
 }
 
 static inline uint32_t
@@ -657,6 +657,7 @@ as_job_manager_get_job_info(as_job_manager* mgr, uint64_t trid)
 	as_mon_jobstat* stat = cf_malloc(sizeof(as_mon_jobstat));
 
 	if (stat) {
+		memset(stat, 0, sizeof(as_mon_jobstat));
 		as_job_info(_job, stat);
 	}
 

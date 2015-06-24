@@ -36,6 +36,7 @@
 #include "base/thr_sindex.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -555,11 +556,10 @@ static as_job_manager g_spop_manager;
 void
 as_spop_init()
 {
-	// TODO - config for max counts?
-	// TODO - and what to do if we did exceed the max active count?
+	// TODO - config for max done?
 	// Initialize with maximum threads since first use is always populate-all at
 	// startup. The thread pool will be down-sized right after that.
-	as_job_manager_init(&g_spop_manager, 100, 100, MAX_POPULATOR_THREADS);
+	as_job_manager_init(&g_spop_manager, UINT_MAX, 100, MAX_POPULATOR_THREADS);
 }
 
 int
@@ -726,11 +726,14 @@ spop_job_info(as_job* _job, as_mon_jobstat* stat)
 	spop_job* job = (spop_job*)_job;
 
 	if (job->si) {
-		strcat(stat->jdata, ":job-type=sindex-populate:sindex-name=");
-		strcat(stat->jdata, job->si->imd->iname);
+		strcpy(stat->job_type, "sindex-populate");
+
+		char *extra = stat->jdata + strlen(stat->jdata);
+
+		sprintf(extra, ":sindex-name=%s", job->si->imd->iname);
 	}
 	else {
-		strcat(stat->jdata, ":job-type=sindex-populate-all");
+		strcpy(stat->job_type, "sindex-populate-all");
 	}
 }
 

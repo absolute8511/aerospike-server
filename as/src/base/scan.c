@@ -691,11 +691,8 @@ basic_scan_job_destroy(as_job* _job)
 void
 basic_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 {
+	strcpy(stat->job_type, scan_type_str(SCAN_TYPE_BASIC));
 	conn_scan_job_info((conn_scan_job*)_job, stat);
-
-	char *extra = stat->jdata + strlen(stat->jdata);
-
-	sprintf(extra, ":job-type=%s", scan_type_str(SCAN_TYPE_BASIC));
 }
 
 //----------------------------------------------------------
@@ -993,11 +990,8 @@ aggr_scan_job_destroy(as_job* _job)
 void
 aggr_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 {
+	strcpy(stat->job_type, scan_type_str(SCAN_TYPE_AGGR));
 	conn_scan_job_info((conn_scan_job*)_job, stat);
-
-	char *extra = stat->jdata + strlen(stat->jdata);
-
-	sprintf(extra, ":job-type=%s", scan_type_str(SCAN_TYPE_AGGR));
 }
 
 //----------------------------------------------------------
@@ -1263,17 +1257,16 @@ udf_bg_scan_job_destroy(as_job* _job)
 void
 udf_bg_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 {
+	strcpy(stat->job_type, scan_type_str(SCAN_TYPE_UDF_BG));
+	stat->net_io_bytes = sizeof(cl_msg); // size of original synchronous fin
+
 	udf_bg_scan_job* job = (udf_bg_scan_job*)_job;
 	char *extra = stat->jdata + strlen(stat->jdata);
 
-	// TODO - dangerous! Let's reform the monitor...
-	sprintf(extra, ":job-type=%s:udf-filename=%s:udf-function=%s:udf-success=%ld:udf-failed=%ld",
-			scan_type_str(SCAN_TYPE_UDF_BG),
+	sprintf(extra, ":udf-filename=%s:udf-function=%s:udf-success=%ld:udf-failed=%ld",
 			job->call.filename, job->call.function,
 			cf_atomic64_get(job->n_successful_tr),
 			cf_atomic64_get(job->n_failed_tr));
-
-	stat->net_io_bytes = sizeof(cl_msg); // size of original synchronous fin
 }
 
 //----------------------------------------------------------

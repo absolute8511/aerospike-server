@@ -2996,6 +2996,11 @@ as_query__fill_jobstat(as_query_transaction *qtr, as_mon_jobstat *stat)
 	stat->net_io_bytes  = qtr->net_io_bytes;
 	stat->priority      = qtr->priority;
 
+	// Not implemented:
+	stat->progress_pct    = 0;
+	stat->time_since_done = 0;
+	stat->job_type[0]     = '\0';
+
 	strcpy(stat->ns, qtr->ns->name);
 
 	if (qtr->setname) {
@@ -3005,9 +3010,9 @@ as_query__fill_jobstat(as_query_transaction *qtr, as_mon_jobstat *stat)
 	}
 
 	strcpy(stat->status, "IN_PROGRESS");
-	stat->jdata[0]        = '\0';
+
 	char *specific_data   = stat->jdata;
-	sprintf(specific_data, "indexname=%s:", qtr->si->imd->iname);
+	sprintf(specific_data, ":sindex-name=%s:", qtr->si->imd->iname);
 }
 
 

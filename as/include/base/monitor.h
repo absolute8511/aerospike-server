@@ -55,16 +55,19 @@ extern const char * AS_MON_MODULES[];
 
 // Stat for currently running job
 typedef struct as_mon_jobstat_s {
+	uint64_t	trid;
+	char		job_type[32];
 	char		ns[AS_ID_NAMESPACE_SZ];
 	char		set[AS_SET_NAME_MAX_SIZE];
-	char		status[32];
-	uint64_t	trid;
-	float		cpu;
-	uint64_t	mem;
+	uint32_t	priority;
+	char		status[64];
+	uint32_t	progress_pct;
 	uint64_t	run_time;
+	uint64_t	time_since_done;
 	uint64_t	recs_read;
 	uint64_t	net_io_bytes;
-	uint64_t	priority;
+	uint64_t	mem;
+	float		cpu;
 	char		jdata[256];
 } as_mon_jobstat;
 
@@ -97,5 +100,5 @@ typedef struct as_mon_s {
 	as_mon_cb	cb;
 } as_mon;
 
-void as_mon_info_cmd(char *module, char *cmd, uint64_t trid, uint32_t priority, cf_dyn_buf *db);
+void as_mon_info_cmd(const char *module, char *cmd, uint64_t trid, uint32_t priority, cf_dyn_buf *db);
 int  as_mon_init();
