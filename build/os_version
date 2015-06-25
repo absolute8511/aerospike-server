@@ -18,7 +18,7 @@ function setPlatform {
 if [ -f /etc/redhat-release ]
 then
   ver=`cat /etc/redhat-release | awk '{printf("%2.2s\n", $3)}'`
-  
+
   if  [ "$ver" = "5." ]
   then
     setPlatform el5 centos5
@@ -27,7 +27,7 @@ then
     setPlatform el6 centos6
   else
     ver=`cat /etc/redhat-release | awk '{printf("%2.2s\n", $4)}'`
-    
+
     if [ "$ver" = "6." ]
     then
       setPlatform el6 centos6
@@ -61,6 +61,9 @@ then
     elif [ "$ver" = "7" ]
     then
       setPlatform debian7 debian7
+    elif [ "$ver" = "8" ]
+    then
+      setPlatform debian8 debian8
     else
       echo "Unknown debian version $ver"
       exit 1
@@ -77,6 +80,9 @@ then
       echo "Unknown ubuntu version $ver"
       exit 1
     fi
+  elif [[ $os == "Amazon"* ]]
+  then
+    setPlatform ami ami
   else
     echo "Unknown platform $os"
     exit 1    
