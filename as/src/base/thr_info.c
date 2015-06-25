@@ -5773,7 +5773,7 @@ info_get_namespace_info(as_namespace *ns, cf_dyn_buf *db)
 
 	// total used memory =  data memory + primary index memory + secondary index memory
 	data_memory   = ns->n_bytes_memory;
-	pindex_memory = as_index_size_get(ns) * ns->n_objects;
+	pindex_memory = as_index_size_get(ns) * (ns->n_objects + ns->n_sub_objects);
 	sindex_memory = cf_atomic_int_get(ns->sindex_data_memory_used);
 	used_memory   = data_memory + pindex_memory + sindex_memory;
 
