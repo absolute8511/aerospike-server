@@ -782,6 +782,12 @@ fabric_connect(fabric_args *fa, fabric_node_element *fne)
 			hbaddr_to_use = g_config.node_ip;
 		}
 
+		// If the user specified an interface-address, we should that address to
+		// the remote machine to send back heartbeats.
+		if (g_config.hb_tx_addr) {
+			hbaddr_to_use = g_config.hb_tx_addr;	
+		}
+		
 		if (1 != inet_pton(AF_INET, hbaddr_to_use, &self))
 			cf_warning(AS_HB, "unable to call inet_pton: %s", cf_strerror(errno));
 		else {
