@@ -572,14 +572,14 @@ udf_record_cache_sethidden(udf_record * urecord, const char * name)
 bool
 udf_record_bin_ishidden(const udf_record *urecord, const char *name)
 {
-	if (!name) return NULL;
-	const char *    bname = (char *) name;
-	size_t          blen  = strlen(name);
-	as_bin *        bb    = as_bin_get(urecord->rd, (uint8_t *) bname, blen);
+	if (!name) {
+		return false;
+	}
+	as_bin * bb = as_bin_get(urecord->rd, name);
 
 	if ( !bb ) {
 		cf_detail(AS_UDF, "udf_record_get: bin not found (%s)", name);
-		return 0;
+		return false;
 	}
 	return as_bin_is_hidden(bb);
 }
@@ -616,9 +616,7 @@ udf_record_storage_get(const udf_record *urecord, const char *name)
 		cf_detail(AS_UDF, "Passed Null bin name to storage get");
 		return NULL;
 	}
-	const char *    bname = (char *) name;
-	size_t          blen  = strlen(name);
-	as_bin *        bb    = as_bin_get(urecord->rd, (uint8_t *) bname, blen);
+	as_bin * bb = as_bin_get(urecord->rd, name);
 
 	if ( !bb ) {
 		cf_detail(AS_UDF, "udf_record_get: bin not found (%s)", name);
@@ -661,9 +659,7 @@ udf_record_param_check(const as_rec *rec, const char *bname, char *fname, int li
 	}
 
 	as_namespace  * ns = urecord->tr->rsv.ns;
-	size_t blen        = strlen(bname);
-	if ((blen > (AS_ID_BIN_SZ - 1)) 
-			|| !as_bin_name_within_quota(ns, (byte *)bname, blen)) {
+	if (strlen(bname) >= AS_ID_BIN_SZ || !as_bin_name_within_quota(ns, bname)) {
 		cf_debug(AS_UDF, "Invalid Parameter: bin name %s too big", bname);
 		return UDF_ERR_PARAMETER;
 	}

@@ -461,15 +461,19 @@ as_bin_set_version(as_bin *b, uint8_t version, bool single_bin) {
 extern int16_t as_bin_get_id(as_namespace *ns, const char *name);
 extern uint16_t as_bin_get_or_assign_id(as_namespace *ns, const char *name);
 extern const char* as_bin_get_name_from_id(as_namespace *ns, uint16_t id);
-extern bool as_bin_name_within_quota(as_namespace *ns, byte *buf, size_t len);
+extern bool as_bin_name_within_quota(as_namespace *ns, const char *name);
 extern uint16_t as_bin_get_n_bins(as_record *r, as_storage_rd *rd);
 extern as_bin *as_bin_get_all(as_record *r, as_storage_rd *rd, as_bin *stack_bins);
 extern int as_storage_rd_load_bins(as_storage_rd *rd, as_bin *stack_bins);
 extern void as_bin_get_all_p(as_storage_rd *rd, as_bin **bin_ptrs);
-extern as_bin *as_bin_create(as_record *r, as_storage_rd *rd, uint8_t *name, size_t namesz, uint version);
-extern as_bin *as_bin_get(as_storage_rd *rd, uint8_t *name, size_t namesz);
-extern int32_t as_bin_get_index(as_storage_rd *rd, uint8_t *name, size_t namesz);
-extern int as_bin_get_all_versions(as_storage_rd *rd, uint8_t *name, size_t namesz, as_bin **curr_bins);
+extern as_bin *as_bin_create(as_storage_rd *rd, const char *name);
+extern as_bin *as_bin_create_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
+extern as_bin *as_bin_get(as_storage_rd *rd, const char *name);
+extern as_bin *as_bin_get_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
+extern as_bin *as_bin_get_or_create(as_storage_rd *rd, const char *name);
+extern as_bin *as_bin_get_or_create_from_buf(as_storage_rd *rd, byte *name, size_t namesz, bool create_only, bool replace_only, int *p_result);
+extern int32_t as_bin_get_index(as_storage_rd *rd, const char *name);
+extern int32_t as_bin_get_index_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
 extern void as_bin_allocate_bin_space(as_record *r, as_storage_rd *rd, int32_t delta);
 extern void as_bin_destroy(as_storage_rd *rd, uint16_t i);
 extern void as_bin_destroy_from(as_storage_rd *rd, uint16_t i);
@@ -477,7 +481,7 @@ extern void as_bin_destroy_all(as_storage_rd *rd);
 extern uint16_t as_bin_inuse_count(as_storage_rd *rd);
 extern void as_bin_all_dump(as_storage_rd *rd, char *msg);
 
-extern void as_bin_init(as_namespace *ns, as_bin *b, byte *name, size_t namesz, uint version);
+extern void as_bin_init(as_namespace *ns, as_bin *b, const char *name);
 
 #define AS_PARTITION_MAX_VERSION 16
 
@@ -1206,7 +1210,7 @@ as_bin_set_id_from_name_buf(as_namespace *ns, as_bin *b, byte *buf, int len) {
 }
 
 static inline void
-as_bin_set_id_from_name(as_namespace *ns, as_bin *b, char *name) {
+as_bin_set_id_from_name(as_namespace *ns, as_bin *b, const char *name) {
 	if (! ns->single_bin) {
 		b->id = as_bin_get_or_assign_id(ns, name);
 	}

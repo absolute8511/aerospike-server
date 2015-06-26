@@ -403,7 +403,7 @@ size_t as_msg_response_msgsize(as_record *r, as_storage_rd *rd, bool nobindata,
 				char binname[AS_ID_BIN_SZ];
 				cf_vector_get(binlist, i, (void*)&binname);
 				cf_debug(AS_PROTO, " Binname projected inside is |%s|", binname);
-				as_bin *p_bin = as_bin_get (rd, (uint8_t*)binname, strlen(binname));
+				as_bin *p_bin = as_bin_get(rd, binname);
 				if (!p_bin)
 				{
 					cf_debug(AS_PROTO, "To be projected bin |%s| not found", binname);
@@ -502,7 +502,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 
 				cf_vector_get(binlist, i, (void*)&binname);
 
-				as_bin *p_bin = as_bin_get(rd, (uint8_t*)binname, strlen(binname));
+				as_bin *p_bin = as_bin_get(rd, binname);
 
 				if (! p_bin) {
 					continue;
@@ -626,7 +626,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 			char binname[AS_ID_BIN_SZ];
 			cf_vector_get(binlist, i, (void*)&binname);
 
-			as_bin *p_bin = as_bin_get(rd, (uint8_t*)binname, strlen(binname));
+			as_bin *p_bin = as_bin_get(rd, binname);
 
 			if (! p_bin) {
 				continue;
