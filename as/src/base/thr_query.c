@@ -1278,8 +1278,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 	as_sindex_bin_data *end   = &qtr->srange->end;
 
 	//TODO: Make it more general to support sindex over multiple bins	
-	as_bin * b = as_bin_get(rd, (uint8_t *)qtr->si->imd->bnames[0],
-							strlen(qtr->si->imd->bnames[0]));
+	as_bin * b = as_bin_get(rd, qtr->si->imd->bnames[0]);
 
 	if (!b) {
 		cf_debug(AS_QUERY , "as_query_record_validation: "

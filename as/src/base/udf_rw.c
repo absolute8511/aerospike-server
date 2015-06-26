@@ -76,7 +76,7 @@ extern udf_call *as_query_get_udf_call(void *ptr);
  */
 static bool
 make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
-			  const char *key, size_t klen, int  vtype,  void *val, size_t vlen)
+			  const char *key, int  vtype,  void *val, size_t vlen)
 {
 	uint8_t *   v           = NULL;
 	int64_t     unswapped_int = 0;
@@ -92,7 +92,7 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 		}
 	}
 
-	as_bin_init(ns, bin, (byte *) key/*name*/, klen/*namelen*/, 0/*version*/);
+	as_bin_init(ns, bin, key/*name*/);
 
 	switch (vtype) {
 		case AS_PARTICLE_TYPE_NULL:
@@ -143,7 +143,7 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
  * 					 be done by the scan thread after scan is finished
  */
 static int
-send_response(udf_call *call, const char *key, size_t klen, int vtype, void *val,
+send_response(udf_call *call, const char *key, int vtype, void *val,
 			  size_t vlen)
 {
 	as_transaction *    tr          = call->transaction;
@@ -179,7 +179,7 @@ send_response(udf_call *call, const char *key, size_t klen, int vtype, void *val
 		keep_fd = true;
 	}
 
-	if (0 != make_send_bin(ns, bin, &sp_p, sp_sz, key, klen, vtype, val, vlen)) {
+	if (0 != make_send_bin(ns, bin, &sp_p, sp_sz, key, vtype, val, vlen)) {
 		return(-1);
 	}
 
@@ -203,7 +203,7 @@ static inline int
 send_cdt_failure(udf_call *call, int vtype, void *val, size_t vlen)
 {
 	call->transaction->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
-	return send_response(call, "FAILURE", 7, vtype, val, vlen);
+	return send_response(call, "FAILURE", vtype, val, vlen);
 }
 
 int
@@ -408,13 +408,13 @@ send_udf_failure(udf_call *call, int vtype, void *val, size_t vlen)
 	cf_debug(AS_UDF, "Non-special LDT or General UDF Error(%s)", (char *) val);
 
 	call->transaction->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
-	return send_response(call, "FAILURE", 7, vtype, val, vlen);
+	return send_response(call, "FAILURE", vtype, val, vlen);
 }
 
 static inline int
 send_success(udf_call *call, int vtype, void *val, size_t vlen)
 {
-	return send_response(call, "SUCCESS", 7, vtype, val, vlen);
+	return send_response(call, "SUCCESS", vtype, val, vlen);
 }
 
 /*
@@ -1216,7 +1216,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 				call->transaction->result_code = AS_PROTO_RESULT_FAIL_KEY_MISMATCH;
 				// Necessary to complete transaction, but error string would be
 				// ignored by client, so don't bother sending one.
-				send_response(call, "FAILURE", 7, AS_PARTICLE_TYPE_NULL, NULL, 0);
+				send_response(call, "FAILURE", AS_PARTICLE_TYPE_NULL, NULL, 0);
 				// free everything we created - the rec destroy with ldt_record hooks
 				// destroys the ldt components and the attached "base_rec"
 				ldt_record_destroy(lrec);
@@ -1229,7 +1229,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 			if (! get_msg_key(m, &rd)) {
 				udf_record_close(&urecord);
 				call->transaction->result_code = AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
-				send_response(call, "FAILURE", 7, AS_PARTICLE_TYPE_NULL, NULL, 0);
+				send_response(call, "FAILURE", AS_PARTICLE_TYPE_NULL, NULL, 0);
 				ldt_record_destroy(lrec);
 				as_rec_destroy(lrec);
 				return 0;
@@ -1310,7 +1310,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		udf_record_close(&urecord);
 		char *rs = as_module_err_string(ret_value);
 		call->transaction->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
-		send_response(call, "FAILURE", 7, AS_PARTICLE_TYPE_STRING, rs, strlen(rs));
+		send_response(call, "FAILURE", AS_PARTICLE_TYPE_STRING, rs, strlen(rs));
 		cf_free(rs);
 		as_result_destroy(res);
 	}

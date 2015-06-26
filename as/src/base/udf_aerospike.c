@@ -99,20 +99,18 @@ udf_aerospike_delbin(udf_record * urecord, const char * bname)
 		return -1;
 	}
 
-	size_t          blen    = strlen(bname);
 	as_storage_rd  *rd      = urecord->rd;
 	as_transaction *tr      = urecord->tr;
 
-	// Check quality of bname -- first check that it is proper length, then
-	// check that we're not over quota for bins, then finally make sure that
-	// the bin exists.
-	if (blen > (AS_ID_BIN_SZ - 1 ) || !as_bin_name_within_quota(rd->ns, (byte *)bname, blen)) {
-		// Can't read bin if name too large or over quota
+	// Check quality of bname -- check that it is proper length, then make sure
+	// that the bin exists.
+	if (strlen(bname) >= AS_ID_BIN_SZ) {
+		// Can't read bin if name too large.
 		cf_warning(AS_UDF, "udf_aerospike_delbin: Invalid Parameters [bin name(%s) too big]... Fail", bname);
 		return -1;
 	}
 
-	as_bin * b = as_bin_get(rd, (byte *)bname, blen);
+	as_bin * b = as_bin_get(rd, bname);
 	if ( !b ) {
 		cf_debug(AS_UDF, "udf_aerospike_delbin: Invalid Operation [Bin name(%s) not found of delete]... Fail", bname);
 		return -1;
@@ -127,7 +125,7 @@ udf_aerospike_delbin(udf_record * urecord, const char * bname)
 		SINDEX_GUNLOCK();
 	}
 
-	int32_t i = as_bin_get_index(rd, (byte *)bname, blen);
+	int32_t i = as_bin_get_index(rd, bname);
 	if (i != -1) {
 		if (has_sindex) {
 			if (sindex_found > 0) {	
@@ -277,10 +275,8 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 		return -3;
 	}
 
-	size_t          blen    = strlen(bname);
 	as_storage_rd * rd      = urecord->rd;
 	as_transaction *tr      = urecord->tr;
-	as_index_ref  * index   = urecord->r_ref;
 
 	SINDEX_BINS_SETUP(sbins, 2 * rd->ns->sindex_cnt);
 	int sindex_found = 0;
@@ -288,22 +284,12 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 	if (has_sindex) {
 		SINDEX_GRLOCK();
 	}
-	as_bin * b = as_bin_get(rd, (byte *)bname, blen);
 
-	if ( !b && (blen > (AS_ID_BIN_SZ - 1 )
-				|| !as_bin_name_within_quota(rd->ns, (byte *)bname, blen)) ) {
-		// Can't write bin
-		cf_warning(AS_UDF, "udf_aerospike_setbin: Invalid Parameters: [Bin name %s too big]... Fail", bname);
-		return -1;
-	}
+	as_bin * b = as_bin_get_or_create(rd, bname);
+
 	if ( !b ) {
-		// See if there's a free one, the hope is you will always find the bin because
-		// you have already allocated bin space before calling this function.
-		b = as_bin_create(index->r, rd, (byte *)bname, blen, 0);
-		if (!b) {
-			cf_warning(AS_UDF, "udf_aerospike_setbin: Internal Error [Bin %s not found.. Possibly ran out of bins]... Fail", bname);
-			return -1;
-		}
+		cf_warning(AS_UDF, "udf_aerospike_setbin: Internal Error [Bin %s not found.. Possibly ran out of bins]... Fail", bname);
+		return -1;
 	}
 	else {
 		if (has_sindex ) {
@@ -312,7 +298,6 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 		}
 	}
 
-	
 
 	// we know we are doing an update now, make sure there is particle data,
 	// set to be 1 wblock size now @TODO!
@@ -566,7 +551,7 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 		if ( urecord->updates[i].dirty ) {
 			char *      k = urecord->updates[i].name;
 			if ( k != NULL ) {
-				if ( !as_bin_get(rd, (uint8_t *)k, strlen(k)) ) {
+				if ( !as_bin_get(rd, k) ) {
 					new_bins++;
 				}
 			}

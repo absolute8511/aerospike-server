@@ -846,14 +846,11 @@ as_sindex__populate_binid(as_namespace *ns, as_sindex_metadata *imd)
 	for (i = 0; i < imd->num_bins; i++) {
 		// Bin id should be around if not create it
 		char bname[AS_ID_BIN_SZ];
-		memset(bname, 0, AS_ID_BIN_SZ);
-		int bname_len = strlen(imd->bnames[i]);
-		if ( (bname_len > (AS_ID_BIN_SZ - 1 ))
-				|| !as_bin_name_within_quota(ns, (byte *)imd->bnames[i], bname_len)) {
+		strncpy(bname, imd->bnames[i], AS_ID_BIN_SZ);
+		if (bname[AS_ID_BIN_SZ - 1] != 0 || !as_bin_name_within_quota(ns, bname)) {
 			cf_warning(AS_SINDEX, "bin name %s too big. Bin not added", bname);
 			return -1;
 		}
-		strncpy(bname, imd->bnames[i], bname_len);
 		imd->binid[i] = as_bin_get_or_assign_id(ns, bname);
 		cf_debug(AS_SINDEX, " Assigned %d for %s %s", imd->binid[i], imd->bnames[i], bname);
 	}
@@ -1651,8 +1648,7 @@ as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 
 	int sindex_found = 0;
 	for (int i = 0; i < imd->num_bins; i++) {
-		as_bin *b = as_bin_get(rd, (uint8_t *)imd->bnames[i],
-				strlen(imd->bnames[i]));
+		as_bin *b = as_bin_get(rd, imd->bnames[i]);
 		as_val * cdt_val = NULL;
 		if (b) {
 			as_sindex_init_sbin(&sbins[sindex_found], AS_SINDEX_OP_INSERT, as_sindex_pktype(si->imd), si->simatch);
