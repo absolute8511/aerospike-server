@@ -145,7 +145,7 @@ void g_write_hash_delete(global_keyd *gk) {
 void rw_complete(write_request *wr, as_transaction *tr, as_index_ref *r_ref);
 void read_local(as_transaction *tr, as_index_ref *r_ref);
 int write_local(as_transaction *tr, write_local_generation *wlg,
-				uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
+				uint8_t **pickled_buf, size_t *pickled_sz,
 				as_rec_props *p_pickled_rec_props, cf_dyn_buf *db);
 int write_journal(as_transaction *tr, write_local_generation *wlg); // only do write
 int write_delete_journal(as_transaction *tr, bool is_subrec);
@@ -277,6 +277,7 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	tr->flag = 0;
 
 	tr->generation = 0;
+	tr->void_time = 0;
 	tr->microbenchmark_is_resolve = false;
 
 	if (wr->shipped_op)
@@ -513,7 +514,7 @@ rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd, uint16_t ld
 
 int
 rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
-		uint8_t ** p_pickled_buf, size_t pickled_sz, uint32_t pickled_void_time,
+		uint8_t ** p_pickled_buf, size_t pickled_sz,
 		as_rec_props * p_pickled_rec_props, int op, uint16_t ldt_rectype_bits,
 		bool has_udf)
 {
@@ -528,7 +529,7 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 
 	if (op == RW_OP_WRITE) {
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
-		msg_set_uint32(m, RW_FIELD_VOID_TIME, pickled_void_time);
+		msg_set_uint32(m, RW_FIELD_VOID_TIME, tr->void_time);
 
 		rw_msg_setup_infobits(m, tr, ldt_rectype_bits, has_udf);
 
@@ -568,7 +569,7 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 	} else if (op == RW_OP_MULTI) {
 		// TODO: What is meaning of generation and TTL here ???
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
-		msg_set_uint32(m, RW_FIELD_VOID_TIME, pickled_void_time);
+		msg_set_uint32(m, RW_FIELD_VOID_TIME, tr->void_time);
 
 		rw_msg_setup_ldt_fields(m, tr, keyd, ldt_rectype_bits);
 
@@ -616,8 +617,7 @@ write_request_setup(write_request *wr, as_transaction *tr, int optype)
 	}
 
 	rw_msg_setup(wr->dest_msg, tr, &wr->keyd, &wr->pickled_buf, wr->pickled_sz,
-			wr->pickled_void_time, &wr->pickled_rec_props, optype,
-			wr->ldt_rectype_bits, wr->has_udf);
+			&wr->pickled_rec_props, optype, wr->ldt_rectype_bits, wr->has_udf);
 
 	if (wr->shipped_op) {
 		cf_detail(AS_RW,
@@ -931,8 +931,8 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 					wlg.use_msg_gen = true;
 
 					rv = write_local(tr, &wlg, &wr->pickled_buf,
-							&wr->pickled_sz, &wr->pickled_void_time,
-							&wr->pickled_rec_props, &wr->response_db);
+							&wr->pickled_sz, &wr->pickled_rec_props,
+							&wr->response_db);
 					WR_TRACK_INFO(wr, "internal_rw_start: write local done ");
 				}
 				if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
@@ -2058,7 +2058,8 @@ write_complete(write_request *wr, as_transaction *tr)
 	}
 	else if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-				tr->generation, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL)) {
+				tr->generation, tr->void_time, NULL, NULL, 0, NULL, NULL,
+				tr->trid, NULL)) {
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
 		}
@@ -3227,8 +3228,6 @@ update_metadata_in_index(as_transaction *tr, bool increment_generation,
 bool
 pickle_all(as_storage_rd *rd, pickle_info *pickle)
 {
-	pickle->void_time = rd->r->void_time;
-
 	if (0 != as_record_pickle(rd->r, rd, &pickle->buf, &pickle->buf_size)) {
 		return false;
 	}
@@ -4636,7 +4635,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 int
 write_local(as_transaction *tr, write_local_generation *wlg,
-		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
+		uint8_t **pickled_buf, size_t *pickled_sz,
 		as_rec_props *p_pickled_rec_props, cf_dyn_buf *db)
 {
 	//------------------------------------------------------
@@ -4846,11 +4845,11 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 
 	*pickled_buf = pickle.buf;
 	*pickled_sz = pickle.buf_size;
-	*pickled_void_time = pickle.void_time;
 	p_pickled_rec_props->p_data = pickle.rec_props_data;
 	p_pickled_rec_props->size = pickle.rec_props_size;
 
 	tr->generation = r->generation;
+	tr->void_time = r->void_time;
 
 	// Get set-id before releasing.
 	uint16_t set_id = as_index_get_set_id(r_ref.r);
@@ -5149,7 +5148,7 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 		if (jqe.delete == true)
 			rv = write_delete_local(&tr, false, 0, false);
 		else
-			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, 0);
+			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0);
 
 		cf_detail(AS_RW, "write journal: wrote: rv %d key %"PRIx64,
 				rv, *(uint64_t *)&tr.keyd);

@@ -1500,8 +1500,7 @@ as_ldt_merge_component_is_candidate(as_partition_reservation *rsv, as_record_mer
 int
 as_ldt_record_pickle(ldt_record *lrecord,
 				  uint8_t               ** pickled_buf,
-				  size_t                 * pickled_sz,
-				  uint32_t               * pickled_void_time)
+				  size_t                 * pickled_sz)
 {
 	cf_detail(AS_LDT, "Enter: MULTI_OP: Packing LDT record");
 
@@ -1543,7 +1542,6 @@ as_ldt_record_pickle(ldt_record *lrecord,
 			rw_msg_setup(m[ops], h_tr, &h_tr->keyd,
 							&h_urecord->pickled_buf,
 							h_urecord->pickled_sz,
-							h_urecord->pickled_void_time,
 							&h_urecord->pickled_rec_props,
 							RW_OP_WRITE,
 							h_urecord->ldt_rectype_bits, true);
@@ -1584,7 +1582,6 @@ as_ldt_record_pickle(ldt_record *lrecord,
 			rw_msg_setup(m[ops], c_tr, &c_tr->keyd,
 							&c_urecord->pickled_buf,
 							c_urecord->pickled_sz,
-							c_urecord->pickled_void_time,
 							&c_urecord->pickled_rec_props,
 							RW_OP_WRITE,
 							c_urecord->ldt_rectype_bits, true);
@@ -1617,7 +1614,6 @@ as_ldt_record_pickle(ldt_record *lrecord,
 				ret = msg_fillbuf(m[i], buf, &sz);
 				buf += sz;
 			}
-			*pickled_void_time = 0;
 		}
 	}
 Out:
@@ -1628,7 +1624,6 @@ Out:
 			cf_free(*pickled_buf);
 			*pickled_buf = NULL;
 			*pickled_sz  = 0;
-			*pickled_void_time = 0;
 		}
 	}
 

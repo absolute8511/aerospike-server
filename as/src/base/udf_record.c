@@ -318,7 +318,6 @@ udf_record_init(udf_record *urecord)
 
 	urecord->pickled_buf        = NULL;
 	urecord->pickled_sz         = 0;
-	urecord->pickled_void_time  = 0;
 
 	as_rec_props_clear(&urecord->pickled_rec_props);
 
@@ -352,7 +351,6 @@ udf_record_cleanup(udf_record *urecord, bool dofree)
 
 		urecord->pickled_buf       = NULL;
 		urecord->pickled_sz        = 0;
-		urecord->pickled_void_time = 0;
 	}
 
 	if (urecord->pickled_rec_props.p_data) {

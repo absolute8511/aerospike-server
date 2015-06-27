@@ -150,7 +150,7 @@ send_response(udf_call *call, const char *key, int vtype, void *val,
 	as_namespace *      ns          = tr->rsv.ns;
 	uint32_t            generation  = tr->generation;
 	uint32_t            sp_sz       = 1024 * 16;
-	uint32_t            void_time   = 0;
+	uint32_t            void_time   = tr->void_time;
 	uint32_t            written_sz  = 0;
 	bool                keep_fd     = false;
 	as_bin              stack_bin;
@@ -671,7 +671,7 @@ udf_rw_getop(udf_record *urecord, udf_optype *urecord_op)
  */
 void
 udf_rw_write_post_processing(as_transaction *tr, as_storage_rd *rd,
-		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
+		uint8_t **pickled_buf, size_t *pickled_sz,
 		as_rec_props *p_pickled_rec_props, int64_t memory_bytes)
 {
 	update_metadata_in_index(tr, true, rd->r);
@@ -682,11 +682,11 @@ udf_rw_write_post_processing(as_transaction *tr, as_storage_rd *rd,
 
 	*pickled_buf = pickle.buf;
 	*pickled_sz = pickle.buf_size;
-	*pickled_void_time = pickle.void_time;
 	p_pickled_rec_props->p_data = pickle.rec_props_data;
 	p_pickled_rec_props->size = pickle.rec_props_size;
 
 	tr->generation = rd->r->generation;
+	tr->void_time = rd->r->void_time;
 
 	if (tr->rsv.ns->storage_data_in_memory) {
 		account_memory(tr, rd, memory_bytes);
@@ -716,7 +716,6 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 	// INIT
 	urecord->pickled_buf     = NULL;
 	urecord->pickled_sz      = 0;
-	urecord->pickled_void_time     = 0;
 	as_rec_props_clear(&urecord->pickled_rec_props);
 	bool udf_xdr_ship_op = false;
 
@@ -741,8 +740,8 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 		}
 
 		udf_rw_write_post_processing(tr, rd, &urecord->pickled_buf,
-			&urecord->pickled_sz, &urecord->pickled_void_time,
-			&urecord->pickled_rec_props, urecord->starting_memory_bytes);
+			&urecord->pickled_sz, &urecord->pickled_rec_props,
+			urecord->starting_memory_bytes);
 
 		// Now ok to accommodate a new stored key...
 		if (! as_index_is_flag_set(r_ref->r, AS_INDEX_FLAG_KEY_STORED) && rd->key) {
@@ -872,7 +871,6 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 	if (urecord_op == UDF_OPTYPE_DELETE) {
 		wr->pickled_buf      = NULL;
 		wr->pickled_sz       = 0;
-		wr->pickled_void_time   = 0;
 		as_rec_props_clear(&wr->pickled_rec_props);
 		wr->ldt_rectype_bits = h_urecord->ldt_rectype_bits;
 		*lrecord_op  = UDF_OPTYPE_DELETE;
@@ -916,7 +914,7 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 
 		if (is_ldt) {
 			// Create the multiop pickled buf for thr_rw.c
-			ret = as_ldt_record_pickle(lrecord, &wr->pickled_buf, &wr->pickled_sz, &wr->pickled_void_time);
+			ret = as_ldt_record_pickle(lrecord, &wr->pickled_buf, &wr->pickled_sz);
 			FOR_EACH_SUBRECORD(i, j, lrecord) {
 				udf_record *c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
 				// Cleanup in case pickle code bailed out
@@ -928,7 +926,6 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 			// Normal UDF case simply pass on pickled buf created for the record
 			wr->pickled_buf       = h_urecord->pickled_buf;
 			wr->pickled_sz        = h_urecord->pickled_sz;
-			wr->pickled_void_time = h_urecord->pickled_void_time;
 			wr->pickled_rec_props = h_urecord->pickled_rec_props;
 			wr->ldt_rectype_bits = h_urecord->ldt_rectype_bits;
 			udf_record_cleanup(h_urecord, false);
