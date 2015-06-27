@@ -150,7 +150,7 @@ send_response(udf_call *call, const char *key, int vtype, void *val,
 	as_namespace *      ns          = tr->rsv.ns;
 	uint32_t            generation  = tr->generation;
 	uint32_t            sp_sz       = 1024 * 16;
-	uint32_t            void_time   = 0;
+	uint32_t            void_time   = tr->void_time;
 	uint32_t            written_sz  = 0;
 	bool                keep_fd     = false;
 	as_bin              stack_bin;
@@ -696,6 +696,7 @@ udf_rw_write_post_processing(as_transaction *tr, as_storage_rd *rd,
 	p_pickled_rec_props->size = pickle.rec_props_size;
 
 	tr->generation = rd->r->generation;
+	tr->void_time = rd->r->void_time;
 
 	if (tr->rsv.ns->storage_data_in_memory) {
 		account_memory(tr, rd, memory_bytes);

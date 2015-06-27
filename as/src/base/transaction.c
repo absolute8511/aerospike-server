@@ -104,6 +104,8 @@ as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
 
 	tr->batch_shared              = 0;
 	tr->batch_index               = 0;
+
+	tr->void_time                 = 0;
 }
 
 /*
@@ -340,6 +342,7 @@ as_transaction_create( as_transaction *tr, tr_create_data *  trc_data)
 	UREQ_DATA_INIT(&tr->udata);
 	tr->batch_shared = 0;
 	tr->batch_index = 0;
+	tr->void_time = 0;
 	return 0;
 }
 

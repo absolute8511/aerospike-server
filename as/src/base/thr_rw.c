@@ -278,6 +278,7 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	tr->flag = 0;
 
 	tr->generation = 0;
+	tr->void_time = 0;
 	tr->microbenchmark_is_resolve = false;
 
 	if (wr->shipped_op)
@@ -2059,7 +2060,8 @@ write_complete(write_request *wr, as_transaction *tr)
 	}
 	else if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-				tr->generation, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL)) {
+				tr->generation, tr->void_time, NULL, NULL, 0, NULL, NULL,
+				tr->trid, NULL)) {
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
 		}
@@ -4852,6 +4854,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 	p_pickled_rec_props->size = pickle.rec_props_size;
 
 	tr->generation = r->generation;
+	tr->void_time = r->void_time;
 
 	// Get set-id before releasing.
 	uint16_t set_id = as_index_get_set_id(r_ref.r);
