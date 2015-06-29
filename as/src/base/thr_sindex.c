@@ -219,7 +219,7 @@ as_sindex__destroy_fn(void *param)
 }
 
 void
-as_sindex_update_defrag_stat(as_sindex *si, uint32_t r, uint64_t start_time_ms)
+as_sindex_update_defrag_stat(as_sindex *si, uint64_t r, uint64_t start_time_ms)
 {
 	cf_atomic64_add(&si->stats.n_deletes,        r);
 	cf_atomic64_add(&si->stats.n_objects,        -r);
