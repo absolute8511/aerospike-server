@@ -519,14 +519,15 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";reaped_fds=");
 	APPEND_STAT_COUNTER(db, g_config.reaper_count);
 
-	cf_dyn_buf_append_string(db, ";scans_initiated=");
-	APPEND_STAT_COUNTER(db, g_config.scans_initiated);
 	cf_dyn_buf_append_string(db, ";scans_active=");
 	APPEND_STAT_COUNTER(db, as_scan_get_active_job_count());
-	cf_dyn_buf_append_string(db, ";scans_succeeded=");
-	APPEND_STAT_COUNTER(db, g_config.scans_succeeded);
-	cf_dyn_buf_append_string(db, ";scans_abandoned=");
-	APPEND_STAT_COUNTER(db, g_config.scans_abandoned);
+
+	cf_dyn_buf_append_string(db, ";jobs_initiated=");
+	APPEND_STAT_COUNTER(db, g_config.jobs_initiated);
+	cf_dyn_buf_append_string(db, ";jobs_succeeded=");
+	APPEND_STAT_COUNTER(db, g_config.jobs_succeeded);
+	cf_dyn_buf_append_string(db, ";jobs_abandoned=");
+	APPEND_STAT_COUNTER(db, g_config.jobs_abandoned);
 
 	cf_dyn_buf_append_string(db, ";batch_index_initiate=");
 	APPEND_STAT_COUNTER(db, g_config.batch_index_initiate);
@@ -2153,8 +2154,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";udf-runtime-max-memory=");
 	cf_dyn_buf_append_uint64(db, g_config.udf_runtime_max_memory);
 
-	cf_dyn_buf_append_string(db, ";sindex-populator-threads=");
-	cf_dyn_buf_append_uint64(db, g_config.sindex_populator_threads);
+	cf_dyn_buf_append_string(db, ";sindex-builder-threads=");
+	cf_dyn_buf_append_uint64(db, g_config.sindex_builder_threads);
 	cf_dyn_buf_append_string(db, ";sindex-data-max-memory=");
 	if (g_config.sindex_data_max_memory == ULONG_MAX) {
 		cf_dyn_buf_append_uint64(db, g_config.sindex_data_max_memory);
@@ -3081,15 +3082,15 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of query-rec-count-bound from %"PRIu64" to %"PRIu64" ", g_config.query_rec_count_bound, val);
 			g_config.query_rec_count_bound = val;
 		}
-		else if (0 == as_info_parameter_get(params, "sindex-populator-threads", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "sindex-builder-threads", context, &context_len)) {
 			int val = 0;
-			if (0 != cf_str_atoi(context, &val) || (val > MAX_POPULATOR_THREADS)) {
-				cf_warning(AS_INFO, "sindex-populator-threads: value must be <= %d, not %s", MAX_POPULATOR_THREADS, context);
+			if (0 != cf_str_atoi(context, &val) || (val > MAX_SINDEX_BUILDER_THREADS)) {
+				cf_warning(AS_INFO, "sindex-builder-threads: value must be <= %d, not %s", MAX_SINDEX_BUILDER_THREADS, context);
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of sindex-populator-threads from %u to %d", g_config.sindex_populator_threads, val);
-			g_config.sindex_populator_threads = (uint32_t)val;
-			as_spop_resize_thread_pool(g_config.sindex_populator_threads);
+			cf_info(AS_INFO, "Changing value of sindex-builder-threads from %u to %d", g_config.sindex_builder_threads, val);
+			g_config.sindex_builder_threads = (uint32_t)val;
+			as_sbld_resize_thread_pool(g_config.sindex_builder_threads);
 		}
 		else if (0 == as_info_parameter_get(params, "sindex-data-max-memory", context, &context_len)) {
 			uint64_t val = atoll(context);
@@ -7247,7 +7248,7 @@ as_info_init()
 	as_info_set_command("sindex-describe", info_command_sindex_describe, PERM_NONE);
 	as_info_set_command("sindex-stat", info_command_sindex_stat, PERM_NONE);
 	as_info_set_command("sindex-list", info_command_sindex_list, PERM_NONE);
-	as_info_set_dynamic("sindex-builder-list", as_spop_list, false);                         // List info for all secondary index population jobs.
+	as_info_set_dynamic("sindex-builder-list", as_sbld_list, false);                         // List info for all secondary index builder jobs.
 
 	// Spin up the Info threads *after* all static and dynamic Info commands have been added
 	// so we can guarantee that the static and dynamic lists will never again be changed.

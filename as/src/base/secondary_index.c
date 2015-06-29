@@ -48,7 +48,7 @@
  *
  * BOOT INDEX 
  * 
- * as_sindex_boot_populateall --> If fast restart or data in memory and load at start up --> as_spop_populate_all
+ * as_sindex_boot_populateall --> If fast restart or data in memory and load at start up --> as_sbld_build_all
  *
  * SBIN creation
  *
@@ -1022,9 +1022,9 @@ as_sindex__stats_clear(as_sindex *si) {
 void
 as_sindex_gconfig_default(as_config *c)
 {
+	c->sindex_builder_threads         = 4;
 	c->sindex_data_max_memory         = ULONG_MAX;
 	c->sindex_data_memory_used        = 0;
-	c->sindex_populator_threads       = 4; // TODO - what?
 }
 void
 as_sindex__config_default(as_sindex *si)
@@ -1934,10 +1934,10 @@ as_sindex_describe_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db
 int
 as_sindex_boot_populateall()
 {
-	// Initialize the secondary index populator. The thread pool is initialized
+	// Initialize the secondary index builder. The thread pool is initialized
 	// with maximum threads to go full throttle, then down-sized to the
 	// configured number after the startup population job is done.
-	as_spop_init();
+	as_sbld_init();
 
 	int ns_cnt = 0;
 
@@ -1948,12 +1948,12 @@ as_sindex_boot_populateall()
 		if (!ns || (ns->sindex_cnt == 0)) {
 			continue;
 		}
-	
+
 		// If FAST START
 		// OR (Data not in memory AND load data at startup)
 		if (!ns->cold_start
 			|| (!ns->storage_data_in_memory)) {
-			as_spop_populate_all(ns);
+			as_sbld_build_all(ns);
 			cf_info(AS_SINDEX, "Queuing namespace %s for sindex population ", ns->name);
 		} else {
 			as_sindex_boot_populateall_done(ns);
@@ -1967,8 +1967,8 @@ as_sindex_boot_populateall()
 		// TODO: Check for failure .. is generally fatal if it fails
 	}
 
-	// Down-size populator thread pool to configured value.
-	as_spop_resize_thread_pool(g_config.sindex_populator_threads);
+	// Down-size builder thread pool to configured value.
+	as_sbld_resize_thread_pool(g_config.sindex_builder_threads);
 
 	g_sindex_boot_done = true;
 

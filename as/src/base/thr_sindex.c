@@ -59,7 +59,7 @@
 #include "base/monitor.h"
 #include "base/secondary_index.h"
 
-int as_spop_populate(as_sindex* si);
+int as_sbld_build(as_sindex* si);
 
 #define RELEASE_ITERATORS(icol) \
 do {                                \
@@ -157,7 +157,7 @@ as_sindex__populate_fn(void *param)
 		} else {
 			cf_debug(AS_SINDEX, "Populating index %s", si->imd->iname);
 			si->flag |= AS_SINDEX_FLAG_POPULATING;
-			as_spop_populate(si);
+			as_sbld_build(si);
 		}
 	}
 	return NULL;
@@ -528,11 +528,11 @@ as_sindex_thr_init()
 
 
 //==============================================================================
-// Secondary index populator.
+// Secondary index builder.
 //
 
-// spop_job - derived class header:
-typedef struct spop_job_s {
+// sbld_job - derived class header:
+typedef struct sbld_job_s {
 	// Base object must be first:
 	as_job			_base;
 
@@ -541,35 +541,35 @@ typedef struct spop_job_s {
 	uint64_t		si_desync_cnt;
 
 	cf_atomic64		n_reduced;
-} spop_job;
+} sbld_job;
 
-spop_job* spop_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si);
+sbld_job* sbld_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si);
 
-// as_job_manager instance for secondary index populator:
-static as_job_manager g_spop_manager;
+// as_job_manager instance for secondary index builder:
+static as_job_manager g_sbld_manager;
 
 
 //------------------------------------------------
-// Sindex populator public API.
+// Sindex builder public API.
 //
 
 void
-as_spop_init()
+as_sbld_init()
 {
 	// TODO - config for max done?
-	// Initialize with maximum threads since first use is always populate-all at
+	// Initialize with maximum threads since first use is always build-all at
 	// startup. The thread pool will be down-sized right after that.
-	as_job_manager_init(&g_spop_manager, UINT_MAX, 100, MAX_POPULATOR_THREADS);
+	as_job_manager_init(&g_sbld_manager, UINT_MAX, 100, MAX_SINDEX_BUILDER_THREADS);
 }
 
 int
-as_spop_populate(as_sindex* si)
+as_sbld_build(as_sindex* si)
 {
 	as_sindex_metadata *imd = si->imd;
 	as_namespace *ns = as_namespace_get_byname(imd->ns_name);
 
 	if (! ns) {
-		cf_warning(AS_SINDEX, "sindex populate %s ns %s - unrecognized namespace", imd->iname, imd->ns_name);
+		cf_warning(AS_SINDEX, "sindex build %s ns %s - unrecognized namespace", imd->iname, imd->ns_name);
 		as_sindex_populate_done(si);
 		AS_SINDEX_RELEASE(si);
 		return -1;
@@ -578,107 +578,107 @@ as_spop_populate(as_sindex* si)
 	uint16_t set_id = INVALID_SET_ID;
 
 	if (imd->set && (set_id = as_namespace_get_set_id(ns, imd->set)) == INVALID_SET_ID) {
-		cf_warning(AS_SINDEX, "sindex populate %s ns %s - set %s not found", imd->iname, imd->ns_name, imd->set);
+		cf_warning(AS_SINDEX, "sindex build %s ns %s - set %s not found", imd->iname, imd->ns_name, imd->set);
 		as_sindex_populate_done(si);
 		AS_SINDEX_RELEASE(si);
 		return -3;
 	}
 
-	spop_job* job = spop_job_create(ns, set_id, si);
+	sbld_job* job = sbld_job_create(ns, set_id, si);
 
 	if (! job) {
-		cf_warning(AS_SINDEX, "sindex populate %s ns %s set %s - job alloc failed", imd->iname, imd->ns_name, imd->set);
+		cf_warning(AS_SINDEX, "sindex build %s ns %s set %s - job alloc failed", imd->iname, imd->ns_name, imd->set);
 		as_sindex_populate_done(si);
 		AS_SINDEX_RELEASE(si);
 		return -2;
 	}
 
 	// Can't fail for this kind of job.
-	as_job_manager_start_job(&g_spop_manager, (as_job*)job);
+	as_job_manager_start_job(&g_sbld_manager, (as_job*)job);
 
 	return 0;
 }
 
 int
-as_spop_populate_all(as_namespace* ns)
+as_sbld_build_all(as_namespace* ns)
 {
-	spop_job* job = spop_job_create(ns, INVALID_SET_ID, NULL);
+	sbld_job* job = sbld_job_create(ns, INVALID_SET_ID, NULL);
 
 	if (! job) {
-		cf_warning(AS_SINDEX, "sindex populate-all ns %s - job alloc failed", ns->name);
+		cf_warning(AS_SINDEX, "sindex build-all ns %s - job alloc failed", ns->name);
 		return -2;
 	}
 
 	// Can't fail for this kind of job.
-	as_job_manager_start_job(&g_spop_manager, (as_job*)job);
+	as_job_manager_start_job(&g_sbld_manager, (as_job*)job);
 
 	return 0;
 }
 
 void
-as_spop_resize_thread_pool(uint32_t n_threads)
+as_sbld_resize_thread_pool(uint32_t n_threads)
 {
-	as_job_manager_resize_thread_pool(&g_spop_manager, n_threads);
+	as_job_manager_resize_thread_pool(&g_sbld_manager, n_threads);
 }
 
 int
-as_spop_list(char* name, cf_dyn_buf* db)
+as_sbld_list(char* name, cf_dyn_buf* db)
 {
-	as_mon_info_cmd(AS_MON_MODULES[SPOP_MOD], NULL, 0, 0, db);
+	as_mon_info_cmd(AS_MON_MODULES[SBLD_MOD], NULL, 0, 0, db);
 	return 0;
 }
 
 as_mon_jobstat*
-as_spop_get_jobstat(uint64_t trid)
+as_sbld_get_jobstat(uint64_t trid)
 {
-	return as_job_manager_get_job_info(&g_spop_manager, trid);
+	return as_job_manager_get_job_info(&g_sbld_manager, trid);
 }
 
 as_mon_jobstat*
-as_spop_get_jobstat_all(int* size)
+as_sbld_get_jobstat_all(int* size)
 {
-	return as_job_manager_get_info(&g_spop_manager, size);
+	return as_job_manager_get_info(&g_sbld_manager, size);
 }
 
 int
-as_spop_abort(uint64_t trid)
+as_sbld_abort(uint64_t trid)
 {
-	return as_job_manager_abort_job(&g_spop_manager, trid) ? 0 : -1;
+	return as_job_manager_abort_job(&g_sbld_manager, trid) ? 0 : -1;
 }
 
 
 //------------------------------------------------
-// spop_job derived class implementation.
+// sbld_job derived class implementation.
 //
 
-void spop_job_slice(as_job* _job, as_partition_reservation* rsv);
-void spop_job_finish(as_job* _job);
-void spop_job_destroy(as_job* _job);
-void spop_job_info(as_job* _job, as_mon_jobstat* stat);
+void sbld_job_slice(as_job* _job, as_partition_reservation* rsv);
+void sbld_job_finish(as_job* _job);
+void sbld_job_destroy(as_job* _job);
+void sbld_job_info(as_job* _job, as_mon_jobstat* stat);
 
-const as_job_vtable spop_job_vtable = {
-		spop_job_slice,
-		spop_job_finish,
-		spop_job_destroy,
-		spop_job_info
+const as_job_vtable sbld_job_vtable = {
+		sbld_job_slice,
+		sbld_job_finish,
+		sbld_job_destroy,
+		sbld_job_info
 };
 
-void spop_job_reduce_cb(as_index_ref* r_ref, void* udata);
+void sbld_job_reduce_cb(as_index_ref* r_ref, void* udata);
 
 //
-// spop_job creation.
+// sbld_job creation.
 //
 
-spop_job*
-spop_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
+sbld_job*
+sbld_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
 {
-	spop_job* job = cf_malloc(sizeof(spop_job));
+	sbld_job* job = cf_malloc(sizeof(sbld_job));
 
 	if (! job) {
 		return NULL;
 	}
 
-	as_job_init((as_job*)job, &spop_job_vtable, &g_spop_manager,
+	as_job_init((as_job*)job, &sbld_job_vtable, &g_sbld_manager,
 			RSV_MIGRATE, 0, ns, set_id, AS_JOB_PRIORITY_MEDIUM);
 
 	job->si = si;
@@ -689,19 +689,19 @@ spop_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
 }
 
 //
-// spop_job mandatory as_job interface.
+// sbld_job mandatory as_job interface.
 //
 
 void
-spop_job_slice(as_job* _job, as_partition_reservation* rsv)
+sbld_job_slice(as_job* _job, as_partition_reservation* rsv)
 {
-	as_index_reduce(rsv->p->vp, spop_job_reduce_cb, (void*)_job);
+	as_index_reduce(rsv->p->vp, sbld_job_reduce_cb, (void*)_job);
 }
 
 void
-spop_job_finish(as_job* _job)
+sbld_job_finish(as_job* _job)
 {
-	spop_job* job = (spop_job*)_job;
+	sbld_job* job = (sbld_job*)_job;
 
 	as_sindex_ticker_done(_job->ns, job->si, _job->start_ms);
 
@@ -716,36 +716,36 @@ spop_job_finish(as_job* _job)
 }
 
 void
-spop_job_destroy(as_job* _job)
+sbld_job_destroy(as_job* _job)
 {
 }
 
 void
-spop_job_info(as_job* _job, as_mon_jobstat* stat)
+sbld_job_info(as_job* _job, as_mon_jobstat* stat)
 {
-	spop_job* job = (spop_job*)_job;
+	sbld_job* job = (sbld_job*)_job;
 
 	if (job->si) {
-		strcpy(stat->job_type, "sindex-populate");
+		strcpy(stat->job_type, "sindex-build");
 
 		char *extra = stat->jdata + strlen(stat->jdata);
 
 		sprintf(extra, ":sindex-name=%s", job->si->imd->iname);
 	}
 	else {
-		strcpy(stat->job_type, "sindex-populate-all");
+		strcpy(stat->job_type, "sindex-build-all");
 	}
 }
 
 //
-// spop_job utilities.
+// sbld_job utilities.
 //
 
 void
-spop_job_reduce_cb(as_index_ref* r_ref, void* udata)
+sbld_job_reduce_cb(as_index_ref* r_ref, void* udata)
 {
 	as_job* _job = (as_job*)udata;
-	spop_job* job = (spop_job*)_job;
+	sbld_job* job = (sbld_job*)_job;
 	as_namespace* ns = _job->ns;
 
 	if (_job->abandoned != 0) {

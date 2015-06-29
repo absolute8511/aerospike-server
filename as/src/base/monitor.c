@@ -64,7 +64,7 @@ as_mon_init()
 	g_as_mon_curr_mod_count = 0;
 	as_mon_register(AS_MON_MODULES[QUERY_MOD]);
 	as_mon_register(AS_MON_MODULES[SCAN_MOD]);
-	as_mon_register(AS_MON_MODULES[SPOP_MOD]);
+	as_mon_register(AS_MON_MODULES[SBLD_MOD]);
 
 	// TODO: Add more stuff if there is any locks needs some stats needed etc etc ...
 	return AS_MON_OK;
@@ -80,8 +80,8 @@ as_mon_get_module(const char * module)
 	else if (strcmp(module, AS_MON_MODULES[SCAN_MOD]) == 0) {
 		mod = SCAN_MOD;
 	}
-	else if (strcmp(module, AS_MON_MODULES[SPOP_MOD]) == 0) {
-		mod = SPOP_MOD;
+	else if (strcmp(module, AS_MON_MODULES[SBLD_MOD]) == 0) {
+		mod = SBLD_MOD;
 	}
 	else {
 		return NULL;
@@ -134,18 +134,18 @@ as_mon_register(const char *module)
 		cb->set_maxpriority = NULL;
 		mod = SCAN_MOD;
 	}
-	else if (!strcmp(module, AS_MON_MODULES[SPOP_MOD]))
+	else if (!strcmp(module, AS_MON_MODULES[SBLD_MOD]))
 	{
-		cb->get_jobstat     = as_spop_get_jobstat;
-		cb->get_jobstat_all = as_spop_get_jobstat_all;
+		cb->get_jobstat     = as_sbld_get_jobstat;
+		cb->get_jobstat_all = as_sbld_get_jobstat_all;
 
 		cb->set_priority    = NULL;
-		cb->kill            = as_spop_abort;
+		cb->kill            = as_sbld_abort;
 		cb->suspend         = NULL;
 		cb->set_pendingmax  = NULL;
 		cb->set_maxinflight = NULL;
 		cb->set_maxpriority = NULL;
-		mod = SPOP_MOD;
+		mod = SBLD_MOD;
 	}
 	else {
 		cf_warning(AS_MON, "wrong module parameter.");

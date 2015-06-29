@@ -298,9 +298,9 @@ typedef struct as_config_s {
 	// all secondary index put together can take
 	// this is to protect cluster. This override the
 	// per namespace configured value
+	uint32_t		sindex_builder_threads;   // Secondary index builder thread pool size
 	uint64_t		sindex_data_max_memory;   // Maximum memory for secondary index trees
 	cf_atomic_int	sindex_data_memory_used;  // Maximum memory for secondary index trees
-	uint32_t		sindex_populator_threads; // Secondary index populator thread pool size
 	cf_atomic_int   sindex_gc_timedout;           // Number of time sindex gc iteration timed out waiting for partition lock
 	uint64_t        sindex_gc_inactivity_dur;     // Commulative sum of sindex GC thread inactivity.
 	uint64_t        sindex_gc_activity_dur;       // Commulative sum of sindex gc thread activity.
@@ -380,12 +380,9 @@ typedef struct as_config_s {
 	cf_atomic_int		proxy_unproxy;
 	cf_atomic_int		proxy_retry_same_dest;
 	cf_atomic_int		proxy_retry_new_dest;
-	cf_atomic_int		scans_initiated;
-	cf_atomic_int		scans_succeeded;
-	cf_atomic_int		scans_abandoned;
-	cf_atomic_int		tscan_initiate;
-	cf_atomic_int		tscan_succeeded;
-	cf_atomic_int		tscan_aborted;
+	cf_atomic_int		jobs_initiated;
+	cf_atomic_int		jobs_succeeded;
+	cf_atomic_int		jobs_abandoned;
 	cf_atomic_int		write_master;
 	cf_atomic_int		write_prole;
 	cf_atomic_int		read_dup_prole;

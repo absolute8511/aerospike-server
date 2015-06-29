@@ -83,12 +83,12 @@ void as_sindex_thr_init();
 void as_sindex_gc_histogram_dumpall();
 objs_to_defrag_arr * as_sindex_gc_get_defrag_arr(void);
 
-#define MAX_POPULATOR_THREADS 32
+#define MAX_SINDEX_BUILDER_THREADS 32
 
-void as_spop_init();
-int as_spop_populate_all(as_namespace* ns);
-void as_spop_resize_thread_pool(uint32_t n_threads);
-int as_spop_list(char* name, cf_dyn_buf* db);
-as_mon_jobstat* as_spop_get_jobstat(uint64_t trid);
-as_mon_jobstat* as_spop_get_jobstat_all(int* size);
-int as_spop_abort(uint64_t trid);
+void as_sbld_init();
+int as_sbld_build_all(as_namespace* ns);
+void as_sbld_resize_thread_pool(uint32_t n_threads);
+int as_sbld_list(char* name, cf_dyn_buf* db);
+as_mon_jobstat* as_sbld_get_jobstat(uint64_t trid);
+as_mon_jobstat* as_sbld_get_jobstat_all(int* size);
+int as_sbld_abort(uint64_t trid);
