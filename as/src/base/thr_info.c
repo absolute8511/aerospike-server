@@ -522,12 +522,18 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";scans_active=");
 	APPEND_STAT_COUNTER(db, as_scan_get_active_job_count());
 
-	cf_dyn_buf_append_string(db, ";jobs_initiated=");
-	APPEND_STAT_COUNTER(db, g_config.jobs_initiated);
-	cf_dyn_buf_append_string(db, ";jobs_succeeded=");
-	APPEND_STAT_COUNTER(db, g_config.jobs_succeeded);
-	cf_dyn_buf_append_string(db, ";jobs_abandoned=");
-	APPEND_STAT_COUNTER(db, g_config.jobs_abandoned);
+	cf_dyn_buf_append_string(db, ";basic_scans_succeeded=");
+	APPEND_STAT_COUNTER(db, g_config.basic_scans_succeeded);
+	cf_dyn_buf_append_string(db, ";basic_scans_failed=");
+	APPEND_STAT_COUNTER(db, g_config.basic_scans_failed);
+	cf_dyn_buf_append_string(db, ";aggr_scans_succeeded=");
+	APPEND_STAT_COUNTER(db, g_config.aggr_scans_succeeded);
+	cf_dyn_buf_append_string(db, ";aggr_scans_failed=");
+	APPEND_STAT_COUNTER(db, g_config.aggr_scans_failed);
+	cf_dyn_buf_append_string(db, ";udf_bg_scans_succeeded=");
+	APPEND_STAT_COUNTER(db, g_config.udf_bg_scans_succeeded);
+	cf_dyn_buf_append_string(db, ";udf_bg_scans_failed=");
+	APPEND_STAT_COUNTER(db, g_config.udf_bg_scans_failed);
 
 	cf_dyn_buf_append_string(db, ";batch_index_initiate=");
 	APPEND_STAT_COUNTER(db, g_config.batch_index_initiate);

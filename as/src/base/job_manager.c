@@ -495,8 +495,6 @@ as_job_manager_start_job(as_job_manager* mgr, as_job* _job)
 	cf_queue_push(mgr->active_jobs, &_job);
 	as_priority_thread_pool_queue_task(&mgr->thread_pool, as_job_slice, _job, _job->priority);
 
-	cf_atomic_int_incr(&g_config.jobs_initiated);
-
 	pthread_mutex_unlock(&mgr->lock);
 	return 0;
 }
@@ -516,8 +514,6 @@ as_job_manager_finish_job(as_job_manager* mgr, as_job* _job)
 	_job->finish_ms = cf_getms();
 	cf_queue_push(mgr->finished_jobs, &_job);
 	as_job_manager_evict_finished_jobs(mgr);
-
-	cf_atomic_int_incr(_job->abandoned == 0 ? &g_config.jobs_succeeded : &g_config.jobs_abandoned);
 
 	pthread_mutex_unlock(&mgr->lock);
 }

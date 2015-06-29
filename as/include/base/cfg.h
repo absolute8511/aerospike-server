@@ -380,9 +380,12 @@ typedef struct as_config_s {
 	cf_atomic_int		proxy_unproxy;
 	cf_atomic_int		proxy_retry_same_dest;
 	cf_atomic_int		proxy_retry_new_dest;
-	cf_atomic_int		jobs_initiated;
-	cf_atomic_int		jobs_succeeded;
-	cf_atomic_int		jobs_abandoned;
+	cf_atomic_int		basic_scans_succeeded;
+	cf_atomic_int		basic_scans_failed;
+	cf_atomic_int		aggr_scans_succeeded;
+	cf_atomic_int		aggr_scans_failed;
+	cf_atomic_int		udf_bg_scans_succeeded;
+	cf_atomic_int		udf_bg_scans_failed;
 	cf_atomic_int		write_master;
 	cf_atomic_int		write_prole;
 	cf_atomic_int		read_dup_prole;
