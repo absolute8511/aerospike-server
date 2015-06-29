@@ -60,6 +60,12 @@ static cf_atomic32 g_job_trid = 0;
 // Non-class-specific utilities.
 //
 
+static inline uint64_t
+job_trid(uint64_t trid)
+{
+	return trid != 0 ? trid : (uint64_t)cf_atomic32_incr(&g_job_trid);
+}
+
 static inline const char*
 job_result_str(int result_code)
 {
@@ -134,7 +140,8 @@ as_priority_thread_pool_shutdown(as_priority_thread_pool* pool)
 }
 
 bool
-as_priority_thread_pool_resize(as_priority_thread_pool* pool, uint32_t n_threads)
+as_priority_thread_pool_resize(as_priority_thread_pool* pool,
+		uint32_t n_threads)
 {
 	pthread_mutex_lock(&pool->lock);
 
@@ -148,7 +155,8 @@ as_priority_thread_pool_resize(as_priority_thread_pool* pool, uint32_t n_threads
 		}
 		else {
 			// Start new detached threads.
-			pool->n_threads += create_threads(pool, n_threads - pool->n_threads);
+			pool->n_threads += create_threads(pool,
+					n_threads - pool->n_threads);
 			result = pool->n_threads == n_threads;
 		}
 	}
@@ -159,11 +167,13 @@ as_priority_thread_pool_resize(as_priority_thread_pool* pool, uint32_t n_threads
 }
 
 bool
-as_priority_thread_pool_queue_task(as_priority_thread_pool* pool, as_priority_thread_pool_task_fn task_fn, void* task, int priority)
+as_priority_thread_pool_queue_task(as_priority_thread_pool* pool,
+		as_priority_thread_pool_task_fn task_fn, void* task, int priority)
 {
 	queue_task qtask = { task_fn, task };
 
-	return cf_queue_priority_push(pool->dispatch_queue, &qtask, priority) == CF_QUEUE_OK;
+	return cf_queue_priority_push(pool->dispatch_queue, &qtask, priority) ==
+			CF_QUEUE_OK;
 }
 
 bool
@@ -171,15 +181,18 @@ as_priority_thread_pool_remove_task(as_priority_thread_pool* pool, void* task)
 {
 	queue_task qtask = { NULL, NULL };
 
-	cf_queue_priority_reduce_pop(pool->dispatch_queue, &qtask, compare_cb, task);
+	cf_queue_priority_reduce_pop(pool->dispatch_queue, &qtask, compare_cb,
+			task);
 
 	return qtask.task != NULL;
 }
 
 void
-as_priority_thread_pool_change_task_priority(as_priority_thread_pool* pool, void* task, int new_priority)
+as_priority_thread_pool_change_task_priority(as_priority_thread_pool* pool,
+		void* task, int new_priority)
 {
-	cf_queue_priority_reduce_change(pool->dispatch_queue, new_priority, compare_cb, task);
+	cf_queue_priority_reduce_change(pool->dispatch_queue, new_priority,
+			compare_cb, task);
 }
 
 //----------------------------------------------------------
@@ -213,7 +226,8 @@ shutdown_threads(as_priority_thread_pool* pool, uint32_t count)
 	queue_task task = { NULL, NULL };
 
 	for (uint32_t i = 0; i < count; i++) {
-		cf_queue_priority_push(pool->dispatch_queue, &task, CF_QUEUE_PRIORITY_HIGH);
+		cf_queue_priority_push(pool->dispatch_queue, &task,
+				CF_QUEUE_PRIORITY_HIGH);
 	}
 
 	// Wait till threads finish.
@@ -231,7 +245,8 @@ run(void* udata)
 	queue_task qtask;
 
 	// Retrieve tasks from queue and execute.
-	while (cf_queue_priority_pop(pool->dispatch_queue, &qtask, CF_QUEUE_FOREVER) == CF_QUEUE_OK) {
+	while (cf_queue_priority_pop(pool->dispatch_queue, &qtask,
+			CF_QUEUE_FOREVER) == CF_QUEUE_OK) {
 		// A null task indicates thread should be shut down.
 		if (! qtask.task_fn) {
 			break;
@@ -283,7 +298,7 @@ as_job_init(as_job* _job, const as_job_vtable* vtable,
 	_job->vtable	= *vtable;
 	_job->mgr		= mgr;
 	_job->rsv_type	= rsv_type;
-	_job->trid		= trid != 0 ? trid : (uint64_t)cf_atomic32_incr(&g_job_trid);
+	_job->trid		= job_trid(trid);
 	_job->ns		= ns;
 	_job->set_id	= set_id;
 	_job->priority	= safe_priority(priority);
@@ -349,7 +364,8 @@ as_job_info(as_job* _job, as_mon_jobstat* stat)
 	bool done = _job->finish_ms != 0;
 	uint64_t since_start_ms = now - _job->start_ms;
 	uint64_t since_finish_ms = done ? now - _job->finish_ms : 0;
-	uint64_t active_ms = done ? _job->finish_ms - _job->start_ms : since_start_ms;
+	uint64_t active_ms = done ?
+			_job->finish_ms - _job->start_ms : since_start_ms;
 
 	stat->trid				= _job->trid;
 	stat->priority			= (uint32_t)_job->priority;
@@ -362,7 +378,8 @@ as_job_info(as_job* _job, as_mon_jobstat* stat)
 	strcpy(stat->set, as_job_safe_set_name(_job));
 
 	char status[64];
-	sprintf(status, "%s(%s)", done ? "done" : "active", job_result_str(_job->abandoned));
+	sprintf(status, "%s(%s)", done ? "done" : "active",
+			job_result_str(_job->abandoned));
 	as_strncpy(stat->status, status, sizeof(stat->status));
 
 	_job->vtable.info_mon_fn(_job, stat);
@@ -404,8 +421,8 @@ int
 as_job_partition_reserve(as_job* _job, int pid, as_partition_reservation* rsv)
 {
 	if (_job->rsv_type == RSV_WRITE) {
-		while (pid < AS_PARTITIONS &&
-				as_partition_reserve_write(_job->ns, pid, rsv, NULL, NULL) != 0) {
+		while (pid < AS_PARTITIONS && as_partition_reserve_write(_job->ns, pid,
+				rsv, NULL, NULL) != 0) {
 			pid++;
 		}
 	}
@@ -452,7 +469,8 @@ int as_job_manager_info_cb(void* buf, void* udata);
 //
 
 void
-as_job_manager_init(as_job_manager* mgr, uint32_t max_active, uint32_t max_done, uint32_t n_threads)
+as_job_manager_init(as_job_manager* mgr, uint32_t max_active, uint32_t max_done,
+		uint32_t n_threads)
 {
 	mgr->max_active	= max_active;
 	mgr->max_done	= max_done;
@@ -493,7 +511,8 @@ as_job_manager_start_job(as_job_manager* mgr, as_job* _job)
 	_job->start_ms = cf_getms();
 	as_job_active_reserve(_job);
 	cf_queue_push(mgr->active_jobs, &_job);
-	as_priority_thread_pool_queue_task(&mgr->thread_pool, as_job_slice, _job, _job->priority);
+	as_priority_thread_pool_queue_task(&mgr->thread_pool, as_job_slice, _job,
+			_job->priority);
 
 	pthread_mutex_unlock(&mgr->lock);
 	return 0;
@@ -502,7 +521,8 @@ as_job_manager_start_job(as_job_manager* mgr, as_job* _job)
 void
 as_job_manager_requeue_job(as_job_manager* mgr, as_job* _job)
 {
-	as_priority_thread_pool_queue_task(&mgr->thread_pool, as_job_slice, _job, _job->priority);
+	as_priority_thread_pool_queue_task(&mgr->thread_pool, as_job_slice, _job,
+			_job->priority);
 }
 
 void
@@ -597,7 +617,8 @@ as_job_manager_abort_all_jobs(as_job_manager* mgr)
 }
 
 bool
-as_job_manager_change_job_priority(as_job_manager* mgr, uint64_t trid, int priority)
+as_job_manager_change_job_priority(as_job_manager* mgr, uint64_t trid,
+		int priority)
 {
 	pthread_mutex_lock(&mgr->lock);
 
@@ -610,7 +631,8 @@ as_job_manager_change_job_priority(as_job_manager* mgr, uint64_t trid, int prior
 
 	pthread_mutex_lock(&_job->requeue_lock);
 	_job->priority = safe_priority(priority);
-	as_priority_thread_pool_change_task_priority(&mgr->thread_pool, _job, _job->priority);
+	as_priority_thread_pool_change_task_priority(&mgr->thread_pool, _job,
+			_job->priority);
 	pthread_mutex_unlock(&_job->requeue_lock);
 
 	pthread_mutex_unlock(&mgr->lock);
@@ -668,7 +690,8 @@ as_job_manager_get_info(as_job_manager* mgr, int* size)
 
 	pthread_mutex_lock(&mgr->lock);
 
-	int n_jobs = cf_queue_sz(mgr->active_jobs) + cf_queue_sz(mgr->finished_jobs);
+	int n_jobs = cf_queue_sz(mgr->active_jobs) +
+				 cf_queue_sz(mgr->finished_jobs);
 
 	if (n_jobs == 0) {
 		pthread_mutex_unlock(&mgr->lock);
