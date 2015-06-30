@@ -259,6 +259,13 @@ as_scan_abort_all()
 	return as_job_manager_abort_all_jobs(&g_scan_manager);
 }
 
+int
+as_scan_change_job_priority(uint64_t trid, uint32_t priority)
+{
+	return as_job_manager_change_job_priority(&g_scan_manager, trid,
+			(int)priority) ? 0 : -1;
+}
+
 
 //==============================================================================
 // Non-class-specific utilities.

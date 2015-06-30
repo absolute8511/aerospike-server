@@ -126,7 +126,7 @@ as_mon_register(const char *module)
 		cb->get_jobstat     = as_scan_get_jobstat;
 		cb->get_jobstat_all = as_scan_get_jobstat_all;
 
-		cb->set_priority    = NULL;
+		cb->set_priority    = as_scan_change_job_priority;
 		cb->kill            = as_scan_abort;
 		cb->suspend         = NULL;
 		cb->set_pendingmax  = NULL;
