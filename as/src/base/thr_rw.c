@@ -3903,7 +3903,8 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			}
 
 			if (respond_all_ops) {
-				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
+				ops[*p_n_response_bins] = op;
+				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
 		// Modify an existing bin value.
@@ -3932,7 +3933,8 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			}
 
 			if (respond_all_ops) {
-				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
+				ops[*p_n_response_bins] = op;
+				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
 		else if (op->op == AS_MSG_OP_READ) {
@@ -3943,11 +3945,12 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			}
 
 			if (b) {
-				ops[(*p_n_response_bins)] = op;
+				ops[*p_n_response_bins] = op;
 				response_bins[(*p_n_response_bins)++] = *b;
 			}
 			else if (respond_all_ops) {
-				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
+				ops[*p_n_response_bins] = op;
+				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
 		else if (op->op == AS_MSG_OP_CDT_MODIFY) {
@@ -3978,7 +3981,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			}
 
 			if (respond_all_ops || as_bin_inuse(&result_bin)) {
-				ops[(*p_n_response_bins)] = op;
+				ops[*p_n_response_bins] = op;
 				response_bins[(*p_n_response_bins)++] = result_bin;
 				append_bin_to_destroy(&result_bin, result_bins, p_n_result_bins);
 			}
@@ -4004,12 +4007,13 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 					return -result;
 				}
 
-				ops[(*p_n_response_bins)] = op;
+				ops[*p_n_response_bins] = op;
 				response_bins[(*p_n_response_bins)++] = result_bin;
 				append_bin_to_destroy(&result_bin, result_bins, p_n_result_bins);
 			}
 			else if (respond_all_ops) {
-				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
+				ops[*p_n_response_bins] = op;
+				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
 		else {
