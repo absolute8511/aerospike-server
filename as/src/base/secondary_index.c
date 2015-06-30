@@ -48,7 +48,7 @@
  *
  * BOOT INDEX 
  * 
- * as_sindex_boot_populateall --> If fast restart or data in memory and load at start up --> as_tscan_sindex_populateall
+ * as_sindex_boot_populateall --> If fast restart or data in memory and load at start up --> as_sbld_build_all
  *
  * SBIN creation
  *
@@ -83,30 +83,37 @@
  * as_sindex_putall_rd --> For each sindex --> as_sindex_put_rd
  *
  */
- 
+
+#include "base/secondary_index.h"
+
+#include <errno.h>
+#include <limits.h>
+#include <string.h>
+
+#include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_clock.h"
 #include "aerospike/as_arraylist.h"
 #include "aerospike/as_arraylist_iterator.h"
 #include "aerospike/as_buffer.h"
 #include "aerospike/as_hashmap.h"
 #include "aerospike/as_hashmap_iterator.h"
-#include <aerospike/as_msgpack.h>
+#include "aerospike/as_msgpack.h"
 #include "aerospike/as_pair.h"
 #include "aerospike/as_serializer.h"
 #include "aerospike/as_val.h"
 
 #include "ai_btree.h"
 #include "ai_globals.h"
-
-#include "base/thr_scan.h"
-#include "base/secondary_index.h"
-#include "base/thr_sindex.h"
-#include "base/system_metadata.h"
-
 #include "bt_iterator.h"
 #include "cf_str.h"
-#include <errno.h>
-#include <limits.h>
-#include <string.h>
+#include "fault.h"
+
+#include "base/cfg.h"
+#include "base/index.h"
+#include "base/system_metadata.h"
+#include "base/thr_sindex.h"
+#include "base/udf_rw.h"
+
 
 #define SINDEX_CRASH(str, ...) \
 	cf_crash(AS_SINDEX, "SINDEX_ASSERT: "str, ##__VA_ARGS__);
@@ -846,14 +853,11 @@ as_sindex__populate_binid(as_namespace *ns, as_sindex_metadata *imd)
 	for (i = 0; i < imd->num_bins; i++) {
 		// Bin id should be around if not create it
 		char bname[AS_ID_BIN_SZ];
-		memset(bname, 0, AS_ID_BIN_SZ);
-		int bname_len = strlen(imd->bnames[i]);
-		if ( (bname_len > (AS_ID_BIN_SZ - 1 ))
-				|| !as_bin_name_within_quota(ns, (byte *)imd->bnames[i], bname_len)) {
+		strncpy(bname, imd->bnames[i], AS_ID_BIN_SZ);
+		if (bname[AS_ID_BIN_SZ - 1] != 0 || !as_bin_name_within_quota(ns, bname)) {
 			cf_warning(AS_SINDEX, "bin name %s too big. Bin not added", bname);
 			return -1;
 		}
-		strncpy(bname, imd->bnames[i], bname_len);
 		imd->binid[i] = as_bin_get_or_assign_id(ns, bname);
 		cf_debug(AS_SINDEX, " Assigned %d for %s %s", imd->binid[i], imd->bnames[i], bname);
 	}
@@ -1018,9 +1022,9 @@ as_sindex__stats_clear(as_sindex *si) {
 void
 as_sindex_gconfig_default(as_config *c)
 {
+	c->sindex_builder_threads         = 4;
 	c->sindex_data_max_memory         = ULONG_MAX;
 	c->sindex_data_memory_used        = 0;
-	c->sindex_populator_scan_priority = 3;  // default priority = normal
 }
 void
 as_sindex__config_default(as_sindex *si)
@@ -1651,8 +1655,7 @@ as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 
 	int sindex_found = 0;
 	for (int i = 0; i < imd->num_bins; i++) {
-		as_bin *b = as_bin_get(rd, (uint8_t *)imd->bnames[i],
-				strlen(imd->bnames[i]));
+		as_bin *b = as_bin_get(rd, imd->bnames[i]);
 		as_val * cdt_val = NULL;
 		if (b) {
 			as_sindex_init_sbin(&sbins[sindex_found], AS_SINDEX_OP_INSERT, as_sindex_pktype(si->imd), si->simatch);
@@ -1931,16 +1934,13 @@ as_sindex_describe_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db
 int
 as_sindex_boot_populateall()
 {
-	int ns_cnt            = 0;
-	int old_priority   = g_config.sindex_populator_scan_priority;
-	int old_g_priority = g_config.scan_priority;
-	int old_g_sleep    = g_config.scan_sleep;
+	// Initialize the secondary index builder. The thread pool is initialized
+	// with maximum threads to go full throttle, then down-sized to the
+	// configured number after the startup population job is done.
+	as_sbld_init();
 
-	// Go full throttle
-	g_config.scan_priority                  = UINT_MAX;
-	g_config.scan_sleep                     = 0;
-	g_config.sindex_populator_scan_priority = MAX_SCAN_THREADS; // use all of it
-	
+	int ns_cnt = 0;
+
 	// Trigger namespace scan to populate all secondary indexes
 	// mark all secondary index for a namespace as populated
 	for (int i = 0; i < g_config.namespaces; i++) {
@@ -1948,12 +1948,12 @@ as_sindex_boot_populateall()
 		if (!ns || (ns->sindex_cnt == 0)) {
 			continue;
 		}
-	
+
 		// If FAST START
 		// OR (Data not in memory AND load data at startup)
 		if (!ns->cold_start
 			|| (!ns->storage_data_in_memory)) {
-			as_tscan_sindex_populateall(ns);
+			as_sbld_build_all(ns);
 			cf_info(AS_SINDEX, "Queuing namespace %s for sindex population ", ns->name);
 		} else {
 			as_sindex_boot_populateall_done(ns);
@@ -1966,10 +1966,11 @@ as_sindex_boot_populateall()
 		cf_queue_pop(g_sindex_populateall_done_q, &ret, CF_QUEUE_FOREVER);
 		// TODO: Check for failure .. is generally fatal if it fails
 	}
-	g_config.scan_priority                  = old_g_priority;
-	g_config.scan_sleep                     = old_g_sleep;
-	g_config.sindex_populator_scan_priority = old_priority;
-	g_sindex_boot_done                      = true;
+
+	// Down-size builder thread pool to configured value.
+	as_sbld_resize_thread_pool(g_config.sindex_builder_threads);
+
+	g_sindex_boot_done = true;
 
 	// This above flag indicates that the basic sindex boot-up loader is done
 	// Go and destroy the sindex_cfg_var_hash here to prevent run-time

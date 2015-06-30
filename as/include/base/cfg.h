@@ -236,10 +236,10 @@ typedef struct as_config_s {
 	/* enables node snubbing - this code caused a Paxos issue in the past */
 	bool				snub_nodes;
 
-	// number of records between an enforced context switch - thus 1 is very low priority, 1000000 would be very high
-	uint32_t			scan_priority;
-	// amount of time a thread will sleep after yielding scan_priority amount of data. (in microseconds)
-	uint32_t			scan_sleep;
+	uint32_t			scan_max_active;	// maximum number of active scans allowed
+	uint32_t			scan_max_done;		// maximum number of finished scans kept for monitoring
+	uint32_t			scan_threads;		// size of scan thread pool
+
 	// maximum count of database requests in a single batch
 	uint32_t			batch_max_requests;
 	// maximum number of buffers allowed in a buffer queue at any one time.  Fail batch if full.
@@ -298,9 +298,9 @@ typedef struct as_config_s {
 	// all secondary index put together can take
 	// this is to protect cluster. This override the
 	// per namespace configured value
+	uint32_t		sindex_builder_threads;   // Secondary index builder thread pool size
 	uint64_t		sindex_data_max_memory;   // Maximum memory for secondary index trees
 	cf_atomic_int	sindex_data_memory_used;  // Maximum memory for secondary index trees
-	uint32_t		sindex_populator_scan_priority;
 	cf_atomic_int   sindex_gc_timedout;           // Number of time sindex gc iteration timed out waiting for partition lock
 	uint64_t        sindex_gc_inactivity_dur;     // Commulative sum of sindex GC thread inactivity.
 	uint64_t        sindex_gc_activity_dur;       // Commulative sum of sindex gc thread activity.
@@ -380,9 +380,12 @@ typedef struct as_config_s {
 	cf_atomic_int		proxy_unproxy;
 	cf_atomic_int		proxy_retry_same_dest;
 	cf_atomic_int		proxy_retry_new_dest;
-	cf_atomic_int		tscan_initiate;
-	cf_atomic_int		tscan_succeeded;
-	cf_atomic_int		tscan_aborted;
+	cf_atomic_int		basic_scans_succeeded;
+	cf_atomic_int		basic_scans_failed;
+	cf_atomic_int		aggr_scans_succeeded;
+	cf_atomic_int		aggr_scans_failed;
+	cf_atomic_int		udf_bg_scans_succeeded;
+	cf_atomic_int		udf_bg_scans_failed;
 	cf_atomic_int		write_master;
 	cf_atomic_int		write_prole;
 	cf_atomic_int		read_dup_prole;

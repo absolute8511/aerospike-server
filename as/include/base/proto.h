@@ -555,6 +555,7 @@ typedef struct as_netio_s {
 	uint32_t                   offset;
 	uint32_t                   seq;
 	bool                       slow;
+	uint64_t                   start_time;
 } as_netio;
 
 void as_netio_init();

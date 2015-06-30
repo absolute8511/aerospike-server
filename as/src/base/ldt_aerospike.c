@@ -376,6 +376,7 @@ ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec, cf_digest *keyd)
 	// Chunk Record Does not respond back to the client
 	c_tr->result_code          = 0;
 	c_tr->generation           = 0;
+	c_tr->void_time            = 0;
 	// Set this to grab some info from the msg from client like
 	// set name etc ... we do not set it in wr..
 	c_tr->msgp                 = h_tr->msgp;

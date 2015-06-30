@@ -28,11 +28,17 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-#include "queue.h"
-#include "ai_obj.h"
-#include "hist.h"
 #include "citrusleaf/cf_digest.h"
+
+#include "ai_obj.h"
+#include "dynbuf.h"
+#include "hist.h"
+#include "queue.h"
+
+#include "base/datamodel.h"
+#include "base/monitor.h"
 
 #define SET_TIME_FOR_SINDEX_GC_HIST(start_time)                                           \
 do {                                                                                      \
@@ -76,3 +82,13 @@ extern bool      g_sindex_boot_done;
 void as_sindex_thr_init();
 void as_sindex_gc_histogram_dumpall();
 objs_to_defrag_arr * as_sindex_gc_get_defrag_arr(void);
+
+#define MAX_SINDEX_BUILDER_THREADS 32
+
+void as_sbld_init();
+int as_sbld_build_all(as_namespace* ns);
+void as_sbld_resize_thread_pool(uint32_t n_threads);
+int as_sbld_list(char* name, cf_dyn_buf* db);
+as_mon_jobstat* as_sbld_get_jobstat(uint64_t trid);
+as_mon_jobstat* as_sbld_get_jobstat_all(int* size);
+int as_sbld_abort(uint64_t trid);

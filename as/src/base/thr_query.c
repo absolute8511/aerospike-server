@@ -222,6 +222,8 @@ struct as_query_transaction_s {
 	bool                     track;
 	bool                     has_send_fin;
 	bool                     blocking;
+	cf_atomic32              partition_reserved;
+	cf_atomic32              partition_released;
 
 	// Record UDF Management
 	cf_atomic_int            uit_queued;    				// Throttling: max in flight scan
@@ -235,8 +237,6 @@ struct as_query_transaction_s {
 	as_sindex_qctx           qctx;     // Secondary Index details
 
 	as_partition_reservation rsv_arr[AS_PARTITIONS];
-	cf_atomic32              partition_reserved;
-	cf_atomic32              partition_released;
 };
 
 typedef enum {
@@ -709,13 +709,16 @@ as_query__transaction_done(as_query_transaction *qtr)
 
 	// Release all the qnodes
 	as_query_post_release_qnodes(qtr);
-	if (qtr->partition_reserved == qtr->partition_released) {
-		cf_warning(AS_QUERY, "Partition leak by query trid- %"PRIu64""
-			"Partition reserved %ld Partition released %ld", "qtr->trid, qtr->partition_reserved, qtr->partition_released");
+	uint32_t p_res = cf_atomic32_get(qtr->partition_reserved);
+	uint32_t p_rel = cf_atomic32_get(qtr->partition_released);
+
+	if (p_res != p_rel) {
+		cf_warning(AS_QUERY, "Partition leak by query trid- %"PRIu64" "
+			"Partition reserved %d Partition released %d",qtr->trid, p_res, p_rel);
 	}
 	else {
-		cf_debug(AS_QUERY, "No Partition leak by query trid- %"PRIu64""
-			"Partition reserved %ld Partition released %ld", "qtr->trid, qtr->partition_reserved, qtr->partition_released");	
+		cf_debug(AS_QUERY, "No Partition leak by query trid- %"PRIu64" "
+			"Partition reserved %d Partition released %d",qtr->trid, p_res, p_rel);
 	}
 
 	as_query__update_stats(qtr);
@@ -1020,6 +1023,7 @@ as_query_netio_finish_cb(void *data, int retcode)
 			cf_atomic32_incr(&qtr->pop_seq_number);
 			cf_detail(AS_QUERY, "Finished sequence number %p->%d", qtr, io->seq);
 			cf_atomic64_add(&qtr->net_io_bytes, io->bb_r->used_sz + 8);
+			QUERY_HIST_INSERT_DATA_POINT(query_net_io_hist, io->start_time);	
 		}
 
 		// If timed out override the decision
@@ -1088,6 +1092,7 @@ as_query__netio(as_query_transaction *qtr, bool final)
 
 	cf_atomic32_incr(&qtr->outstanding_net_io);
 	io.seq         = cf_atomic32_incr(&qtr->push_seq_number);
+	io.start_time  = cf_getns();
 
 	int ret        = as_netio_send(&io, NULL, qtr->blocking);
 	if (ret != AS_NETIO_CONTINUE) {
@@ -1273,8 +1278,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 	as_sindex_bin_data *end   = &qtr->srange->end;
 
 	//TODO: Make it more general to support sindex over multiple bins	
-	as_bin * b = as_bin_get(rd, (uint8_t *)qtr->si->imd->bnames[0],
-							strlen(qtr->si->imd->bnames[0]));
+	as_bin * b = as_bin_get(rd, qtr->si->imd->bnames[0]);
 
 	if (!b) {
 		cf_debug(AS_QUERY , "as_query_record_validation: "
@@ -2257,7 +2261,6 @@ as_query_init()
 	}
 
 	g_config.query_enable_histogram	= false;
-	g_config.qnodes_pre_reserved    = true;
 }
 
 /*
@@ -2975,6 +2978,8 @@ as_query_gconfig_default(as_config *c)
 	c->query_req_in_query_thread = 0;
 	c->query_untracked_time_ns   = AS_QUERY_UNTRACKED_TIME;
 
+	c->qnodes_pre_reserved    = true;
+
 	// Aggregation
 	c->udf_runtime_max_memory    = ULONG_MAX;
 	c->udf_runtime_max_gmemory   = ULONG_MAX;
@@ -2993,6 +2998,11 @@ as_query__fill_jobstat(as_query_transaction *qtr, as_mon_jobstat *stat)
 	stat->net_io_bytes  = qtr->net_io_bytes;
 	stat->priority      = qtr->priority;
 
+	// Not implemented:
+	stat->progress_pct    = 0;
+	stat->time_since_done = 0;
+	stat->job_type[0]     = '\0';
+
 	strcpy(stat->ns, qtr->ns->name);
 
 	if (qtr->setname) {
@@ -3002,9 +3012,9 @@ as_query__fill_jobstat(as_query_transaction *qtr, as_mon_jobstat *stat)
 	}
 
 	strcpy(stat->status, "IN_PROGRESS");
-	stat->jdata[0]        = '\0';
+
 	char *specific_data   = stat->jdata;
-	sprintf(specific_data, "indexname=%s:", qtr->si->imd->iname);
+	sprintf(specific_data, ":sindex-name=%s:", qtr->si->imd->iname);
 }
 
 
@@ -3151,7 +3161,7 @@ as_query_post_release_qnodes(as_query_transaction * qtr)
 			if (qtr->qctx.is_partition_qnode[i]) {
 				as_partition_release(&qtr->rsv_arr[i]);
 				cf_atomic_int_decr(&g_config.dup_tree_count);
-				cf_atomic32_decr(&qtr->partition_released);
+				cf_atomic32_incr(&qtr->partition_released);
 			}
 		}
 	}

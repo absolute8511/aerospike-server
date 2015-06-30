@@ -58,8 +58,12 @@
 #include "base/asm.h"
 #include "base/batch.h"
 #include "base/datamodel.h"
+#include "base/ldt.h"
+#include "base/monitor.h"
+#include "base/scan.h"
 #include "base/thr_batch.h"
 #include "base/thr_proxy.h"
+#include "base/thr_sindex.h"
 #include "base/thr_tsvc.h"
 #include "base/thr_write.h"
 #include "base/transaction.h"
@@ -67,15 +71,11 @@
 #include "base/secondary_index.h"
 #include "base/security.h"
 #include "base/system_metadata.h"
+#include "base/udf_cask.h"
 #include "fabric/fabric.h"
 #include "fabric/hb.h"
-#include "fabric/paxos.h"
 #include "fabric/migrate.h"
-#include "base/udf_cask.h"
-#include "base/thr_scan.h"
-#include "base/monitor.h"
-#include "base/thr_sindex.h"
-#include "base/ldt.h"
+#include "fabric/paxos.h"
 
 #define STR_NS              "ns"
 #define STR_SET             "set"
@@ -134,7 +134,6 @@ void clear_ldt_histograms();
 int info_get_tree_sets(char *name, char *subtree, cf_dyn_buf *db);
 int info_get_tree_bins(char *name, char *subtree, cf_dyn_buf *db);
 int info_get_tree_sindexes(char *name, char *subtree, cf_dyn_buf *db);
-int as_tscan_get_pending_job_count();
 void as_storage_show_wblock_stats(as_namespace *ns);
 void as_storage_summarize_wblock_stats(as_namespace *ns);
 int as_storage_analyze_wblock(as_namespace* ns, int device_index, uint32_t wblock_id);
@@ -520,14 +519,21 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";reaped_fds=");
 	APPEND_STAT_COUNTER(db, g_config.reaper_count);
 
-	cf_dyn_buf_append_string(db, ";tscan_initiate=");
-	APPEND_STAT_COUNTER(db, g_config.tscan_initiate);
-	cf_dyn_buf_append_string(db, ";tscan_pending=");
-	APPEND_STAT_COUNTER(db, as_tscan_get_pending_job_count());
-	cf_dyn_buf_append_string(db, ";tscan_succeeded=");
-	APPEND_STAT_COUNTER(db, g_config.tscan_succeeded);
-	cf_dyn_buf_append_string(db, ";tscan_aborted=");
-	APPEND_STAT_COUNTER(db, g_config.tscan_aborted);
+	cf_dyn_buf_append_string(db, ";scans_active=");
+	APPEND_STAT_COUNTER(db, as_scan_get_active_job_count());
+
+	cf_dyn_buf_append_string(db, ";basic_scans_succeeded=");
+	APPEND_STAT_COUNTER(db, g_config.basic_scans_succeeded);
+	cf_dyn_buf_append_string(db, ";basic_scans_failed=");
+	APPEND_STAT_COUNTER(db, g_config.basic_scans_failed);
+	cf_dyn_buf_append_string(db, ";aggr_scans_succeeded=");
+	APPEND_STAT_COUNTER(db, g_config.aggr_scans_succeeded);
+	cf_dyn_buf_append_string(db, ";aggr_scans_failed=");
+	APPEND_STAT_COUNTER(db, g_config.aggr_scans_failed);
+	cf_dyn_buf_append_string(db, ";udf_bg_scans_succeeded=");
+	APPEND_STAT_COUNTER(db, g_config.udf_bg_scans_succeeded);
+	cf_dyn_buf_append_string(db, ";udf_bg_scans_failed=");
+	APPEND_STAT_COUNTER(db, g_config.udf_bg_scans_failed);
 
 	cf_dyn_buf_append_string(db, ";batch_index_initiate=");
 	APPEND_STAT_COUNTER(db, g_config.batch_index_initiate);
@@ -1007,36 +1013,6 @@ info_command_tip_clear(char *name, char *params, cf_dyn_buf *db)
 	as_hb_tip_clear();
 
 	cf_info(AS_INFO, "tip clear command executed: params %s", params);
-
-	return(0);
-}
-
-int
-info_command_scan_kill(char *name, char *params, cf_dyn_buf *db)
-{
-	char tid_str[50];
-	int  tid_len = sizeof(tid_str);
-
-	cf_debug(AS_INFO, "scan kill command received: params %s", params);
-
-	if (0 != as_info_parameter_get(params, "tid", tid_str, &tid_len)) {
-		cf_info(AS_INFO, "scan-kill, just have tid");
-		cf_dyn_buf_append_string(db, "error");
-		return(0);
-	}
-
-	int tid = 0;
-	if (0 != cf_str_atoi(tid_str, &tid) ) {
-		cf_info(AS_INFO, "scan-kill, just have integer tid: have instead %s", tid_str);
-		cf_dyn_buf_append_string(db, "error");
-		return(0);
-	}
-
-	// TODO - add missing functionality for tscan
-
-	cf_dyn_buf_append_string(db, "ok");
-
-	cf_info(AS_INFO, "scan kill command executed: params %s", params);
 
 	return(0);
 }
@@ -2084,10 +2060,12 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, g_config.storage_benchmarks ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";ldt-benchmarks=");
 	cf_dyn_buf_append_string(db, g_config.ldt_benchmarks ? "true" : "false");
-	cf_dyn_buf_append_string(db, ";scan-priority=");
-	cf_dyn_buf_append_int(db, g_config.scan_priority);
-	cf_dyn_buf_append_string(db, ";scan-sleep=");
-	cf_dyn_buf_append_int(db, g_config.scan_sleep);
+	cf_dyn_buf_append_string(db, ";scan-max-active=");
+	cf_dyn_buf_append_int(db, g_config.scan_max_active);
+	cf_dyn_buf_append_string(db, ";scan-max-done=");
+	cf_dyn_buf_append_int(db, g_config.scan_max_done);
+	cf_dyn_buf_append_string(db, ";scan-threads=");
+	cf_dyn_buf_append_int(db, g_config.scan_threads);
 
 	cf_dyn_buf_append_string(db, ";batch-index-threads=");
 	cf_dyn_buf_append_int(db, g_config.n_batch_index_threads);
@@ -2182,8 +2160,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";udf-runtime-max-memory=");
 	cf_dyn_buf_append_uint64(db, g_config.udf_runtime_max_memory);
 
-	cf_dyn_buf_append_string(db, ";sindex-populator-scan-priority=");
-	cf_dyn_buf_append_uint64(db, g_config.sindex_populator_scan_priority);
+	cf_dyn_buf_append_string(db, ";sindex-builder-threads=");
+	cf_dyn_buf_append_uint64(db, g_config.sindex_builder_threads);
 	cf_dyn_buf_append_string(db, ";sindex-data-max-memory=");
 	if (g_config.sindex_data_max_memory == ULONG_MAX) {
 		cf_dyn_buf_append_uint64(db, g_config.sindex_data_max_memory);
@@ -2716,17 +2694,35 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			else
 				goto Error;
 		}
-		else if (0 == as_info_parameter_get(params, "scan-priority", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "scan-max-active", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
 				goto Error;
-			cf_info(AS_INFO, "Changing value of scan-priority from %d to %d ", g_config.scan_priority, val);
-			g_config.scan_priority = val;
-		}
-		else if (0 == as_info_parameter_get(params, "scan-sleep", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val) || val < 0)
+			if (val < 0 || val > 200) {
 				goto Error;
-			cf_info(AS_INFO, "Changing value of scan-sleep from %d to %d ", g_config.scan_sleep, val);
-			g_config.scan_sleep = val;
+			}
+			cf_info(AS_INFO, "Changing value of scan-max-active from %d to %d ", g_config.scan_max_active, val);
+			g_config.scan_max_active = val;
+			as_scan_limit_active_jobs(g_config.scan_max_active);
+		}
+		else if (0 == as_info_parameter_get(params, "scan-max-done", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val))
+				goto Error;
+			if (val < 0 || val > 1000) {
+				goto Error;
+			}
+			cf_info(AS_INFO, "Changing value of scan-max-done from %d to %d ", g_config.scan_max_done, val);
+			g_config.scan_max_done = val;
+			as_scan_limit_finished_jobs(g_config.scan_max_done);
+		}
+		else if (0 == as_info_parameter_get(params, "scan-threads", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val))
+				goto Error;
+			if (val < 0 || val > 32) {
+				goto Error;
+			}
+			cf_info(AS_INFO, "Changing value of scan-threads from %d to %d ", g_config.scan_threads, val);
+			g_config.scan_threads = val;
+			as_scan_resize_thread_pool(g_config.scan_threads);
 		}
 		else if (0 == as_info_parameter_get(params, "batch-index-threads", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
@@ -3092,14 +3088,15 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of query-rec-count-bound from %"PRIu64" to %"PRIu64" ", g_config.query_rec_count_bound, val);
 			g_config.query_rec_count_bound = val;
 		}
-		else if ( 0 == as_info_parameter_get(params, "sindex-populator-scan-priority", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "sindex-builder-threads", context, &context_len)) {
 			int val = 0;
-			if (0 != cf_str_atoi(context, &val) || (val != 1 && val != 3 && val != 5)) {
-				cf_warning(AS_INFO, "sindex-populator-scan-priority: value must be among (1, 3, 5), Current is: %s", context);
+			if (0 != cf_str_atoi(context, &val) || (val > MAX_SINDEX_BUILDER_THREADS)) {
+				cf_warning(AS_INFO, "sindex-builder-threads: value must be <= %d, not %s", MAX_SINDEX_BUILDER_THREADS, context);
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of sindex-populator-scan-priority from %"PRIu64" to %"PRIu64" ", g_config.sindex_populator_scan_priority, val);
-			g_config.sindex_populator_scan_priority = val;
+			cf_info(AS_INFO, "Changing value of sindex-builder-threads from %u to %d", g_config.sindex_builder_threads, val);
+			g_config.sindex_builder_threads = (uint32_t)val;
+			as_sbld_resize_thread_pool(g_config.sindex_builder_threads);
 		}
 		else if (0 == as_info_parameter_get(params, "sindex-data-max-memory", context, &context_len)) {
 			uint64_t val = atoll(context);
@@ -6815,7 +6812,7 @@ int info_command_abort_scan(char *name, char *params, cf_dyn_buf *db) {
 		uint64_t trid;
 		trid = strtoull(context, NULL, 10);
 		if (trid != 0) {
-			rv = as_tscan_abort(trid);
+			rv = as_scan_abort(trid);
 		}
 	}
 
@@ -6833,7 +6830,7 @@ int info_command_abort_scan(char *name, char *params, cf_dyn_buf *db) {
 
 int info_command_abort_all_scans(char *name, char *params, cf_dyn_buf *db) {
 
-	int n_scans_killed = as_tscan_abort_all();
+	int n_scans_killed = as_scan_abort_all();
 
 	cf_dyn_buf_append_string(db, "OK - number of scans killed: ");
 	cf_dyn_buf_append_int(db, n_scans_killed);
@@ -7253,10 +7250,11 @@ as_info_init()
 	as_info_set_dynamic("query-stat", as_query_stat, false);
 	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SCAN_MANAGE);            // Abort a scan with a given id.
 	as_info_set_command("scan-abort-all", info_command_abort_all_scans, PERM_SCAN_MANAGE);   // Abort all scans.
-	as_info_set_dynamic("scan-list", as_tscan_list, false);                                  // List job ids of all scans.
+	as_info_set_dynamic("scan-list", as_scan_list, false);                                   // List info for all scan jobs.
 	as_info_set_command("sindex-describe", info_command_sindex_describe, PERM_NONE);
 	as_info_set_command("sindex-stat", info_command_sindex_stat, PERM_NONE);
 	as_info_set_command("sindex-list", info_command_sindex_list, PERM_NONE);
+	as_info_set_dynamic("sindex-builder-list", as_sbld_list, false);                         // List info for all secondary index builder jobs.
 
 	// Spin up the Info threads *after* all static and dynamic Info commands have been added
 	// so we can guarantee that the static and dynamic lists will never again be changed.

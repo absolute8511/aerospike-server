@@ -36,16 +36,24 @@
 
 #include "base/secondary_index.h"
 #include "base/monitor.h"
-#include "base/thr_scan.h"
+#include "base/scan.h"
+#include "base/thr_sindex.h"
 
 
 #define AS_MON_MAX_MODULE 10
+
+// Indexed by as_mon_module_slot - keep in sync.
+const char * AS_MON_MODULES[] = {
+		"query",
+		"scan",
+		"sindex-builder"
+};
 
 // functional declaration
 int    as_mon_populate_jobstat(as_mon_jobstat * stat, cf_dyn_buf *db);
 static as_mon * g_as_mon_module[AS_MON_MAX_MODULE];
 static uint32_t g_as_mon_curr_mod_count;
-int    as_mon_register(char *module);
+int    as_mon_register(const char *module);
 
 /*
  * This is called to init the mon subsystem.
@@ -54,22 +62,26 @@ int
 as_mon_init()
 {
 	g_as_mon_curr_mod_count = 0;
-	as_mon_register("query");
-	as_mon_register("scan");
+	as_mon_register(AS_MON_MODULES[QUERY_MOD]);
+	as_mon_register(AS_MON_MODULES[SCAN_MOD]);
+	as_mon_register(AS_MON_MODULES[SBLD_MOD]);
 
 	// TODO: Add more stuff if there is any locks needs some stats needed etc etc ...
 	return AS_MON_OK;
 }
 
 as_mon *
-as_mon_get_module(char * module)
+as_mon_get_module(const char * module)
 {
 	as_mon_module_slot mod;
-	if (strcmp(module, "query") == 0) {
+	if (strcmp(module, AS_MON_MODULES[QUERY_MOD]) == 0) {
 		mod = QUERY_MOD;
 	}
-	else if (strcmp(module, "scan") == 0) {
+	else if (strcmp(module, AS_MON_MODULES[SCAN_MOD]) == 0) {
 		mod = SCAN_MOD;
+	}
+	else if (strcmp(module, AS_MON_MODULES[SBLD_MOD]) == 0) {
+		mod = SBLD_MOD;
 	}
 	else {
 		return NULL;
@@ -85,7 +97,7 @@ as_mon_get_module(char * module)
  * 		AS_MON_ERROR - failure
  */
 int
-as_mon_register(char *module)
+as_mon_register(const char *module)
 {
 	if (!module) return AS_MON_ERR;
 	as_mon *mon_obj = (as_mon *) cf_rc_alloc(sizeof(as_mon));
@@ -97,7 +109,7 @@ as_mon_register(char *module)
 	as_mon_cb *cb = cf_malloc(sizeof(as_mon_cb));
 	as_mon_module_slot mod;
 
-	if(!strcmp(module, "query")) {
+	if(!strcmp(module, AS_MON_MODULES[QUERY_MOD])) {
 		cb->get_jobstat     = as_query_get_jobstat;
 		cb->get_jobstat_all = as_query_get_jobstat_all;
 
@@ -109,18 +121,31 @@ as_mon_register(char *module)
 		cb->set_maxpriority = NULL;
 		mod = QUERY_MOD;
 	}
-	else if (!strcmp(module, "scan"))
+	else if (!strcmp(module, AS_MON_MODULES[SCAN_MOD]))
 	{
-		cb->get_jobstat     = as_tscan_get_jobstat;
-		cb->get_jobstat_all = as_tscan_get_jobstat_all;
+		cb->get_jobstat     = as_scan_get_jobstat;
+		cb->get_jobstat_all = as_scan_get_jobstat_all;
 
-		cb->set_priority    = NULL;
-		cb->kill            = as_tscan_abort;
+		cb->set_priority    = as_scan_change_job_priority;
+		cb->kill            = as_scan_abort;
 		cb->suspend         = NULL;
 		cb->set_pendingmax  = NULL;
 		cb->set_maxinflight = NULL;
 		cb->set_maxpriority = NULL;
 		mod = SCAN_MOD;
+	}
+	else if (!strcmp(module, AS_MON_MODULES[SBLD_MOD]))
+	{
+		cb->get_jobstat     = as_sbld_get_jobstat;
+		cb->get_jobstat_all = as_sbld_get_jobstat_all;
+
+		cb->set_priority    = NULL;
+		cb->kill            = as_sbld_abort;
+		cb->suspend         = NULL;
+		cb->set_pendingmax  = NULL;
+		cb->set_maxinflight = NULL;
+		cb->set_maxpriority = NULL;
+		mod = SBLD_MOD;
 	}
 	else {
 		cf_warning(AS_MON, "wrong module parameter.");
@@ -144,7 +169,7 @@ as_mon_register(char *module)
  *
  */
 int
-as_mon_killjob(char *module, uint64_t id, cf_dyn_buf *db)
+as_mon_killjob(const char *module, uint64_t id, cf_dyn_buf *db)
 {
 	int retval = AS_MON_ERR;
 	as_mon * mon_object = as_mon_get_module(module);
@@ -190,7 +215,7 @@ as_mon_killjob(char *module, uint64_t id, cf_dyn_buf *db)
  *
  */
 int
-as_mon_set_priority(char *module, uint64_t id, uint32_t priority, cf_dyn_buf *db)
+as_mon_set_priority(const char *module, uint64_t id, uint32_t priority, cf_dyn_buf *db)
 {
 	if (priority == 0) {
 		cf_dyn_buf_append_string(db, "ERROR:");
@@ -246,36 +271,50 @@ as_mon_populate_jobstat(as_mon_jobstat * job_stat, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, "trid=");
 	cf_dyn_buf_append_uint64(db, job_stat->trid);
 
+	if (job_stat->job_type[0]) {
+		cf_dyn_buf_append_string(db, ":job-type=");
+		cf_dyn_buf_append_string(db, job_stat->job_type);
+	}
+
 	cf_dyn_buf_append_string(db, ":ns=");
 	cf_dyn_buf_append_string(db, job_stat->ns);
 
-	cf_dyn_buf_append_string(db, ":set=");
-	cf_dyn_buf_append_string(db, job_stat->set);
+	if (job_stat->set[0]) {
+		cf_dyn_buf_append_string(db, ":set=");
+		cf_dyn_buf_append_string(db, job_stat->set);
+	}
 
-	cf_dyn_buf_append_string(db, ":status=");
-	cf_dyn_buf_append_string(db, job_stat->status);
+	cf_dyn_buf_append_string(db, ":priority=");
+	cf_dyn_buf_append_uint32(db, job_stat->priority);
+
+	if (job_stat->status[0]) {
+		cf_dyn_buf_append_string(db, ":status=");
+		cf_dyn_buf_append_string(db, job_stat->status);
+	}
+
+	cf_dyn_buf_append_string(db, ":job-progress=");
+	cf_dyn_buf_append_uint32(db, job_stat->progress_pct);
+
+	cf_dyn_buf_append_string(db, ":run-time=");
+	cf_dyn_buf_append_uint64(db, job_stat->run_time);
+
+	cf_dyn_buf_append_string(db, ":time-since-done=");
+	cf_dyn_buf_append_uint64(db, job_stat->time_since_done);
+
+	cf_dyn_buf_append_string(db, ":recs-read=");
+	cf_dyn_buf_append_uint64(db, job_stat->recs_read);
+
+	cf_dyn_buf_append_string(db, ":net-io-bytes=");
+	cf_dyn_buf_append_uint64(db, job_stat->net_io_bytes);
+
+	cf_dyn_buf_append_string(db, ":mem-usage=");
+	cf_dyn_buf_append_uint64(db, job_stat->mem);
 
 	//	char cpu_data[100];
 	//	sprintf(cpu_data, "%f", job_stat->cpu);
 	//	cf_dyn_buf_append_string(db, cpu_data);
 
-	cf_dyn_buf_append_string(db, ":mem_usage=");
-	cf_dyn_buf_append_uint64(db, job_stat->mem);
-
-	cf_dyn_buf_append_string(db, ":run_time=");
-	cf_dyn_buf_append_uint64(db, job_stat->run_time);
-
-	cf_dyn_buf_append_string(db, ":recs_read=");
-	cf_dyn_buf_append_uint64(db, job_stat->recs_read);
-
-	cf_dyn_buf_append_string(db, ":net_io_bytes=");
-	cf_dyn_buf_append_uint64(db, job_stat->net_io_bytes);
-
-	cf_dyn_buf_append_string(db, ":priority=");
-	cf_dyn_buf_append_uint64(db, job_stat->priority);
-
-	if (job_stat->jdata) {
-		cf_dyn_buf_append_string(db, ":");
+	if (job_stat->jdata[0]) {
 		cf_dyn_buf_append_string(db, job_stat->jdata);
 	}
 
@@ -322,7 +361,7 @@ as_mon_get_jobstat_reduce_fn(as_mon *mon_object, cf_dyn_buf *db)
  *          negative value in case of failure
  */
 int
-as_mon_get_jobstat_all(char *module, cf_dyn_buf *db)
+as_mon_get_jobstat_all(const char *module, cf_dyn_buf *db)
 {
 	bool found_module = false;
 	for (int i = 0; i < g_as_mon_curr_mod_count; i++) {
@@ -361,7 +400,7 @@ as_mon_get_jobstat_all(char *module, cf_dyn_buf *db)
  *          negative value in case of failure
  */
 int
-as_mon_get_jobstat(char *module, uint64_t id, cf_dyn_buf *db)
+as_mon_get_jobstat(const char *module, uint64_t id, cf_dyn_buf *db)
 {
 	int      retval     = AS_MON_ERR;
 	as_mon * mon_object = as_mon_get_module(module);;
@@ -408,7 +447,7 @@ as_mon_get_jobstat(char *module, uint64_t id, cf_dyn_buf *db)
  */
 
 void
-as_mon_info_cmd(char *module, char *cmd, uint64_t trid, uint32_t value, cf_dyn_buf *db)
+as_mon_info_cmd(const char *module, char *cmd, uint64_t trid, uint32_t value, cf_dyn_buf *db)
 {
 	if (module == NULL) {
 		as_mon_get_jobstat_all(NULL, db);
