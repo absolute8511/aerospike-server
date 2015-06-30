@@ -2637,7 +2637,7 @@ as_query(as_transaction *tr)
 	}
 	// Be aware of the size of qtr
 	// Memset it partially
-	memset(qtr, 0, offsetof(as_query_transaction, bkey));
+	memset(qtr, 0, offsetof(as_query_transaction, rsv_arr));
 	qtr->is_malloc           = true;
 	qtr->inited              = false;
 	qtr->trid                = tr->trid;
