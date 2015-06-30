@@ -229,12 +229,19 @@ struct as_query_transaction_s {
 	cf_atomic_int            uit_queued;    				// Throttling: max in flight scan
 	cf_atomic_int            uit_completed; 				// Number of udf transactions successfully completed
 	cf_atomic64			     uit_total_run_time;			// Average transaction processing time for all udf internal transactions
-	// Folllowing elements are big.
-	// Keep them at the end of structure to avoid them while memzeroing qtr
+
+    // Empirically, some of the following fields *still* require memzero
+    // initialization.  Please test with a memset(qtr, 0xff, sizeof(*qtr))
+    // right after allocation before you initialize before moving them
+    // into the uninitialized section.
+    
 	struct ai_obj            bkey;
 	udf_call                 call;     // Record UDF Details
 	as_aggr_call             agg_call; // Stream UDF Details 
 	as_sindex_qctx           qctx;     // Secondary Index details
+
+	// Folllowing elements are big.
+	// Keep them at the end of structure to avoid them while memzeroing qtr
 
 	as_partition_reservation rsv_arr[AS_PARTITIONS];
 };
@@ -2637,7 +2644,7 @@ as_query(as_transaction *tr)
 	}
 	// Be aware of the size of qtr
 	// Memset it partially
-	memset(qtr, 0, offsetof(as_query_transaction, bkey));
+	memset(qtr, 0, offsetof(as_query_transaction, rsv_arr));
 	qtr->is_malloc           = true;
 	qtr->inited              = false;
 	qtr->trid                = tr->trid;
