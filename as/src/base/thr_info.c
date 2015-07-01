@@ -2199,6 +2199,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_uint64(db, g_config.query_threshold);
 	cf_dyn_buf_append_string(db, ";query-untracked-time=");
 	cf_dyn_buf_append_uint64(db, g_config.query_untracked_time_ns/1000); // Show it in micro seconds
+	cf_dyn_buf_append_string(db, ";pre-reserve-qnodes=");
+	cf_dyn_buf_append_string(db, (g_config.qnodes_pre_reserved) ? "true" : "false");
 
 	return(0);
 }
