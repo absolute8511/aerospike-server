@@ -61,7 +61,6 @@
 #include "base/rec_props.h"
 #include "base/secondary_index.h"
 #include "base/thr_proxy.h"
-#include "base/thr_scan.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "base/udf_rw.h"
@@ -117,7 +116,7 @@ void g_write_hash_delete(global_keyd *gk) {
 void rw_complete(write_request *wr, as_transaction *tr, as_index_ref *r_ref);
 void read_local(as_transaction *tr, as_index_ref *r_ref);
 int write_local(as_transaction *tr, write_local_generation *wlg,
-				uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
+				uint8_t **pickled_buf, size_t *pickled_sz,
 				as_rec_props *p_pickled_rec_props, cf_dyn_buf *db);
 int write_journal(as_transaction *tr, write_local_generation *wlg); // only do write
 int write_delete_journal(as_transaction *tr, bool is_subrec);
@@ -249,6 +248,7 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	tr->flag = 0;
 
 	tr->generation = 0;
+	tr->void_time = 0;
 	tr->microbenchmark_is_resolve = false;
 
 	if (wr->shipped_op)
@@ -479,13 +479,15 @@ rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd, uint16_t ld
 	msg_set_buf(m, RW_FIELD_VINFOSET, (uint8_t *)&tr->rsv.p->version_info, sizeof(as_partition_vinfo), MSG_SET_COPY);
 	cf_detail_digest(AS_RW, keyd,
 			"MULTI_OP : Set Up Replication Message for the LDT current outgoing "
-			" migrate version %ld for partition %d", tr->rsv.p->current_outgoing_ldt_version, tr->rsv.p->partition_id);
-	msg_set_uint64(m, RW_FIELD_LDT_VERSION, tr->rsv.p->current_outgoing_ldt_version);
+			" migrate version %ld for partition %d %d", tr->rsv.p->current_outgoing_ldt_version, tr->rsv.p->partition_id, ldt_rectype_bits);
+	if (tr->rsv.p->current_outgoing_ldt_version != 0) {
+		msg_set_uint64(m, RW_FIELD_LDT_VERSION, tr->rsv.p->current_outgoing_ldt_version);
+	}
 }
 
 int
 rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
-		uint8_t ** p_pickled_buf, size_t pickled_sz, uint32_t pickled_void_time,
+		uint8_t ** p_pickled_buf, size_t pickled_sz,
 		as_rec_props * p_pickled_rec_props, int op, uint16_t ldt_rectype_bits,
 		bool has_udf)
 {
@@ -499,8 +501,27 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 	msg_set_uint32(m, RW_FIELD_OP, op);
 
 	if (op == RW_OP_WRITE) {
+		/*
+		 * if ldt_rectype bits not set. It is possibly direct manipulation of 
+		 * record with LDT bin. Try to fetch the ldt bit types from the 
+		 * pickled rec props
+		 *
+		 * NB: We sent both rec_props and ldt bits over the wire
+		 * this is redundant information. Can be improved by sending
+		 * only 1 and other inferred at the prole side.
+		 */
+		if (ldt_rectype_bits == 0) { 
+			uint16_t *ldt_bits = NULL;
+			as_rec_props_get_value((const as_rec_props *)p_pickled_rec_props, CL_REC_PROPS_FIELD_LDT_TYPE, NULL,
+					(uint8_t**)&ldt_bits);
+			if (ldt_bits) {
+				ldt_rectype_bits = *ldt_bits;
+			}
+		}
+
+
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
-		msg_set_uint32(m, RW_FIELD_VOID_TIME, pickled_void_time);
+		msg_set_uint32(m, RW_FIELD_VOID_TIME, tr->void_time);
 
 		rw_msg_setup_infobits(m, tr, ldt_rectype_bits, has_udf);
 
@@ -540,7 +561,7 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 	} else if (op == RW_OP_MULTI) {
 		// TODO: What is meaning of generation and TTL here ???
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
-		msg_set_uint32(m, RW_FIELD_VOID_TIME, pickled_void_time);
+		msg_set_uint32(m, RW_FIELD_VOID_TIME, tr->void_time);
 
 		rw_msg_setup_ldt_fields(m, tr, keyd, ldt_rectype_bits);
 
@@ -588,8 +609,7 @@ write_request_setup(write_request *wr, as_transaction *tr, int optype)
 	}
 
 	rw_msg_setup(wr->dest_msg, tr, &wr->keyd, &wr->pickled_buf, wr->pickled_sz,
-			wr->pickled_void_time, &wr->pickled_rec_props, optype,
-			wr->ldt_rectype_bits, wr->has_udf);
+			&wr->pickled_rec_props, optype, wr->ldt_rectype_bits, wr->has_udf);
 
 	if (wr->shipped_op) {
 		cf_detail(AS_RW,
@@ -895,6 +915,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						return 0;
 					}
 				} else {
+					wr->has_udf = false;
 					cf_free(call);
 
 					write_local_generation wlg;
@@ -903,8 +924,8 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 					wlg.use_msg_gen = true;
 
 					rv = write_local(tr, &wlg, &wr->pickled_buf,
-							&wr->pickled_sz, &wr->pickled_void_time,
-							&wr->pickled_rec_props, &wr->response_db);
+							&wr->pickled_sz, &wr->pickled_rec_props,
+							&wr->response_db);
 					WR_TRACK_INFO(wr, "internal_rw_start: write local done ");
 				}
 				if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
@@ -2030,7 +2051,8 @@ write_complete(write_request *wr, as_transaction *tr)
 	}
 	else if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-				tr->generation, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL)) {
+				tr->generation, tr->void_time, NULL, NULL, 0, NULL, NULL,
+				tr->trid, NULL)) {
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
 		}
@@ -2400,18 +2422,21 @@ as_ldt_set_prole_subrec_version(cf_digest *keyd, as_partition_reservation *rsv,
 			if (linfo->replication_partition_version_match) {
 				if (linfo->ldt_prole_version_set) {
 					// ldt_version should be set
+					cf_debug_digest(AS_RW, keyd, "Has Set %d type Version %ld from %ld for %s", type, linfo->ldt_prole_version, as_ldt_subdigest_getversion(keyd), (info & RW_INFO_LDT_ESR) ? "esr" : "subrec");
 					as_ldt_subdigest_setversion(keyd, linfo->ldt_prole_version);
 					cf_detail_digest(AS_RW, keyd, "Set Prole Version %ld", linfo->ldt_prole_version);
 					type = 1;
 				} else {
-					cf_detail_digest(AS_RW, keyd, "No Parent record setting source version for subrecord");
+					cf_debug_digest(AS_RW, keyd, "No Parent record setting source version for subrecord");
 					type = 2;
 				}
-			} else {
+			} else if (linfo->ldt_source_version_set) {
 				// ldt_version should be set as source
+				cf_debug_digest(AS_RW, keyd, "Has Set %d type Version %ld from %ld for %s", type, linfo->ldt_source_version, as_ldt_subdigest_getversion(keyd), (info & RW_INFO_LDT_ESR) ? "esr" : "subrec");
 				as_ldt_subdigest_setversion(keyd, linfo->ldt_source_version);
+			} else {
+				cf_debug_digest(AS_RW, keyd, "Has skipped %d type Version %ld from %ld for %s", type, linfo->ldt_source_version, as_ldt_subdigest_getversion(keyd), (info & RW_INFO_LDT_ESR) ? "esr" : "subrec");
 			}
-			cf_detail_digest(AS_RW, keyd, "Has %d type Version %ld for %s", type, as_ldt_subdigest_getversion(keyd), (info & RW_INFO_LDT_ESR) ? "esr" : "subrec");
 		}
 	}
 	return 0;
@@ -2547,6 +2572,9 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		}
 		cf_detail_digest(AS_LDT, keyd, "Wrote the destination version match %s set version (%ld) out of prole (%d:%ld) source(%ld)",
 						linfo->replication_partition_version_match ? "true" : "false", version_to_set, linfo->ldt_prole_version_set, linfo->ldt_prole_version, linfo->ldt_source_version);
+	} else {
+		cf_detail_digest(AS_LDT, keyd, "Wrote the destination version match %s set version (%ld) out of prole (%d:%ld) source(%ld)",
+						linfo->replication_partition_version_match ? "true" : "false", version_to_set, linfo->ldt_prole_version_set, linfo->ldt_prole_version, linfo->ldt_source_version);
 	}
 
 Out:
@@ -2593,6 +2621,7 @@ int
 as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv)
 {
 	linfo->ldt_source_version = 0;
+	linfo->ldt_source_version_set = false;
 	linfo->ldt_prole_version_set = false;
 	linfo->replication_partition_version_match = false;
 
@@ -2602,7 +2631,7 @@ as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv)
 	if (0 != msg_get_buf(m, RW_FIELD_VINFOSET, (byte **) &source_partition_version,
 			&vinfo_sz, MSG_GET_DIRECT)) {
 		not_found++;
-		cf_detail(AS_RW, "MULTI_OP: Message Without Partition Version");
+		cf_debug(AS_LDT, "MULTI_OP: Message Without Partition Version");
 	} else {
 		linfo->replication_partition_version_match = as_partition_vinfo_same(source_partition_version, &rsv->p->version_info);
 /*
@@ -2626,8 +2655,9 @@ as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv)
 	}
 
 	if (0 != msg_get_uint64(m, RW_FIELD_LDT_VERSION, &linfo->ldt_source_version)) {
-		not_found++;
-		cf_info(AS_RW, "MULTI_OP: Message Without LDT source version Field");
+		cf_debug(AS_RW, "MULTI_OP: Message Without LDT source version Field");
+	} else {
+		linfo->ldt_source_version_set = true;
 	}
 	cf_detail(AS_RW, "MULTI_OP: LDT Info [%ld %d %d]", linfo->ldt_source_version, linfo->ldt_prole_version_set, linfo->replication_partition_version_match);
 	return not_found;
@@ -3199,8 +3229,6 @@ update_metadata_in_index(as_transaction *tr, bool increment_generation,
 bool
 pickle_all(as_storage_rd *rd, pickle_info *pickle)
 {
-	pickle->void_time = rd->r->void_time;
-
 	if (0 != as_record_pickle(rd->r, rd, &pickle->buf, &pickle->buf_size)) {
 		return false;
 	}
@@ -3545,27 +3573,17 @@ write_local_handle_msg_key(as_transaction *tr, as_storage_rd *rd)
 	return 0;
 }
 
+// For now, used only for read ops.
 int
 write_local_bin_check(as_transaction *tr, as_bin *bin)
 {
 	// Shortcut pointers.
-	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 
 	if (bin && as_bin_is_hidden(bin)) {
 		// Note - if single-bin, this likely means the bin state is corrupt.
 		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: cannot manipulate hidden bin directly ", ns->name);
 		return AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
-	}
-
-	// TODO - should we just disallow these policies for single-bin?
-
-	if ((m->info2 & AS_MSG_INFO2_BIN_CREATE_ONLY) && bin) {
-		return AS_PROTO_RESULT_FAIL_BIN_EXISTS;
-	}
-
-	if ((m->info3 & AS_MSG_INFO3_BIN_REPLACE_ONLY) && ! bin) {
-		return AS_PROTO_RESULT_FAIL_BIN_NOT_FOUND;
 	}
 
 	return 0;
@@ -3831,8 +3849,9 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
-	as_index *r = rd->r;
 	bool respond_all_ops = (m->info2 & AS_MSG_INFO2_RESPOND_ALL_OPS) != 0;
+	bool create_only = (m->info2 & AS_MSG_INFO2_BIN_CREATE_ONLY) != 0;
+	bool replace_only = (m->info3 & AS_MSG_INFO3_BIN_REPLACE_ONLY) != 0;
 
 	int result;
 
@@ -3848,7 +3867,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			// AS_PARTICLE_TYPE_NULL means delete the bin.
 			// TODO - should this even be allowed for single-bin?
 			if (op->particle_type == AS_PARTICLE_TYPE_NULL) {
-				int32_t j = as_bin_get_index(rd, op->name, op->name_sz);
+				int32_t j = as_bin_get_index_from_buf(rd, op->name, op->name_sz);
 
 				if (j != -1) {
 					if (ns->storage_data_in_memory) {
@@ -3860,19 +3879,10 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			}
 			// It's a regular bin write.
 			else {
-				as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+				as_bin *b = as_bin_get_or_create_from_buf(rd, op->name, op->name_sz, create_only, replace_only, &result);
 
-				if ((result = write_local_bin_check(tr, b)) != 0) {
+				if (! b) {
 					return result;
-				}
-
-				if (! b) {
-					b = as_bin_create(r, rd, op->name, op->name_sz, 0);
-				}
-
-				if (! b) {
-					cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-					return AS_PROTO_RESULT_FAIL_UNKNOWN;
 				}
 
 				if (ns->storage_data_in_memory) {
@@ -3894,26 +3904,16 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			}
 
 			if (respond_all_ops) {
-				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
+				ops[*p_n_response_bins] = op;
+				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
 		// Modify an existing bin value.
 		else if (OP_IS_MODIFY(op->op)) {
-			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+			as_bin *b = as_bin_get_or_create_from_buf(rd, op->name, op->name_sz, create_only, replace_only, &result);
 
-			if ((result = write_local_bin_check(tr, b)) != 0) {
+			if (! b) {
 				return result;
-			}
-
-			// Currently all modify operations become creates if there's no
-			// existing particle.
-			if (! b) {
-				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
-			}
-
-			if (! b) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
 
 			if (ns->storage_data_in_memory) {
@@ -3934,38 +3934,31 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			}
 
 			if (respond_all_ops) {
-				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
+				ops[*p_n_response_bins] = op;
+				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
 		else if (op->op == AS_MSG_OP_READ) {
-			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+			as_bin *b = as_bin_get_from_buf(rd, op->name, op->name_sz);
 
 			if ((result = write_local_bin_check(tr, b)) != 0) {
 				return result;
 			}
 
 			if (b) {
-				ops[(*p_n_response_bins)] = op;
+				ops[*p_n_response_bins] = op;
 				response_bins[(*p_n_response_bins)++] = *b;
 			}
 			else if (respond_all_ops) {
-				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
+				ops[*p_n_response_bins] = op;
+				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
 		else if (op->op == AS_MSG_OP_CDT_MODIFY) {
-			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+			as_bin *b = as_bin_get_or_create_from_buf(rd, op->name, op->name_sz, create_only, replace_only, &result);
 
-			if ((result = write_local_bin_check(tr, b)) != 0) {
+			if (! b) {
 				return result;
-			}
-
-			if (! b) {
-				b = as_bin_create(r, rd, op->name, op->name_sz, 0);
-			}
-
-			if (! b) {
-				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed bin create ", ns->name);
-				return AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
 
 			as_bin result_bin;
@@ -3989,18 +3982,18 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 			}
 
 			if (respond_all_ops || as_bin_inuse(&result_bin)) {
-				ops[(*p_n_response_bins)] = op;
+				ops[*p_n_response_bins] = op;
 				response_bins[(*p_n_response_bins)++] = result_bin;
 				append_bin_to_destroy(&result_bin, result_bins, p_n_result_bins);
 			}
 
 			if (! as_bin_inuse(b)) {
 				// TODO - could do better than finding index from name.
-				as_bin_set_empty_shift(rd, as_bin_get_index(rd, op->name, op->name_sz));
+				as_bin_set_empty_shift(rd, as_bin_get_index_from_buf(rd, op->name, op->name_sz));
 			}
 		}
 		else if (op->op == AS_MSG_OP_CDT_READ) {
-			as_bin *b = as_bin_get(rd, op->name, op->name_sz);
+			as_bin *b = as_bin_get_from_buf(rd, op->name, op->name_sz);
 
 			if ((result = write_local_bin_check(tr, b)) != 0) {
 				return result;
@@ -4015,12 +4008,13 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 					return -result;
 				}
 
-				ops[(*p_n_response_bins)] = op;
+				ops[*p_n_response_bins] = op;
 				response_bins[(*p_n_response_bins)++] = result_bin;
 				append_bin_to_destroy(&result_bin, result_bins, p_n_result_bins);
 			}
 			else if (respond_all_ops) {
-				ops[(*p_n_response_bins)++] = op; // skip response bin, leaving it unused
+				ops[*p_n_response_bins] = op;
+				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
 		else {
@@ -4150,25 +4144,30 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 	uint32_t n_cleanup_bins = 0;
 
 	//------------------------------------------------------
-	// Loop over bin ops to affect new bin space, creating
-	// the new record bins to write.
-	//
-
-	int result = write_local_bin_ops(tr, rd, NULL, cleanup_bins, &n_cleanup_bins, db);
-
-	if (result != 0) {
-		write_local_dim_single_bin_unwind(&old_bin, rd->bins, cleanup_bins, n_cleanup_bins);
-		return result;
-	}
-
-	//------------------------------------------------------
-	// Created the new bin to write - apply changes to
-	// metadata in as_index needed for pickling and writing.
+	// Apply changes to metadata in as_index needed for
+	// response, pickling, and writing.
 	//
 
 	index_metadata old_metadata;
 
 	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
+
+	//------------------------------------------------------
+	// Loop over bin ops to affect new bin space, creating
+	// the new record bin to write.
+	//
+
+	int result = write_local_bin_ops(tr, rd, NULL, cleanup_bins, &n_cleanup_bins, db);
+
+	if (result != 0) {
+		write_local_index_metadata_unwind(&old_metadata, r);
+		write_local_dim_single_bin_unwind(&old_bin, rd->bins, cleanup_bins, n_cleanup_bins);
+		return result;
+	}
+
+	//------------------------------------------------------
+	// Created the new bin to write.
+	//
 
 	// Pickle before writing - can't fail after.
 	if (! pickle_all(rd, pickle)) {
@@ -4273,6 +4272,15 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	uint32_t n_cleanup_bins = 0;
 
 	//------------------------------------------------------
+	// Apply changes to metadata in as_index needed for
+	// response, pickling, and writing.
+	//
+
+	index_metadata old_metadata;
+
+	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
+
+	//------------------------------------------------------
 	// Loop over bin ops to affect new bin space, creating
 	// the new record bins to write.
 	//
@@ -4280,13 +4288,13 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	int result = write_local_bin_ops(tr, rd, NULL, cleanup_bins, &n_cleanup_bins, db);
 
 	if (result != 0) {
+		write_local_index_metadata_unwind(&old_metadata, r);
 		write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins, cleanup_bins, n_cleanup_bins);
 		return result;
 	}
 
 	//------------------------------------------------------
-	// Created the new bins to write - apply changes to
-	// metadata in as_index needed for pickling and writing.
+	// Created the new bins to write.
 	//
 
 	// Adjust - find the actual number of new bins.
@@ -4299,18 +4307,15 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 	if (! new_bin_space) {
 		cf_warning(AS_RW, "write_local: failed alloc new as_bin_space");
+		write_local_index_metadata_unwind(&old_metadata, r);
 		write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins, cleanup_bins, n_cleanup_bins);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
-	index_metadata old_metadata;
-
-	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
-
 	// Pickle before writing - can't fail after.
 	if (! pickle_all(rd, pickle)) {
-		write_local_index_metadata_unwind(&old_metadata, r);
 		cf_free(new_bin_space);
+		write_local_index_metadata_unwind(&old_metadata, r);
 		write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins, cleanup_bins, n_cleanup_bins);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
@@ -4326,8 +4331,8 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	if ((result = as_storage_record_close(r, rd)) < 0) {
 		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
 		write_local_pickle_unwind(pickle);
-		write_local_index_metadata_unwind(&old_metadata, r);
 		cf_free(new_bin_space);
+		write_local_index_metadata_unwind(&old_metadata, r);
 		write_local_dim_unwind(old_bins, n_old_bins, new_bins, n_new_bins, cleanup_bins, n_cleanup_bins);
 		return -result;
 	}
@@ -4415,30 +4420,34 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	}
 
 	//------------------------------------------------------
-	// Loop over bin ops to affect new bin space, creating
-	// the new record bins to write.
-	//
-
-	cf_dyn_buf_define_size(particles_db, STACK_PARTICLES_SIZE);
-
-	if ((result = write_local_bin_ops(tr, rd, &particles_db, NULL, NULL, db)) != 0) {
-		cf_dyn_buf_free(&particles_db);
-		return result;
-	}
-
-	//------------------------------------------------------
-	// Created the new bin to write - apply changes to
-	// metadata in as_index needed for pickling and writing.
+	// Apply changes to metadata in as_index needed for
+	// response, pickling, and writing.
 	//
 
 	index_metadata old_metadata;
 
 	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
 
+	//------------------------------------------------------
+	// Loop over bin ops to affect new bin space, creating
+	// the new record bin to write.
+	//
+
+	cf_dyn_buf_define_size(particles_db, STACK_PARTICLES_SIZE);
+
+	if ((result = write_local_bin_ops(tr, rd, &particles_db, NULL, NULL, db)) != 0) {
+		cf_dyn_buf_free(&particles_db);
+		write_local_index_metadata_unwind(&old_metadata, r);
+		return result;
+	}
+
+	//------------------------------------------------------
+	// Created the new bin to write.
+
 	// Pickle before writing - bins may disappear on as_storage_record_close().
 	if (! pickle_all(rd, pickle)) {
-		write_local_index_metadata_unwind(&old_metadata, r);
 		cf_dyn_buf_free(&particles_db);
+		write_local_index_metadata_unwind(&old_metadata, r);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
@@ -4455,8 +4464,8 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 	if (write_result < 0) {
 		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
 		write_local_pickle_unwind(pickle);
-		write_local_index_metadata_unwind(&old_metadata, r);
 		cf_dyn_buf_free(&particles_db);
+		write_local_index_metadata_unwind(&old_metadata, r);
 		return -write_result;
 	}
 
@@ -4539,6 +4548,15 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	}
 
 	//------------------------------------------------------
+	// Apply changes to metadata in as_index needed for
+	// response, pickling, and writing.
+	//
+
+	index_metadata old_metadata;
+
+	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
+
+	//------------------------------------------------------
 	// Loop over bin ops to affect new bin space, creating
 	// the new record bins to write.
 	//
@@ -4547,26 +4565,22 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 	if ((result = write_local_bin_ops(tr, rd, &particles_db, NULL, NULL, db)) != 0) {
 		cf_dyn_buf_free(&particles_db);
+		write_local_index_metadata_unwind(&old_metadata, r);
 		return result;
 	}
 
 	//------------------------------------------------------
-	// Created the new bins to write - apply changes to
-	// metadata in as_index needed for pickling and writing.
+	// Created the new bins to write.
 	//
 
 	// Adjust - find the actual number of new bins.
 	rd->n_bins = as_bin_inuse_count(rd);
 	n_new_bins = (uint32_t)rd->n_bins;
 
-	index_metadata old_metadata;
-
-	write_local_update_index_metadata(tr, increment_generation, &old_metadata, r);
-
 	// Pickle before writing - bins may disappear on as_storage_record_close().
 	if (! pickle_all(rd, pickle)) {
-		write_local_index_metadata_unwind(&old_metadata, r);
 		cf_dyn_buf_free(&particles_db);
+		write_local_index_metadata_unwind(&old_metadata, r);
 		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
@@ -4581,8 +4595,8 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 	if ((result = as_storage_record_close(r, rd)) < 0) {
 		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
 		write_local_pickle_unwind(pickle);
-		write_local_index_metadata_unwind(&old_metadata, r);
 		cf_dyn_buf_free(&particles_db);
+		write_local_index_metadata_unwind(&old_metadata, r);
 		return -result;
 	}
 
@@ -4626,7 +4640,7 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 int
 write_local(as_transaction *tr, write_local_generation *wlg,
-		uint8_t **pickled_buf, size_t *pickled_sz, uint32_t *pickled_void_time,
+		uint8_t **pickled_buf, size_t *pickled_sz,
 		as_rec_props *p_pickled_rec_props, cf_dyn_buf *db)
 {
 	//------------------------------------------------------
@@ -4836,11 +4850,11 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 
 	*pickled_buf = pickle.buf;
 	*pickled_sz = pickle.buf_size;
-	*pickled_void_time = pickle.void_time;
 	p_pickled_rec_props->p_data = pickle.rec_props_data;
 	p_pickled_rec_props->size = pickle.rec_props_size;
 
 	tr->generation = r->generation;
+	tr->void_time = r->void_time;
 
 	// Get set-id before releasing.
 	uint16_t set_id = as_index_get_set_id(r_ref.r);
@@ -5139,7 +5153,7 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 		if (jqe.delete == true)
 			rv = write_delete_local(&tr, false, 0, false);
 		else
-			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0, 0);
+			rv = write_local(&tr, &jqe.wlg, 0, 0, 0, 0);
 
 		cf_detail(AS_RW, "write journal: wrote: rv %d key %"PRIx64,
 				rv, *(uint64_t *)&tr.keyd);
@@ -6114,7 +6128,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 
 		while ((op = as_msg_op_iterate(m, op, &n)) != NULL) {
 			if (op->op == AS_MSG_OP_READ) {
-				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+				as_bin *b = as_bin_get_from_buf(&rd, op->name, op->name_sz);
 
 				if (b || respond_all_ops) {
 					ops[n_bins] = op;
@@ -6122,7 +6136,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 				}
 			}
 			else if (op->op == AS_MSG_OP_CDT_READ) {
-				as_bin *b = as_bin_get(&rd, op->name, op->name_sz);
+				as_bin *b = as_bin_get_from_buf(&rd, op->name, op->name_sz);
 
 				if (b) {
 					as_bin *rb = &result_bins[n_result_bins];

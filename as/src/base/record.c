@@ -522,7 +522,8 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 			as_bin_set_id_from_name_buf(ns, b, name, name_sz);
 		}
 		else {
-			b = as_bin_create(r, rd, name, name_sz, version);
+			// TODO - what if this fails?
+			b = as_bin_create_from_buf(rd, name, name_sz);
 		}
 
 		if (ns->storage_data_in_memory) {

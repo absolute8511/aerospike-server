@@ -926,7 +926,7 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 	if (!rd->ns->ldt_enabled)
 		return 0;
 
-	as_bin * binp           = as_bin_get(rd, (byte *)REC_LDT_CTRL_BIN, strlen(REC_LDT_CTRL_BIN));
+	as_bin * binp           = as_bin_get(rd, REC_LDT_CTRL_BIN);
 	int rv                  = 0;
 	if (!binp) {
 		cf_warning_digest(AS_LDT, &rd->keyd, "as_ldt_parent_storage_set_version: [LDT Control bin not found %s %d]", fname, lineno);
@@ -1022,7 +1022,7 @@ as_ldt_parent_storage_get_version(as_storage_rd *rd, uint64_t *ldt_version, bool
 		return 0;
 
 	// Pull out bin
-	as_bin * binp           = as_bin_get(rd, (byte *)REC_LDT_CTRL_BIN, strlen(REC_LDT_CTRL_BIN));
+	as_bin * binp           = as_bin_get(rd, REC_LDT_CTRL_BIN);
 	int       rv            = 0;
 	if (!binp) {
 		if (as_ldt_record_is_parent(rd->r)) {
@@ -1085,7 +1085,7 @@ as_ldt_subrec_storage_get_digests(as_storage_rd *rd, cf_digest *edigest, cf_dige
 		return -1;
 	}
 
-	as_bin * binp        = as_bin_get(rd, (byte *)SUBREC_PROP_BIN, strlen(SUBREC_PROP_BIN));
+	as_bin * binp        = as_bin_get(rd, SUBREC_PROP_BIN);
 	if (!binp) {
 		cf_debug(AS_LDT, "Property Bin Not found");
 		return -1;
@@ -1500,8 +1500,7 @@ as_ldt_merge_component_is_candidate(as_partition_reservation *rsv, as_record_mer
 int
 as_ldt_record_pickle(ldt_record *lrecord,
 				  uint8_t               ** pickled_buf,
-				  size_t                 * pickled_sz,
-				  uint32_t               * pickled_void_time)
+				  size_t                 * pickled_sz)
 {
 	cf_detail(AS_LDT, "Enter: MULTI_OP: Packing LDT record");
 
@@ -1543,7 +1542,6 @@ as_ldt_record_pickle(ldt_record *lrecord,
 			rw_msg_setup(m[ops], h_tr, &h_tr->keyd,
 							&h_urecord->pickled_buf,
 							h_urecord->pickled_sz,
-							h_urecord->pickled_void_time,
 							&h_urecord->pickled_rec_props,
 							RW_OP_WRITE,
 							h_urecord->ldt_rectype_bits, true);
@@ -1584,7 +1582,6 @@ as_ldt_record_pickle(ldt_record *lrecord,
 			rw_msg_setup(m[ops], c_tr, &c_tr->keyd,
 							&c_urecord->pickled_buf,
 							c_urecord->pickled_sz,
-							c_urecord->pickled_void_time,
 							&c_urecord->pickled_rec_props,
 							RW_OP_WRITE,
 							c_urecord->ldt_rectype_bits, true);
@@ -1617,7 +1614,6 @@ as_ldt_record_pickle(ldt_record *lrecord,
 				ret = msg_fillbuf(m[i], buf, &sz);
 				buf += sz;
 			}
-			*pickled_void_time = 0;
 		}
 	}
 Out:
@@ -1628,7 +1624,6 @@ Out:
 			cf_free(*pickled_buf);
 			*pickled_buf = NULL;
 			*pickled_sz  = 0;
-			*pickled_void_time = 0;
 		}
 	}
 
@@ -1651,7 +1646,7 @@ as_ldt_get_key(char c, as_string *key, char *key_buffer)
 char *
 as_ldt_leaf_getNext(as_storage_rd *rd)
 {
-	as_bin * bb    = as_bin_get(rd, (uint8_t *)"LsrControlBin", 13);
+	as_bin * bb    = as_bin_get(rd, "LsrControlBin");
 	as_val * srMap = as_val_frombin(bb);
 
 	char key_buffer[2]; as_string key;
@@ -1691,7 +1686,7 @@ as_bin_is_ldt_bin(as_map * prop_map)
 as_list *
 as_ldt_leaf_scan(as_storage_rd *rd)
 {
-	as_bin * bb  = as_bin_get(rd, (uint8_t *)"LsrListBin", 10);
+	as_bin * bb  = as_bin_get(rd, "LsrListBin");
 	as_list *sl  = (as_list *)as_val_frombin(bb); 
 	return sl;
 }

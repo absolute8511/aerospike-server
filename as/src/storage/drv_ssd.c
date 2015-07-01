@@ -3202,8 +3202,8 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 				as_bin_set_id_from_name(ns, b, ssd_bin->name);
 			}
 			else {
-				b = as_bin_create(r, &rd, (uint8_t*)ssd_bin->name,
-						strlen(ssd_bin->name), ssd_bin->version);
+				// TODO - what if this fails?
+				b = as_bin_create(&rd, ssd_bin->name);
 			}
 
 			// TODO - what if this fails?

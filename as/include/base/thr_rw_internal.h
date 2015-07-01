@@ -109,6 +109,7 @@ typedef struct write_local_generation {
 typedef struct ldt_prole_info_s {
 	bool        replication_partition_version_match;
 	uint64_t    ldt_source_version;
+	bool        ldt_source_version_set;
 	uint64_t    ldt_prole_version;
 	bool        ldt_prole_version_set;
 } ldt_prole_info;
@@ -133,7 +134,6 @@ extern bool get_msg_key(as_msg* m, as_storage_rd* rd);
 extern void update_metadata_in_index(as_transaction *tr, bool increment_generation, as_index *r);
 
 typedef struct pickle_info_s {
-	uint32_t	void_time;
 	uint8_t*	rec_props_data;
 	uint32_t	rec_props_size;
 	uint8_t*	buf;
@@ -153,7 +153,6 @@ rw_msg_setup(
 	cf_digest *keyd,
 	uint8_t ** p_pickled_buf,
 	size_t pickled_sz,
-	uint32_t pickled_void_time,
 	as_rec_props * p_pickled_rec_props,
 	int op,
 	uint16_t ldt_rectype_bits,

@@ -40,16 +40,17 @@
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/proto.h"
+#include "base/scan.h"
 #include "base/security.h"
 #include "base/thr_batch.h"
 #include "base/thr_info.h"
 #include "base/thr_proxy.h"
-#include "base/thr_scan.h"
 #include "base/thr_write.h"
 #include "base/transaction.h"
 #include "fabric/fabric.h"
 #include "storage/storage.h"
 
+extern int as_query(as_transaction *tr);
 
 // These must all be OFF in production.
 // #define DEBUG 1
@@ -411,7 +412,7 @@ process_transaction(as_transaction *tr)
 				// Has no key or digest, which means it's a either table scan or
 				// a secondary index query. If query options (i.e where clause)
 				// defined then go through as_query path otherwise default to
-				// as_tscan.
+				// as_scan.
 				int rr = 0;
 				if (as_msg_field_get(&msgp->msg,
 						AS_MSG_FIELD_TYPE_INDEX_RANGE) != NULL) {
@@ -434,28 +435,17 @@ process_transaction(as_transaction *tr)
 					cf_debug(AS_TSVC, "Received Scan Request: TrID(%"PRIx64")", tr->trid);
 					// We got a scan, it might be for udfs, no need to know now,
 					// for now, do not free msgp for all the cases. Should take
-					// care of it inside as_tscan.
+					// care of it inside as_scan.
 					if (! as_security_check_data_op(tr, &msgp->msg, ns,
 							is_udf(msgp) ? PERM_UDF_SCAN : PERM_SCAN)) {
 						goto Cleanup;
 					}
 					free_msgp = false;
-					rr = as_tscan(tr);   // <><><> S C A N <><><>
-					// Process the scan return codes:
-					// -1 :: bad parameters
-					// -2 :: internal errors
-					// -3 :: proper response, cluster in migration
-					// -4 :: set name is valid but set doesn't exist
-					// -5 :: unsupported feature (e.g. scans with UDF)
+					rr = as_scan(tr);   // <><><> S C A N <><><>
 					if (rr != 0) {
-						cf_info(AS_TSVC, "Scan failed with error %d", rr);
-						as_transaction_error(tr,
-								 rr == -1 ? AS_PROTO_RESULT_FAIL_NAMESPACE :
-								(rr == -3 ? AS_PROTO_RESULT_FAIL_UNAVAILABLE :
-								(rr == -4 ? AS_PROTO_RESULT_FAIL_NOTFOUND :
-								(rr == -5 ? AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE :
-											AS_PROTO_RESULT_FAIL_UNKNOWN))));
+						as_transaction_error(tr, rr);
 					}
+
 				}
 			} else if (rv == -3) {
 				// Has digest array, is batch - msgp gets freed through cleanup.

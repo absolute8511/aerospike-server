@@ -33,15 +33,33 @@
  *
  */
 
-#include <errno.h>
-
 #include "base/thr_sindex.h"
-#include "base/secondary_index.h"
-#include "base/thr_scan.h"
+
+#include <errno.h>
+#include <limits.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "citrusleaf/alloc.h"
+#include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_clock.h"
 
 #include "ai_obj.h"
 #include "ai_btree.h"
+#include "fault.h"
 #include "hist.h"
+
+#include "base/cfg.h"
+#include "base/datamodel.h"
+#include "base/index.h"
+#include "base/job_manager.h"
+#include "base/monitor.h"
+#include "base/secondary_index.h"
+
+int as_sbld_build(as_sindex* si);
 
 #define RELEASE_ITERATORS(icol) \
 do {                                \
@@ -132,14 +150,14 @@ as_sindex__populate_fn(void *param)
 		as_sindex *si;
 		cf_queue_pop(g_sindex_populate_q, &si, CF_QUEUE_FOREVER);
 		if (si->flag & AS_SINDEX_FLAG_POPULATING) {
-			// Earlier scan to populate index is still going on, push it back
+			// Earlier job to populate index is still going on, push it back
 			// into the queue to look at it later. this is problem only when
 			// there are multiple populating threads currently there is only 1.
 			cf_queue_push(g_sindex_populate_q, &si);
 		} else {
 			cf_debug(AS_SINDEX, "Populating index %s", si->imd->iname);
 			si->flag |= AS_SINDEX_FLAG_POPULATING;
-			as_tscan_sindex_populate(si);
+			as_sbld_build(si);
 		}
 	}
 	return NULL;
@@ -201,7 +219,7 @@ as_sindex__destroy_fn(void *param)
 }
 
 void
-as_sindex_update_defrag_stat(as_sindex *si, uint32_t r, uint64_t start_time_ms)
+as_sindex_update_defrag_stat(as_sindex *si, uint64_t r, uint64_t start_time_ms)
 {
 	cf_atomic64_add(&si->stats.n_deletes,        r);
 	cf_atomic64_add(&si->stats.n_objects,        -r);
@@ -487,16 +505,16 @@ as_sindex_thr_init()
 
 	g_sindex_populate_q = cf_queue_create(sizeof(as_sindex *), true);
 	if (0 != pthread_create(&g_sindex_populate_th, 0, as_sindex__populate_fn, 0)) {
-		cf_crash(AS_INDEX, " Could not create sindex populate thread ");
+		cf_crash(AS_SINDEX, " Could not create sindex populate thread ");
 	}
 
 	g_sindex_destroy_q = cf_queue_create(sizeof(as_sindex *), true);
 	if (0 != pthread_create(&g_sindex_destroy_th, 0, as_sindex__destroy_fn, 0)) {
-		cf_crash(AS_INDEX, " Could not create sindex destroy thread ");
+		cf_crash(AS_SINDEX, " Could not create sindex destroy thread ");
 	}
 
 	if (0 != pthread_create(&g_sindex_defrag_th, 0, as_sindex__defrag_fn, 0)) {
-		cf_crash(AS_INDEX, " Could not create sindex defrag thread ");
+		cf_crash(AS_SINDEX, " Could not create sindex defrag thread ");
 	}
 
 	g_sindex_populateall_done_q = cf_queue_create(sizeof(int), true);
@@ -505,4 +523,274 @@ as_sindex_thr_init()
 	g_sindex_boot_done = false;
 
 	ai_btree_init();
+}
+
+
+
+//==============================================================================
+// Secondary index builder.
+//
+
+// sbld_job - derived class header:
+typedef struct sbld_job_s {
+	// Base object must be first:
+	as_job			_base;
+
+	// Derived class data:
+	as_sindex*		si;
+	uint64_t		si_desync_cnt;
+
+	cf_atomic64		n_reduced;
+} sbld_job;
+
+sbld_job* sbld_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si);
+
+// as_job_manager instance for secondary index builder:
+static as_job_manager g_sbld_manager;
+
+
+//------------------------------------------------
+// Sindex builder public API.
+//
+
+void
+as_sbld_init()
+{
+	// TODO - config for max done?
+	// Initialize with maximum threads since first use is always build-all at
+	// startup. The thread pool will be down-sized right after that.
+	as_job_manager_init(&g_sbld_manager, UINT_MAX, 100, MAX_SINDEX_BUILDER_THREADS);
+}
+
+int
+as_sbld_build(as_sindex* si)
+{
+	as_sindex_metadata *imd = si->imd;
+	as_namespace *ns = as_namespace_get_byname(imd->ns_name);
+
+	if (! ns) {
+		cf_warning(AS_SINDEX, "sindex build %s ns %s - unrecognized namespace", imd->iname, imd->ns_name);
+		as_sindex_populate_done(si);
+		AS_SINDEX_RELEASE(si);
+		return -1;
+	}
+
+	uint16_t set_id = INVALID_SET_ID;
+
+	if (imd->set && (set_id = as_namespace_get_set_id(ns, imd->set)) == INVALID_SET_ID) {
+		cf_warning(AS_SINDEX, "sindex build %s ns %s - set %s not found", imd->iname, imd->ns_name, imd->set);
+		as_sindex_populate_done(si);
+		AS_SINDEX_RELEASE(si);
+		return -3;
+	}
+
+	sbld_job* job = sbld_job_create(ns, set_id, si);
+
+	if (! job) {
+		cf_warning(AS_SINDEX, "sindex build %s ns %s set %s - job alloc failed", imd->iname, imd->ns_name, imd->set);
+		as_sindex_populate_done(si);
+		AS_SINDEX_RELEASE(si);
+		return -2;
+	}
+
+	// Can't fail for this kind of job.
+	as_job_manager_start_job(&g_sbld_manager, (as_job*)job);
+
+	return 0;
+}
+
+int
+as_sbld_build_all(as_namespace* ns)
+{
+	sbld_job* job = sbld_job_create(ns, INVALID_SET_ID, NULL);
+
+	if (! job) {
+		cf_warning(AS_SINDEX, "sindex build-all ns %s - job alloc failed", ns->name);
+		return -2;
+	}
+
+	// Can't fail for this kind of job.
+	as_job_manager_start_job(&g_sbld_manager, (as_job*)job);
+
+	return 0;
+}
+
+void
+as_sbld_resize_thread_pool(uint32_t n_threads)
+{
+	as_job_manager_resize_thread_pool(&g_sbld_manager, n_threads);
+}
+
+int
+as_sbld_list(char* name, cf_dyn_buf* db)
+{
+	as_mon_info_cmd(AS_MON_MODULES[SBLD_MOD], NULL, 0, 0, db);
+	return 0;
+}
+
+as_mon_jobstat*
+as_sbld_get_jobstat(uint64_t trid)
+{
+	return as_job_manager_get_job_info(&g_sbld_manager, trid);
+}
+
+as_mon_jobstat*
+as_sbld_get_jobstat_all(int* size)
+{
+	return as_job_manager_get_info(&g_sbld_manager, size);
+}
+
+int
+as_sbld_abort(uint64_t trid)
+{
+	return as_job_manager_abort_job(&g_sbld_manager, trid) ? 0 : -1;
+}
+
+
+//------------------------------------------------
+// sbld_job derived class implementation.
+//
+
+void sbld_job_slice(as_job* _job, as_partition_reservation* rsv);
+void sbld_job_finish(as_job* _job);
+void sbld_job_destroy(as_job* _job);
+void sbld_job_info(as_job* _job, as_mon_jobstat* stat);
+
+const as_job_vtable sbld_job_vtable = {
+		sbld_job_slice,
+		sbld_job_finish,
+		sbld_job_destroy,
+		sbld_job_info
+};
+
+void sbld_job_reduce_cb(as_index_ref* r_ref, void* udata);
+
+//
+// sbld_job creation.
+//
+
+sbld_job*
+sbld_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
+{
+	sbld_job* job = cf_malloc(sizeof(sbld_job));
+
+	if (! job) {
+		return NULL;
+	}
+
+	as_job_init((as_job*)job, &sbld_job_vtable, &g_sbld_manager,
+			RSV_MIGRATE, 0, ns, set_id, AS_JOB_PRIORITY_MEDIUM);
+
+	job->si = si;
+	job->si_desync_cnt = si ? si->desync_cnt : 0;
+	job->n_reduced = 0;
+
+	return job;
+}
+
+//
+// sbld_job mandatory as_job interface.
+//
+
+void
+sbld_job_slice(as_job* _job, as_partition_reservation* rsv)
+{
+	as_index_reduce(rsv->p->vp, sbld_job_reduce_cb, (void*)_job);
+}
+
+void
+sbld_job_finish(as_job* _job)
+{
+	sbld_job* job = (sbld_job*)_job;
+
+	as_sindex_ticker_done(_job->ns, job->si, _job->start_ms);
+
+	if (job->si) {
+		as_sindex_populate_done(job->si);
+		job->si->stats.loadtime = cf_getms() - _job->start_ms;
+		AS_SINDEX_RELEASE(job->si);
+	}
+	else {
+		as_sindex_boot_populateall_done(_job->ns);
+	}
+}
+
+void
+sbld_job_destroy(as_job* _job)
+{
+}
+
+void
+sbld_job_info(as_job* _job, as_mon_jobstat* stat)
+{
+	sbld_job* job = (sbld_job*)_job;
+
+	if (job->si) {
+		strcpy(stat->job_type, "sindex-build");
+
+		char *extra = stat->jdata + strlen(stat->jdata);
+
+		sprintf(extra, ":sindex-name=%s", job->si->imd->iname);
+	}
+	else {
+		strcpy(stat->job_type, "sindex-build-all");
+	}
+}
+
+//
+// sbld_job utilities.
+//
+
+void
+sbld_job_reduce_cb(as_index_ref* r_ref, void* udata)
+{
+	as_job* _job = (as_job*)udata;
+	sbld_job* job = (sbld_job*)_job;
+	as_namespace* ns = _job->ns;
+
+	if (_job->abandoned != 0) {
+		as_record_done(r_ref, ns);
+		return;
+	}
+
+	if (job->si) {
+		if (! as_sindex_isactive(job->si) || job->si->desync_cnt > job->si_desync_cnt) {
+			as_record_done(r_ref, ns);
+			as_job_manager_abandon_job(_job->mgr, _job, AS_JOB_FAIL_UNKNOWN);
+			return;
+		}
+
+		cf_atomic64_decr(&job->si->stats.recs_pending);
+	}
+
+	as_sindex_ticker(ns, job->si, cf_atomic64_incr(&job->n_reduced), _job->start_ms);
+
+	as_index *r = r_ref->r;
+
+	if ((_job->set_id != INVALID_SET_ID && _job->set_id != as_index_get_set_id(r)) ||
+			as_record_is_expired(r)) {
+		as_record_done(r_ref, ns);
+		return;
+	}
+
+	as_storage_rd rd;
+	as_storage_record_open(ns, r, &rd, &r->key);
+	rd.n_bins = as_bin_get_n_bins(r, &rd);
+	as_bin stack_bins[rd.ns->storage_data_in_memory ? 0 : rd.n_bins];
+	rd.bins = as_bin_get_all(r, &rd, stack_bins);
+
+	if (job->si) {
+		SINDEX_GRLOCK();
+		AS_SINDEX_RESERVE(job->si);
+		SINDEX_GUNLOCK();
+		as_sindex_put_rd(job->si, &rd);
+	}
+	else {
+		as_sindex_putall_rd(ns, &rd);
+	}
+
+	as_storage_record_close(r, &rd);
+	as_record_done(r_ref, ns);
+
+	cf_atomic64_incr(&_job->n_records_read);
 }

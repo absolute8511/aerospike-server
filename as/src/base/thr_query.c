@@ -229,12 +229,19 @@ struct as_query_transaction_s {
 	cf_atomic_int            uit_queued;    				// Throttling: max in flight scan
 	cf_atomic_int            uit_completed; 				// Number of udf transactions successfully completed
 	cf_atomic64			     uit_total_run_time;			// Average transaction processing time for all udf internal transactions
-	// Folllowing elements are big.
-	// Keep them at the end of structure to avoid them while memzeroing qtr
+
+    // Empirically, some of the following fields *still* require memzero
+    // initialization.  Please test with a memset(qtr, 0xff, sizeof(*qtr))
+    // right after allocation before you initialize before moving them
+    // into the uninitialized section.
+    
 	struct ai_obj            bkey;
 	udf_call                 call;     // Record UDF Details
 	as_aggr_call             agg_call; // Stream UDF Details 
 	as_sindex_qctx           qctx;     // Secondary Index details
+
+	// Folllowing elements are big.
+	// Keep them at the end of structure to avoid them while memzeroing qtr
 
 	as_partition_reservation rsv_arr[AS_PARTITIONS];
 };
@@ -1023,6 +1030,7 @@ as_query_netio_finish_cb(void *data, int retcode)
 			cf_atomic32_incr(&qtr->pop_seq_number);
 			cf_detail(AS_QUERY, "Finished sequence number %p->%d", qtr, io->seq);
 			cf_atomic64_add(&qtr->net_io_bytes, io->bb_r->used_sz + 8);
+			QUERY_HIST_INSERT_DATA_POINT(query_net_io_hist, io->start_time);	
 		}
 
 		// If timed out override the decision
@@ -1091,6 +1099,7 @@ as_query__netio(as_query_transaction *qtr, bool final)
 
 	cf_atomic32_incr(&qtr->outstanding_net_io);
 	io.seq         = cf_atomic32_incr(&qtr->push_seq_number);
+	io.start_time  = cf_getns();
 
 	int ret        = as_netio_send(&io, NULL, qtr->blocking);
 	if (ret != AS_NETIO_CONTINUE) {
@@ -1276,8 +1285,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 	as_sindex_bin_data *end   = &qtr->srange->end;
 
 	//TODO: Make it more general to support sindex over multiple bins	
-	as_bin * b = as_bin_get(rd, (uint8_t *)qtr->si->imd->bnames[0],
-							strlen(qtr->si->imd->bnames[0]));
+	as_bin * b = as_bin_get(rd, qtr->si->imd->bnames[0]);
 
 	if (!b) {
 		cf_debug(AS_QUERY , "as_query_record_validation: "
@@ -2260,7 +2268,6 @@ as_query_init()
 	}
 
 	g_config.query_enable_histogram	= false;
-	g_config.qnodes_pre_reserved    = true;
 }
 
 /*
@@ -2637,7 +2644,7 @@ as_query(as_transaction *tr)
 	}
 	// Be aware of the size of qtr
 	// Memset it partially
-	memset(qtr, 0, offsetof(as_query_transaction, bkey));
+	memset(qtr, 0, offsetof(as_query_transaction, rsv_arr));
 	qtr->is_malloc           = true;
 	qtr->inited              = false;
 	qtr->trid                = tr->trid;
@@ -2978,6 +2985,8 @@ as_query_gconfig_default(as_config *c)
 	c->query_req_in_query_thread = 0;
 	c->query_untracked_time_ns   = AS_QUERY_UNTRACKED_TIME;
 
+	c->qnodes_pre_reserved    = true;
+
 	// Aggregation
 	c->udf_runtime_max_memory    = ULONG_MAX;
 	c->udf_runtime_max_gmemory   = ULONG_MAX;
@@ -2996,6 +3005,11 @@ as_query__fill_jobstat(as_query_transaction *qtr, as_mon_jobstat *stat)
 	stat->net_io_bytes  = qtr->net_io_bytes;
 	stat->priority      = qtr->priority;
 
+	// Not implemented:
+	stat->progress_pct    = 0;
+	stat->time_since_done = 0;
+	stat->job_type[0]     = '\0';
+
 	strcpy(stat->ns, qtr->ns->name);
 
 	if (qtr->setname) {
@@ -3005,9 +3019,9 @@ as_query__fill_jobstat(as_query_transaction *qtr, as_mon_jobstat *stat)
 	}
 
 	strcpy(stat->status, "IN_PROGRESS");
-	stat->jdata[0]        = '\0';
+
 	char *specific_data   = stat->jdata;
-	sprintf(specific_data, "indexname=%s:", qtr->si->imd->iname);
+	sprintf(specific_data, ":sindex-name=%s:", qtr->si->imd->iname);
 }
 
 
