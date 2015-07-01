@@ -211,8 +211,9 @@ cf_buf_builder_reserve_internal(cf_buf_builder **bb_r, size_t sz)
 	size_t new_sz = cf_dyn_buf_get_newsize(bb->alloc_sz, bb->used_sz, sz);
 	if (new_sz > bb->alloc_sz) {
 		if (bb->alloc_sz - bb->used_sz < MAX_BACKOFF) {
-			bb = cf_realloc(bb, new_sz);
-			if (!bb)	return(-1);
+			cf_buf_builder	*_t = cf_realloc(bb, new_sz);
+			if (!_t)	return(-1);
+			bb = _t;
 		}
 		else {
 			// Only possible if buffer was reset. Avoids potential expensive
