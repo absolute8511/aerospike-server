@@ -498,7 +498,7 @@ static as_query_transaction * as_query_qtr_alloc()
 
 	pthread_mutex_unlock(&as_query_qtr_pool_mutex);
 
-	cf_rc_reserve(qtr);
+	as_qtr__reserve(qtr, __FILE__, __LINE__);
 	// NB: When in pool qtr always has extra ref count of 1. When in usage
 	// the refcount is always 2. Returns qtr with 2 references .. Ideas is 
 	// to not let the qtr reference go down to 0 given we need it to come 
@@ -854,9 +854,7 @@ as_qtr__reserve(as_query_transaction *qtr, char *fname, int lineno)
 	if (!qtr) {
 		return AS_QUERY_ERR;
 	}
-	pthread_rwlock_wrlock(&g_query_lock);
 	int val = cf_rc_reserve(qtr);
-	pthread_rwlock_unlock(&g_query_lock);
 	cf_detail(AS_QUERY, "Reserved qtr [%s:%d] %p %d ", fname, lineno, qtr, val);
 	return AS_QUERY_OK;
 }
@@ -2002,7 +2000,7 @@ as_qtr_track(as_query_transaction *qtr)
 	if (!qtr->track) {
 		if ((cf_getns() - qtr->start_time) > g_config.query_untracked_time_ns) {
 			qtr->track = true;
-			cf_rc_reserve(qtr);
+			as_qtr__reserve(qtr, __FILE__, __LINE__);
 			int ret = as_query__put_qtr(qtr);
 			if (ret != 0 && ret != AS_QUERY_CONTINUE) {
 				qtr->err       = true;
