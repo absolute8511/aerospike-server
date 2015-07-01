@@ -153,8 +153,7 @@ extern int as_query__queue(as_query_transaction *qtr);
 #define QTR_FAILED(qtr) \
 	((qtr)->abort || (qtr)->err)
 
-//#define AS_QUERY_UNTRACKED_TIME       1000 * 1000 * 1000 // (nanosecond) 1 sec
-#define AS_QUERY_UNTRACKED_TIME       1 // (nanosecond) 1 sec
+#define AS_QUERY_UNTRACKED_TIME       1000 * 1000 * 1000 // (nanosecond) 1 sec
 typedef enum {
 	AS_QUERY_LOOKUP = 0,
 	AS_QUERY_UDF    = 1,
