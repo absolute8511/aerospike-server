@@ -3234,6 +3234,7 @@ pickle_all(as_storage_rd *rd, pickle_info *pickle)
 	}
 
 	pickle->rec_props_data = NULL;
+	pickle->rec_props_size = 0;
 
 	// TODO - we could avoid this copy (and maybe even not do this here at all)
 	// if all callers malloced rdp->rec_props.p_data upstream for hand-off...
