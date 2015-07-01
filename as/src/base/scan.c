@@ -100,14 +100,9 @@ scan_type_str(scan_type type)
 // scan_job - derived classes' public methods.
 //
 
-struct basic_scan_job_s;
-struct basic_scan_job_s* basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id);
-
-struct aggr_scan_job_s;
-struct aggr_scan_job_s* aggr_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id);
-
-struct udf_bg_scan_job_s;
-struct udf_bg_scan_job_s* udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id);
+int basic_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id);
+int aggr_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id);
+int udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id);
 
 //----------------------------------------------------------
 // Non-class-specific utilities.
@@ -172,33 +167,24 @@ as_scan(as_transaction *tr)
 		return result;
 	}
 
-	as_job* _job = NULL;
-
 	switch (get_scan_type(tr)) {
 	case SCAN_TYPE_BASIC:
-		_job = (as_job*)basic_scan_job_create(tr, ns, set_id);
+		result = basic_scan_job_start(tr, ns, set_id);
 		break;
 	case SCAN_TYPE_AGGR:
-		_job = (as_job*)aggr_scan_job_create(tr, ns, set_id);
+		result = aggr_scan_job_start(tr, ns, set_id);
 		break;
 	case SCAN_TYPE_UDF_BG:
-		_job = (as_job*)udf_bg_scan_job_create(tr, ns, set_id);
+		result = udf_bg_scan_job_start(tr, ns, set_id);
 		break;
 	default:
 		cf_warning(AS_SCAN, "can't identify scan type");
-		cf_free(tr->msgp);
-		return AS_PROTO_RESULT_FAIL_PARAMETER;
+		result = AS_PROTO_RESULT_FAIL_PARAMETER;
+		break;
 	}
 
-	if (! _job) {
+	if (result != AS_PROTO_RESULT_OK) {
 		cf_free(tr->msgp);
-		return tr->result_code;
-	}
-
-	if ((result = as_job_manager_start_job(&g_scan_manager, _job)) != 0) {
-		cf_warning(AS_SCAN, "scan job %lu failed to start (%d)", _job->trid,
-				result);
-		as_job_destroy(_job);
 	}
 
 	return result;
@@ -290,7 +276,7 @@ get_scan_ns(as_msg* m, as_namespace** p_ns)
 
 	*p_ns = ns;
 
-	return 0;
+	return AS_PROTO_RESULT_OK;
 }
 
 int
@@ -315,7 +301,7 @@ get_scan_set_id(as_msg* m, as_namespace* ns, uint16_t* p_set_id)
 
 	*p_set_id = set_id;
 
-	return 0;
+	return AS_PROTO_RESULT_OK;
 }
 
 scan_type
@@ -470,7 +456,8 @@ typedef struct conn_scan_job_s {
 	uint64_t		net_io_bytes;
 } conn_scan_job;
 
-void conn_scan_job_init(conn_scan_job* job, as_transaction* tr);
+void conn_scan_job_own_fd(conn_scan_job* job, as_file_handle* fd_h);
+void conn_scan_job_disown_fd(conn_scan_job* job);
 void conn_scan_job_finish(conn_scan_job* job);
 bool conn_scan_job_send_response(conn_scan_job* job, uint8_t* buf, size_t size);
 void conn_scan_job_release_fd(conn_scan_job* job);
@@ -481,15 +468,24 @@ void conn_scan_job_info(conn_scan_job* job, as_mon_jobstat* stat);
 //
 
 void
-conn_scan_job_init(conn_scan_job* job, as_transaction* tr)
+conn_scan_job_own_fd(conn_scan_job* job, as_file_handle* fd_h)
 {
 	pthread_mutex_init(&job->fd_lock, NULL);
 
-	// Take ownership of socket from transaction.
-	job->fd_h = tr->proto_fd_h;
+	job->fd_h = fd_h;
 	job->fd_h->fh_info |= FH_INFO_DONOT_REAP;
 	set_blocking(job->fd_h->fd, true);
-	tr->proto_fd_h = NULL;
+}
+
+void
+conn_scan_job_disown_fd(conn_scan_job* job)
+{
+	// Just undo conn_scan_job_own_fd(), nothing more.
+
+	set_blocking(job->fd_h->fd, false);
+	job->fd_h->fh_info &= ~FH_INFO_DONOT_REAP;
+
+	pthread_mutex_destroy(&job->fd_lock);
 }
 
 void
@@ -597,38 +593,38 @@ cf_vector* bin_names_from_op(as_msg* m, int* result);
 // basic_scan_job public API.
 //
 
-basic_scan_job*
-basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
+int
+basic_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 {
 	basic_scan_job* job = cf_malloc(sizeof(basic_scan_job));
 	as_job* _job = (as_job*)job;
 
 	if (! job) {
 		cf_warning(AS_SCAN, "basic scan job failed alloc");
-		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		return NULL;
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	scan_options options = { 0, false, 100 };
 
 	if (! get_scan_options(&tr->msgp->msg, &options)) {
-		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
 		cf_free(job);
-		return NULL;
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	as_job_init(_job, &basic_scan_job_vtable, &g_scan_manager, RSV_WRITE,
 			tr->trid, ns, set_id, options.priority);
 
+	int result;
+
 	job->cluster_key = as_paxos_get_cluster_key();
 	job->fail_on_cluster_change = options.fail_on_cluster_change;
 	job->no_bin_data = (tr->msgp->msg.info1 & AS_MSG_INFO1_GET_NOBINDATA) != 0;
 	job->sample_pct = options.sample_pct;
-	job->bin_names = bin_names_from_op(&tr->msgp->msg, &tr->result_code);
+	job->bin_names = bin_names_from_op(&tr->msgp->msg, &result);
 
-	if (! job->bin_names && tr->result_code != AS_PROTO_RESULT_OK) {
+	if (! job->bin_names && result != AS_PROTO_RESULT_OK) {
 		as_job_destroy(_job);
-		return NULL;
+		return result;
 	}
 
 	// TODO - detect migrations more rigorously!
@@ -636,15 +632,12 @@ basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 			cf_atomic_int_get(g_config.migrate_progress_send) != 0) {
 		// TODO - was AS_PROTO_RESULT_FAIL_UNAVAILABLE - ok?
 		cf_warning(AS_SCAN, "basic scan job not started - migration");
-		tr->result_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
 		as_job_destroy(_job);
-		return NULL;
+		return AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
 	}
 
-	conn_scan_job_init((conn_scan_job*)job, tr);
-
-	// Normal scans don't need anything in the message beyond here.
-	cf_free(tr->msgp);
+	// Take ownership of socket from transaction.
+	conn_scan_job_own_fd((conn_scan_job*)job, tr->proto_fd_h);
 
 	cf_info(AS_SCAN, "starting basic scan job %lu {%s:%s} priority %u, sample-pct %u%s%s",
 			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
@@ -652,7 +645,18 @@ basic_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 			job->no_bin_data ? ", metadata-only" : "",
 			job->fail_on_cluster_change ? ", fail-on-cluster-change" : "");
 
-	return job;
+	if ((result = as_job_manager_start_job(_job->mgr, _job)) != 0) {
+		cf_warning(AS_SCAN, "basic scan job %lu failed to start (%d)",
+				_job->trid, result);
+		conn_scan_job_disown_fd((conn_scan_job*)job);
+		as_job_destroy(_job);
+		return result;
+	}
+
+	// Normal scans don't need anything in the message beyond here.
+	cf_free(tr->msgp);
+
+	return AS_PROTO_RESULT_OK;
 }
 
 //----------------------------------------------------------
@@ -899,24 +903,22 @@ void aggr_scan_add_val_response(aggr_scan_slice* slice, const as_val* val, bool 
 // aggr_scan_job public API.
 //
 
-aggr_scan_job*
-aggr_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
+int
+aggr_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 {
 	aggr_scan_job* job = cf_malloc(sizeof(aggr_scan_job));
 	as_job* _job = (as_job*)job;
 
 	if (! job) {
 		cf_warning(AS_SCAN, "aggregation scan job failed alloc");
-		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		return NULL;
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	scan_options options = { 0, false, 100 };
 
 	if (! get_scan_options(&tr->msgp->msg, &options)) {
-		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
 		cf_free(job);
-		return NULL;
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	as_job_init(_job, &aggr_scan_job_vtable, &g_scan_manager, RSV_WRITE,
@@ -926,19 +928,30 @@ aggr_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 			&aggr_scan_istream_hooks, &aggr_scan_ostream_hooks, ns,
 			true) != 0) {
 		cf_warning(AS_SCAN, "aggregation scan job failed call init");
-		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
-		return NULL;
+		as_job_destroy(_job);
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	conn_scan_job_init((conn_scan_job*)job, tr);
-
-	job->msgp = tr->msgp;
+	// Take ownership of socket from transaction.
+	conn_scan_job_own_fd((conn_scan_job*)job, tr->proto_fd_h);
 
 	cf_info(AS_SCAN, "starting aggregation scan job %lu {%s:%s} priority %u",
 			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
 			_job->priority);
 
-	return job;
+	int result = as_job_manager_start_job(_job->mgr, _job);
+
+	if (result != 0) {
+		cf_warning(AS_SCAN, "aggregation scan job %lu failed to start (%d)",
+				_job->trid, result);
+		conn_scan_job_disown_fd((conn_scan_job*)job);
+		as_job_destroy(_job);
+		return result;
+	}
+
+	job->msgp = tr->msgp;
+
+	return AS_PROTO_RESULT_OK;
 }
 
 //----------------------------------------------------------
@@ -1213,24 +1226,22 @@ as_scan_get_udf_call(void* req_udata)
 // udf_bg_scan_job public API.
 //
 
-udf_bg_scan_job*
-udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
+int
+udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 {
 	udf_bg_scan_job* job = cf_malloc(sizeof(udf_bg_scan_job));
 	as_job* _job = (as_job*)job;
 
 	if (! job) {
 		cf_warning(AS_SCAN, "udf-bg scan job failed alloc");
-		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		return NULL;
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	scan_options options = { 0, false, 100 };
 
 	if (! get_scan_options(&tr->msgp->msg, &options)) {
-		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
 		cf_free(job);
-		return NULL;
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	as_job_init(_job, &udf_bg_scan_job_vtable, &g_scan_manager, RSV_WRITE,
@@ -1242,14 +1253,26 @@ udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 
 	if (udf_call_init(&job->call, tr) != 0) {
 		cf_warning(AS_SCAN, "udf-bg scan job failed call init");
-		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
-		return NULL;
+		as_job_destroy(_job);
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
+
+	cf_info(AS_SCAN, "starting udf-bg scan job %lu {%s:%s} priority %u",
+			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
+			_job->priority);
+
+	int result = as_job_manager_start_job(_job->mgr, _job);
+
+	if (result != 0) {
+		cf_warning(AS_SCAN, "udf-bg scan job %lu failed to start (%d)",
+				_job->trid, result);
+		as_job_destroy(_job);
+		return result;
 	}
 
 	if (as_msg_send_fin(tr->proto_fd_h->fd, AS_PROTO_RESULT_OK) != 0) {
 		cf_warning(AS_SCAN, "udf-bg scan job error sending fin");
-		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		return NULL;
+		// Nothing more we can do here.
 	}
 
 	tr->proto_fd_h->last_used = cf_getms();
@@ -1258,11 +1281,7 @@ udf_bg_scan_job_create(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 
 	job->msgp = tr->msgp;
 
-	cf_info(AS_SCAN, "starting udf-bg scan job %lu {%s:%s} priority %u",
-			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
-			_job->priority);
-
-	return job;
+	return AS_PROTO_RESULT_OK;
 }
 
 //----------------------------------------------------------
