@@ -578,7 +578,7 @@ as_sbld_build(as_sindex* si)
 	uint16_t set_id = INVALID_SET_ID;
 
 	if (imd->set && (set_id = as_namespace_get_set_id(ns, imd->set)) == INVALID_SET_ID) {
-		cf_warning(AS_SINDEX, "sindex build %s ns %s - set %s not found", imd->iname, imd->ns_name, imd->set);
+		cf_info(AS_SINDEX, "sindex build %s ns %s - set %s not found - assuming empty", imd->iname, imd->ns_name, imd->set);
 		as_sindex_populate_done(si);
 		AS_SINDEX_RELEASE(si);
 		return -3;
