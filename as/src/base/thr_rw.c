@@ -510,7 +510,7 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 		 * this is redundant information. Can be improved by sending
 		 * only 1 and other inferred at the prole side.
 		 */
-		if (ldt_rectype_bits == 0) { 
+		if (ldt_rectype_bits == 0 && p_pickled_rec_props->p_data) {
 			uint16_t *ldt_bits = NULL;
 			as_rec_props_get_value((const as_rec_props *)p_pickled_rec_props, CL_REC_PROPS_FIELD_LDT_TYPE, NULL,
 					(uint8_t**)&ldt_bits);
