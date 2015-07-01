@@ -1151,10 +1151,9 @@ static pthread_t      g_netio_th;
 static pthread_t      g_netio_slow_th;
 static cf_queue     * g_netio_queue      = 0;
 static cf_queue     * g_netio_slow_queue = 0;
-void                * as_query__netio_th(void *q_to_wait_on);
 
 int
-as_query__send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offset, bool blocking)
+as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offset, bool blocking)
 {
 	uint32_t len  = bb_r->used_sz;
 	uint8_t *buf  = bb_r->buf;
@@ -1234,13 +1233,34 @@ as_netio_init()
  * the queues it up to be picked by the asynchronous queueing
  * thread
  *
- * Caller is responsible for freeing up stuff in in the io structure
+ * vtable:
  *
- * qtr related stuff will be taken care of when callback is called.
- * Callback is called upfront to be able check for timeout
+ * start_cb: Callback to the module before the real IO is started.
+ *           it returns the status 
+ *           AS_NETIO_OK: Everythin ok go ahead with IO
+ *           AS_NETIO_ERR: If there was issue like abort/err/timeout etc.
  *
- * In case of success or failure module specific callback is called
- * returns nothing
+ * finish_cb: Callback to the module with the status code of the IO call
+ *            AS_NETIO_OK: Everything went fine
+ *            AS_NETIO_CONTINUE: The IO was requeued. Generally is noop in finish_cb
+ *            AS_NETIO_ERR: IO erred out due to some issue.
+ *
+ *            The function should do the needful like release ref to user
+ *            data etc.
+ *
+ * Return Code:
+ * AS_NETIO_OK: Everything is fine normal code flow. Both the start_cb
+ *              finish were called
+ *
+ * AS_NETIO_ERR: Something failed either in calling module start_cb or 
+ *               while doing network IO. finish_cb is called.
+ *              
+ * Consumption:
+ *     this function consumes qtr reference. It calls finish_cb which releases
+ *     ref to qtr
+ *     In case of AS_NETIO_CONTINUE: This function also consumes bb_r and ref for 
+ *     fd_h. The background thread is responsible for freeing up bb_r and release
+ *     ref to fd_h.
  */
 int
 as_netio_send(as_netio *io, void *q_to_use, bool blocking)
@@ -1250,7 +1270,7 @@ as_netio_send(as_netio *io, void *q_to_use, bool blocking)
 	int ret = io->start_cb(io, io->seq);
 
 	if (ret == AS_NETIO_OK) {
-		ret     = io->finish_cb(io, as_query__send_packet(io->fd_h, io->bb_r, &io->offset, blocking));
+		ret     = io->finish_cb(io, as_netio_send_packet(io->fd_h, io->bb_r, &io->offset, blocking));
 	} 
 	else {
 		ret     = io->finish_cb(io, ret);
