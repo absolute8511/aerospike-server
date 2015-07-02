@@ -155,6 +155,7 @@ typedef int (* as_query_ioreq_cb)
 	((qtr)->abort || (qtr)->err)
 
 #define AS_QUERY_UNTRACKED_TIME       1000 * 1000 * 1000 // (nanosecond) 1 sec
+#define AS_QUERY_WAIT_MAX_TRAN_US     1000
 typedef enum {
 	AS_QUERY_LOOKUP = 0,
 	AS_QUERY_UDF    = 1,
@@ -1563,7 +1564,7 @@ as_internal_query_udf_txn_setup(tr_create_data * d)
 		cf_debug(AS_QUERY, "UDF: scan transactions [%d] exceeded the maximum "
 				"configured limit", qtr->uit_queued);
 
-		usleep(g_config.query_sleep);
+		usleep(AS_QUERY_WAIT_MAX_TRAN_US);
 	}
 
 	as_transaction tr;

@@ -593,6 +593,7 @@ typedef struct as_config_s {
 	cf_atomic_int		stat_nsup_deletes_not_shipped;
 
 	cf_atomic_int		err_tsvc_requests;
+	cf_atomic_int		err_tsvc_requests_timeout;
 	cf_atomic_int		err_out_of_space;
 	cf_atomic_int		err_duplicate_proxy_request;
 	cf_atomic_int		err_rw_request_not_found;
