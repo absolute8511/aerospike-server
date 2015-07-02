@@ -71,35 +71,6 @@
 #include "storage/storage.h"
 #include "fabric/migrate.h"
 
-
-// Per-Transaction Consistency Guarantees:
-//   The client-request consistency guarantee level is respected
-//   unless the corresponding server's namespace override is enabled.
-
-// Extract the read consistency level from an as_msg.
-// [Note:  Not a strict check:  Both bits == 0 means the default, anything else means the alternative.]
-#define PROTO_CONSISTENCY_LEVEL(asmsg)									\
-	((!(asmsg.info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B0)				\
-	  && !(asmsg.info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B1))			\
-	 ? AS_POLICY_CONSISTENCY_LEVEL_ONE : AS_POLICY_CONSISTENCY_LEVEL_ALL)
-
-// Extract the write commit level from an as_msg.
-// [Note:  Not a strict check:  Both bits == 0 means the default, anything else means the alternative.]
-#define PROTO_COMMIT_LEVEL(asmsg)										\
-	((!(asmsg.info3 & AS_MSG_INFO3_COMMIT_LEVEL_B0)						\
-	  && !(asmsg.info3 & AS_MSG_INFO3_COMMIT_LEVEL_B1))					\
-	 ? AS_POLICY_COMMIT_LEVEL_ALL : AS_POLICY_COMMIT_LEVEL_MASTER)
-
-// Determine the read consistency level for this transaction based upon the server's namespace and client policy settings.
-#define TRANSACTION_CONSISTENCY_LEVEL(tr)								\
-	(tr->rsv.ns->read_consistency_level_override						\
-	 ? tr->rsv.ns->read_consistency_level : PROTO_CONSISTENCY_LEVEL(tr->msgp->msg))
-
-// Determine the write commit level for this transaction based upon the server's namespace and client policy settings.
-#define TRANSACTION_COMMIT_LEVEL(tr)									\
-	(tr->rsv.ns->write_commit_level_override							\
-	 ? tr->rsv.ns->write_commit_level : PROTO_COMMIT_LEVEL(tr->msgp->msg))
-
 msg_template rw_mt[] =
 {
 	{ RW_FIELD_OP, M_FT_UINT32 },
@@ -539,7 +510,7 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 		 * this is redundant information. Can be improved by sending
 		 * only 1 and other inferred at the prole side.
 		 */
-		if (ldt_rectype_bits == 0) { 
+		if (ldt_rectype_bits == 0 && p_pickled_rec_props->p_data) {
 			uint16_t *ldt_bits = NULL;
 			as_rec_props_get_value((const as_rec_props *)p_pickled_rec_props, CL_REC_PROPS_FIELD_LDT_TYPE, NULL,
 					(uint8_t**)&ldt_bits);
@@ -3263,6 +3234,7 @@ pickle_all(as_storage_rd *rd, pickle_info *pickle)
 	}
 
 	pickle->rec_props_data = NULL;
+	pickle->rec_props_size = 0;
 
 	// TODO - we could avoid this copy (and maybe even not do this here at all)
 	// if all callers malloced rdp->rec_props.p_data upstream for hand-off...

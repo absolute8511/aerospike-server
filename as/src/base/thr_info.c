@@ -92,6 +92,7 @@
 #define STR_BINTYPE         "bintype"
 
 extern int as_nsup_queue_get_size();
+extern bool g_shutdown_started;
 
 // Use the following macro to enforce locking around Info requests at run-time.
 // (Warning:  This will unnecessarily increase contention and Info request timeouts!)
@@ -4824,6 +4825,8 @@ info_debug_ticker_fn(void *unused)
 
 		if ((g_config.paxos == 0) || (g_config.paxos->ready == false)) {
 			cf_info(AS_INFO, " fabric: cluster not ready yet");
+		} else if (g_shutdown_started) {
+			cf_debug(AS_INFO, "Shutdown in progress. Skipping info ticker");
 		} else {
 
 			uint64_t freemem;

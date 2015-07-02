@@ -427,7 +427,7 @@ as_job_partition_reserve(as_job* _job, int pid, as_partition_reservation* rsv)
 		}
 	}
 	else if (_job->rsv_type == RSV_MIGRATE) {
-		as_partition_reserve_migrate(_job->ns, pid++, rsv, NULL);
+		as_partition_reserve_migrate(_job->ns, pid, rsv, NULL);
 	}
 	else {
 		cf_crash(AS_JOB, "bad job rsv type %d", _job->rsv_type);

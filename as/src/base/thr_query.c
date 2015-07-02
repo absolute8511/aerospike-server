@@ -3100,7 +3100,7 @@ as_query__fill_jobstat(as_query_transaction *qtr, as_mon_jobstat *stat)
 		strcpy(stat->set, "NULL");
 	}
 
-	strcpy(stat->status, "IN_PROGRESS");
+	strcpy(stat->status, "active");
 
 	char *specific_data   = stat->jdata;
 	sprintf(specific_data, ":sindex-name=%s:", qtr->si->imd->iname);

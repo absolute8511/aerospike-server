@@ -149,6 +149,7 @@ const char DEFAULT_CONFIG_FILE[] = "/etc/aerospike/aerospike.conf";
 // The mutex that the main function deadlocks on after starting the service.
 pthread_mutex_t g_NONSTOP;
 bool g_startup_complete = false;
+bool g_shutdown_started = false;
 
 
 //==========================================================
@@ -466,6 +467,7 @@ main(int argc, char **argv)
 	// stop the service (yes, these signals always occur in this thread) will
 	// unlock the mutex, allowing us to continue.
 
+	g_shutdown_started = true;
 	pthread_mutex_unlock(&g_NONSTOP);
 	pthread_mutex_destroy(&g_NONSTOP);
 

@@ -634,16 +634,32 @@ process_transaction(as_transaction *tr)
 			// so that we can process the transaction.
 			node_cluster_key = as_paxos_get_cluster_key();
 			if (node_cluster_key != partition_cluster_key) {
-				// This transaction is NOT READY to be processed. We must set it
-				// aside until the proper cluster state is restored. We queue
-				// this transaction on the "slow queue" to give it time to rest
-				// while the cluster state becomes consistent again.
-				as_partition_release(&tr->rsv);
-				cf_atomic_int_decr(&g_config.rw_tree_count);
-				thr_tsvc_enqueue_slow(tr);
-				ns = NULL;
-				free_msgp = false;
-				goto Cleanup;
+				// First check if the user relaxed the guarantees that he is
+				// expecting from the read or the write. If yes, let the txn go.
+				if (   (msgp->msg.info2 & AS_MSG_INFO2_WRITE) 
+					&& (g_config.write_duplicate_resolution_disable == true)
+					&& (TRANSACTION_COMMIT_LEVEL(tr) == AS_POLICY_COMMIT_LEVEL_MASTER)) {
+
+					cf_detail(AS_TSVC, "Letting the write with mistmatched cluster key (%"PRIx64") and partition key (%"PRIx64")",
+								node_cluster_key, partition_cluster_key);
+				} else if (    (msgp->msg.info1 & AS_MSG_INFO1_READ) 
+							&& (g_config.transaction_repeatable_read == false)
+							&& (TRANSACTION_CONSISTENCY_LEVEL(tr) == AS_POLICY_CONSISTENCY_LEVEL_ONE)) {
+
+					cf_detail(AS_TSVC, "Letting the read with mistmatched cluster key (%"PRIx64") and partition key (%"PRIx64")",
+								node_cluster_key, partition_cluster_key);
+				} else {
+					// This transaction is NOT READY to be processed. We must set it
+					// aside until the proper cluster state is restored. We queue
+					// this transaction on the "slow queue" to give it time to rest
+					// while the cluster state becomes consistent again.
+					as_partition_release(&tr->rsv);
+					cf_atomic_int_decr(&g_config.rw_tree_count);
+					thr_tsvc_enqueue_slow(tr);
+					ns = NULL;
+					free_msgp = false;
+					goto Cleanup;
+				}
 			}
 
 			ns = 0; // got a reservation
