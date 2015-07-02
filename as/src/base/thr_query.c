@@ -184,7 +184,6 @@ struct as_query_transaction_s {
 	bool                     err;   // Internal system err or parameter err
 
 	// bounds and counters
-	int                      loop;
 	uint64_t                 start_time;               // Start time
 	uint64_t                 end_time;                 // timeout value
 	cf_atomic_int            num_records;              // Number of records returned as result
@@ -219,8 +218,6 @@ struct as_query_transaction_s {
 	bool                     track;
 	bool                     done;
 	bool                     blocking;
-	cf_atomic32              partition_reserved;
-	cf_atomic32              partition_released;
 
 	// Record UDF Management
 	cf_atomic_int            uit_queued;    				// Throttling: max in flight scan
@@ -763,17 +760,6 @@ as_query__transaction_done(as_query_transaction *qtr)
 
 	// Release all the qnodes
 	as_query_post_release_qnodes(qtr);
-	uint32_t p_res = cf_atomic32_get(qtr->partition_reserved);
-	uint32_t p_rel = cf_atomic32_get(qtr->partition_released);
-
-	if (p_res != p_rel) {
-		cf_warning(AS_QUERY, "Partition leak by query trid- %"PRIu64" "
-			"Partition reserved %d Partition released %d",qtr->trid, p_res, p_rel);
-	}
-	else {
-		cf_debug(AS_QUERY, "No Partition leak by query trid- %"PRIu64" "
-			"Partition reserved %d Partition released %d",qtr->trid, p_res, p_rel);
-	}
 
 	as_query__update_stats(qtr);
 
@@ -1919,6 +1905,9 @@ as_query__setup_qreq(as_query_request *qreqp, as_query_transaction *qtr)
 		cf_warning(AS_QUERY, "MRJ Query not supported ");
 		// what to do
 	} else if (qtr->job_type == AS_QUERY_UDF) {
+		qtr->uit_queued      = 0;
+		qtr->uit_total_run_time = 0;
+		qtr->uit_completed   = 0;
 		qreqp->type          = AS_QUERY_REQTYPE_UDF;
 	} else {
 		qreqp->type          = AS_QUERY_REQTYPE_IO;
@@ -1977,7 +1966,6 @@ as_query_transaction_init(as_query_transaction *qtr)
 		qtr->priority                 = g_config.query_priority;
 		qtr->bb_r                     = as_query__bb_poolrequest();
 		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
-		qtr->loop                     = 0;
 
 		// Check if bufbuilder request was successful
 		if (!qtr->bb_r) {
@@ -2054,7 +2042,7 @@ as_qtr_check_requeue(as_query_transaction *qtr)
 	}
 	
 	// If the query batch is done then wait for number of outstanding qreq to
-	// finish
+	// finish. This may slow down query responses get the better model
 	if (qtr->done) {
 		if ((cf_atomic32_get(qtr->qreq_in_flight) == 0) 
 				&& (cf_atomic32_get(qtr->outstanding_net_io) == 0)) {
@@ -2126,6 +2114,7 @@ as_query__generator(as_query_transaction *qtr)
 		time_ns                   = cf_getns();
 	}
 
+	int loop = 0;
 	while (true) {
 		// Step 1: Check for timeout
 		as_query__check_timeout(qtr);
@@ -2153,11 +2142,10 @@ as_query__generator(as_query_transaction *qtr)
 		}
 
 		// Step 3: Get Next Batch
-		qtr->loop++;
-
+		loop++;
 		int qret    = as_query__generator_get_nextbatch(qtr);
 
-		cf_detail(AS_QUERY, "Loop=%d, Selected=%d, ret=%d", qtr->loop, qtr->qctx.n_bdigs, qret);
+		cf_detail(AS_QUERY, "Loop=%d, Selected=%d, ret=%d", loop, qtr->qctx.n_bdigs, qret);
 		switch(qret) {
 			case  AS_QUERY_OK:
 			case  AS_QUERY_DONE:
@@ -2608,8 +2596,12 @@ const as_aggr_caller_intf as_query_aggr_caller_qintf = {
 };
 
 
-as_query_transaction *
-as_query_parse_setup(as_transaction *tr)
+/*
+ * Populates valid qtrp in case of success and NULL in case of failure. Return code
+ * to give error type.
+ */
+int
+as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 {
 	if (tr) {
 		QUERY_HIST_INSERT_DATA_POINT(query_txn_q_wait_hist, tr->start_time);
@@ -2623,7 +2615,7 @@ as_query_parse_setup(as_transaction *tr)
 
 	as_msg_field *nsfp = as_msg_field_get(&tr->msgp->msg,
 			AS_MSG_FIELD_TYPE_NAMESPACE);
-	int rv = AS_QUERY_ERR;
+	int rv = AS_QUERY_OK;
 	if (!nsfp) {
 		cf_debug(AS_QUERY,
 				"Query requests must have namespace, client error");
@@ -2700,17 +2692,8 @@ as_query_parse_setup(as_transaction *tr)
 
 	// quick check if there is any data with the certain set name
 	if (setname && as_namespace_get_set_id(ns, setname) == INVALID_SET_ID) {
-		tr->result_code = AS_PROTO_RESULT_OK;
 		cf_info(AS_QUERY, "Query on non-existent set %s", setname);
-		// Send FIN packet to client to ignore this.
-		as_msg_send_fin(tr->proto_fd_h->fd, AS_PROTO_RESULT_OK);
-		if (tr->msgp) {
-			cf_free(tr->msgp);
-			tr->msgp = NULL;
-		}
-		// special case :
-		// add this in the query_fail stat
-		cf_atomic64_incr(&g_config.query_fail);
+		tr->result_code = AS_PROTO_RESULT_OK;
 		rv = AS_QUERY_OK;
 		goto Cleanup;
 	}
@@ -2751,7 +2734,8 @@ as_query_parse_setup(as_transaction *tr)
 		qtr->job_type  = AS_QUERY_LOOKUP;
 		cf_atomic64_incr(&g_config.n_lookup);
 	}
-	return qtr;
+	*qtrp = qtr;
+	return rv;
 
 Cleanup:
 	// Pre Query Setup Failure
@@ -2759,7 +2743,7 @@ Cleanup:
 	if (si)          AS_SINDEX_RELEASE(si);
 	if (srange)      as_sindex_range_free(&srange);
 	if (binlist)     cf_vector_destroy(binlist);
-	return qtr;
+	return rv;
 }
 
 /*
@@ -2781,12 +2765,17 @@ int
 as_query(as_transaction *tr)
 {
 	as_query_transaction *qtr;
-	if (NULL == (qtr = as_query_parse_setup(tr))) {
-		if (tr->msgp)    {
+	int rv = as_query_parse_setup(tr, &qtr);
+	if (qtr == NULL) {
+		if (rv == AS_QUERY_OK) {
+			// Send FIN packet to client to ignore this.
+			as_msg_send_fin(tr->proto_fd_h->fd, AS_PROTO_RESULT_OK);
+		} 
+		if (tr->msgp) {
 			cf_free(tr->msgp);
 			tr->msgp = NULL;
 		}
-		return AS_QUERY_ERR;
+		return rv;
 	}
 
 	// Query is only setup not inited. Some heavy lifting is done
@@ -3246,7 +3235,6 @@ as_query_pre_reserve_qnodes(as_query_transaction * qtr)
 	if (qtr->qctx.qnodes_pre_reserved) {
 		reserved = as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv_arr);
 	}
-	cf_atomic32_add(&qtr->partition_reserved, reserved);
 }
 
 void
@@ -3261,7 +3249,6 @@ as_query_post_release_qnodes(as_query_transaction * qtr)
 			if (qtr->qctx.is_partition_qnode[i]) {
 				as_partition_release(&qtr->rsv_arr[i]);
 				cf_atomic_int_decr(&g_config.dup_tree_count);
-				cf_atomic32_incr(&qtr->partition_released);
 			}
 		}
 	}
