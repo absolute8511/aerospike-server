@@ -101,7 +101,7 @@
 
 // [7] [9-13]  // 6 byte clock
 #define DIGEST_CLOCK_ZERO_BYTE      7
-#define DIGEST_CLOCK_START_BYTE     9 // upto 13  
+#define DIGEST_CLOCK_START_BYTE     9 // upto 13
 
 // [14-19]  // 6 byte version
 #define DIGEST_VERSION_START_POS   14 // upto 19
@@ -198,16 +198,16 @@ typedef struct as_particle_s {
 	uint8_t		data[];
 } __attribute__ ((__packed__)) as_particle;
 
-// Bit Flag constants used for the particle state value (2 bits, 4 values)
+// Bit Flag constants used for the particle state value (4 bits, 16 values)
 #define AS_BIN_STATE_UNUSED			0
 #define AS_BIN_STATE_INUSE_INTEGER	1
 #define AS_BIN_STATE_INUSE_HIDDEN	2 // Denotes a server-side, hidden bin
 #define AS_BIN_STATE_INUSE_OTHER	3
+#define AS_BIN_STATE_INUSE_FLOAT	4
 
 typedef struct as_particle_iparticle_s {
 	uint8_t		version: 4;		// can only be used in multi bin
-	uint8_t		unused: 2;		// can only be used in multi bin
-	uint8_t		state: 2;		// IF 0: unused, IF 1: integer, IF 2: HIDDEN bin, IF 3: inuse, other bin type
+	uint8_t		state: 4;		// see AS_BIN_STATE_...
 	uint8_t		data[];
 } __attribute__ ((__packed__)) as_particle_iparticle;
 
@@ -325,7 +325,6 @@ static inline void
 as_bin_state_set(as_bin *b, uint8_t val)
 {
 	((as_particle_iparticle *)b)->state = val;
-	((as_particle_iparticle *)b)->unused = 0;
 }
 
 static inline void
@@ -339,6 +338,8 @@ as_bin_state_set_from_type(as_bin *b, as_particle_type type)
 		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_INTEGER;
 		break;
 	case AS_PARTICLE_TYPE_FLOAT:
+		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_FLOAT;
+		break;
 	case AS_PARTICLE_TYPE_TIMESTAMP:
 		// TODO - unsupported
 		((as_particle_iparticle *)b)->state = AS_BIN_STATE_UNUSED;
@@ -351,8 +352,6 @@ as_bin_state_set_from_type(as_bin *b, as_particle_type type)
 		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_OTHER;
 		break;
 	}
-
-	((as_particle_iparticle *)b)->unused = 0;
 }
 
 static inline bool
@@ -406,7 +405,8 @@ as_bin_set_all_empty(as_storage_rd *rd) {
 
 static inline bool
 as_bin_is_embedded_particle(const as_bin *b) {
-	return ((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_INTEGER;
+	return ((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_INTEGER ||
+			((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_FLOAT;
 }
 
 static inline as_particle *
@@ -414,30 +414,26 @@ as_bin_get_particle(as_bin *b) {
 	return as_bin_is_embedded_particle(b) ? &b->iparticle : b->particle;
 }
 
-/**
- * Quick test to show if this bin is one of the HIDDEN bins.
- */
 static inline bool
 as_bin_is_hidden(const as_bin *b) {
 	return  (((as_particle_iparticle *)b)->state) == AS_BIN_STATE_INUSE_HIDDEN;
 }
 
-/*
- * Return the type of the particle.  Integers are stored directly, but the other
- * bin types ("other" or "hidden") must follow an indirection to get the
- * actual type.
- */
+// "Embedded" types like integer are stored directly, but other bin types
+// ("other" or "hidden") must follow an indirection to get the actual type.
 static inline uint8_t
 as_bin_get_particle_type(const as_bin *b) {
 	switch (((as_particle_iparticle *)b)->state) {
 		case AS_BIN_STATE_INUSE_INTEGER:
-			return (AS_PARTICLE_TYPE_INTEGER);
+			return AS_PARTICLE_TYPE_INTEGER;
+		case AS_BIN_STATE_INUSE_FLOAT:
+			return AS_PARTICLE_TYPE_FLOAT;
 		case AS_BIN_STATE_INUSE_OTHER:
-			return (b->particle->metadata);
+			return b->particle->metadata;
 		case AS_BIN_STATE_INUSE_HIDDEN:
-			return (b->particle->metadata);
+			return b->particle->metadata;
 		default:
-			return (AS_PARTICLE_TYPE_NULL);
+			return AS_PARTICLE_TYPE_NULL;
 	}
 }
 
