@@ -496,7 +496,7 @@ as_particle_incr_from_wire_float(as_particle_type wire_type, const uint8_t *wire
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	(*(double *)pp) += *(double *)(uint8_t *)&i;
+	(*(double *)pp) += *(double *)&i;
 
 	return 0;
 }
