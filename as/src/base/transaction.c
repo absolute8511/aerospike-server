@@ -367,7 +367,7 @@ as_transaction_error(as_transaction* tr, uint32_t error_code)
 	} else if (tr->udata.req_udata) {
 		if (udf_rw_needcomplete(tr)) {
 			udf_rw_complete(tr, error_code, __FILE__,__LINE__);
-        }
+		}
 	}
 }
 
