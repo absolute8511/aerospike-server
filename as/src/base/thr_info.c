@@ -471,6 +471,8 @@ info_get_stats(char *name, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";err_tsvc_requests=");
 	APPEND_STAT_COUNTER(db, g_config.err_tsvc_requests);
+	cf_dyn_buf_append_string(db, ";err_tsvc_requests_timeout=");
+	APPEND_STAT_COUNTER(db, g_config.err_tsvc_requests_timeout);
 	cf_dyn_buf_append_string(db, ";err_out_of_space=");
 	APPEND_STAT_COUNTER(db, g_config.err_out_of_space);
 	cf_dyn_buf_append_string(db, ";err_duplicate_proxy_request=");

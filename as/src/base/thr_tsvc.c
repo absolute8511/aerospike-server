@@ -704,7 +704,7 @@ process_transaction(as_transaction *tr)
 				goto Cleanup;
 			}
 		} else {
-			// rv != 0 or cluster keys DO NOT MATCH.
+			// rv != 0 (reservation failed) or cluster keys DO NOT MATCH.
 			//
 			// Make sure that if it is shipped op it is not further redirected.
 			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
@@ -751,6 +751,11 @@ process_transaction(as_transaction *tr)
 				cf_debug_digest(AS_PROXY, &(tr->keyd),
 						"proxy REDIRECT (wr) to(%"PRIx64") :", dest);
 				as_proxy_send_redirect(tr->proxy_node, tr->proxy_msg, dest);
+			} else if (tr->udata.req_udata){
+				cf_debug(AS_TSVC,"Internal transaction. Partition reservation failed or cluster key mismatch:%d", rv);
+				if (udf_rw_needcomplete(tr)) {
+					udf_rw_complete(tr, cluster_keys_match ? AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH : AS_PROTO_RESULT_FAIL_UNKNOWN, __FILE__,__LINE__);
+				}
 			}
 			if (free_msgp == true) {
 				cf_free(msgp);

@@ -155,6 +155,7 @@ typedef int (* as_query_ioreq_cb)
 	((qtr)->abort || (qtr)->err)
 
 #define AS_QUERY_UNTRACKED_TIME       1000 * 1000 * 1000 // (nanosecond) 1 sec
+#define AS_QUERY_WAIT_MAX_TRAN_US     1000
 typedef enum {
 	AS_QUERY_LOOKUP = 0,
 	AS_QUERY_UDF    = 1,
