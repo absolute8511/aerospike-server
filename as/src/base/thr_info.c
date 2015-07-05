@@ -2199,7 +2199,7 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";query-threshold=");
 	cf_dyn_buf_append_uint64(db, g_config.query_threshold);
 	cf_dyn_buf_append_string(db, ";query-untracked-time=");
-	cf_dyn_buf_append_uint64(db, g_config.query_untracked_time_ns/1000); // Show it in micro seconds
+	cf_dyn_buf_append_uint64(db, g_config.query_untracked_time_ns/1000000); // Show it in ms seconds
 	cf_dyn_buf_append_string(db, ";pre-reserve-qnodes=");
 	cf_dyn_buf_append_string(db, (g_config.qnodes_pre_reserved) ? "true" : "false");
 
@@ -3074,13 +3074,13 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 		}
 		else if (0 == as_info_parameter_get(params, "query-untracked-time", context, &context_len)) {
 			uint64_t val = atoll(context);
-			cf_debug(AS_INFO, "query-untracked-time = %"PRIu64" micro seconds", val);
+			cf_debug(AS_INFO, "query-untracked-time = %"PRIu64" milli seconds", val);
 			if (val < 0) {
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" micro seconds to %"PRIu64" micro seconds",
-						g_config.query_untracked_time_ns/1000, val);
-			g_config.query_untracked_time_ns = val * 1000;
+			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" milli seconds to %"PRIu64" milli seconds",
+						g_config.query_untracked_time_ns/1000000, val);
+			g_config.query_untracked_time_ns = val * 1000000;
 		}
 		else if (0 == as_info_parameter_get(params, "query-rec-count-bound", context, &context_len)) {
 			uint64_t val = atoll(context);
