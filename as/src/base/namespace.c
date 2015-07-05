@@ -163,6 +163,7 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->sindex_data_max_memory = ULONG_MAX;
 	ns->sindex_data_memory_used = 0;
 	ns->sindex_cfg_var_hash = NULL;
+    ns->sindex_num_partitions = 32;
 
 	//
 	// END - Configuration defaults.

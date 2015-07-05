@@ -297,7 +297,13 @@ typedef enum {
 	CASE_SERVICE_PAXOS_RECOVERY_POLICY,
 	CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD,
 	CASE_SERVICE_PROTO_FD_IDLE_MS,
+	CASE_SERVICE_QUERY_PRIORITY,
+	CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS,
 	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD,
+	CASE_SERVICE_QUERY_BATCH_SIZE,
+	CASE_SERVICE_QUERY_THRESHOLD,
+	CASE_SERVICE_QUERY_UNTRACK_TIME_MS,
+	CASE_SERVICE_QUERY_QNODE_PRE_RESERVE,
 	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET,
 	CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION,
 	CASE_SERVICE_RUN_AS_DAEMON,
@@ -560,6 +566,7 @@ typedef enum {
 
 	// Namespace sindex options:
 	CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY,
+	CASE_NAMESPACE_SINDEX_NUM_PARTITIONS,
 
 	// Mod-lua options:
 	CASE_MOD_LUA_CACHE_ENABLED,
@@ -671,7 +678,13 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "paxos-recovery-policy",			CASE_SERVICE_PAXOS_RECOVERY_POLICY },
 		{ "paxos-retransmit-period",		CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD },
 		{ "proto-fd-idle-ms",				CASE_SERVICE_PROTO_FD_IDLE_MS },
+		{ "query-priority", 				CASE_SERVICE_QUERY_PRIORITY },
+		{ "query-priority-sleep-ms", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS },
 		{ "query-in-transaction-thread",	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD },
+		{ "query-batch-size",				CASE_SERVICE_QUERY_BATCH_SIZE },
+		{ "query-threshold", 				CASE_SERVICE_QUERY_THRESHOLD },
+		{ "query-untracked-time",			CASE_SERVICE_QUERY_UNTRACK_TIME_MS },
+		{ "query-pre-reserve-qnodes", 		CASE_SERVICE_QUERY_QNODE_PRE_RESERVE },
 		{ "replication-fire-and-forget",	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET },
 		{ "respond-client-on-master-completion", CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION },
 		{ "run-as-daemon",					CASE_SERVICE_RUN_AS_DAEMON },
@@ -946,6 +959,7 @@ const cfg_opt NAMESPACE_SI_OPTS[] = {
 
 const cfg_opt NAMESPACE_SINDEX_OPTS[] = {
 		{ "data-max-memory",				CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY },
+		{ "num-partitions",					CASE_NAMESPACE_SINDEX_NUM_PARTITIONS },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -1976,8 +1990,26 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_PROTO_FD_IDLE_MS:
 				c->proto_fd_idle_ms = cfg_int_no_checks(&line);
 				break;
+			case CASE_SERVICE_QUERY_PRIORITY:
+				c->query_priority = cfg_int_no_checks(&line);
+				break;
+			case CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS:
+				c->query_sleep_ns = cfg_u64_no_checks(&line) * 1000000;
+				break;
 			case CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD:
 				c->query_in_transaction_thr = cfg_bool(&line);
+				break;
+			case CASE_SERVICE_QUERY_BATCH_SIZE:
+				c->query_bsize = cfg_int_no_checks(&line);
+				break;
+			case CASE_SERVICE_QUERY_THRESHOLD:
+				c->query_threshold = cfg_int_no_checks(&line);
+				break;
+			case CASE_SERVICE_QUERY_UNTRACK_TIME_MS:
+				c->query_untracked_time_ns = cfg_u64_no_checks(&line) * 1000000;
+				break;
+			case CASE_SERVICE_QUERY_QNODE_PRE_RESERVE:
+				c->qnodes_pre_reserved = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_REPLICATION_FIRE_AND_FORGET:
 				c->replication_fire_and_forget = cfg_bool(&line);
@@ -2829,6 +2861,10 @@ as_config_init(const char *config_file)
 				else {
 					ns->sindex_data_max_memory = config_val; // this is in addition to namespace memory
 				}
+				break;
+			case CASE_NAMESPACE_SINDEX_NUM_PARTITIONS:
+				// FIXME - minimum should be 1, but currently crashes.
+				ns->sindex_num_partitions = cfg_u32(&line, 2, 128);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);
