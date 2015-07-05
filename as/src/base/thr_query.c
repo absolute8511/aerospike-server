@@ -1563,7 +1563,7 @@ as_internal_query_udf_txn_setup(tr_create_data * d)
 		cf_debug(AS_QUERY, "UDF: scan transactions [%d] exceeded the maximum "
 				"configured limit", qtr->uit_queued);
 
-		usleep(g_config.query_sleep);
+		usleep(g_config.query_sleep_ns / 1000);
 	}
 
 	as_transaction tr;
@@ -1644,7 +1644,7 @@ as_query__process_udfreq(as_query_request *qudf)
 			as_internal_query_udf_txn_setup(&d);
 			qtr->yield_count++;
 			if (qtr->yield_count % qtr->priority == 0) {
-				usleep(g_config.query_sleep);
+				usleep(g_config.query_sleep_ns / 1000);
 			}
 		}
 		as_index_keys_release_arr_to_queue(keys_arr);
@@ -1710,7 +1710,7 @@ as_query__process_ioreq(as_query_request *qio)
 
 			if (++qtr->yield_count % qtr->priority == 0)
 			{
-				usleep(g_config.query_sleep);
+				usleep(g_config.query_sleep_ns / 1000);
 				as_query__check_timeout(qtr);
 				if (QTR_FAILED(qtr)) {
 					as_index_keys_release_arr_to_queue(keys_arr);
@@ -2970,7 +2970,7 @@ as_query_gconfig_default(as_config *c)
 	c->query_threads             = 6;
 	c->query_worker_threads      = 15;
 	c->query_priority            = 10;
-	c->query_sleep               = 1;
+	c->query_sleep_ns            = 1000;
 	c->query_bsize               = QUERY_BATCH_SIZE;
 	c->query_job_tracking        = false;
 	c->query_in_transaction_thr  = 0;

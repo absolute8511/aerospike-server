@@ -103,7 +103,7 @@ typedef struct as_config_s {
 	uint32_t			query_threads;
 	uint32_t			query_worker_threads;
 	uint32_t			query_priority;
-	uint32_t			query_sleep;
+	uint64_t			query_sleep_ns;
 	uint32_t			query_bsize;
 	bool				query_job_tracking;
 	bool				query_in_transaction_thr;
@@ -115,7 +115,7 @@ typedef struct as_config_s {
 	uint32_t			query_bufpool_size;
 	uint32_t			query_short_q_max_size;
 	uint32_t			query_long_q_max_size;
-	uint32_t			query_untracked_time_ns;
+	uint64_t			query_untracked_time_ns;
 
 	int					n_transaction_queues;
 	int					n_transaction_threads_per_queue;
