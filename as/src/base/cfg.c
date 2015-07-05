@@ -566,6 +566,7 @@ typedef enum {
 
 	// Namespace sindex options:
 	CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY,
+	CASE_NAMESPACE_SINDEX_NUM_PARTITIONS,
 
 	// Mod-lua options:
 	CASE_MOD_LUA_CACHE_ENABLED,
@@ -958,6 +959,7 @@ const cfg_opt NAMESPACE_SI_OPTS[] = {
 
 const cfg_opt NAMESPACE_SINDEX_OPTS[] = {
 		{ "data-max-memory",				CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY },
+		{ "num-partitions",					CASE_NAMESPACE_SINDEX_NUM_PARTITIONS },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -2859,6 +2861,10 @@ as_config_init(const char *config_file)
 				else {
 					ns->sindex_data_max_memory = config_val; // this is in addition to namespace memory
 				}
+				break;
+			case CASE_NAMESPACE_SINDEX_NUM_PARTITIONS:
+				// FIXME - minimum should be 1, but currently crashes.
+				ns->sindex_num_partitions = cfg_u32(&line, 2, 128);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);

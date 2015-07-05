@@ -1127,6 +1127,7 @@ struct as_namespace_s {
 	shash               *sindex_set_binid_hash;
 	shash				*sindex_iname_hash;
 	uint32_t             binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];
+	uint32_t			sindex_num_partitions;
 
 	// Current state of threshold breaches.
 	cf_atomic32		hwm_breached;

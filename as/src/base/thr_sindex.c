@@ -242,7 +242,7 @@ int
 as_sindex_get_pimd_to_defrag(as_namespace *ns, int *si_index, int *p_index, as_sindex_pmetadata** pimd,
 		as_sindex ** sindex, int *si_defraged)
 {
-	if (*p_index >= NUM_SINDEX_PARTITIONS) {
+	if (*p_index >= ns->sindex_num_partitions) {
 		// pimd reaches max limit. Switch to next si.
 		*p_index = 0;
 		(*si_index)++;
