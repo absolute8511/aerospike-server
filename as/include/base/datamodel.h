@@ -588,7 +588,7 @@ extern int as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m)
 	((c)->flag & AS_COMPONENT_FLAG_LDT_ESR)
 
 #define COMPONENT_IS_LDT_SUB(c) \
-	(((c)->flag & AS_COMPONENT_FLAG_LDT_ESR)        \
+	(((c)->flag & AS_COMPONENT_FLAG_LDT_ESR) \
 		|| ((c)->flag & AS_COMPONENT_FLAG_LDT_SUBREC))
 
 #define COMPONENT_IS_LDT(c) \
@@ -680,7 +680,7 @@ static inline as_partition_id
 as_partition_getid(cf_digest d)
 {
 	return( (as_partition_id) cf_digest_gethash( &d, AS_PARTITION_MASK ) );
-//     return((as_partition_id)((*(as_partition_id *)&d.digest[0]) & AS_PARTITION_MASK));
+//	return((as_partition_id)((*(as_partition_id *)&d.digest[0]) & AS_PARTITION_MASK));
 }
 
 
@@ -702,13 +702,13 @@ struct as_partition_s {
 	bool replica_tx_onsync[AS_CLUSTER_SZ];
 
 	size_t n_dupl;
-	cf_node  dupl_nodes[AS_CLUSTER_SZ];
+	cf_node dupl_nodes[AS_CLUSTER_SZ];
 	bool reject_writes;
 	bool waiting_for_master;
-	cf_node  qnode; 	// point to the node which serves the query at the moment
+	cf_node qnode; 	// point to the node which serves the query at the moment
 	as_partition_vinfo primary_version_info; // the version of the primary partition in the cluster
 	as_partition_vinfo version_info;         // the version of my partition here and now
-	pthread_mutex_t        vinfoset_lock;
+	pthread_mutex_t vinfoset_lock;
 	as_partition_vinfoset vinfoset;
 
 	cf_node old_sl[AS_CLUSTER_SZ];
@@ -716,7 +716,7 @@ struct as_partition_s {
 	uint64_t cluster_key;
 
 	// the number of bytes in the tree below
-	cf_atomic_int	n_bytes_memory; // memory bytes
+	cf_atomic_int n_bytes_memory; // memory bytes
 	// the maximum void time of all records in the tree below
 	cf_atomic_int max_void_time;
 
@@ -740,22 +740,22 @@ struct as_partition_s {
  *     unless you what you are doing
  */
 struct as_partition_reservation_s {
-	as_namespace          *ns;
-	bool                   is_write;
-	bool                   reject_writes;
-	as_partition_state     state;
-	uint8_t                n_dupl;
-	as_partition_id        pid;
-	uint8_t                spare[2];
+	as_namespace			*ns;
+	bool					is_write;
+	bool					reject_writes;
+	as_partition_state		state;
+	uint8_t					n_dupl;
+	as_partition_id			pid;
+	uint8_t					spare[2];
 	/************* 16 byte ******/
-	as_partition           *p;
-	struct as_index_tree_s *tree;
-	uint64_t                cluster_key;
-	as_partition_vinfo      vinfo;
+	as_partition			*p;
+	struct as_index_tree_s	*tree;
+	uint64_t				cluster_key;
+	as_partition_vinfo		vinfo;
 
 	/************* 64 byte *****/
-	struct as_index_tree_s *sub_tree;
-	cf_node                 dupl_nodes[AS_CLUSTER_SZ];
+	struct as_index_tree_s	*sub_tree;
+	cf_node					dupl_nodes[AS_CLUSTER_SZ];
 };
 
 
@@ -791,10 +791,10 @@ typedef struct as_partition_states_s {
 	int 	wait;
 	int		absent;
 	int		undef;
-	int     n_objects;
-	int     n_ref_count;
-	int     n_sub_objects;
-	int     n_sub_ref_count;
+	int		n_objects;
+	int		n_ref_count;
+	int		n_sub_objects;
+	int		n_sub_ref_count;
 } as_partition_states;
 
 /* Partition function declarations */
@@ -1126,7 +1126,7 @@ struct as_namespace_s {
 	cf_atomic_int		sindex_data_memory_used;
 	shash               *sindex_set_binid_hash;
 	shash				*sindex_iname_hash;
-	uint32_t             binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];
+	uint32_t			binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];
 	uint32_t			sindex_num_partitions;
 
 	// Current state of threshold breaches.

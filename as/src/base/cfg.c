@@ -297,13 +297,13 @@ typedef enum {
 	CASE_SERVICE_PAXOS_RECOVERY_POLICY,
 	CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD,
 	CASE_SERVICE_PROTO_FD_IDLE_MS,
+	CASE_SERVICE_QUERY_BATCH_SIZE,
+	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD,
+	CASE_SERVICE_QUERY_PRE_RESERVE_QNODES,
 	CASE_SERVICE_QUERY_PRIORITY,
 	CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS,
-	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD,
-	CASE_SERVICE_QUERY_BATCH_SIZE,
 	CASE_SERVICE_QUERY_THRESHOLD,
-	CASE_SERVICE_QUERY_UNTRACK_TIME_MS,
-	CASE_SERVICE_QUERY_QNODE_PRE_RESERVE,
+	CASE_SERVICE_QUERY_UNTRACKED_TIME,
 	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET,
 	CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION,
 	CASE_SERVICE_RUN_AS_DAEMON,
@@ -678,13 +678,13 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "paxos-recovery-policy",			CASE_SERVICE_PAXOS_RECOVERY_POLICY },
 		{ "paxos-retransmit-period",		CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD },
 		{ "proto-fd-idle-ms",				CASE_SERVICE_PROTO_FD_IDLE_MS },
+		{ "query-batch-size",				CASE_SERVICE_QUERY_BATCH_SIZE },
+		{ "query-in-transaction-thread",	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD },
+		{ "query-pre-reserve-qnodes", 		CASE_SERVICE_QUERY_PRE_RESERVE_QNODES },
 		{ "query-priority", 				CASE_SERVICE_QUERY_PRIORITY },
 		{ "query-priority-sleep-ms", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS },
-		{ "query-in-transaction-thread",	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD },
-		{ "query-batch-size",				CASE_SERVICE_QUERY_BATCH_SIZE },
 		{ "query-threshold", 				CASE_SERVICE_QUERY_THRESHOLD },
-		{ "query-untracked-time",			CASE_SERVICE_QUERY_UNTRACK_TIME_MS },
-		{ "query-pre-reserve-qnodes", 		CASE_SERVICE_QUERY_QNODE_PRE_RESERVE },
+		{ "query-untracked-time",			CASE_SERVICE_QUERY_UNTRACKED_TIME },
 		{ "replication-fire-and-forget",	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET },
 		{ "respond-client-on-master-completion", CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION },
 		{ "run-as-daemon",					CASE_SERVICE_RUN_AS_DAEMON },
@@ -849,7 +849,7 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "high-water-disk-pct",			CASE_NAMESPACE_HIGH_WATER_DISK_PCT },
 		{ "high-water-memory-pct",			CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT },
 		{ "ldt-enabled",					CASE_NAMESPACE_LDT_ENABLED },
-		{ "ldt-gc-rate",                    CASE_NAMESPACE_LDT_GC_RATE },
+		{ "ldt-gc-rate",					CASE_NAMESPACE_LDT_GC_RATE },
 		{ "ldt-page-size",					CASE_NAMESPACE_LDT_PAGE_SIZE },
 		{ "max-ttl",						CASE_NAMESPACE_MAX_TTL },
 		{ "obj-size-hist-max",				CASE_NAMESPACE_OBJ_SIZE_HIST_MAX },
@@ -859,7 +859,7 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "sindex",							CASE_NAMESPACE_SINDEX_BEGIN },
 		{ "single-bin",						CASE_NAMESPACE_SINGLE_BIN },
 		{ "stop-writes-pct",				CASE_NAMESPACE_STOP_WRITES_PCT },
-		{ "write-commit-level-override",    CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE },
+		{ "write-commit-level-override",	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE },
 		{ "demo-read-multiplier",			CASE_NAMESPACE_DEMO_READ_MULTIPLIER },
 		{ "demo-write-multiplier",			CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER },
 		{ "high-water-pct",					CASE_NAMESPACE_HIGH_WATER_PCT },
@@ -1990,26 +1990,26 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_PROTO_FD_IDLE_MS:
 				c->proto_fd_idle_ms = cfg_int_no_checks(&line);
 				break;
+			case CASE_SERVICE_QUERY_BATCH_SIZE:
+				c->query_bsize = cfg_int_no_checks(&line);
+				break;
+			case CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD:
+				c->query_in_transaction_thr = cfg_bool(&line);
+				break;
+			case CASE_SERVICE_QUERY_PRE_RESERVE_QNODES:
+				c->qnodes_pre_reserved = cfg_bool(&line);
+				break;
 			case CASE_SERVICE_QUERY_PRIORITY:
 				c->query_priority = cfg_int_no_checks(&line);
 				break;
 			case CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS:
 				c->query_sleep_ns = cfg_u64_no_checks(&line) * 1000000;
 				break;
-			case CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD:
-				c->query_in_transaction_thr = cfg_bool(&line);
-				break;
-			case CASE_SERVICE_QUERY_BATCH_SIZE:
-				c->query_bsize = cfg_int_no_checks(&line);
-				break;
 			case CASE_SERVICE_QUERY_THRESHOLD:
 				c->query_threshold = cfg_int_no_checks(&line);
 				break;
-			case CASE_SERVICE_QUERY_UNTRACK_TIME_MS:
+			case CASE_SERVICE_QUERY_UNTRACKED_TIME:
 				c->query_untracked_time_ns = cfg_u64_no_checks(&line) * 1000000;
-				break;
-			case CASE_SERVICE_QUERY_QNODE_PRE_RESERVE:
-				c->qnodes_pre_reserved = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_REPLICATION_FIRE_AND_FORGET:
 				c->replication_fire_and_forget = cfg_bool(&line);
