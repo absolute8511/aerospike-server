@@ -3976,7 +3976,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 					break;
 				}
 
-				// ops array is not used on this case.
+				// ops array will not be not used in this case.
 				response_bins[(*p_n_response_bins)++] = *b;
 			}
 		}
