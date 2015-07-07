@@ -3976,7 +3976,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 					break;
 				}
 
-				ops[*p_n_response_bins] = op;
+				ops[*p_n_response_bins] = NULL;
 				response_bins[(*p_n_response_bins)++] = *b;
 			}
 		}
