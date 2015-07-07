@@ -3429,6 +3429,14 @@ check_msg_set_name(as_msg* m, const char* set_name)
 	return true;
 }
 
+// Not a nice way to specify a read-all op - dictated by backward compatibility.
+// Note - must check this before checking for normal read op!
+static inline bool
+op_is_read_all(as_msg_op *op, as_msg *m)
+{
+	return op->name_sz == 0 && op->op == AS_MSG_OP_READ && (m->info1 & AS_MSG_INFO1_GET_ALL) != 0;
+}
+
 int
 write_local_policies(as_transaction *tr, bool *p_must_not_create,
 		bool *p_record_level_replace, bool *p_must_fetch_data,
@@ -3437,6 +3445,8 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
+	bool info1_get_all = (m->info1 & AS_MSG_INFO1_GET_ALL) != 0;
+	bool respond_all_ops = (m->info2 & AS_MSG_INFO2_RESPOND_ALL_OPS) != 0;
 
 	bool must_not_create =
 			(m->info3 & AS_MSG_INFO3_UPDATE_ONLY) ||
@@ -3450,6 +3460,9 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 	bool must_fetch_data = false;
 
 	bool increment_generation = false;
+
+	bool has_read_all_op = false;
+	bool generates_response_bin = false;
 
 	// Loop over ops to check and modify flags.
 	as_msg_op *op = NULL;
@@ -3498,7 +3511,22 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 
 			must_fetch_data = true;
 		}
+		else if (op_is_read_all(op, m)) {
+			if (respond_all_ops) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: read-all op can't have respond-all-ops flag ", ns->name);
+				return AS_PROTO_RESULT_FAIL_PARAMETER;
+			}
+
+			if (has_read_all_op) {
+				cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: can't have more than one read-all op ", ns->name);
+				return AS_PROTO_RESULT_FAIL_PARAMETER;
+			}
+
+			has_read_all_op = true;
+			must_fetch_data = true;
+		}
 		else if (op->op == AS_MSG_OP_READ) {
+			generates_response_bin = true;
 			must_fetch_data = true;
 		}
 		else if (op->op == AS_MSG_OP_CDT_MODIFY) {
@@ -3507,28 +3535,29 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 				return AS_PROTO_RESULT_FAIL_PARAMETER;
 			}
 
+			generates_response_bin = true; // CDT modify may generate a response bin
 			must_fetch_data = true;
 		}
 		else if (op->op == AS_MSG_OP_CDT_READ) {
+			generates_response_bin = true;
 			must_fetch_data = true;
 		}
 	}
 
-	if (p_must_not_create) {
-		*p_must_not_create = must_not_create;
+	if (has_read_all_op && generates_response_bin) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: read-all op can't mix with ops that generate response bins ", ns->name);
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	if (p_record_level_replace) {
-		*p_record_level_replace = record_level_replace;
+	if (info1_get_all && ! has_read_all_op) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: get-all flag set with no read-all op ", ns->name);
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	if (p_must_fetch_data) {
-		*p_must_fetch_data = must_fetch_data;
-	}
-
-	if (p_increment_generation) {
-		*p_increment_generation = increment_generation;
-	}
+	*p_must_not_create = must_not_create;
+	*p_record_level_replace = record_level_replace;
+	*p_must_fetch_data = must_fetch_data;
+	*p_increment_generation = increment_generation;
 
 	return 0;
 }
@@ -3939,6 +3968,18 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 				as_bin_set_empty(&response_bins[(*p_n_response_bins)++]);
 			}
 		}
+		else if (op_is_read_all(op, m)) {
+			for (uint16_t i = 0; i < rd->n_bins; i++) {
+				as_bin *b = &rd->bins[i];
+
+				if (! as_bin_inuse(b)) {
+					break;
+				}
+
+				ops[*p_n_response_bins] = op;
+				response_bins[(*p_n_response_bins)++] = *b;
+			}
+		}
 		else if (op->op == AS_MSG_OP_READ) {
 			as_bin *b = as_bin_get_from_buf(rd, op->name, op->name_sz);
 
@@ -4036,9 +4077,10 @@ write_local_bin_ops(as_transaction *tr, as_storage_rd *rd,
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
 	as_index *r = rd->r;
+	bool has_read_all_op = (m->info1 & AS_MSG_INFO1_GET_ALL) != 0;
 
 	as_msg_op *ops[m->n_ops];
-	as_bin response_bins[m->n_ops];
+	as_bin response_bins[has_read_all_op ? rd->n_bins : m->n_ops];
 	as_bin result_bins[m->n_ops];
 
 	uint32_t n_response_bins = 0;
