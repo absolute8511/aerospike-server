@@ -3976,7 +3976,7 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 					break;
 				}
 
-				ops[*p_n_response_bins] = NULL;
+				// ops array is not used on this case.
 				response_bins[(*p_n_response_bins)++] = *b;
 			}
 		}
@@ -4111,8 +4111,8 @@ write_local_bin_ops(as_transaction *tr, as_storage_rd *rd,
 
 	size_t msg_sz = 0;
 	uint8_t *msgp = (uint8_t *)as_msg_make_response_msg(AS_PROTO_RESULT_OK,
-			r->generation, r->void_time, ops, bins, (uint16_t)n_response_bins, ns,
-			NULL, &msg_sz, tr->trid, NULL);
+			r->generation, r->void_time, has_read_all_op ? NULL : ops, bins,
+			(uint16_t)n_response_bins, ns, NULL, &msg_sz, tr->trid, NULL);
 
 	destroy_stack_bins(result_bins, n_result_bins);
 
