@@ -159,6 +159,7 @@ typedef enum {
 } as_qtr_state;
 
 #define AS_QUERY_UNTRACKED_TIME       1000 * 1000 * 1000 // (nanosecond) 1 sec
+#define AS_QUERY_WAIT_MAX_TRAN_US     1000
 typedef enum {
 	AS_QUERY_LOOKUP = 0,
 	AS_QUERY_UDF    = 1,
@@ -1567,7 +1568,7 @@ as_internal_query_udf_txn_setup(tr_create_data * d)
 		cf_debug(AS_QUERY, "UDF: scan transactions [%d] exceeded the maximum "
 				"configured limit", qtr->uit_queued);
 
-		usleep(g_config.query_sleep);
+		usleep(g_config.query_sleep_us);
 	}
 
 	as_transaction tr;
@@ -1697,7 +1698,7 @@ as_query_process_ioreq(as_query_request *qio)
 
 			if (cf_atomic64_get(qtr->num_records) % qtr->priority == 0)
 			{
-				usleep(g_config.query_sleep);
+				usleep(g_config.query_sleep_us);
 				as_query_check_timeout(qtr);
 				if (as_query_failed(qtr)) {
 					as_index_keys_release_arr_to_queue(keys_arr);
@@ -1999,14 +2000,14 @@ as_query_transaction_init(as_query_transaction *qtr)
 	return 0;
 }
 
-// If any query run from more than g_config.query_untracked_time_ns
+// If any query run from more than g_config.query_untracked_time_ms
 // 		we are going to track it
 // else no.
 int
 as_qtr_track(as_query_transaction *qtr) 
 {
 	if (!qtr->track) {
-		if ((cf_getns() - qtr->start_time) > g_config.query_untracked_time_ns) {
+		if ((cf_getns() - qtr->start_time) > (g_config.query_untracked_time_ms * 1000000)) {
 			qtr->track = true;
 			as_qtr_reserve(qtr, __FILE__, __LINE__);
 			int ret = as_query__put_qtr(qtr);
@@ -3040,7 +3041,7 @@ as_query_gconfig_default(as_config *c)
 	c->query_threads             = 6;
 	c->query_worker_threads      = 15;
 	c->query_priority            = 10;
-	c->query_sleep               = 1;
+	c->query_sleep_us            = 1;
 	c->query_bsize               = QUERY_BATCH_SIZE;
 	c->query_job_tracking        = false;
 	c->query_in_transaction_thr  = 0;
@@ -3053,7 +3054,7 @@ as_query_gconfig_default(as_config *c)
 										// no reason for choosing 10
 	c->query_rec_count_bound     = UINT64_MAX; // Unlimited
 	c->query_req_in_query_thread = 0;
-	c->query_untracked_time_ns   = AS_QUERY_UNTRACKED_TIME;
+	c->query_untracked_time_ms   = AS_QUERY_UNTRACKED_TIME;
 
 	c->qnodes_pre_reserved    = true;
 

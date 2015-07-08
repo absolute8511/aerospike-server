@@ -101,7 +101,7 @@
 
 // [7] [9-13]  // 6 byte clock
 #define DIGEST_CLOCK_ZERO_BYTE      7
-#define DIGEST_CLOCK_START_BYTE     9 // upto 13  
+#define DIGEST_CLOCK_START_BYTE     9 // upto 13
 
 // [14-19]  // 6 byte version
 #define DIGEST_VERSION_START_POS   14 // upto 19
@@ -198,16 +198,16 @@ typedef struct as_particle_s {
 	uint8_t		data[];
 } __attribute__ ((__packed__)) as_particle;
 
-// Bit Flag constants used for the particle state value (2 bits, 4 values)
+// Bit Flag constants used for the particle state value (4 bits, 16 values)
 #define AS_BIN_STATE_UNUSED			0
 #define AS_BIN_STATE_INUSE_INTEGER	1
 #define AS_BIN_STATE_INUSE_HIDDEN	2 // Denotes a server-side, hidden bin
 #define AS_BIN_STATE_INUSE_OTHER	3
+#define AS_BIN_STATE_INUSE_FLOAT	4
 
 typedef struct as_particle_iparticle_s {
 	uint8_t		version: 4;		// can only be used in multi bin
-	uint8_t		unused: 2;		// can only be used in multi bin
-	uint8_t		state: 2;		// IF 0: unused, IF 1: integer, IF 2: HIDDEN bin, IF 3: inuse, other bin type
+	uint8_t		state: 4;		// see AS_BIN_STATE_...
 	uint8_t		data[];
 } __attribute__ ((__packed__)) as_particle_iparticle;
 
@@ -325,7 +325,6 @@ static inline void
 as_bin_state_set(as_bin *b, uint8_t val)
 {
 	((as_particle_iparticle *)b)->state = val;
-	((as_particle_iparticle *)b)->unused = 0;
 }
 
 static inline void
@@ -339,6 +338,8 @@ as_bin_state_set_from_type(as_bin *b, as_particle_type type)
 		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_INTEGER;
 		break;
 	case AS_PARTICLE_TYPE_FLOAT:
+		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_FLOAT;
+		break;
 	case AS_PARTICLE_TYPE_TIMESTAMP:
 		// TODO - unsupported
 		((as_particle_iparticle *)b)->state = AS_BIN_STATE_UNUSED;
@@ -351,8 +352,6 @@ as_bin_state_set_from_type(as_bin *b, as_particle_type type)
 		((as_particle_iparticle *)b)->state = AS_BIN_STATE_INUSE_OTHER;
 		break;
 	}
-
-	((as_particle_iparticle *)b)->unused = 0;
 }
 
 static inline bool
@@ -406,7 +405,8 @@ as_bin_set_all_empty(as_storage_rd *rd) {
 
 static inline bool
 as_bin_is_embedded_particle(const as_bin *b) {
-	return ((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_INTEGER;
+	return ((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_INTEGER ||
+			((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_FLOAT;
 }
 
 static inline as_particle *
@@ -414,30 +414,26 @@ as_bin_get_particle(as_bin *b) {
 	return as_bin_is_embedded_particle(b) ? &b->iparticle : b->particle;
 }
 
-/**
- * Quick test to show if this bin is one of the HIDDEN bins.
- */
 static inline bool
 as_bin_is_hidden(const as_bin *b) {
 	return  (((as_particle_iparticle *)b)->state) == AS_BIN_STATE_INUSE_HIDDEN;
 }
 
-/*
- * Return the type of the particle.  Integers are stored directly, but the other
- * bin types ("other" or "hidden") must follow an indirection to get the
- * actual type.
- */
+// "Embedded" types like integer are stored directly, but other bin types
+// ("other" or "hidden") must follow an indirection to get the actual type.
 static inline uint8_t
 as_bin_get_particle_type(const as_bin *b) {
 	switch (((as_particle_iparticle *)b)->state) {
 		case AS_BIN_STATE_INUSE_INTEGER:
-			return (AS_PARTICLE_TYPE_INTEGER);
+			return AS_PARTICLE_TYPE_INTEGER;
+		case AS_BIN_STATE_INUSE_FLOAT:
+			return AS_PARTICLE_TYPE_FLOAT;
 		case AS_BIN_STATE_INUSE_OTHER:
-			return (b->particle->metadata);
+			return b->particle->metadata;
 		case AS_BIN_STATE_INUSE_HIDDEN:
-			return (b->particle->metadata);
+			return b->particle->metadata;
 		default:
-			return (AS_PARTICLE_TYPE_NULL);
+			return AS_PARTICLE_TYPE_NULL;
 	}
 }
 
@@ -592,7 +588,7 @@ extern int as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m)
 	((c)->flag & AS_COMPONENT_FLAG_LDT_ESR)
 
 #define COMPONENT_IS_LDT_SUB(c) \
-	(((c)->flag & AS_COMPONENT_FLAG_LDT_ESR)        \
+	(((c)->flag & AS_COMPONENT_FLAG_LDT_ESR) \
 		|| ((c)->flag & AS_COMPONENT_FLAG_LDT_SUBREC))
 
 #define COMPONENT_IS_LDT(c) \
@@ -684,7 +680,7 @@ static inline as_partition_id
 as_partition_getid(cf_digest d)
 {
 	return( (as_partition_id) cf_digest_gethash( &d, AS_PARTITION_MASK ) );
-//     return((as_partition_id)((*(as_partition_id *)&d.digest[0]) & AS_PARTITION_MASK));
+//	return((as_partition_id)((*(as_partition_id *)&d.digest[0]) & AS_PARTITION_MASK));
 }
 
 
@@ -706,13 +702,13 @@ struct as_partition_s {
 	bool replica_tx_onsync[AS_CLUSTER_SZ];
 
 	size_t n_dupl;
-	cf_node  dupl_nodes[AS_CLUSTER_SZ];
+	cf_node dupl_nodes[AS_CLUSTER_SZ];
 	bool reject_writes;
 	bool waiting_for_master;
-	cf_node  qnode; 	// point to the node which serves the query at the moment
+	cf_node qnode; 	// point to the node which serves the query at the moment
 	as_partition_vinfo primary_version_info; // the version of the primary partition in the cluster
 	as_partition_vinfo version_info;         // the version of my partition here and now
-	pthread_mutex_t        vinfoset_lock;
+	pthread_mutex_t vinfoset_lock;
 	as_partition_vinfoset vinfoset;
 
 	cf_node old_sl[AS_CLUSTER_SZ];
@@ -720,7 +716,7 @@ struct as_partition_s {
 	uint64_t cluster_key;
 
 	// the number of bytes in the tree below
-	cf_atomic_int	n_bytes_memory; // memory bytes
+	cf_atomic_int n_bytes_memory; // memory bytes
 	// the maximum void time of all records in the tree below
 	cf_atomic_int max_void_time;
 
@@ -744,22 +740,22 @@ struct as_partition_s {
  *     unless you what you are doing
  */
 struct as_partition_reservation_s {
-	as_namespace          *ns;
-	bool                   is_write;
-	bool                   reject_writes;
-	as_partition_state     state;
-	uint8_t                n_dupl;
-	as_partition_id        pid;
-	uint8_t                spare[2];
+	as_namespace			*ns;
+	bool					is_write;
+	bool					reject_writes;
+	as_partition_state		state;
+	uint8_t					n_dupl;
+	as_partition_id			pid;
+	uint8_t					spare[2];
 	/************* 16 byte ******/
-	as_partition           *p;
-	struct as_index_tree_s *tree;
-	uint64_t                cluster_key;
-	as_partition_vinfo      vinfo;
+	as_partition			*p;
+	struct as_index_tree_s	*tree;
+	uint64_t				cluster_key;
+	as_partition_vinfo		vinfo;
 
 	/************* 64 byte *****/
-	struct as_index_tree_s *sub_tree;
-	cf_node                 dupl_nodes[AS_CLUSTER_SZ];
+	struct as_index_tree_s	*sub_tree;
+	cf_node					dupl_nodes[AS_CLUSTER_SZ];
 };
 
 
@@ -795,10 +791,10 @@ typedef struct as_partition_states_s {
 	int 	wait;
 	int		absent;
 	int		undef;
-	int     n_objects;
-	int     n_ref_count;
-	int     n_sub_objects;
-	int     n_sub_ref_count;
+	int		n_objects;
+	int		n_ref_count;
+	int		n_sub_objects;
+	int		n_sub_ref_count;
 } as_partition_states;
 
 /* Partition function declarations */
@@ -1130,7 +1126,8 @@ struct as_namespace_s {
 	cf_atomic_int		sindex_data_memory_used;
 	shash               *sindex_set_binid_hash;
 	shash				*sindex_iname_hash;
-	uint32_t             binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];
+	uint32_t			binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];
+	uint32_t			sindex_num_partitions;
 
 	// Current state of threshold breaches.
 	cf_atomic32		hwm_breached;

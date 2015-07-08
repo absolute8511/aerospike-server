@@ -269,7 +269,7 @@ as_particle_incr_from_wire_int(as_particle_type wire_type, const uint8_t *wire_v
 	case 16: // memcache increment - it's special
 		i = cf_swap_from_be64(*(uint64_t *)wire_value);
 		// For memcache, decrements floor at 0.
-		if ((int64_t)i < 0 && *(uint64_t*)pp + i > *(uint64_t*)pp) {
+		if ((int64_t)i < 0 && *(uint64_t *)pp + i > *(uint64_t *)pp) {
 			*pp = 0;
 			return 0;
 		}
@@ -279,7 +279,7 @@ as_particle_incr_from_wire_int(as_particle_type wire_type, const uint8_t *wire_v
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	(*(uint64_t*)pp) += i;
+	(*(uint64_t *)pp) += i;
 
 	return 0;
 }
@@ -485,18 +485,18 @@ as_particle_incr_from_wire_float(as_particle_type wire_type, const uint8_t *wire
 		return -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
 	}
 
-	double x;
+	uint64_t i;
 
 	switch (value_size) {
 	case 8:
-		x = (double)cf_swap_from_be64(*(uint64_t *)wire_value);
+		i = cf_swap_from_be64(*(uint64_t *)wire_value);
 		break;
 	default:
 		cf_warning(AS_PARTICLE, "unexpected value size %u", value_size);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	(*(double*)pp) += x;
+	(*(double *)pp) += *(double *)&i;
 
 	return 0;
 }

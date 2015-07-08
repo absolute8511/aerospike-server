@@ -103,7 +103,7 @@ typedef struct as_config_s {
 	uint32_t			query_threads;
 	uint32_t			query_worker_threads;
 	uint32_t			query_priority;
-	uint32_t			query_sleep;
+	uint64_t			query_sleep_us;
 	uint32_t			query_bsize;
 	bool				query_job_tracking;
 	bool				query_in_transaction_thr;
@@ -115,7 +115,7 @@ typedef struct as_config_s {
 	uint32_t			query_bufpool_size;
 	uint32_t			query_short_q_max_size;
 	uint32_t			query_long_q_max_size;
-	uint32_t			query_untracked_time_ns;
+	uint64_t			query_untracked_time_ms;
 
 	int					n_transaction_queues;
 	int					n_transaction_threads_per_queue;
@@ -593,6 +593,7 @@ typedef struct as_config_s {
 	cf_atomic_int		stat_nsup_deletes_not_shipped;
 
 	cf_atomic_int		err_tsvc_requests;
+	cf_atomic_int		err_tsvc_requests_timeout;
 	cf_atomic_int		err_out_of_space;
 	cf_atomic_int		err_duplicate_proxy_request;
 	cf_atomic_int		err_rw_request_not_found;

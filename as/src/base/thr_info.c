@@ -471,6 +471,8 @@ info_get_stats(char *name, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";err_tsvc_requests=");
 	APPEND_STAT_COUNTER(db, g_config.err_tsvc_requests);
+	cf_dyn_buf_append_string(db, ";err_tsvc_requests_timeout=");
+	APPEND_STAT_COUNTER(db, g_config.err_tsvc_requests_timeout);
 	cf_dyn_buf_append_string(db, ";err_out_of_space=");
 	APPEND_STAT_COUNTER(db, g_config.err_out_of_space);
 	cf_dyn_buf_append_string(db, ";err_duplicate_proxy_request=");
@@ -2187,7 +2189,7 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";query-batch-size=");
 	cf_dyn_buf_append_uint64(db, g_config.query_bsize);
 	cf_dyn_buf_append_string(db, ";query-sleep=");
-	cf_dyn_buf_append_uint64(db, g_config.query_sleep);
+	cf_dyn_buf_append_uint64(db, g_config.query_sleep_us);	// Show uSec
 	cf_dyn_buf_append_string(db, ";query-job-tracking=");
 	cf_dyn_buf_append_string(db, (g_config.query_job_tracking) ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";query-short-q-max-size=");
@@ -2199,7 +2201,9 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";query-threshold=");
 	cf_dyn_buf_append_uint64(db, g_config.query_threshold);
 	cf_dyn_buf_append_string(db, ";query-untracked-time=");
-	cf_dyn_buf_append_uint64(db, g_config.query_untracked_time_ns/1000); // Show it in micro seconds
+	cf_dyn_buf_append_uint64(db, g_config.query_untracked_time_ms); // Show it in ms seconds
+	cf_dyn_buf_append_string(db, ";pre-reserve-qnodes=");
+	cf_dyn_buf_append_string(db, (g_config.qnodes_pre_reserved) ? "true" : "false");
 
 	return(0);
 }
@@ -3072,13 +3076,13 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 		}
 		else if (0 == as_info_parameter_get(params, "query-untracked-time", context, &context_len)) {
 			uint64_t val = atoll(context);
-			cf_debug(AS_INFO, "query-untracked-time = %"PRIu64" micro seconds", val);
+			cf_debug(AS_INFO, "query-untracked-time = %"PRIu64" milli seconds", val);
 			if (val < 0) {
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" micro seconds to %"PRIu64" micro seconds",
-						g_config.query_untracked_time_ns/1000, val);
-			g_config.query_untracked_time_ns = val * 1000;
+			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" milli seconds to %"PRIu64" milli seconds",
+						g_config.query_untracked_time_ms, val);
+			g_config.query_untracked_time_ms = val;
 		}
 		else if (0 == as_info_parameter_get(params, "query-rec-count-bound", context, &context_len)) {
 			uint64_t val = atoll(context);
@@ -3160,8 +3164,8 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 				cf_warning(AS_INFO, "query_sleep should be a number %s", context);
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of query-sleep from %d to %d ", g_config.query_sleep, val);
-			g_config.query_sleep = val;
+			cf_info(AS_INFO, "Changing value of query-sleep from %"PRIu64" uSec to %"PRIu64" uSec ", g_config.query_sleep_us, val);
+			g_config.query_sleep_us = val;
 		}
 		else if (0 == as_info_parameter_get(params, "query-batch-size", context, &context_len)) {
 			uint64_t val = atoll(context);
@@ -7113,7 +7117,7 @@ as_info_init()
 	as_info_set("node", istr, true);                     // Node ID. Unique 15 character hex string for each node based on the mac address and port.
 	as_info_set("name", istr, false);                    // Alias to 'node'.
 	// Returns list of features supported by this server
-	as_info_set("features", "batch-index;replicas-all;replicas-master;replicas-prole;udf", true);
+	as_info_set("features", "float;batch-index;replicas-all;replicas-master;replicas-prole;udf", true);
 	if (g_config.hb_mode == AS_HB_MODE_MCAST) {
 		sprintf(istr, "%s:%d", g_config.hb_addr, g_config.hb_port);
 		as_info_set("mcast", istr, false);               // Returns the multicast heartbeat address and port used by this server. Only available in multicast heartbeat mode.

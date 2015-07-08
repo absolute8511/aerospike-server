@@ -1406,7 +1406,7 @@ as_sindex_create(as_namespace *ns, as_sindex_metadata *imd, bool user_create)
 		return AS_SINDEX_ERR;
 	}
 
-	imd->nprts  = NUM_SINDEX_PARTITIONS;
+	imd->nprts  = ns->sindex_num_partitions;
 	int id      = chosen_id;
 	si          = &ns->sindex[id];
 	as_sindex_metadata *qimd;

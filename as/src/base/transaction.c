@@ -360,6 +360,13 @@ as_transaction_error(as_transaction* tr, uint32_t error_code)
 			tr->proto_fd_h = 0;
 			MICROBENCHMARK_HIST_INSERT_P(error_hist);
 			cf_atomic_int_incr(&g_config.err_tsvc_requests);
+			if (error_code == AS_PROTO_RESULT_FAIL_TIMEOUT) {
+				cf_atomic_int_incr(&g_config.err_tsvc_requests_timeout);
+			}
+		}
+	} else if (tr->udata.req_udata) {
+		if (udf_rw_needcomplete(tr)) {
+			udf_rw_complete(tr, error_code, __FILE__,__LINE__);
 		}
 	}
 }
