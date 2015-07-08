@@ -980,7 +980,7 @@ aggr_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 
 	if (cf_ll_size(&ll) != 0) {
 		as_result* res = as_result_new();
-		int ret = as_aggr__process(&job->aggr_call, &ll, (void*)&slice, res);
+		int ret = as_aggr_process(&job->aggr_call, &ll, (void*)&slice, res);
 
 		if (ret != 0) {
 			char* rs = as_module_err_string(ret);
