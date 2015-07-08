@@ -105,7 +105,6 @@ typedef struct as_config_s {
 	uint32_t			query_priority;
 	uint64_t			query_sleep_us;
 	uint32_t			query_bsize;
-	bool				query_job_tracking;
 	bool				query_in_transaction_thr;
 	uint64_t			query_buf_size;
 	uint32_t			query_threshold;

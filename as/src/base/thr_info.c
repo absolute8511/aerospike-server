@@ -2190,8 +2190,6 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_uint64(db, g_config.query_bsize);
 	cf_dyn_buf_append_string(db, ";query-sleep=");
 	cf_dyn_buf_append_uint64(db, g_config.query_sleep_us);	// Show uSec
-	cf_dyn_buf_append_string(db, ";query-job-tracking=");
-	cf_dyn_buf_append_string(db, (g_config.query_job_tracking) ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";query-short-q-max-size=");
 	cf_dyn_buf_append_uint64(db, g_config.query_short_q_max_size);
 	cf_dyn_buf_append_string(db, ";query-long-q-max-size=");
