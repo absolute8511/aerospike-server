@@ -109,7 +109,7 @@ typedef struct as_config_s {
 	bool				query_in_transaction_thr;
 	uint64_t			query_buf_size;
 	uint32_t			query_threshold;
-	uint32_t			query_rec_count_bound;
+	uint64_t			query_rec_count_bound;
 	bool				query_req_in_query_thread;
 	uint32_t			query_req_max_inflight;
 	uint32_t			query_bufpool_size;

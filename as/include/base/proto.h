@@ -122,6 +122,7 @@ struct as_file_handle_s;
 #define AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT     212
 #define AS_PROTO_RESULT_FAIL_QUERY_CBERROR     213
 #define AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR   214
+#define AS_PROTO_RESULT_FAIL_QUERY_DUPLICATE   215
 
 
 /* SYNOPSIS
@@ -564,3 +565,4 @@ int as_netio_send(as_netio *io, void *q, bool);
 #define AS_NETIO_OK        0
 #define AS_NETIO_CONTINUE  1
 #define AS_NETIO_ERR       2 
+#define AS_NETIO_IO_ERR    3 

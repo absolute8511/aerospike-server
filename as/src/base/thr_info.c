@@ -3218,18 +3218,6 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			else
 				goto Error;
 		}
-		else if (0 == as_info_parameter_get(params, "query-job-tracking", context, &context_len)) {
-			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
-				cf_info(AS_INFO, "Changing value of query-job-tracking from %s to %s", bool_val[g_config.query_job_tracking], context);
-				as_query_set_job_tracking(true);
-			}
-			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
-				cf_info(AS_INFO, "Changing value of query-job-tracking from %s to %s", bool_val[g_config.query_job_tracking], context);
-				as_query_set_job_tracking(false);
-			}
-			else
-				goto Error;
-		}
 		else if (0 == as_info_parameter_get(params, "query-short-q-max-size", context, &context_len)) {
 			uint64_t val = atoll(context);
 			cf_info(AS_INFO, "query-short-q-max-size = %d", val);

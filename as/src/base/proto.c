@@ -1175,8 +1175,7 @@ as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offse
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
 				cf_warning(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
-				shutdown(fd_h->fd, SHUT_RDWR);
-				return AS_NETIO_ERR;
+				return AS_NETIO_IO_ERR;
 			}
 			if (!blocking && (retry > AS_NETIO_MAX_IO_RETRY)) {
 				*offset = pos;
@@ -1205,10 +1204,7 @@ as_netio_th(void *q_to_wait_on) {
 		if (io.slow) {
 			usleep(g_config.proto_slow_netio_sleep_ms * 1000);
 		}
-		if (as_netio_send(&io, g_netio_slow_queue, false) != AS_NETIO_CONTINUE) {
-			AS_RELEASE_FILE_HANDLE(io.fd_h);
-			cf_buf_builder_free(io.bb_r);
-		};
+		as_netio_send(&io, g_netio_slow_queue, false);
 	}
 }
 
@@ -1276,7 +1272,7 @@ as_netio_send(as_netio *io, void *q_to_use, bool blocking)
 		ret     = io->finish_cb(io, ret);
 	}
     // If needs requeue then requeue it
-	switch(ret) {
+	switch (ret) {
 		case AS_NETIO_CONTINUE:
 			if (!q) {
 				cf_queue_push(g_netio_queue, io);
