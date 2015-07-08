@@ -3247,22 +3247,24 @@ as_config_post_process(as_config *c, const char *config_file)
 		cf_info(AS_CFG, "Rack Aware mode not enabled");
 	}
 
-	// Take necessary steps if specific address is given in service address
-	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0 ) {
-		if (g_config.external_address != NULL){
-			// check external-address is matches with service address
+	cf_info(AS_CFG, "Node id %"PRIx64, c->self_node);
+
+	// Handle specific service address (as opposed to 'any') if configured.
+	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0) {
+		if (g_config.external_address) {
 			if (strcmp(g_config.external_address, g_config.socket.addr) != 0) {
-				cf_crash_nostack(AS_CFG, "external address:%s is not matching with service address:%s",
+				cf_crash_nostack(AS_CFG, "external address '%s' does not match service address '%s'",
 						g_config.external_address, g_config.socket.addr);
 			}
-		} else {
-			// Check if service address is any. If not any then put this address in external address
-			// to avoid updating of service list continuously
+		}
+		else {
+			// Set external address to avoid updating service list continuously.
 			g_config.external_address = g_config.socket.addr;
 		}
 	}
-	if (!g_config.is_external_address_virtual) {
-		// check external-address is matching with given addresses in service list
+
+	if (! g_config.is_external_address_virtual) {
+		// Check if external address matches any address in service list.
 		uint8_t buf[512];
 		cf_ifaddr *ifaddr;
 		int	ifaddr_sz;
@@ -3273,24 +3275,20 @@ as_config_post_process(as_config *c, const char *config_file)
 
 		char *service_str = cf_dyn_buf_strdup(&temp_service_db);
 
-		// check for nulls since strstr on NULLs is undefined
-		if (service_str == NULL || g_config.external_address == NULL) {
-			if (service_str == NULL) {
-				cf_warning(AS_CFG, "no service interface address found");
-			}
-			if (g_config.external_address == NULL) {
-				cf_warning(AS_CFG, "external address is NULL");
-			}
-			cf_crash_nostack(AS_CFG, "shutting down because external address not virtual");
-		} else if (strstr(service_str, g_config.external_address) == NULL) {
-			cf_crash_nostack(AS_CFG, "external address:%s is not matching with any of service addresses:%s",
+		if (! (service_str && g_config.external_address)) {
+			cf_crash_nostack(AS_CFG, "external address '%s' not virtual: services '%s'",
+					g_config.external_address ? g_config.external_address : "null",
+					service_str ? service_str : "null");
+		}
+
+		if (! strstr(service_str, g_config.external_address)) {
+			cf_crash_nostack(AS_CFG, "external address '%s' does not match service addresses '%s'",
 					g_config.external_address, service_str);
 		}
+
 		cf_dyn_buf_free(&temp_service_db);
 		cf_free(service_str);
 	}
-
-	cf_info(AS_CFG, "Node id %"PRIx64, c->self_node);
 }
 
 
