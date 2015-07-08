@@ -43,6 +43,7 @@
 #include "citrusleaf/cf_shash.h"
 
 #include "cf_str.h"
+#include "dynbuf.h"
 #include "fault.h"
 #include "hist.h"
 #include "hist_track.h"
@@ -3244,6 +3245,49 @@ as_config_post_process(as_config *c, const char *config_file)
 	}
 	else {
 		cf_info(AS_CFG, "Rack Aware mode not enabled");
+	}
+
+	// Take necessery steps if specific address is given in service address
+	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0 ) {
+		if (g_config.external_address != NULL){
+			// check external-address is matches with service address
+			if (strcmp(g_config.external_address, g_config.socket.addr) != 0) {
+				cf_crash_nostack(AS_CFG, "external address:%s is not matching with service address:%s",
+						g_config.external_address, g_config.socket.addr);
+			}
+		} else {
+			// Check if service address is any. If not any then put this adress in external address
+			// to avoid updation of service list continuosly
+			g_config.external_address = g_config.socket.addr;
+		}
+	}
+	if (!g_config.is_external_address_virtual) {
+		// check external-address is matching with given addresses in service list
+		uint8_t buf[512];
+		cf_ifaddr *ifaddr;
+		int	ifaddr_sz;
+		cf_ifaddr_get(&ifaddr, &ifaddr_sz, buf, sizeof(buf));
+
+		cf_dyn_buf_define(temp_service_db);
+		build_service_list(ifaddr, ifaddr_sz, &temp_service_db);
+
+		char *service_str = cf_dyn_buf_strdup(&temp_service_db);
+
+		// check for nulls since strstr on NULLs is undefined
+		if (service_str == NULL || g_config.external_address == NULL) {
+			if (service_str == NULL) {
+				cf_warning(AS_CFG, "no service interface address found");
+			}
+			if (g_config.external_address == NULL) {
+				cf_warning(AS_CFG, "external address is NULL");
+			}
+			cf_crash_nostack(AS_CFG, "shutting down because external address not virtual");
+		} else if (strstr(service_str, g_config.external_address) == NULL) {
+			cf_crash_nostack(AS_CFG, "external address:%s is not matching with any of service addresses:%s",
+					g_config.external_address, service_str);
+		}
+		cf_dyn_buf_free(&temp_service_db);
+		cf_free(service_str);
 	}
 
 	cf_info(AS_CFG, "Node id %"PRIx64, c->self_node);

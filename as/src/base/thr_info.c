@@ -5326,39 +5326,6 @@ info_interfaces_static_fn(void *unused)
 
 	cf_info(AS_INFO, " static external network definition ");
 
-	if (!g_config.is_external_address_virtual) {
-		// check external-address is matching with given addresses in service list
-		uint8_t buf[512];
-		cf_ifaddr *ifaddr;
-		int	ifaddr_sz;
-		cf_ifaddr_get(&ifaddr, &ifaddr_sz, buf, sizeof(buf));
-
-		cf_dyn_buf_define(temp_service_db);
-		build_service_list(ifaddr, ifaddr_sz, &temp_service_db);
-
-		char *service_str = cf_dyn_buf_strdup(&temp_service_db);
-
-		// check for nulls since strstr on NULLs is undefined
-		if (service_str == NULL || g_config.external_address == NULL) {
-			if (service_str == NULL) {
-				cf_warning(AS_INFO, "no service interface address found");
-			}
-			if (g_config.external_address == NULL) {
-				cf_warning(AS_INFO, "external address is NULL");
-			}
-			cf_warning(AS_INFO, "shutting down because external address not virtual");
-			extern pthread_mutex_t g_NONSTOP;
-			pthread_mutex_unlock(&g_NONSTOP);
-			// give up thread timeslice
-			sleep(1);
-		} else if (strstr(service_str, g_config.external_address) == NULL) {
-			cf_crash(AS_INFO, "external address:%s is not matching with any of service addresses:%s",
-					g_config.external_address, service_str);
-		}
-		cf_dyn_buf_free(&temp_service_db);
-		cf_free(service_str);
-	}
-
 	// For valid external-address specify the same in service-list
 	cf_dyn_buf_define(service_db);
 	cf_dyn_buf_append_string(&service_db, g_config.external_address);
@@ -7292,21 +7259,6 @@ as_info_init()
 	}
 
 	as_fabric_register_msg_fn(M_TYPE_INFO, info_mt, sizeof(info_mt), info_msg_fn, 0 /* udata */ );
-
-	// Take necessery steps if specific address is given in service address
-	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0 ) {
-		if (g_config.external_address != NULL){
-			// check external-address is matches with service address
-			if (strcmp(g_config.external_address, g_config.socket.addr) != 0) {
-				cf_crash(AS_INFO, "external address:%s is not matching with service address:%s",
-						g_config.external_address, g_config.socket.addr);
-			}
-		} else {
-			// Check if service address is any. If not any then put this adress in external address
-			// to avoid updation of service list continuosly
-			g_config.external_address = g_config.socket.addr;
-		}
-	}
 
 	pthread_t info_interfaces_th;
 	// if there's a statically configured external interface, use this simple function to monitor
