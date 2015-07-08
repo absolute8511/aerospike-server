@@ -3247,7 +3247,7 @@ as_config_post_process(as_config *c, const char *config_file)
 		cf_info(AS_CFG, "Rack Aware mode not enabled");
 	}
 
-	// Take necessery steps if specific address is given in service address
+	// Take necessary steps if specific address is given in service address
 	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0 ) {
 		if (g_config.external_address != NULL){
 			// check external-address is matches with service address
@@ -3256,8 +3256,8 @@ as_config_post_process(as_config *c, const char *config_file)
 						g_config.external_address, g_config.socket.addr);
 			}
 		} else {
-			// Check if service address is any. If not any then put this adress in external address
-			// to avoid updation of service list continuosly
+			// Check if service address is any. If not any then put this address in external address
+			// to avoid updating of service list continuously
 			g_config.external_address = g_config.socket.addr;
 		}
 	}
