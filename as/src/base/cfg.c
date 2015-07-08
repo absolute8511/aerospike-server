@@ -57,6 +57,7 @@
 #include "base/proto.h"
 #include "base/secondary_index.h"
 #include "base/security_config.h"
+#include "base/thr_info.h"
 #include "base/transaction_policy.h"
 #include "fabric/migrate.h"
 
