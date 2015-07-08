@@ -43,6 +43,7 @@
 #include "citrusleaf/cf_shash.h"
 
 #include "cf_str.h"
+#include "dynbuf.h"
 #include "fault.h"
 #include "hist.h"
 #include "hist_track.h"
@@ -3247,6 +3248,47 @@ as_config_post_process(as_config *c, const char *config_file)
 	}
 
 	cf_info(AS_CFG, "Node id %"PRIx64, c->self_node);
+
+	// Handle specific service address (as opposed to 'any') if configured.
+	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0) {
+		if (g_config.external_address) {
+			if (strcmp(g_config.external_address, g_config.socket.addr) != 0) {
+				cf_crash_nostack(AS_CFG, "external address '%s' does not match service address '%s'",
+						g_config.external_address, g_config.socket.addr);
+			}
+		}
+		else {
+			// Set external address to avoid updating service list continuously.
+			g_config.external_address = g_config.socket.addr;
+		}
+	}
+
+	if (! g_config.is_external_address_virtual) {
+		// Check if external address matches any address in service list.
+		uint8_t buf[512];
+		cf_ifaddr *ifaddr;
+		int	ifaddr_sz;
+		cf_ifaddr_get(&ifaddr, &ifaddr_sz, buf, sizeof(buf));
+
+		cf_dyn_buf_define(temp_service_db);
+		build_service_list(ifaddr, ifaddr_sz, &temp_service_db);
+
+		char *service_str = cf_dyn_buf_strdup(&temp_service_db);
+
+		if (! (service_str && g_config.external_address)) {
+			cf_crash_nostack(AS_CFG, "external address '%s' not virtual: services '%s'",
+					g_config.external_address ? g_config.external_address : "null",
+					service_str ? service_str : "null");
+		}
+
+		if (! strstr(service_str, g_config.external_address)) {
+			cf_crash_nostack(AS_CFG, "external address '%s' does not match service addresses '%s'",
+					g_config.external_address, service_str);
+		}
+
+		cf_dyn_buf_free(&temp_service_db);
+		cf_free(service_str);
+	}
 }
 
 
