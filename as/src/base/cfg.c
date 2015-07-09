@@ -3264,7 +3264,7 @@ as_config_post_process(as_config *c, const char *config_file)
 		}
 	}
 
-	if (! g_config.is_external_address_virtual) {
+	if (g_config.external_address && ! g_config.is_external_address_virtual) {
 		// Check if external address matches any address in service list.
 		uint8_t buf[512];
 		cf_ifaddr *ifaddr;
