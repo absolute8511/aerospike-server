@@ -501,8 +501,10 @@ rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd, uint16_t ld
 	msg_set_buf(m, RW_FIELD_VINFOSET, (uint8_t *)&tr->rsv.p->version_info, sizeof(as_partition_vinfo), MSG_SET_COPY);
 	cf_detail_digest(AS_RW, keyd,
 			"MULTI_OP : Set Up Replication Message for the LDT current outgoing "
-			" migrate version %ld for partition %d", tr->rsv.p->current_outgoing_ldt_version, tr->rsv.p->partition_id);
-	msg_set_uint64(m, RW_FIELD_LDT_VERSION, tr->rsv.p->current_outgoing_ldt_version); 
+			" migrate version %ld for partition %d %d", tr->rsv.p->current_outgoing_ldt_version, tr->rsv.p->partition_id, ldt_rectype_bits);
+	if (tr->rsv.p->current_outgoing_ldt_version != 0) {
+		msg_set_uint64(m, RW_FIELD_LDT_VERSION, tr->rsv.p->current_outgoing_ldt_version);
+	}
 }
 
 int
@@ -2408,18 +2410,21 @@ as_ldt_set_prole_subrec_version(cf_digest *keyd, as_partition_reservation *rsv,
 			if (linfo->replication_partition_version_match) {
 				if (linfo->ldt_prole_version_set) {
 					// ldt_version should be set
+					cf_debug_digest(AS_RW, keyd, "Has Set %d type Version %ld from %ld for %s", type, linfo->ldt_prole_version, as_ldt_subdigest_getversion(keyd), (info & RW_INFO_LDT_ESR) ? "esr" : "subrec");
 					as_ldt_subdigest_setversion(keyd, linfo->ldt_prole_version);
 					cf_detail_digest(AS_RW, keyd, "Set Prole Version %ld", linfo->ldt_prole_version);
 					type = 1;
 				} else {
-					cf_detail_digest(AS_RW, keyd, "No Parent record setting source version for subrecord");
+					cf_debug_digest(AS_RW, keyd, "No Parent record setting source version for subrecord");
 					type = 2;
 				}
-			} else {
+			} else if (linfo->ldt_source_version_set) {
 				// ldt_version should be set as source
+				cf_debug_digest(AS_RW, keyd, "Has Set %d type Version %ld from %ld for %s", type, linfo->ldt_source_version, as_ldt_subdigest_getversion(keyd), (info & RW_INFO_LDT_ESR) ? "esr" : "subrec");
 				as_ldt_subdigest_setversion(keyd, linfo->ldt_source_version);
+			} else {
+				cf_debug_digest(AS_RW, keyd, "Has skipped %d type Version %ld from %ld for %s", type, linfo->ldt_source_version, as_ldt_subdigest_getversion(keyd), (info & RW_INFO_LDT_ESR) ? "esr" : "subrec");
 			}
-			cf_detail_digest(AS_RW, keyd, "Has %d type Version %ld for %s", type, as_ldt_subdigest_getversion(keyd), (info & RW_INFO_LDT_ESR) ? "esr" : "subrec");
 		}
 	}
 	return 0;
@@ -2555,6 +2560,9 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		}
 		cf_detail_digest(AS_LDT, keyd, "Wrote the destination version match %s set version (%ld) out of prole (%d:%ld) source(%ld)", 
 						linfo->replication_partition_version_match ? "true" : "false", version_to_set, linfo->ldt_prole_version_set, linfo->ldt_prole_version, linfo->ldt_source_version);
+	} else {
+		cf_detail_digest(AS_LDT, keyd, "Wrote the destination version match %s set version (%ld) out of prole (%d:%ld) source(%ld)",
+						linfo->replication_partition_version_match ? "true" : "false", version_to_set, linfo->ldt_prole_version_set, linfo->ldt_prole_version, linfo->ldt_source_version);
 	}
 
 Out:
@@ -2601,6 +2609,7 @@ int
 as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv) 
 {
 	linfo->ldt_source_version = 0;
+	linfo->ldt_source_version_set = false;
 	linfo->ldt_prole_version_set = false;
 	linfo->replication_partition_version_match = false;
 
@@ -2610,7 +2619,7 @@ as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv)
 	if (0 != msg_get_buf(m, RW_FIELD_VINFOSET, (byte **) &source_partition_version, 
 			&vinfo_sz, MSG_GET_DIRECT)) {
 		not_found++;
-		cf_detail(AS_RW, "MULTI_OP: Message Without Partition Version");
+		cf_debug(AS_LDT, "MULTI_OP: Message Without Partition Version");
 	} else {
 		linfo->replication_partition_version_match = as_partition_vinfo_same(source_partition_version, &rsv->p->version_info);
 /*
@@ -2634,8 +2643,9 @@ as_rw_get_ldt_info(ldt_prole_info *linfo, msg *m, as_partition_reservation *rsv)
 	}
 
 	if (0 != msg_get_uint64(m, RW_FIELD_LDT_VERSION, &linfo->ldt_source_version)) {
-		not_found++;
-		cf_info(AS_RW, "MULTI_OP: Message Without LDT source version Field");
+		cf_debug(AS_RW, "MULTI_OP: Message Without LDT source version Field");
+	} else {
+		linfo->ldt_source_version_set = true;
 	}
 	cf_detail(AS_RW, "MULTI_OP: LDT Info [%ld %d %d]", linfo->ldt_source_version, linfo->ldt_prole_version_set, linfo->replication_partition_version_match);
 	return not_found;

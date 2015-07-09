@@ -132,6 +132,7 @@ void write_local_post_processing(
 typedef struct ldt_prole_info_s {
 	bool        replication_partition_version_match;
 	uint64_t    ldt_source_version;
+	bool        ldt_source_version_set;
 	uint64_t    ldt_prole_version;
 	bool        ldt_prole_version_set;
 } ldt_prole_info;
