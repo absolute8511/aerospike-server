@@ -1572,7 +1572,6 @@ as_ldt_record_pickle(ldt_record *lrecord,
 				continue;
 			}
 
-
 			bool reset_flag = true;
 			if (UDF_OP_IS_DELETE(c_urecord->op)) {
 				// Fake it as delete

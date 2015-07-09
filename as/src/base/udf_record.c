@@ -324,6 +324,7 @@ udf_record_init(udf_record *urecord)
 	as_rec_props_clear(&urecord->pickled_rec_props);
 
 	urecord->ldt_rectype_bits   = 0;
+	urecord->op                 = UDF_OPTYPE_READ;
 	urecord->keyd               = cf_digest_zero;
 	urecord->op                 = UDF_OPTYPE_READ;
 	for (uint32_t i = 0; i < UDF_RECORD_BIN_ULIMIT; i++) {
