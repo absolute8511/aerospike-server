@@ -3276,15 +3276,10 @@ as_config_post_process(as_config *c, const char *config_file)
 
 		char *service_str = cf_dyn_buf_strdup(&temp_service_db);
 
-		if (! (service_str && g_config.external_address)) {
-			cf_crash_nostack(AS_CFG, "external address '%s' not virtual: services '%s'",
-					g_config.external_address ? g_config.external_address : "null",
-					service_str ? service_str : "null");
-		}
-
-		if (! strstr(service_str, g_config.external_address)) {
+		if (! (service_str && strstr(service_str, g_config.external_address))) {
 			cf_crash_nostack(AS_CFG, "external address '%s' does not match service addresses '%s'",
-					g_config.external_address, service_str);
+					g_config.external_address,
+					service_str ? service_str : "null");
 		}
 
 		cf_dyn_buf_free(&temp_service_db);
