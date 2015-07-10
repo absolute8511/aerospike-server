@@ -26,6 +26,7 @@
 #include <stdint.h>
 
 #include "dynbuf.h"
+#include "socket.h"
 #include "util.h"
 
 #include "base/transaction.h"
@@ -55,3 +56,5 @@ extern int as_info_init();
 
 // The info port is used by more basic monitoring services.
 extern int as_info_port_start();
+
+extern void build_service_list(cf_ifaddr *ifaddr, int ifaddr_sz, cf_dyn_buf *db);
