@@ -2565,6 +2565,7 @@ as_query(as_transaction *tr)
 			cf_free(tr->msgp);
 			tr->msgp = NULL;
 		}
+		return rv;
 	} else if (rv == AS_QUERY_ERR) {
 		if (tr->msgp) {
 			cf_free(tr->msgp);
