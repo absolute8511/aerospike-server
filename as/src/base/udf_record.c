@@ -110,10 +110,6 @@ udf_storage_record_open(udf_record *urecord)
 		urecord->lrecord->subrec_io++;
 	}
 
-	urecord->ldt_rectype_bits = as_ldt_record_get_rectype_bits(r);
-	cf_detail(AS_RW, "TO URECORD FROM INDEX Digest=%"PRIx64" bits %d %p",
-			  *(uint64_t *)&urecord->tr->keyd.digest[8], urecord->ldt_rectype_bits, urecord);
-
 	cf_detail_digest(AS_UDF, &tr->keyd, "Storage Open: Rec(%p) flag(%x) Digest:", urecord, urecord->flag );
 	if (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) {
 		as_ldt_subrec_storage_validate(rd, "Reading");
@@ -306,6 +302,7 @@ udf_record_init(udf_record *urecord)
 	urecord->r_ref              = NULL;
 	urecord->rd                 = NULL;
 	urecord->nupdates           = 0;
+	urecord->ldt_rectype_bit_update   = 0;
 	urecord->particle_data      = NULL;
 	urecord->cur_particle_data  = NULL;
 	urecord->end_particle_data  = NULL;
@@ -321,7 +318,6 @@ udf_record_init(udf_record *urecord)
 
 	as_rec_props_clear(&urecord->pickled_rec_props);
 
-	urecord->ldt_rectype_bits   = 0;
 	urecord->op                 = UDF_OPTYPE_READ;
 	urecord->keyd               = cf_digest_zero;
 	for (uint32_t i = 0; i < UDF_RECORD_BIN_ULIMIT; i++) {
@@ -776,10 +772,10 @@ udf_record_set_flags(const as_rec * rec, const char * name, uint8_t flags)
  * flag (with a negative bits value).
  */
 static int
-udf_record_set_type(const as_rec * rec,  int8_t ldt_rectype_bits)
+udf_record_set_type(const as_rec * rec,  int8_t ldt_rectype_bit_update)
 {
-	if (!rec || !ldt_rectype_bits) {
-		cf_warning(AS_UDF, "Invalid Paramters: record=%p rec_type_bits=%d", rec, ldt_rectype_bits);
+	if (!rec || !ldt_rectype_bit_update) {
+		cf_warning(AS_UDF, "Invalid Paramters: record=%p rec_type_bits=%d", rec, ldt_rectype_bit_update);
 		return 2;
 	}
 	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
@@ -788,8 +784,8 @@ udf_record_set_type(const as_rec * rec,  int8_t ldt_rectype_bits)
 	}
 
 	if (!udf_record_ldt_enabled(rec)
-			&& (as_ldt_flag_has_parent(ldt_rectype_bits)
-				|| as_ldt_flag_has_sub(ldt_rectype_bits))) {
+			&& (as_ldt_flag_has_parent(ldt_rectype_bit_update)
+				|| as_ldt_flag_has_sub(ldt_rectype_bit_update))) {
 		cf_warning(AS_LDT, "Cannot Set Large Object Bits .. Not Enabled !!");
 		return -2;
 	}
@@ -799,9 +795,9 @@ udf_record_set_type(const as_rec * rec,  int8_t ldt_rectype_bits)
 		return -1;
 	}
 
-	urecord->ldt_rectype_bits = ldt_rectype_bits;
+	urecord->ldt_rectype_bit_update = ldt_rectype_bit_update;
 	cf_detail(AS_RW, "TO URECORD FROM LUA   Digest=%"PRIx64" bits %d",
-			  *(uint64_t *)&urecord->rd->keyd.digest[8], urecord->ldt_rectype_bits);
+			  *(uint64_t *)&urecord->rd->keyd.digest[8], urecord->ldt_rectype_bit_update);
 
 	urecord->flag |= UDF_RECORD_FLAG_METADATA_UPDATED;
 
