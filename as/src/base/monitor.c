@@ -262,7 +262,8 @@ as_mon_set_priority(const char *module, uint64_t id, uint32_t priority, cf_dyn_b
 static const char *
 old_status_str(const char* new_str)
 {
-	if (strcmp(new_str, "active") == 0) {
+	if (strncmp(new_str, "active", 6) == 0) {
+		// Note - we'll treat active(<abandoned-reason>) like active(ok) here.
 		return "IN PROGRESS";
 	}
 
@@ -276,7 +277,7 @@ old_status_str(const char* new_str)
 	}
 
 	// Should never get here.
-	return "UNKNOWN";
+	return new_str;
 }
 
 /*
