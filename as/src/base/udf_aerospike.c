@@ -650,13 +650,13 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 		}
 	}
 
-	if (urecord->ldt_rectype_bits) {
-		if (urecord->ldt_rectype_bits < 0) {
-			// ldt_rectype_bits is negative in case we want to reset the bits 
-			uint8_t rectype_bits = urecord->ldt_rectype_bits * -1; 
+	if (urecord->ldt_rectype_bit_update) {
+		if (urecord->ldt_rectype_bit_update < 0) {
+			// ldt_rectype_bit_update is negative in case we want to reset the bits 
+			uint8_t rectype_bits = urecord->ldt_rectype_bit_update * -1; 
 			new_index_flags = old_index_flags & ~rectype_bits;
 		} else { 
-			new_index_flags = old_index_flags | urecord->ldt_rectype_bits;  
+			new_index_flags = old_index_flags | urecord->ldt_rectype_bit_update;  
 		} 
 
 		if (new_index_flags != old_index_flags) {
@@ -716,6 +716,7 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 		// Set up record to be flushed to storage
 		urecord->rd->write_to_device = true;
 	}
+	urecord->ldt_rectype_bit_update = 0;
 
 	// Clean up oldvalue cache and reset dirty. All the changes made 
 	// here has made to the particle buffer. Nothing will now be backed out.
@@ -764,6 +765,7 @@ Rollback:
 		as_index_set_flags(rd->r, old_index_flags);
 		is_record_flag_dirty = false;
 	}
+	urecord->ldt_rectype_bit_update = 0;
 
 	if (has_sindex) {
 		SINDEX_GUNLOCK();

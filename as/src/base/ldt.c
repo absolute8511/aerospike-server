@@ -1548,7 +1548,7 @@ as_ldt_record_pickle(ldt_record *lrecord,
 							h_urecord->pickled_void_time,
 							&h_urecord->pickled_rec_props,
 							RW_OP_WRITE,
-							h_urecord->ldt_rectype_bits, true);
+							true, false);
 			buflen = 0;
 			msg_fillbuf(m[ops], NULL, &buflen);
 			sz += buflen;
@@ -1566,7 +1566,6 @@ as_ldt_record_pickle(ldt_record *lrecord,
 				ret = -3;
 				goto Out;
 			}
-			cf_detail(AS_LDT, "MULTI_OP: Packing Write for LDT SUB Record %d", c_urecord->ldt_rectype_bits);
 			if (UDF_OP_IS_READ(c_urecord->op)) {
 				// Skip Reads
 				continue;
@@ -1589,7 +1588,7 @@ as_ldt_record_pickle(ldt_record *lrecord,
 							c_urecord->pickled_void_time,
 							&c_urecord->pickled_rec_props,
 							RW_OP_WRITE,
-							c_urecord->ldt_rectype_bits, true);
+							true, true);
 
 			if (reset_flag) {
 				c_tr->msgp->msg.info2 &= ~AS_MSG_INFO2_DELETE;

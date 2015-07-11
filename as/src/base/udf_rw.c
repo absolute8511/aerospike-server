@@ -863,7 +863,6 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 		wr->pickled_sz       = 0;
 		wr->pickled_void_time   = 0;
 		as_rec_props_clear(&wr->pickled_rec_props);
-		wr->ldt_rectype_bits = h_urecord->ldt_rectype_bits;
 		*lrecord_op  = UDF_OPTYPE_DELETE;
 	} else {
 
@@ -920,7 +919,6 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 			wr->pickled_sz        = h_urecord->pickled_sz;
 			wr->pickled_void_time = h_urecord->pickled_void_time;
 			wr->pickled_rec_props = h_urecord->pickled_rec_props;
-			wr->ldt_rectype_bits = h_urecord->ldt_rectype_bits;
 			udf_record_cleanup(h_urecord, false);
 		}
 	}

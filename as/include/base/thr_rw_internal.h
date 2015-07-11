@@ -166,6 +166,6 @@ rw_msg_setup(
 	uint32_t pickled_void_time,
 	as_rec_props * p_pickled_rec_props,
 	int op,
-	uint16_t ldt_rectype_bits,
-	bool has_udf
+	bool has_udf,
+	bool is_subrec
 	);
