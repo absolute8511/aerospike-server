@@ -64,6 +64,7 @@ typedef struct udf_record_s {
 	as_bin				stack_bins[256];
 
 	// UDF CHANGE CACHE
+	int8_t				ldt_rectype_bit_update; // ESR  / LDT / PARENT LDT / NOTHING
 	udf_record_bin		updates[UDF_RECORD_BIN_ULIMIT]; // stores cache bin value
                                                         // if ditry is set modified bins. internal to udf module
 	uint32_t			nupdates; // reset after every cache free, incremented in every cache set
@@ -78,7 +79,6 @@ typedef struct udf_record_s {
 	// INTERNAL UTILITY
 	ldt_record 			*lrecord; // Parent lrecord
 	uint16_t			flag;
-	int8_t				ldt_rectype_bits; // ESR  / LDT / PARENT LDT / NOTHING
 
 	// FABRIC MESSAGE
 	uint8_t             op;

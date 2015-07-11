@@ -190,7 +190,6 @@ write_request_create(void) {
 	wr->msgp = 0;
 	wr->pickled_buf = 0;
 	as_rec_props_clear(&wr->pickled_rec_props);
-	wr->ldt_rectype_bits = 0;
 	wr->respond_client_on_master_completion = false;
 	wr->replication_fire_and_forget = false;
 	// Set the initial limit on wr lifetime to guarantee finite life-span.
@@ -419,7 +418,7 @@ void as_rw_set_stat_counters(bool is_read, int rv, as_transaction *tr) {
 }
 
 int
-rw_msg_setup_infobits(msg *m, as_transaction *tr, int ldt_rectype_bits, bool has_udf)
+rw_msg_setup_infobits(msg *m, as_transaction *tr, bool has_udf, bool is_subrec)
 {
 	uint32_t info = 0;
 	if (tr->msgp && (tr->msgp->msg.info1 & AS_MSG_INFO1_XDR))
@@ -432,19 +431,13 @@ rw_msg_setup_infobits(msg *m, as_transaction *tr, int ldt_rectype_bits, bool has
 
 	if (tr->rsv.ns->ldt_enabled) {
 		// Nothing is set means it is normal record
-		if (as_ldt_flag_has_subrec(ldt_rectype_bits)) {
+		if (is_subrec) {
 			cf_detail(AS_RW,
 					"MULTI_OP : Set Up Replication Message for the LDT Subrecord %"PRIx64"",
 					*(uint64_t*)&tr->keyd);
 			info |= RW_INFO_LDT_SUBREC;
 		}
-		else if (as_ldt_flag_has_esr(ldt_rectype_bits)) {
-			cf_detail(AS_RW,
-					"MULTI_OP : Set Up Replication Message for the LDT ESR %"PRIx64"",
-					*(uint64_t*)&tr->keyd);
-			info |= RW_INFO_LDT_ESR;
-		}
-		else if (as_ldt_flag_has_parent(ldt_rectype_bits)) {
+		else {
 			cf_detail(AS_RW,
 					"MULTI_OP : Set Up Replication Message for the LDT Record %"PRIx64"",
 					*(uint64_t*)&tr->keyd);
@@ -464,7 +457,7 @@ rw_msg_setup_infobits(msg *m, as_transaction *tr, int ldt_rectype_bits, bool has
 }
 
 void
-rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd, uint16_t ldt_rectype_bits)
+rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd)
 {
 	// Send the Partition version info and current ldt outgoing migration version
 	// at the master ..
@@ -479,7 +472,7 @@ rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd, uint16_t ld
 	msg_set_buf(m, RW_FIELD_VINFOSET, (uint8_t *)&tr->rsv.p->version_info, sizeof(as_partition_vinfo), MSG_SET_COPY);
 	cf_detail_digest(AS_RW, keyd,
 			"MULTI_OP : Set Up Replication Message for the LDT current outgoing "
-			" migrate version %ld for partition %d %d", tr->rsv.p->current_outgoing_ldt_version, tr->rsv.p->partition_id, ldt_rectype_bits);
+			" migrate version %ld for partition %d", tr->rsv.p->current_outgoing_ldt_version, tr->rsv.p->partition_id);
 	if (tr->rsv.p->current_outgoing_ldt_version != 0) {
 		msg_set_uint64(m, RW_FIELD_LDT_VERSION, tr->rsv.p->current_outgoing_ldt_version);
 	}
@@ -488,8 +481,7 @@ rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd, uint16_t ld
 int
 rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 		uint8_t ** p_pickled_buf, size_t pickled_sz,
-		as_rec_props * p_pickled_rec_props, int op, uint16_t ldt_rectype_bits,
-		bool has_udf)
+		as_rec_props * p_pickled_rec_props, int op, bool has_udf, bool is_subrec)
 {
 	// setup the write message
 	msg_set_buf(m, RW_FIELD_DIGEST, (void *) keyd, sizeof(cf_digest),
@@ -501,35 +493,17 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 	msg_set_uint32(m, RW_FIELD_OP, op);
 
 	if (op == RW_OP_WRITE) {
-		/*
-		 * if ldt_rectype bits not set. It is possibly direct manipulation of 
-		 * record with LDT bin. Try to fetch the ldt bit types from the 
-		 * pickled rec props
-		 *
-		 * NB: We sent both rec_props and ldt bits over the wire
-		 * this is redundant information. Can be improved by sending
-		 * only 1 and other inferred at the prole side.
-		 */
-		if (ldt_rectype_bits == 0 && p_pickled_rec_props->p_data) {
-			uint16_t *ldt_bits = NULL;
-			as_rec_props_get_value((const as_rec_props *)p_pickled_rec_props, CL_REC_PROPS_FIELD_LDT_TYPE, NULL,
-					(uint8_t**)&ldt_bits);
-			if (ldt_bits) {
-				ldt_rectype_bits = *ldt_bits;
-			}
-		}
-
 
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
 		msg_set_uint32(m, RW_FIELD_VOID_TIME, tr->void_time);
 
-		rw_msg_setup_infobits(m, tr, ldt_rectype_bits, has_udf);
+		rw_msg_setup_infobits(m, tr, has_udf, is_subrec);
 
 		// Send this along with parent packet as well. This is required
 		// in case the LDT parent replication is done without MULTI_OP.
 		// Example touch of the some other bin in the LDT parent
-		if (as_ldt_flag_has_parent(ldt_rectype_bits)) {
-			rw_msg_setup_ldt_fields(m, tr, keyd, ldt_rectype_bits);
+		if (!is_subrec) {
+			rw_msg_setup_ldt_fields(m, tr, keyd);
 		}
 
 		if (*p_pickled_buf) {
@@ -549,7 +523,7 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 					as_proto_size_get(&tr->msgp->proto), MSG_SET_COPY);
 			msg_set_unset(m, RW_FIELD_RECORD);
 
-			rw_msg_setup_infobits(m, tr, ldt_rectype_bits, has_udf);
+			rw_msg_setup_infobits(m, tr, has_udf, is_subrec);
 		}
 	} else if (op == RW_OP_DUP) {
 		msg_set_uint32(m, RW_FIELD_OP, RW_OP_DUP);
@@ -563,7 +537,7 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
 		msg_set_uint32(m, RW_FIELD_VOID_TIME, tr->void_time);
 
-		rw_msg_setup_ldt_fields(m, tr, keyd, ldt_rectype_bits);
+		rw_msg_setup_ldt_fields(m, tr, keyd);
 
 		msg_set_uint32(m, RW_FIELD_INFO, RW_INFO_LDT);
 		msg_set_unset(m, RW_FIELD_AS_MSG);
@@ -609,7 +583,7 @@ write_request_setup(write_request *wr, as_transaction *tr, int optype)
 	}
 
 	rw_msg_setup(wr->dest_msg, tr, &wr->keyd, &wr->pickled_buf, wr->pickled_sz,
-			&wr->pickled_rec_props, optype, wr->ldt_rectype_bits, wr->has_udf);
+			&wr->pickled_rec_props, optype, wr->has_udf, false);
 
 	if (wr->shipped_op) {
 		cf_detail(AS_RW,
@@ -1495,12 +1469,6 @@ finish_rw_process_prole_ack(write_request *wr, uint32_t result_code)
 	if (wr->shipped_op) {
 		cf_detail_digest(AS_RW, &wr->keyd, "SHIPPED_OP WINNER [Digest %"PRIx64"] Replication Done",
 				*(uint64_t *)&wr->keyd);
-	}
-
-	if (as_ldt_flag_has_parent(wr->ldt_rectype_bits)) {
-		cf_detail(AS_RW,
-				"MULTI_OP: LDT Replication Request Response Received %"PRIx64" rv=%d",
-				*(uint64_t*)&wr->keyd, result_code);
 	}
 
 	// TODO:: We bail out if wr->msgp is not set. Use case
