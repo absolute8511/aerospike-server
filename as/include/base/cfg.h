@@ -236,9 +236,10 @@ typedef struct as_config_s {
 	/* enables node snubbing - this code caused a Paxos issue in the past */
 	bool				snub_nodes;
 
-	uint32_t			scan_max_active;	// maximum number of active scans allowed
-	uint32_t			scan_max_done;		// maximum number of finished scans kept for monitoring
-	uint32_t			scan_threads;		// size of scan thread pool
+	uint32_t			scan_max_active;			// maximum number of active scans allowed
+	uint32_t			scan_max_done;				// maximum number of finished scans kept for monitoring
+	uint32_t			scan_max_udf_transactions;	// maximum number of active transactions per UDF background scan
+	uint32_t			scan_threads;				// size of scan thread pool
 
 	// maximum count of database requests in a single batch
 	uint32_t			batch_max_requests;
