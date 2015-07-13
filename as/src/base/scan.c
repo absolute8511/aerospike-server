@@ -475,6 +475,8 @@ conn_scan_job_own_fd(conn_scan_job* job, as_file_handle* fd_h)
 	job->fd_h = fd_h;
 	job->fd_h->fh_info |= FH_INFO_DONOT_REAP;
 	set_blocking(job->fd_h->fd, true);
+
+	job->net_io_bytes = 0;
 }
 
 void
