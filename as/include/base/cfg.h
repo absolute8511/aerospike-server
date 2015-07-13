@@ -322,7 +322,6 @@ typedef struct as_config_s {
 	cf_atomic64			query_long_queue_full;
 	cf_atomic64			query_short_running;
 	cf_atomic64			query_long_running;
-	cf_atomic64			query_tracked;
 	cf_atomic64			query_false_positives;
 	bool				query_enable_histogram;
 

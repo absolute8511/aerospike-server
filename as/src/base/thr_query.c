@@ -162,7 +162,8 @@ typedef enum {
 	AS_QTR_STATE_RUNNING  = 1,
 	AS_QTR_STATE_ABORT    = 2,
 	AS_QTR_STATE_ERR      = 3,
-	AS_QTR_STATE_DONE     = 4 
+	AS_QTR_STATE_DONE     = 4, 
+	AS_QTR_STATE_SHUTDOWN = 5
 } as_qtr_state;
 // **************************************************************************************************
 
@@ -343,6 +344,9 @@ static pthread_attr_t   g_query_th_attr;
 static cf_queue       * g_query_short_queue     = 0;
 static cf_queue       * g_query_long_queue      = 0;
 static cf_atomic32      g_query_threadcnt       = 0;
+static cf_atomic32      g_query_short_running   = 0;
+static cf_atomic32      g_query_long_running   = 0;
+
 // I/O & AGGREGATOR
 static pthread_t       g_query_worker_threads[AS_QUERY_MAX_WORKER_THREADS];
 static pthread_attr_t  g_query_worker_th_attr;
@@ -361,12 +365,20 @@ static cf_atomic32     g_query_worker_threadcnt = 0;
  * Histograms
  */
 // **************************************************************************************************
-histogram * query_txn_q_wait_hist;               // Histogram to track time spend in trasaction queue
-histogram * query_prepare_batch_q_wait_hist;     // Histogram to track time spend waiting in queue for query thread
-histogram * query_prepare_batch_hist;            // Histogram to track time spend while preparing batches
-histogram * query_batch_io_q_wait_hist;          // Histogram to track time spend waiting in queue for worker thread
-histogram * query_batch_io_hist;                 // Histogram to track time spend doing I/O per batch
-histogram * query_net_io_hist;                   // Histogram to track time spend sending results to client
+histogram * query_txn_q_wait_hist;               // Histogram to track time spend in trasaction queue. Transaction
+												 // queue backing, it is busy. Check if query in transaction is 
+												 // true from query perspective.
+histogram * query_query_q_wait_hist;             // Histogram to track time spend waiting in queue for query thread.
+												 // Query queue backing up. Try increasing query thread in case CPU is
+												 // not fully utilized or if system is not IO bound
+histogram * query_prepare_batch_hist;            // Histogram to track time spend while preparing batches. Secondary index
+												 // slow. Check batch is too big 
+histogram * query_batch_io_q_wait_hist;          // Histogram to track time spend waiting in queue for worker thread. 
+histogram * query_batch_io_hist;                 // Histogram to track time spend doing I/O per batch. 
+												 // For above two Query worker thread busy if not IO bound then try bumping
+												 // up the priority. Query thread may be yielding too much.
+histogram * query_net_io_hist;                   // Histogram to track time spend sending results to client. Network problem!!
+												 // or client too slow
 
 #define QUERY_HIST_INSERT_DATA_POINT(type, start_time_ns)              \
 do {                                                                   \
@@ -376,6 +388,16 @@ do {                                                                   \
 		}                                                              \
 	}                                                                  \
 } while(0);
+
+#define QUERY_HIST_INSERT_RAW(type, time_ns)                      \
+do {                                                                   \
+	if (g_config.query_enable_histogram && time_ns != 0) {             \
+		if (type) {                                                    \
+			histogram_insert_raw(type, time_ns);                       \
+		}                                                              \
+	}                                                                  \
+} while(0);
+
 // **************************************************************************************************
 
 
@@ -574,6 +596,15 @@ as_query_set_err(as_query_transaction *qtr, int result_code, char *fname, int li
 }
 
 static void
+as_query_set_shutdown(as_query_transaction *qtr, int result_code, char *fname, int lineno)
+{
+	query_slock(&qtr->slock);
+	qtr->state = AS_QTR_STATE_SHUTDOWN;
+	qtr->result_code = result_code;
+	query_sunlock(&qtr->slock);
+}
+
+static void
 as_query_set_done(as_query_transaction *qtr, int result_code, char *fname, int lineno)
 {
 	query_slock(&qtr->slock);
@@ -590,11 +621,23 @@ as_query_failed(as_query_transaction *qtr) {
 	query_slock(&qtr->slock);
 	bool abort = false;
 	if ((qtr->state == AS_QTR_STATE_ABORT) 
+	 	 || (qtr->state == AS_QTR_STATE_SHUTDOWN)
 		 || (qtr->state == AS_QTR_STATE_ERR)) {
 		abort = true;
 	}
 	query_sunlock(&qtr->slock);
 	return abort;
+}
+
+static bool
+as_query_is_shutdown(as_query_transaction *qtr) {
+	query_slock(&qtr->slock);
+	bool shutdown = false;
+	if (qtr->state == AS_QTR_STATE_SHUTDOWN) {
+		shutdown = true;
+	}
+	query_sunlock(&qtr->slock);
+	return shutdown;
 }
 
 static void
@@ -615,6 +658,7 @@ as_query_fin(as_query_transaction *qtr)
 	bool finished = false;
 	if ((qtr->state == AS_QTR_STATE_DONE)
 		|| (qtr->state == AS_QTR_STATE_ERR)
+		|| (qtr->state == AS_QTR_STATE_SHUTDOWN)
 		|| (qtr->state == AS_QTR_STATE_ABORT)) {
 		finished = true;
 	}
@@ -625,7 +669,7 @@ as_query_fin(as_query_transaction *qtr)
 
 
 /*
- * Query Destructore Function
+ * Query Destructor Function
  */
 // **************************************************************************************************
 static void
@@ -650,7 +694,8 @@ as_query_update_stats(as_query_transaction *qtr)
 {
 	uint64_t rows = cf_atomic64_get(qtr->num_records);
 
-	if (qtr->state == AS_QTR_STATE_ABORT) {
+	if ((qtr->state == AS_QTR_STATE_ABORT)
+		|| (qtr->state == AS_QTR_STATE_SHUTDOWN)) {
 		if (qtr->job_type == AS_QUERY_AGG) {
 			cf_atomic64_incr(&g_config.n_agg_abort);
 		}
@@ -691,11 +736,12 @@ as_query_update_stats(as_query_transaction *qtr)
 	}
 	cf_hist_track_insert_raw(g_config.q_rcnt_hist, rows);
 	cf_hist_track_insert_data_point(g_config.q_hist, qtr->start_time);
+	QUERY_HIST_INSERT_RAW(query_prepare_batch_hist, qtr->querying_ai_time_ns);
+
 	SINDEX_HIST_INSERT_DATA_POINT(qtr->si, query_hist, qtr->start_time);
 	SINDEX_HIST_INSERT_RAW(qtr->si, query_rcnt_hist, qtr->n_digests);
 	SINDEX_HIST_INSERT_RAW(qtr->si, query_diff_hist, qtr->n_digests - qtr->num_records);
 
-	QUERY_HIST_INSERT_DATA_POINT(query_prepare_batch_hist, qtr->querying_ai_time_ns);
 
 	uint64_t query_stop_time = cf_getns();
 	uint64_t elapsed_us = (query_stop_time - qtr->start_time) / 1000;
@@ -718,6 +764,9 @@ static void
 as_query_release_fd(as_query_transaction *qtr)
 {
 	if (qtr && qtr->fd_h) {
+		if (as_query_is_shutdown(qtr)) {
+			shutdown(qtr->fd_h->fd, SHUT_RDWR);
+		}
 		qtr->fd_h->fh_info &= ~FH_INFO_DONOT_REAP;
 		AS_RELEASE_FILE_HANDLE(qtr->fd_h);
 		qtr->fd_h = NULL;
@@ -738,6 +787,12 @@ as_query_transaction_done(as_query_transaction *qtr)
 		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		cf_free(qtr->qctx.recl);
 		qtr->qctx.recl = NULL;
+	}
+
+	if (qtr->short_running) {
+		cf_atomic32_decr(&g_query_short_running);
+	} else {
+		cf_atomic32_decr(&g_query_long_running);
 	}
 
 	// Release all the qnodes
@@ -807,6 +862,16 @@ as_query_netio_start_cb(void *udata, int seq)
 	as_query_transaction *qtr  = (as_query_transaction *)io->data;
 	cf_detail(AS_QUERY, "Netio Started_CB %d %d %d %d ", io->offset, io->seq, qtr->pop_seq_number, qtr->state);
 
+	// It is needed to send all the packets in sequence
+	// A packet can be requeued after being half sent.
+	if (seq > cf_atomic32_get(qtr->pop_seq_number)) {
+		return AS_NETIO_CONTINUE;
+	}
+	
+	if (as_query_is_shutdown(qtr)) {
+		return AS_QUERY_ERR;
+	}
+
 	// Check for abort or error. If timed out override the decision
 	//
 	// NB: Let the half sent buffer fully finish. This is the exception
@@ -815,14 +880,7 @@ as_query_netio_start_cb(void *udata, int seq)
 	if (as_query_failed(qtr) && (io->offset == 0)) {
 		return AS_NETIO_ERR;
 	}
-
-	// It is needed to send all the packets in sequence
-	// A packet can be requeued after being half sent.
-	if (seq <= cf_atomic32_get(qtr->pop_seq_number)) {
-		return AS_NETIO_OK;
-	} else {
-		return AS_NETIO_CONTINUE;
-	}
+	return AS_NETIO_OK;
 }
 
 /*
@@ -842,18 +900,16 @@ as_query_netio_finish_cb(void *data, int retcode)
 	if (qtr && (retcode != AS_NETIO_CONTINUE)) {
 		// If send success make stat is updated
 		if (retcode == AS_NETIO_OK) {
-			cf_atomic32_incr(&qtr->pop_seq_number);
 			cf_detail(AS_QUERY, "Finished sequence number %p->%d", qtr, io->seq);
 			cf_atomic64_add(&qtr->net_io_bytes, io->bb_r->used_sz + 8);
-			QUERY_HIST_INSERT_DATA_POINT(query_net_io_hist, io->start_time);	
+		} else if (retcode == AS_NETIO_IO_ERR) {
+			as_query_set_shutdown(qtr, AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR, __FILE__, __LINE__);
 		} else {
 			as_query_set_abort(qtr, AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR, __FILE__, __LINE__);
 		}
-
-		if (retcode == AS_NETIO_IO_ERR) {
-			shutdown(io->fd_h->fd, SHUT_RDWR);
-		}
-
+		QUERY_HIST_INSERT_DATA_POINT(query_net_io_hist, io->start_time);	
+		
+		cf_atomic32_incr(&qtr->pop_seq_number);
 		AS_RELEASE_FILE_HANDLE(io->fd_h);
 		as_query__bb_poolrelease(io->bb_r);
 		cf_atomic32_decr(&qtr->outstanding_net_io);
@@ -981,9 +1037,7 @@ as_query__put_qtr(as_query_transaction * qtr)
 	int rc = rchash_put_unique(g_query_job_hash, &qtr->trid, sizeof(qtr->trid), qtr);
 	if (rc) {
 		cf_warning(AS_SINDEX, "QTR Put in hash failed with error %d", rc);
-	} else {
-		cf_atomic64_incr(&g_config.query_tracked);
-	}
+	} 
 
 	return rc;
 }
@@ -1147,10 +1201,7 @@ as_query_process_aggreq(as_query_request *qagg)
 	int ret = AS_QUERY_ERR;
 	as_query_transaction *qtr = qagg->qtr;
 	if (!qtr)           goto Cleanup;
-	as_query_check_timeout(qtr);
-	if (as_query_failed(qtr)) {
-		goto Cleanup;
-	}
+
 
 	if (!cf_ll_size(qagg->recl)) {
 		goto Cleanup;
@@ -1676,6 +1727,10 @@ as_internal_query_udf_txn_setup(tr_create_data * d)
 				"configured limit", qtr->uit_queued);
 
 		usleep(g_config.query_sleep_us);
+		as_query_check_timeout(qtr);
+		if (as_query_failed(qtr)) {
+			return AS_QUERY_ERR;
+		}
 	}
 
 	as_transaction tr;
@@ -1717,11 +1772,6 @@ as_query_process_udfreq(as_query_request *qudf)
 	cf_ll_iterator * iter = NULL;
 	as_query_transaction *qtr = qudf->qtr;
 	if (!qtr)           return AS_QUERY_ERR;
-	as_query_check_timeout(qtr);
-	if (as_query_failed(qtr)) {
-		ret = AS_QUERY_ERR;
-	    goto Cleanup;
-	}
 	cf_detail(AS_QUERY, "Performing UDF");
 	iter                  = cf_ll_getIterator(qudf->recl, true /*forward*/);
 	if (!iter) {
@@ -1754,7 +1804,11 @@ as_query_process_udfreq(as_query_request *qudf)
 
 			// Setup the internal udf transaction. This includes creating an internal transaction
 			// and enqueuing it with throttling.
-			as_internal_query_udf_txn_setup(&d);
+			if (AS_QUERY_ERR == as_internal_query_udf_txn_setup(&d)) {
+				as_index_keys_release_arr_to_queue(keys_arr);
+				ret = AS_QUERY_ERR;
+				goto Cleanup;
+			};
 		}
 		as_index_keys_release_arr_to_queue(keys_arr);
 	}
@@ -1843,6 +1897,9 @@ as_query_process_request(as_query_request *qreqp)
 {
 	QUERY_HIST_INSERT_DATA_POINT(query_batch_io_q_wait_hist, qreqp->queued_time_ns);
 	cf_detail(AS_QUERY, "Processing Request %d", qreqp->type);
+	if (as_query_failed(qreqp->qtr)) {
+		return AS_QUERY_ERR;
+	}
 	int ret = AS_QUERY_OK;
 	switch(qreqp->type) {
 		case AS_QUERY_REQTYPE_IO:
@@ -1868,7 +1925,7 @@ as_query_setup_qreq(as_query_request *qreqp, as_query_transaction *qtr)
 	qreqp->qtr               = qtr;
 	qreqp->recl              = qtr->qctx.recl;
 	qtr->qctx.recl           = NULL;
-	qreqp->queued_time_ns    = 0;
+	qreqp->queued_time_ns    = cf_getns();
 	qtr->n_digests          += qtr->qctx.n_bdigs;
 	qtr->qctx.n_bdigs        = 0;
 	if (qtr->job_type == AS_QUERY_AGG) {
@@ -2037,10 +2094,10 @@ int
 as_query_transaction_init(as_query_transaction *qtr)
 {
 	if (!as_query_inited(qtr)) {
+		QUERY_HIST_INSERT_DATA_POINT(query_query_q_wait_hist, qtr->start_time);
 		qtr->short_running       = true;
 		cf_atomic64_set(&qtr->num_records, 0);
 		qtr->track               = false;
-		QUERY_HIST_INSERT_DATA_POINT(query_prepare_batch_q_wait_hist, cf_getns() - qtr->start_time);
 		qtr->querying_ai_time_ns = 0;
 		qtr->outstanding_net_io  = 0;
 		qtr->push_seq_number     = 0;
@@ -2090,37 +2147,6 @@ as_query_transaction_init(as_query_transaction *qtr)
 int 
 as_qtr_check_requeue(as_query_transaction *qtr)
 {
-	// Step 1.5: Client is slow requeue
-	if (as_query__netio_wait(qtr) != AS_QUERY_OK) {
-		if (as_query__queue(qtr) != 0) {
-			cf_warning(AS_QUERY, "Queuing Error... continue!!");
-			return AS_QUERY_ERR;
-		} else {
-			cf_detail(AS_QUERY, "Query Queued Due to Network");
-			return AS_QUERY_OK;
-		}
-	}
-
-	// Step 2: Check to see if this is long running query. This is determined by
-	// checking number of records read. Please note that it makes sure the false
-	// entries in secondary index does not effect this decision. All short running
-	// queries perform I/O in the batch thread context.
-	if ((cf_atomic64_get(qtr->num_records) >= g_config.query_threshold)
-			&& qtr->short_running) {
-		qtr->short_running       = false;
-		// Change batch size to the long running job batch size value
-		qtr->qctx.bsize          = g_config.query_bsize;
-		if (as_query__queue(qtr) != 0) {
-			cf_warning(AS_QUERY, "Long running transaction Queueing Error... continue!!");
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);
-			return AS_QUERY_ERR;
-		} 
-		cf_detail(AS_QUERY, "Query Queued Into Long running thread pool %ld %d", cf_atomic64_get(qtr->num_records), qtr->short_running);
-		cf_atomic64_incr(&g_config.query_long_running);
-		cf_atomic64_decr(&g_config.query_short_running);
-		return AS_QUERY_OK;
-	}
-	
 	// If the query batch is done then wait for number of outstanding qreq to
 	// finish. This may slow down query responses get the better model
 	if (as_query_fin(qtr)) {
@@ -2135,9 +2161,44 @@ as_qtr_check_requeue(as_query_transaction *qtr)
 
 		if (as_query__queue(qtr) != 0) {
 			cf_warning(AS_QUERY, "Long running transaction Queueing Error... continue!!");
+			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
 			return AS_QUERY_ERR;
 		} else {
 			cf_detail(AS_QUERY, "Query Queued Into Long running thread pool");
+			return AS_QUERY_OK;
+		}
+	}
+
+	// Step 2: Check to see if this is long running query. This is determined by
+	// checking number of records read. Please note that it makes sure the false
+	// entries in secondary index does not effect this decision. All short running
+	// queries perform I/O in the batch thread context.
+	if ((cf_atomic64_get(qtr->num_records) >= g_config.query_threshold)
+			&& qtr->short_running) {
+		qtr->short_running       = false;
+		// Change batch size to the long running job batch size value
+		qtr->qctx.bsize          = g_config.query_bsize;
+		cf_atomic32_decr(&g_query_short_running);
+		cf_atomic32_incr(&g_query_long_running);
+		if (as_query__queue(qtr) != 0) {
+			cf_warning(AS_QUERY, "Long running transaction Queueing Error... continue!!");
+			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);
+			return AS_QUERY_ERR;
+		} 
+		cf_detail(AS_QUERY, "Query Queued Into Long running thread pool %ld %d", cf_atomic64_get(qtr->num_records), qtr->short_running);
+		cf_atomic64_incr(&g_config.query_long_running);
+		cf_atomic64_decr(&g_config.query_short_running);
+		return AS_QUERY_OK;
+	}
+
+	// Step 3: Client is slow requeue
+	if (as_query__netio_wait(qtr) != AS_QUERY_OK) {
+		if (as_query__queue(qtr) != 0) {
+			cf_warning(AS_QUERY, "Queuing Error... continue!!");
+			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);
+			return AS_QUERY_ERR;
+		} else {
+			cf_detail(AS_QUERY, "Query Queued Due to Network");
 			return AS_QUERY_OK;
 		}
 	}
@@ -2239,7 +2300,8 @@ as_query__generator(as_query_transaction *qtr)
 		// Step:4 Check for requeue
 		int ret = as_qtr_check_requeue(qtr);
 		if (ret == AS_QUERY_ERR) {
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
+			cf_warning(AS_QUERY, "Unexpected requeue failure .. shutdown connection.. abort!!");
+			as_query_set_shutdown(qtr, AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR, __FILE__, __LINE__);
 			break;
 		} else if (ret == AS_QUERY_DONE) {
 			break;
@@ -2252,7 +2314,6 @@ as_query__generator(as_query_transaction *qtr)
 			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT, __FILE__, __LINE__);
 			continue;
 		}
-
 		// Step 2: Conditionally track
 		if (as_qtr_track(qtr)) {
 			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_DUPLICATE, __FILE__, __LINE__);
@@ -2272,7 +2333,7 @@ as_query__generator(as_query_transaction *qtr)
 		int qret    = as_query__generator_get_nextbatch(qtr);
 
 		cf_detail(AS_QUERY, "Loop=%d, Selected=%d, ret=%d", loop, qtr->qctx.n_bdigs, qret);
-		switch(qret) {
+		switch (qret) {
 			case  AS_QUERY_OK:
 			case  AS_QUERY_DONE:
 				break;
@@ -2304,8 +2365,10 @@ as_query__generator(as_query_transaction *qtr)
 		}
 	}
 
-	// Send the fin packet in case of abort
-	as_qtr__send_fin(qtr);
+	if (!as_query_is_shutdown(qtr)) {
+		// Send the fin packet in it is NOT a shutdown
+		as_qtr__send_fin(qtr);
+	} 
 	// deleting it from the global hash.
 	as_query__delete_qtr(qtr);
 	as_qtr_release(qtr, __FILE__, __LINE__);
@@ -2358,18 +2421,18 @@ int
 as_query__queue(as_query_transaction *qtr)
 {
 	uint64_t limit  = 0;
-	uint64_t size   = 0;
+	uint32_t size   = 0;
 	cf_queue    * q;
 	cf_atomic64 * queue_full_err;
 	if (qtr->short_running) {
 		limit          = g_config.query_short_q_max_size;
-		size           = cf_queue_sz(g_query_short_queue);
+		size           = cf_atomic32_get(g_query_short_running);
 		q              = g_query_short_queue;
 		queue_full_err = &g_config.query_short_queue_full;
 	}
 	else {
 		limit          = g_config.query_long_q_max_size;
-		size           = cf_queue_sz(g_query_long_queue);
+		size           = cf_atomic32_get(g_query_long_running);
 		q              = g_query_long_queue;
 		queue_full_err = &g_config.query_long_queue_full;
 	}
@@ -2403,9 +2466,7 @@ as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 	int rv = AS_QUERY_ERR;
 	*qtrp  = NULL;
 
-	if (tr) {
-		QUERY_HIST_INSERT_DATA_POINT(query_txn_q_wait_hist, tr->start_time);
-	}
+
 	uint64_t start_time     = cf_getns();
 	as_sindex *si           = NULL;
 	cf_vector *binlist      = 0;
@@ -2555,6 +2616,10 @@ Cleanup:
 int
 as_query(as_transaction *tr)
 {
+	if (tr) {
+		QUERY_HIST_INSERT_DATA_POINT(query_txn_q_wait_hist, tr->start_time);
+	}
+
 	as_query_transaction *qtr;
 	int rv = as_query_parse_setup(tr, &qtr);
 
@@ -2580,6 +2645,7 @@ as_query(as_transaction *tr)
 	if (g_config.query_in_transaction_thr) {
 		as_query__generator(qtr);
 	} else {
+		cf_atomic32_incr(&g_query_short_running);
 		if (as_query__queue(qtr)) {
 			// This error will be accounted by thr_tsvc layer. Thus
 			// reset fd_h and msgp before calling qtr release, let
@@ -2695,9 +2761,6 @@ as_query_stat(char *name, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";query_long_running=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_long_running));
-
-	cf_dyn_buf_append_string(db, ";query_tracked=");
-	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_tracked));
 
 	// Aggregation stats
 	cf_dyn_buf_append_string(db, ";query_agg=");
@@ -2889,8 +2952,8 @@ as_query_histogram_dumpall()
 	if (query_txn_q_wait_hist) {
 		histogram_dump(query_txn_q_wait_hist);
 	}
-	if (query_prepare_batch_q_wait_hist) {
-		histogram_dump(query_prepare_batch_q_wait_hist);
+	if (query_query_q_wait_hist) {
+		histogram_dump(query_query_q_wait_hist);
 	}
 	if (query_prepare_batch_hist) {
 		histogram_dump(query_prepare_batch_hist);
@@ -3023,8 +3086,8 @@ as_query_init()
 		cf_warning(AS_SINDEX, "couldn't create histogram for the time spent in transaction queue by queries.");
 	}
 
-	sprintf(hist_name, "query_prepare_batch_q_wait_us");
-	if (NULL == (query_prepare_batch_q_wait_hist = histogram_create(hist_name, HIST_MICROSECONDS))) {
+	sprintf(hist_name, "query_query_q_wait_us");
+	if (NULL == (query_query_q_wait_hist = histogram_create(hist_name, HIST_MICROSECONDS))) {
 		cf_warning(AS_SINDEX, "couldn't create histogram for time spent waiting for batch creation phase");
 	}
 
