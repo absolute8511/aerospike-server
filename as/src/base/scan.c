@@ -1333,8 +1333,9 @@ udf_bg_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 	udf_bg_scan_job* job = (udf_bg_scan_job*)_job;
 	char *extra = stat->jdata + strlen(stat->jdata);
 
-	sprintf(extra, ":udf-filename=%s:udf-function=%s:udf-success=%ld:udf-failed=%ld",
+	sprintf(extra, ":udf-filename=%s:udf-function=%s:udf-active=%u:udf-success=%lu:udf-failed=%lu",
 			job->call.filename, job->call.function,
+			cf_atomic32_get(job->n_active_tr),
 			cf_atomic64_get(job->n_successful_tr),
 			cf_atomic64_get(job->n_failed_tr));
 }
