@@ -1000,7 +1000,7 @@ aggr_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 
 			const as_val* v = (as_val*)as_string_new(rs, false);
 
-			aggr_scan_add_val_response(&slice, v, true);
+			aggr_scan_add_val_response(&slice, v, false);
 			as_val_destroy(v);
 			cf_free(rs);
 			as_job_manager_abandon_job(_job->mgr, _job,
