@@ -2257,7 +2257,7 @@ as_qtr_process(as_query_transaction *qtr)
 int
 as_query_check_abort(as_query_transaction *qtr)
 {
-	if (cf_atomic32_get(qtr->num_records) > g_config.query_rec_count_bound) {
+	if (cf_atomic64_get(qtr->num_records) > g_config.query_rec_count_bound) {
 		return AS_QUERY_ERR;
 	}
 	return AS_QUERY_OK;
