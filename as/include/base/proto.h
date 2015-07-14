@@ -373,7 +373,7 @@ typedef struct cl_msg_s {
 
 #define AS_MSG_INFO1_READ				(1 << 0) // contains a read operation
 #define AS_MSG_INFO1_GET_ALL			(1 << 1) // get all bins, period
-#define AS_MSG_INFO1_GET_ALL_NODATA		(1 << 2) // get all bins WITHOUT data (currently unimplemented)
+// (Note:  Bit 2 is unused.)
 #define AS_MSG_INFO1_BATCH				(1 << 3) // new batch protocol
 #define AS_MSG_INFO1_XDR				(1 << 4) // operation is being performed by XDR
 #define AS_MSG_INFO1_GET_NOBINDATA		(1 << 5) // Do not get information about bins and its data
@@ -384,7 +384,7 @@ typedef struct cl_msg_s {
 #define AS_MSG_INFO2_DELETE				(1 << 1) // delete record
 #define AS_MSG_INFO2_GENERATION			(1 << 2) // pay attention to the generation
 #define AS_MSG_INFO2_GENERATION_GT		(1 << 3) // apply write if new generation >= old, good for restore
-#define AS_MSG_INFO2_GENERATION_DUP		(1 << 4) // if a generation collision, create a duplicate
+// (Note:  Bit 4 is unused.)
 #define AS_MSG_INFO2_CREATE_ONLY		(1 << 5) // write record only if it doesn't exist
 #define AS_MSG_INFO2_BIN_CREATE_ONLY	(1 << 6) // write bin only if it doesn't exist
 #define AS_MSG_INFO2_RESPOND_ALL_OPS	(1 << 7) // all bin ops (read, write, or modify) require a response, in request order
