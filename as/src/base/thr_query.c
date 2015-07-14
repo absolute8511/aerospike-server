@@ -425,11 +425,6 @@ as_query_qtr_alloc()
 	}
 
 	pthread_mutex_unlock(&g_query_pool_mutex);
-
-	// NB: When in pool qtr always has extra ref count of 1. When in usage
-	// the refcount is always 2. Returns qtr with 2 references .. Ideas is 
-	// to not let the qtr reference go down to 0 given we need it to come 
-	// back to the pool. 
 	return qtr;
 }
 
@@ -821,7 +816,6 @@ as_qtr_release(as_query_transaction *qtr, char *fname, int lineno)
 {
 	if (qtr) {
 		int val = cf_rc_release(qtr);
-		// If tracked free it up when ref count is 1.
 		if (val == 0) { 
 			cf_detail(AS_QUERY, "Released qtr [%s:%d] %p %d ", fname, lineno, qtr, val);
 			as_query_transaction_done(qtr);
