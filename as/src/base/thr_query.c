@@ -125,6 +125,7 @@
 #include "base/udf_memtracker.h"
 #include "base/udf_rw.h"
 #include "base/udf_record.h"
+#include "base/as_stap.h"
 #include "fabric/fabric.h"
 
 // parameter read off from a transaction
@@ -707,8 +708,14 @@ as_query__pop_qreq()
 void
 as_query__transaction_done(as_query_transaction *qtr)
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	if (!qtr)
 		return;
+
+	ASD_QUERY_TRANS_DONE(nodeid, qtr->trid, (void *) qtr);
 
 	if (qtr->uit_queued != 0) {
 		cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
@@ -750,6 +757,9 @@ as_query__transaction_done(as_query_transaction *qtr)
 	if (qtr->setname)     cf_free(qtr->setname);
 	if (qtr->msgp)        cf_free(qtr->msgp);
 	pthread_mutex_destroy(&qtr->buf_mutex);
+
+	ASD_QUERY_QTR_FREE(nodeid, qtr->trid, (void *) qtr);
+
 	if (do_free) cf_rc_free(qtr);
 }
 
@@ -940,6 +950,10 @@ as_query__add_result(char *res, as_query_transaction *qtr, bool success)
 int
 as_query__add_fin(as_query_transaction *qtr)
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	cf_detail(AS_QUERY, "Adding fin %p", qtr);
 	uint8_t *b;
 	// in case of aborted query, the bb_r is already released
@@ -948,6 +962,8 @@ as_query__add_fin(as_query_transaction *qtr)
 		return AS_QUERY_ERR;
 	}
 	cf_buf_builder_reserve(&qtr->bb_r, sizeof(as_msg), &b);
+
+	ASD_QUERY_ADDFIN(nodeid, qtr->trid);
 
 	// set up the header
 	uint8_t *buf      = b;
@@ -1073,10 +1089,16 @@ as_query__netio_wait(as_query_transaction *qtr) {
 int 
 as_query__netio(as_query_transaction *qtr, bool final) 
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	uint64_t time_ns        = 0;
 	if (g_config.query_enable_histogram) {
 		time_ns = cf_getns();
 	}
+
+	ASD_QUERY_NETIO_STARTING(nodeid, qtr->trid);
 
 	as_netio        io;
 
@@ -1122,6 +1144,9 @@ as_query__netio(as_query_transaction *qtr, bool final)
 		qtr->bb_r         = as_query__bb_poolrequest();
    		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 	}
+
+	ASD_QUERY_NETIO_FINISHED(nodeid, qtr->trid);
+
 	return ret;
 }
 
@@ -1447,6 +1472,10 @@ as_query_aggr_match_record(query_record * qrecord, as_sindex_key * skey)
 int
 as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	as_namespace * ns = qtr->ns;
 	as_partition_reservation rsv_stack;
 	as_partition_reservation * rsv = &rsv_stack;
@@ -1460,6 +1489,8 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 	if (!rsv) {
 		return AS_QUERY_OK;
 	}
+
+	ASD_QUERY_IO_STARTING(nodeid, qtr->trid);
 
 	as_index_ref r_ref;
 	r_ref.skip_lock = false;
@@ -1497,6 +1528,7 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 			as_record_done(&r_ref, ns);
 			as_query_release_qnode(qtr, rsv);
 			cf_atomic64_incr(&g_config.query_false_positives);
+			ASD_QUERY_IO_NOTMATCH(nodeid, qtr->trid);
 			return AS_QUERY_OK;
 		}
 
@@ -1510,6 +1542,7 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 			cf_debug(AS_QUERY, "Query %p Aborted at %s:%d", qtr, __FILE__, __LINE__);
 			qtr->result_code = AS_PROTO_RESULT_FAIL_QUERY_CBERROR;
 			as_query_release_qnode(qtr, rsv);
+			ASD_QUERY_IO_ERROR(nodeid, qtr->trid);
 			return AS_QUERY_ERR;
 		}
 		as_storage_record_close(r, &rd);
@@ -1525,6 +1558,9 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 	}
 CLEANUP :
 	as_query_release_qnode(qtr, rsv);
+
+	ASD_QUERY_IO_FINISHED(nodeid, qtr->trid);
+
 	return AS_QUERY_OK;
 }
 
@@ -1669,10 +1705,16 @@ Cleanup:
 int
 as_query__process_ioreq(as_query_request *qio)
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	as_query_transaction *qtr = qio->qtr;
 	if (!qtr) {
 		return AS_QUERY_ERR;
 	}
+
+	ASD_QUERY_IOREQ_STARTING(nodeid, qtr->trid);
 
 	int ret               = AS_QUERY_ERR;
 	QUERY_HIST_INSERT_DATA_POINT(query_batch_io_q_wait_hist, qtr->queued_time_ns);
@@ -1738,6 +1780,8 @@ Cleanup:
 
 	QUERY_HIST_INSERT_DATA_POINT(query_batch_io_hist, time_ns);
 	SINDEX_HIST_INSERT_DATA_POINT(qtr->si, query_batch_io, time_ns);
+
+	ASD_QUERY_IOREQ_FINISHED(nodeid, qtr->trid);
 
 	return 0;
 }
@@ -1944,8 +1988,18 @@ as_query__queue_qreq(as_query_request *qreqp)
 void
 as_query__generator(as_query_transaction *qtr)
 {
+#if defined(USE_SYSTEMTAP)
+	// We'll need to preserve some values on the stack for tracing
+	// becuase the qtr is gone before the done event.
+	uint64_t nodeid = g_config.self_node;
+	uint64_t trid = qtr->trid;
+	size_t nrecs = 0;
+#endif
+
 	// Setup Query Transaction if it not already setup
 	if (!qtr->inited) {
+		ASD_QUERY_INIT(nodeid, qtr->trid);
+
 		// Aerospike Index object initialization
 		qtr->result_code              = AS_PROTO_RESULT_OK;
 		
@@ -2092,6 +2146,9 @@ as_query__generator(as_query_transaction *qtr)
 			// till less than batch size results are returned
 			cf_detail(AS_QUERY, "All the Data finished; All tree finished %d %d", qtr->qctx.n_bdigs, qtr->qctx.bsize);
 			qtr->result_code = AS_PROTO_RESULT_OK;
+#if defined(USE_SYSTEMTAP)
+			nrecs = qtr->num_records;
+#endif
 			break;
 		}
 	}
@@ -2104,6 +2161,8 @@ Cleanup:
 		qtr->qctx.recl = NULL;
 	}
 	as_qtr__release(qtr, __FILE__, __LINE__);
+
+	ASD_QUERY_DONE(nodeid, trid, nrecs);
 }
 
 /*
@@ -2531,9 +2590,17 @@ const as_aggr_caller_intf as_query_aggr_caller_qintf = {
 int
 as_query(as_transaction *tr)
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+	uint64_t trid = tr ? tr->trid : 0;
+#endif
+
 	if (tr) {
 		QUERY_HIST_INSERT_DATA_POINT(query_txn_q_wait_hist, tr->start_time);
 	}
+
+	ASD_QUERY_STARTING(nodeid, trid);
+
 	uint64_t start_time     = cf_getns();
 	as_sindex *si           = NULL;
 	cf_vector *binlist      = 0;
@@ -2570,6 +2637,8 @@ as_query(as_transaction *tr)
 		cf_debug(AS_QUERY, "No Index Defined in the Query");
 	}
 
+	ASD_SINDEX_MSGRANGE_STARTING(nodeid, trid);
+
 	// TODO: Try srange stack allocation in case execution is in transaction thread;
 	// as_sindex_range srange;
 	int ret = as_sindex_rangep_from_msg(ns, &tr->msgp->msg, &srange);
@@ -2580,6 +2649,8 @@ as_query(as_transaction *tr)
 		rv = AS_QUERY_ERR;
 		goto Cleanup;
 	}
+
+	ASD_SINDEX_MSGRANGE_FINISHED(nodeid, trid);
 
 	// get optional set
 	as_msg_field *sfp = as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_SET);
@@ -2638,11 +2709,16 @@ as_query(as_transaction *tr)
 	cf_detail(AS_QUERY, "Query on index %s ",
 			((as_sindex_metadata *)si->imd)->iname);
 
+	ASD_QUERY_QTRSETUP_STARTING(nodeid, trid);
+
 	as_query_transaction *qtr = cf_rc_alloc(sizeof(as_query_transaction));
 	if (!qtr) {
 		rv = AS_QUERY_ERR;
 		goto Cleanup;
 	}
+
+	ASD_QUERY_QTR_ALLOC(nodeid, trid, (void *) qtr);
+
 	// Be aware of the size of qtr
 	// Memset it partially
 	memset(qtr, 0, offsetof(as_query_transaction, rsv_arr));
@@ -2673,6 +2749,8 @@ as_query(as_transaction *tr)
 	qtr->pop_seq_number      = 1;
 	qtr->blocking            = false;
 
+	ASD_QUERY_QTRSETUP_FINISHED(nodeid, trid);
+
 	if (as_aggr_call_init(&qtr->agg_call, tr, qtr, &as_query_aggr_caller_qintf,
 			&query_agg_istream_hooks, &query_agg_ostream_hooks, ns, false) == AS_QUERY_OK) {
 		// There is no io call back, record is worked on from inside stream
@@ -2687,6 +2765,7 @@ as_query(as_transaction *tr)
 		qtr->job_type  = AS_QUERY_LOOKUP;
 		cf_atomic64_incr(&g_config.n_lookup);
 	}
+
 	pthread_mutex_init(&qtr->buf_mutex, NULL);
 
 	if (g_config.query_in_transaction_thr) {

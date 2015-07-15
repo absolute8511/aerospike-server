@@ -50,11 +50,11 @@
 #include "base/thr_info.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
+#include "base/as_stap.h"
 
 #ifdef USE_JEM
 #include "base/datamodel.h"
 #endif
-
 
 #define EPOLL_SZ	1024
 // Workaround for platforms that don't have EPOLLRDHUP yet.
@@ -243,6 +243,10 @@ thr_demarshal(void *arg)
 	static struct epoll_event ev;
 	int nevents, i, n, epoll_fd;
 	cf_clock last_fd_print = 0;
+
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
 
 	// Early stage aborts; these will cause faults in process scope.
 	cf_assert(arg, AS_DEMARSHAL, CF_CRITICAL, "invalid argument");
@@ -704,6 +708,8 @@ thr_demarshal(void *arg)
 						cf_atomic_int_incr(&g_config.proto_transactions);
 						goto NextEvent;
 					}
+
+					ASD_TRANS_DEMARSHAL(nodeid, (uint64_t) tr.msgp);
 
 					// Fast path for batch requests.
 					if (tr.msgp->msg.info1 & AS_MSG_INFO1_BATCH) {

@@ -44,7 +44,7 @@
 #include "base/scan.h"
 #include "base/security.h"
 #include "base/udf_rw.h"
-
+#include "base/as_stap.h"
 
 /* as_transaction_prepare
  * Prepare a transaction that has just been received from the wire.
@@ -125,6 +125,10 @@ int as_transaction_prepare(as_transaction *tr) {
 	cl_msg *msgp = tr->msgp;
 	as_msg *m = &msgp->msg;
 
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 //	cf_assert(tr, AS_PROTO, CF_CRITICAL, "invalid transaction");
 
 	void *limit = ((void *)m) + msgp->proto.sz;
@@ -174,6 +178,11 @@ int as_transaction_prepare(as_transaction *tr) {
 		memcpy(&trid_nbo, tridfp->data, sizeof(trid_nbo));
 		tr->trid = __be64_to_cpu(trid_nbo);
 	}
+
+
+	// It's tempting to move this to the final return, but queries
+	// actually escape in the if clause below ...
+	ASD_TRANS_PREPARE(nodeid, (uint64_t) msgp, tr->trid);
 
 	// Sent digest? Use!
 	as_msg_field *dfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_DIGEST_RIPE);
