@@ -46,12 +46,12 @@
 #include "fault.h"
 #include "jem.h"
 
+#include "base/as_stap.h"
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "base/udf_rw.h"
-#include "base/as_stap.h"
 #include "storage/storage.h"
 
 void

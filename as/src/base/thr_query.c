@@ -118,6 +118,7 @@
 #include "bt_iterator.h"
 
 #include "base/aggr.h"
+#include "base/as_stap.h"
 #include "base/datamodel.h"
 #include "base/secondary_index.h"
 #include "base/thr_tsvc.h"
@@ -125,7 +126,6 @@
 #include "base/udf_memtracker.h"
 #include "base/udf_rw.h"
 #include "base/udf_record.h"
-#include "base/as_stap.h"
 #include "fabric/fabric.h"
 
 // parameter read off from a transaction

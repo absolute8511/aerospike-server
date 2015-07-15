@@ -42,6 +42,7 @@
 #include "queue.h"
 #include "socket.h"
 
+#include "base/as_stap.h"
 #include "base/batch.h"
 #include "base/cfg.h"
 #include "base/packet_compression.h"
@@ -50,7 +51,6 @@
 #include "base/thr_info.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
-#include "base/as_stap.h"
 
 #ifdef USE_JEM
 #include "base/datamodel.h"

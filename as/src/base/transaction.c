@@ -38,13 +38,13 @@
 
 #include "fault.h"
 
+#include "base/as_stap.h"
 #include "base/batch.h"
 #include "base/datamodel.h"
 #include "base/proto.h"
 #include "base/scan.h"
 #include "base/security.h"
 #include "base/udf_rw.h"
-#include "base/as_stap.h"
 
 /* as_transaction_prepare
  * Prepare a transaction that has just been received from the wire.
