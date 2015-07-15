@@ -1363,12 +1363,6 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 		return;
 	}
 
-	// TODO - replace this mechanism with signal-based counter?
-	while (cf_atomic32_get(job->n_active_tr) >
-			g_config.scan_max_udf_transactions) {
-		usleep(50);
-	}
-
 	tr_create_data d;
 
 	d.digest	= r->key;
@@ -1382,6 +1376,12 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	// Release record lock before enqueuing transaction.
 	as_record_done(r_ref, ns);
+
+	// TODO - replace this mechanism with signal-based counter?
+	while (cf_atomic32_get(job->n_active_tr) >
+			g_config.scan_max_udf_transactions) {
+		usleep(50);
+	}
 
 	as_transaction tr;
 
