@@ -140,7 +140,7 @@ cfg_set_defaults()
 	c->run_as_daemon = true; // set false only to run in debugger & see console output
 	c->scan_max_active = 100;
 	c->scan_max_done = 100;
-	c->scan_max_udf_transactions = 64;
+	c->scan_max_udf_transactions = 32;
 	c->scan_threads = 4;
 	c->storage_benchmarks = false;
 	c->ticker_interval = 10;
