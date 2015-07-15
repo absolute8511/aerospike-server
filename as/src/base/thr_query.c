@@ -234,7 +234,7 @@ struct as_query_transaction_s {
 	as_aggr_call             agg_call; // Stream UDF Details 
 	as_sindex_qctx           qctx;     // Secondary Index details
 
-	as_partition_reservation rsv[AS_PARTITIONS];
+	as_partition_reservation * rsv;
 };
 
 typedef enum {
@@ -747,6 +747,7 @@ as_query__transaction_done(as_query_transaction *qtr)
 				cf_atomic_int_decr(&g_config.dup_tree_count);
 			}
 		}
+		cf_free(qtr->rsv);
 	}
 
 	as_query__update_stats(qtr);
@@ -1979,6 +1980,7 @@ as_query__generator(as_query_transaction *qtr)
 		bzero(&qtr->qctx.bdig, sizeof(cf_digest));
 		// Populate all the paritions for which this node is a qnode.
 		if (qtr->qctx.qnodes_pre_reserved) {
+			qtr->rsv = cf_malloc(sizeof(as_partition_reservation) * AS_PARTITIONS);
 			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
 		}
 
@@ -2287,7 +2289,7 @@ as_query_init()
 	}
 
 	g_config.query_enable_histogram	= false;
-	g_config.qnodes_pre_reserved    = true;
+	g_config.qnodes_pre_reserved    = false;
 }
 
 /*
