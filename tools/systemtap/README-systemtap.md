@@ -24,11 +24,11 @@ Add user to systemtap groups:
 #### Collecting server events
 
     cd aerospike-server
-    stap systemtap/queries.stp -o /tmp/asd-`hostname`-stap.log
+    stap tools/systemtap/queries.stp -o /tmp/asd-`hostname`-stap.log
 
 
 #### Annotate multiple concurrent trace files
 
     cd aerospike-server
-    sort -n /tmp/*-stap.log | systemtap/query_annotate 
+    sort -n /tmp/*-stap.log | tools/systemtap/query_annotate 
 
