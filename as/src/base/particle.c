@@ -1876,8 +1876,7 @@ uint32_t
 as_bin_particle_client_value_size(as_bin *b)
 {
 	if (! as_bin_inuse(b)) {
-		// TODO - just crash?
-		cf_warning(AS_PARTICLE, "sizing unused bin");
+		// UDF result bin (bin name "SUCCESS" or "FAILURE") will get here.
 		return 0;
 	}
 
