@@ -740,14 +740,16 @@ as_query__transaction_done(as_query_transaction *qtr)
 	}
 
 	// Release all the qnodes
-	if (qtr->qctx.qnodes_pre_reserved) {
+	if (qtr->qctx.qnodes_pre_reserved && qtr->inited) {
 		for (int i=0; i<AS_PARTITIONS; i++) {
 			if (qtr->qctx.is_partition_qnode[i]) {
 				as_partition_release(&qtr->rsv[i]);
 				cf_atomic_int_decr(&g_config.dup_tree_count);
 			}
 		}
-		cf_free(qtr->rsv);
+		if (qtr->rsv) {
+			cf_free(qtr->rsv);
+		}
 	}
 
 	as_query__update_stats(qtr);
@@ -1983,6 +1985,9 @@ as_query__generator(as_query_transaction *qtr)
 			qtr->rsv = cf_malloc(sizeof(as_partition_reservation) * AS_PARTITIONS);
 			as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
 		}
+		else {
+			qtr->rsv = NULL;
+		}
 
 		qtr->priority                 = g_config.query_priority;
 		qtr->bb_r                     = as_query__bb_poolrequest();
@@ -2693,6 +2698,7 @@ as_query(as_transaction *tr)
 	qtr->push_seq_number     = 0;
 	qtr->pop_seq_number      = 1;
 	qtr->blocking            = false;
+	qtr->rsv                 = NULL;
 
 	if (as_aggr_call_init(&qtr->agg_call, tr, qtr, &as_query_aggr_caller_qintf,
 			&query_agg_istream_hooks, &query_agg_ostream_hooks, ns, false) == AS_QUERY_OK) {
