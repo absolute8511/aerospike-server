@@ -8,12 +8,18 @@ Do this first so it can settle while you do the rest ...
 
 Install systemtap software:
 
+    # On RedHat/CentOS/Fedora:
     sudo yum install systemtap systemtap-runtime systemtap-sdt-devel
+
+    # On Debian/Ubuntu:
+    sudo apt-get install -y systemtap systemtap-runtime systemtap-sdt-dev
+
 
 Add user to systemtap groups:
 
     sudo usermod -a -G stapusr,stapsys,stapdev <username>
     # relogin after this to obtain group privileges
+
 
 #### Building server
 
