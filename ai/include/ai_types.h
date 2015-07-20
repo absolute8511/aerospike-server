@@ -58,8 +58,6 @@ typedef struct uint160 {
 #define INIT_MAX_NUM_TABLES        256
 #define INIT_MAX_NUM_INDICES       256
 
-#define MAX_PARTITIONS_PER_INDEX   256
-
 #define MAX_JOIN_COLS              128
 #define MAX_ORDER_BY_COLS          16
 

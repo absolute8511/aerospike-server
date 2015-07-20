@@ -872,6 +872,9 @@ void as_partition_map_dump();
 #define AS_SINDEX_BINMAX	4
 #define AS_SINDEX_MAX		256
 
+#define MIN_PARTITIONS_PER_INDEX 1
+#define MAX_PARTITIONS_PER_INDEX 256
+
 // as_sindex structure which hangs from the ns.
 #define AS_SINDEX_INACTIVE			1 // On init, pre-loading
 #define AS_SINDEX_ACTIVE			2 // On creation and afterwards

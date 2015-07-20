@@ -2866,7 +2866,7 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_SINDEX_NUM_PARTITIONS:
 				// FIXME - minimum should be 1, but currently crashes.
-				ns->sindex_num_partitions = cfg_u32(&line, 2, 128);
+				ns->sindex_num_partitions = cfg_u32(&line, MIN_PARTITIONS_PER_INDEX, MAX_PARTITIONS_PER_INDEX);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);

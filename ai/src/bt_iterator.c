@@ -248,6 +248,19 @@ static btSIter *newIter() {
 	bzero(siter, sizeof(btSIter));
 	return siter;
 }
+
+static btSIter *getIterator() {
+	return newIter();
+}
+
+static void releaseIterator(btSIter *siter) {
+	if (siter) {
+		cf_free(siter);
+	}
+	return;
+}
+
+/*
 static btSIter *getIterator() {
 	pthread_mutex_lock  (&g_iter_lock); // -->>>>>>>>>>>>>>>> LOCK
 	if (!IterList) {
@@ -276,6 +289,7 @@ static void releaseIterator(btSIter *siter) {
 	else                              cf_free(siter);
 	pthread_mutex_unlock(&g_iter_lock); // <<<<<<<<<<<<<<<<-- UNLOCK
 }
+*/
 
 static btSIter *createIterator(bt *btr, iter_single *itl, iter_single *itn) {
 	btSIter *siter = getIterator();
