@@ -728,7 +728,10 @@ msg_get_buf(const msg *m, int field_id, uint8_t **r, size_t *len, msg_get_type t
 	if ( ! m->f[field_id].is_set ) {
 //		cf_fault(CF_FAULT_SCOPE_THREAD, CF_FAULT_SEVERITY_NOTICE, "msg %p: attempt to retrieve unset field %d",m,field_id);
 //		msg_dump(m);
-		*r = 0; *len = 0;
+		*r = 0; 
+		if (len != NULL){
+			*len = 0;
+		}
 		return(-2);
 	}
 

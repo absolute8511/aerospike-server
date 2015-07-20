@@ -63,6 +63,8 @@
 // failure?
 // #define VERIFY_BREAK 1
 
+int xdr_internal_read_response(as_namespace *ptr_namespace, int tr_result_code, uint32_t generation, uint32_t void_time, as_bin** as_bins, uint16_t n_as_bins, char* setname, void* from_xdr);
+
 // Forward declaration.
 int thr_tsvc_enqueue_slow(as_transaction *tr);
 
@@ -745,6 +747,13 @@ process_transaction(as_transaction *tr)
 				cf_debug_digest(AS_PROXY, &(tr->keyd),
 						"proxy REDIRECT (wr) to(%"PRIx64") :", dest);
 				as_proxy_send_redirect(tr->proxy_node, tr->proxy_msg, dest);
+			} else if (tr->from_xdr) {
+				// It is a read request from XDR.
+				// As proxy is required for it, XDR should relog it at current owner and replicas.
+				// Send "AS_PROTO_RESULT_FAIL_UNKNOWN" back to XDR.
+				// XDR will relog digest on seeing this error.
+				xdr_internal_read_response(ns, AS_PROTO_RESULT_FAIL_UNKNOWN, 0, 0, NULL, 0, NULL, tr->from_xdr);
+				free_msgp = true;
 			}
 			if (free_msgp == true) {
 				cf_free(msgp);

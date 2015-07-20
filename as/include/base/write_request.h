@@ -127,6 +127,8 @@ typedef struct write_request_s {
 	// response that comes back from a given node
 	msg                * dup_msg[AS_CLUSTER_SZ];
 	int                  dup_result_code[AS_CLUSTER_SZ];
+	// XDR data to respond back to xdr on reading data.
+	void *from_xdr;
 } write_request; // this is really an rw_request, but the old name looks pretty
 
 void write_request_destructor (void *object);

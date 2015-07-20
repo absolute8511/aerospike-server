@@ -48,6 +48,7 @@
 
 #include "cf_str.h"
 #include "dynbuf.h"
+#include "fault.h"
 #include "jem.h"
 #include "meminfo.h"
 #include "queue.h"
@@ -2489,6 +2490,8 @@ info_xdr_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_delete_shipping_enabled ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";xdr-nsup-deletes-enabled=");
 	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_nsup_deletes_enabled ? "true" : "false");
+	cf_dyn_buf_append_string(db, ";enable-xdr-logging=");
+	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_global_enabled ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";stop-writes-noxdr=");
 	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_stop_writes_noxdr ? "true" : "false");
 }
@@ -3722,52 +3725,17 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 	}
 	else if (strcmp(context, "xdr") == 0) {
 		context_len = sizeof(context);
-		if (0 == as_info_parameter_get(params, "enable-xdr", context, &context_len)) {
+		if (0 == as_info_parameter_get(params, "xdr-digest-logging", context, &context_len)) {
 			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
-
-				// If this is for a fresh start, we better close the existing pipe
-				// and reopen as it can be in a broken state.
-				context_len = sizeof(context);
-				if (0 == as_info_parameter_get(params, "freshstart", context, &context_len)) {
-					cf_info(AS_INFO, "Closing the digest pipe for a fresh start");
-					close(g_config.xdr_cfg.xdr_digestpipe_fd);
-					g_config.xdr_cfg.xdr_digestpipe_fd = -1;
-				}
-
-				// Create the named pipe if it is not already open
-				// Note below that we do not close named pipe when xdr is disabled.
-				if (g_config.xdr_cfg.xdr_digestpipe_fd == -1) {
-
-					if (xdr_create_named_pipe(&(g_config.xdr_cfg)) != 0) {
-						goto Error;
-					}
-
-					// We need to send the namespace info
-					if (xdr_send_nsinfo() != 0) {
-						goto Error;
-					}
-
-					if (xdr_send_nodemap() != 0) {
-						goto Error;
-					}
-				}
-
-				// Everything set.
-				cf_info(AS_INFO, "Changing value of enable-xdr from %s to %s", bool_val[g_config.xdr_cfg.xdr_global_enabled], context);
+				cf_info(AS_INFO, "Enabling XDR digest logging");
 				g_config.xdr_cfg.xdr_global_enabled = true;
-
 			} else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
-				cf_info(AS_INFO, "Changing value of enable-xdr from %s to %s", bool_val[g_config.xdr_cfg.xdr_global_enabled], context);
+				cf_info(AS_INFO, "Disabling XDR digest logging");
 				g_config.xdr_cfg.xdr_global_enabled = false;
-				/* Closing the named pipe is not really necessary. Moreover, this
-				 * will allow us to have additional functionality where XDR on server
-				 * can be temporarily disabled.
-				 */
 			} else {
 				goto Error;
 			}
-		}
-		else if (0 == as_info_parameter_get(params, "lastshiptime", context, &context_len)) {
+		} else if (0 == as_info_parameter_get(params, "lastshiptime", context, &context_len)) {
 			uint64_t val[DC_MAX_NUM];
 			char * tmp_val;
 			char *  delim = {","};
@@ -3857,9 +3825,21 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			} else {
 				goto Error;
 			}
-		}
-		else
+		} else  if (0 == as_info_parameter_get(params, "enable-xdr", context, &context_len)) {
+			if (strncmp(context, "true", 4)==0 || strncmp(context, "yes", 3)==0) {
+				g_config.xdr_cfg.xdr_global_enabled = true;
+				as_xdr_set_shipping(true);
+				cf_info(AS_XDR, "XDR Service is Enabled");	
+			} else if (strncmp(context, "false", 5)==0 || strncmp(context, "no", 2)==0) {
+				g_config.xdr_cfg.xdr_global_enabled = false;
+				as_xdr_set_shipping(false);
+				cf_info(AS_XDR, "XDR Service is Disabled");	
+			} else {
+				goto Error;
+			}
+        	} else {
 			goto Error;
+		}
 	}
 	else
 		goto Error;
@@ -3873,67 +3853,89 @@ Error:
 	return(0);
 }
 
-//
-// log-set:log=id;context=foo;level=bar
-// ie:
-//   log-set:log=0;context=rw;level=debug
 
-
+// e.g.
+// log-set:id=0;fabric=debug;scan=debug"
+// log-set:rw=warning"
+// log-set:id=0;any=info;batch=debug"
 int
 info_command_log_set(char *name, char *params, cf_dyn_buf *db)
 {
 	cf_debug(AS_INFO, "log-set command received: params %s", params);
 
+	cf_fault_sink *s = NULL;
 	char id_str[50];
 	int  id_str_len = sizeof(id_str);
-	int  id = -1;
-	bool found_id = true;
-	cf_fault_sink *s = 0;
 
-	if (0 != as_info_parameter_get(params, "id", id_str, &id_str_len)) {
-		if (0 != as_info_parameter_get(params, "log", id_str, &id_str_len)) {
-			cf_debug(AS_INFO, "log set command: no log id to be set - doing all");
-			found_id = false;
-		}
-	}
-	if (found_id == true) {
-		if (0 != cf_str_atoi(id_str, &id) ) {
-			cf_info(AS_INFO, "log set command: id must be an integer, is: %s", id_str);
+	// Check whether a sink is specified.
+	if (0 == as_info_parameter_get(params, "id", id_str, &id_str_len) ||
+			0 == as_info_parameter_get(params, "log", id_str, &id_str_len)) {
+		int id;
+
+		if (0 != cf_str_atoi(id_str, &id)) {
+			cf_info(AS_INFO, "log-set command: invalid sink id '%s'", id_str);
 			cf_dyn_buf_append_string(db, "error-id-not-integer");
-			return(0);
+			return 0;
 		}
+
 		s = cf_fault_sink_get_id(id);
-		if (!s) {
-			cf_info(AS_INFO, "log set command: sink id %d invalid", id);
+
+		if (! s) {
+			cf_info(AS_INFO, "log-set command: invalid sink id %d", id);
 			cf_dyn_buf_append_string(db, "error-bad-id");
-			return(0);
+			return 0;
 		}
 	}
+	else {
+		cf_debug(AS_INFO, "log-set command: sink id not specified - doing all");
+	}
 
-	// now, loop through all context strings. If we find a known context string,
-	// do the set
+	// It's possible to have multiple context=level pairs.
+	int contexts_set = 0;
+	char level_str[50];
+	int  level_str_len = sizeof(level_str);
+
+	// Check for context "any". It only makes sense if it's done first.
+	if (0 == as_info_parameter_get(params, "any", level_str, &level_str_len)) {
+		if (0 != cf_fault_sink_set_severity(s, CF_FAULT_CONTEXT_ANY, cf_fault_sink_severity(level_str))) {
+			cf_info(AS_INFO, "log-set command: set severity failed: context 'any' level '%s'", level_str);
+			cf_dyn_buf_append_string(db, "error-invalid-level");
+			return 0;
+		}
+
+		contexts_set++;
+	}
+
+	// Loop through all context strings. If we find a known one, do the set.
 	for (int c_id = 0; c_id < CF_FAULT_CONTEXT_UNDEF; c_id++) {
-
-		char level_str[50];
-		int  level_str_len = sizeof(level_str);
 		char *context = cf_fault_context_strings[c_id];
+
+		level_str_len = sizeof(level_str);
+
 		if (0 != as_info_parameter_get(params, context, level_str, &level_str_len)) {
 			continue;
 		}
-		for (uint i = 0; level_str[i]; i++) level_str[i] = toupper(level_str[i]);
 
-		if (0 != cf_fault_sink_addcontext(s, context, level_str)) {
-			cf_info(AS_INFO, "log set command: addcontext failed: context %s level %s", context, level_str);
-			cf_dyn_buf_append_string(db, "error-invalid-context-or-level");
-			return(0);
+		if (0 != cf_fault_sink_set_severity(s, c_id, cf_fault_sink_severity(level_str))) {
+			cf_info(AS_INFO, "log-set command: set severity failed: context '%s' level '%s'", context, level_str);
+			cf_dyn_buf_append_string(db, "error-invalid-level");
+			return 0;
 		}
+
+		contexts_set++;
 	}
 
-	cf_info(AS_INFO, "log-set command executed: params %s", params);
+	if (contexts_set != 0) {
+		// Note - we don't flag invalid contexts if there is any valid context.
+		cf_info(AS_INFO, "log-set command: set %d context(s): params %s", contexts_set, params);
+		cf_dyn_buf_append_string(db, "ok");
+	}
+	else {
+		cf_info(AS_INFO, "log-set command: no valid context: params %s", params);
+		cf_dyn_buf_append_string(db, "error-no-valid-context");
+	}
 
-	cf_dyn_buf_append_string(db, "ok");
-
-	return(0);
+	return 0;
 }
 
 
@@ -7177,6 +7179,7 @@ as_info_init()
 	as_info_set_command("tip-clear", info_command_tip_clear, PERM_SERVICE_CTRL);              // Clear tip list from mesh-mode heartbeats.
 	as_info_set_command("undun", info_command_undun, PERM_SERVICE_CTRL);                      // Instruct this server to not ignore another node.
 	as_info_set_command("xdr-min-lastshipinfo", info_command_get_min_config, PERM_NONE);      // Get the min XDR lastshipinfo.
+	as_info_set_command("xdr-command", as_info_command_xdr, PERM_SERVICE_CTRL);		  // Command to XDR module.
 
 	// SINDEX
 	as_info_set_dynamic("sindex", info_get_sindexes, false);

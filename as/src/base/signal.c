@@ -38,7 +38,6 @@
 extern const char aerospike_build_type[];
 extern const char aerospike_build_id[];
 
-
 //==========================================================
 // Globals.
 //
@@ -47,6 +46,8 @@ extern const char aerospike_build_id[];
 extern pthread_mutex_t g_NONSTOP;
 extern bool g_startup_complete;
 
+extern void xdr_sig_handler(int signum);
+extern int as_xdr_stop();
 
 //==========================================================
 // Local helpers.
@@ -92,6 +93,8 @@ as_sig_handle_abort(int sig_num)
 	cf_warning(AS_AS, "SIGABRT received, aborting %s build %s",
 			aerospike_build_type, aerospike_build_id);
 
+	xdr_sig_handler(sig_num);
+
 	PRINT_STACK();
 	reraise_signal(sig_num, as_sig_handle_abort);
 }
@@ -102,6 +105,8 @@ as_sig_handle_fpe(int sig_num)
 {
 	cf_warning(AS_AS, "SIGFPE received, aborting %s build %s",
 			aerospike_build_type, aerospike_build_id);
+
+	xdr_sig_handler(sig_num);
 
 	PRINT_STACK();
 	reraise_signal(sig_num, as_sig_handle_fpe);
@@ -138,6 +143,9 @@ as_sig_handle_int(int sig_num)
 		_exit(0);
 	}
 
+	as_xdr_stop();
+	xdr_sig_handler(sig_num);
+
 	pthread_mutex_unlock(&g_NONSTOP);
 }
 
@@ -159,6 +167,8 @@ as_sig_handle_segv(int sig_num)
 	cf_warning(AS_AS, "SIGSEGV received, aborting %s build %s",
 			aerospike_build_type, aerospike_build_id);
 
+	xdr_sig_handler(sig_num);
+
 	PRINT_STACK();
 	reraise_signal(sig_num, as_sig_handle_segv);
 }
@@ -173,14 +183,24 @@ as_sig_handle_term(int sig_num)
 		cf_warning(AS_AS, "startup was not complete, exiting immediately");
 		_exit(0);
 	}
+	as_xdr_stop();
+	xdr_sig_handler(sig_num);
 
 	pthread_mutex_unlock(&g_NONSTOP);
 }
 
+sighandler_t g_old_bus_handler = 0;
+void
+as_sig_handle_bus(int sig_num)
+{
+	cf_warning(AS_AS, "SIGBUS received, aborting %s build %s",
+			aerospike_build_type, aerospike_build_id);
 
-//==========================================================
-// Public API.
-//
+	xdr_sig_handler(sig_num);
+
+	PRINT_STACK();
+	reraise_signal(sig_num, as_sig_handle_bus);
+}
 
 void
 as_signal_setup()
@@ -193,6 +213,7 @@ as_signal_setup()
 	register_signal_handler(SIGQUIT, as_sig_handle_quit);
 	register_signal_handler(SIGSEGV, as_sig_handle_segv);
 	register_signal_handler(SIGTERM, as_sig_handle_term);
+	register_signal_handler(SIGBUS , as_sig_handle_bus);
 
 	// Block SIGPIPE signal when there is some error while writing to pipe. The
 	// write() call will return with a normal error which we can handle.

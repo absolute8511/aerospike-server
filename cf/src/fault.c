@@ -171,30 +171,97 @@ cf_fault_init()
 
 
 /* cf_fault_sink_add
- * Register an sink for faults */
+ * Add and activate another sink for faults. Called at runtime, but for now is
+ * not thread safe and so is not a generic add method. Sink is added with all
+ * limits set to CF_CRITICAL, so these must be set separately. If sink exists
+ * already, it's considered an error. */
 cf_fault_sink *
 cf_fault_sink_add(char *path)
 {
-	cf_fault_sink *s;
-
-	if ((CF_FAULT_SINKS_MAX - 1) == cf_fault_sinks_inuse)
-		return(NULL);
-
-	s = &cf_fault_sinks[cf_fault_sinks_inuse++];
-	s->path = cf_strdup(path);
-	if (0 == strncmp(path, "stderr", 6))
-		s->fd = 2;
-	else {
-		if (-1 == (s->fd = open(path, O_WRONLY|O_CREAT|O_APPEND|O_NONBLOCK, S_IRUSR|S_IWUSR))) {
-			cf_fault_sinks_inuse--;
-			return(NULL);
+	// First check that this sink does not already exist.
+	for (int i = 0; i < cf_fault_sinks_inuse; i++) {
+		if (strcmp(path, cf_fault_sinks[i].path) == 0) {
+			cf_warning(CF_MISC, "sink %s already exists", path);
+			return NULL;
 		}
 	}
 
-	for (int i = 0; i < CF_FAULT_CONTEXT_UNDEF; i++)
-		s->limit[i] = CF_INFO;
+	// We need a slot in the array.
+	if (cf_fault_sinks_inuse >= CF_FAULT_SINKS_MAX) {
+		cf_warning(CF_MISC, "too many fault sinks");
+		return NULL;
+	}
 
-	return(s);
+	cf_fault_sink *s = &cf_fault_sinks[cf_fault_sinks_inuse];
+
+	// "Activate" the sink.
+	if (0 == strcmp(path, "stderr")) {
+		s->fd = 2;
+	}
+	else if (-1 == (s->fd = open(path, O_WRONLY|O_CREAT|O_APPEND|O_NONBLOCK, S_IRUSR|S_IWUSR))) {
+		cf_warning(CF_MISC, "can't open %s: %s", path, cf_strerror(errno));
+		return NULL;
+	}
+
+	s->path = cf_strdup(path);
+
+	for (int j = 0; j < CF_FAULT_CONTEXT_UNDEF; j++) {
+		s->limit[j] = CF_CRITICAL;
+		// No need to adjust filter - new CF_CRITICAL level will not affect it.
+	}
+
+	// Finally, reveal this sink to the fault event functions.
+	cf_fault_sinks_inuse++;
+
+	return s;
+}
+
+
+/* cf_fault_sink_remove
+ * Remove the last fault sink if the path matches. For now this is not a generic
+ * remove method - we'd have to move the other sinks to close up the sink array,
+ * messy to do at runtime because of thread safety. */
+int
+cf_fault_sink_remove(char *path)
+{
+	if (cf_fault_sinks_inuse < 1) {
+		cf_warning(CF_MISC, "no fault sinks");
+		return -1;
+	}
+
+	cf_fault_sink *s = &cf_fault_sinks[cf_fault_sinks_inuse - 1];
+
+	if (strcmp(s->path, path) != 0) {
+		cf_warning(CF_MISC, "%s is not the last fault sink", path);
+		return -1;
+	}
+
+	if (s->fd <= 2) {
+		cf_warning(CF_MISC, "can't remove fault sink %s", s->path);
+		return -1;
+	}
+
+	// Hide it from the fault event functions ...
+	cf_fault_sinks_inuse--;
+
+	// ... then close it.
+	if (close(s->fd) != 0) {
+		cf_warning(CF_MISC, "can't close %s: %s", s->path, cf_strerror(errno));
+		return -1;
+	}
+
+	// Reset all its fields.
+
+	s->fd = -1;
+
+	cf_free(s->path);
+	s->path = NULL;
+
+	for (int j = 0; j < CF_FAULT_CONTEXT_UNDEF; j++) {
+		s->limit[j] = CF_CRITICAL;
+	}
+
+	return 0;
 }
 
 
@@ -277,7 +344,7 @@ cf_fault_sink_activate_all_held()
 		cf_fault_sink *s = &cf_fault_sinks[i];
 
 		// "Activate" the sink.
-		if (0 == strncmp(s->path, "stderr", 6)) {
+		if (0 == strcmp(s->path, "stderr")) {
 			s->fd = 2;
 		}
 		else if (-1 == (s->fd = open(s->path, O_WRONLY|O_CREAT|O_NONBLOCK|O_APPEND, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH))) {
@@ -319,81 +386,96 @@ cf_fault_sink_get_fd_list(int *fds)
 }
 
 
+/* cf_fault_sink_context
+ * Look up a context string and return the corresponding enum value. */
+cf_fault_context
+cf_fault_sink_context(const char *context)
+{
+	if (0 == strcasecmp(context, "any")) {
+		return CF_FAULT_CONTEXT_ANY;
+	}
+
+	int i;
+
+	for (i = 0; i < CF_FAULT_CONTEXT_UNDEF; i++) {
+		if (0 == strcasecmp(cf_fault_context_strings[i], context)) {
+			break;
+		}
+	}
+
+	return (cf_fault_context)i;
+}
+
+
+/* cf_fault_sink_severity
+ * Look up a severity string and return the corresponding enum value. */
+cf_fault_severity
+cf_fault_sink_severity(const char *severity)
+{
+	int i;
+
+	for (i = 0; i < CF_FAULT_SEVERITY_UNDEF; i++) {
+		if (0 == strcasecmp(cf_fault_severity_strings[i], severity)) {
+			break;
+		}
+	}
+
+	return (cf_fault_severity)i;
+}
+
+
 static int
-cf_fault_sink_addcontext_all(char *context, char *severity)
+cf_fault_sink_set_severity_all(cf_fault_context context,
+		cf_fault_severity severity)
 {
 	for (int i = 0; i < cf_fault_sinks_inuse; i++) {
 		cf_fault_sink *s = &cf_fault_sinks[i];
-		int rv = cf_fault_sink_addcontext(s, context, severity);
-		if (rv != 0)	return(rv);
+
+		int rv = cf_fault_sink_set_severity(s, context, severity);
+
+		if (rv != 0) {
+			return rv;
+		}
 	}
-	return(0);
+
+	return 0;
 }
 
 
+/* cf_fault_sink_set_severity
+ * Set the specified severity level for the specified context and sink. Passing
+ * a null sink means set all sinks. Passing context CF_FAULT_CONTEXT_ANY means
+ * set all contexts. */
 int
-cf_fault_sink_addcontext(cf_fault_sink *s, char *context, char *severity)
+cf_fault_sink_set_severity(cf_fault_sink *s, cf_fault_context context,
+		cf_fault_severity severity)
 {
-	if (s == 0) 		return(cf_fault_sink_addcontext_all(context, severity));
-
-	cf_fault_context ctx = CF_FAULT_CONTEXT_UNDEF;
-	cf_fault_severity sev = CF_FAULT_SEVERITY_UNDEF;
-
-	for (int i = 0; i < CF_FAULT_SEVERITY_UNDEF; i++) {
-		if (0 == strncasecmp(cf_fault_severity_strings[i], severity, strlen(severity)))
-			sev = (cf_fault_severity)i;
+	if (! s) {
+		return cf_fault_sink_set_severity_all(context, severity);
 	}
-	if (CF_FAULT_SEVERITY_UNDEF == sev)
-		return(-1);
 
-	if (0 == strncasecmp(context, "any", 3)) {
+	if (context < CF_FAULT_CONTEXT_ANY || context >= CF_FAULT_CONTEXT_UNDEF) {
+		cf_warning(CF_MISC, "illegal fault context");
+		return -1;
+	}
+
+	if (severity < 0 || severity >= CF_FAULT_SEVERITY_UNDEF) {
+		cf_warning(CF_MISC, "illegal fault severity");
+		return -1;
+	}
+
+	if (context == CF_FAULT_CONTEXT_ANY) {
 		for (int i = 0; i < CF_FAULT_CONTEXT_UNDEF; i++) {
-			s->limit[i] = sev;
+			s->limit[i] = severity;
 			fault_filter_adjust(s, (cf_fault_context)i);
 		}
-	} else {
-		for (int i = 0; i < CF_FAULT_CONTEXT_UNDEF; i++) {
-		//strncasecmp only compared the length of context passed in the 3rd argument and as cf_fault_context_strings has info and info port,
-		//So when you try to set info to debug it will set info-port to debug . Just forcing it to check the length from cf_fault_context_strings
-			if (0 == strncasecmp(cf_fault_context_strings[i], context, strlen(cf_fault_context_strings[i])))
-				ctx = (cf_fault_context)i;
-		}
-		if (CF_FAULT_CONTEXT_UNDEF == ctx)
-			return(-1);
-
-		s->limit[ctx] = sev;
-		fault_filter_adjust(s, ctx);
+	}
+	else {
+		s->limit[context] = severity;
+		fault_filter_adjust(s, context);
 	}
 
-	return(0);
-}
-
-int
-cf_fault_sink_setcontext(cf_fault_sink *s, char *context, char *severity)
-{
-	if (s == 0) 		return(cf_fault_sink_addcontext_all(context, severity));
-
-	cf_fault_context ctx = CF_FAULT_CONTEXT_UNDEF;
-	cf_fault_severity sev = CF_FAULT_SEVERITY_UNDEF;
-
-	for (int i = 0; i < CF_FAULT_SEVERITY_UNDEF; i++) {
-		if (0 == strncasecmp(cf_fault_severity_strings[i], severity, strlen(severity)))
-			sev = (cf_fault_severity)i;
-	}
-	if (CF_FAULT_SEVERITY_UNDEF == sev)
-		return(-1);
-
-	for (int i = 0; i < CF_FAULT_CONTEXT_UNDEF; i++) {
-		if (0 == strncasecmp(cf_fault_context_strings[i], context, strlen(cf_fault_context_strings[i])))
-			ctx = (cf_fault_context)i;
-	}
-	if (CF_FAULT_CONTEXT_UNDEF == ctx)
-		return(-1);
-
-	s->limit[ctx] = sev;
-	cf_fault_set_severity(ctx, s->limit[ctx]);
-
-	return(0);
+	return 0;
 }
 
 
@@ -927,11 +1009,10 @@ cf_fault_sink_logroll(void)
 }
 
 
-cf_fault_sink *cf_fault_sink_get_id(int id)
+cf_fault_sink *
+cf_fault_sink_get_id(int id)
 {
-	if (id > cf_fault_sinks_inuse)	return(0);
-	return ( &cf_fault_sinks[id] );
-
+	return (id >= 0 && id < cf_fault_sinks_inuse) ? &cf_fault_sinks[id] : NULL;
 }
 
 int

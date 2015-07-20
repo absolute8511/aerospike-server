@@ -61,11 +61,21 @@
 
 
 //==========================================================
+// Constants.
+//
+
+const char DEFAULT_CONFIG_FILE[] = "/etc/aerospike/aerospike.conf";
+
+
+//==========================================================
 // Globals.
 //
 
 // The runtime configuration instance.
 as_config g_config;
+
+// The configuration file name.
+const char *g_config_file = DEFAULT_CONFIG_FILE;
 
 
 //==========================================================
@@ -1136,7 +1146,7 @@ cfg_find_tok(const char* tok, const cfg_opt opts[], int num_opts)
 }
 
 xdr_cfg_case_id
-xdr_cfg_find_tok(const char* tok, const xdr_cfg_opt opts[], int num_opts)
+as_xdr_cfg_find_tok(const char* tok, const xdr_cfg_opt opts[], int num_opts)
 {
 	for (int i = 0; i < num_opts; i++) {
 		if (strcmp(tok, opts[i].tok) == 0) {
@@ -1651,7 +1661,7 @@ const char CFG_WHITESPACE[] = " \t\n\r\f\v";
 //
 
 as_config*
-as_config_init(const char *config_file)
+as_config_init()
 {
 	as_config* c = &g_config; // shortcut pointer
 
@@ -1679,8 +1689,8 @@ as_config_init(const char *config_file)
 	bool transaction_queues_set = false;
 
 	// Open the configuration file for reading.
-	if (NULL == (FD = fopen(config_file, "r"))) {
-		cf_crash_nostack(AS_CFG, "couldn't open configuration file %s: %s", config_file, cf_strerror(errno));
+	if (NULL == (FD = fopen(g_config_file, "r"))) {
+		cf_crash_nostack(AS_CFG, "couldn't open configuration file %s: %s", g_config_file, cf_strerror(errno));
 	}
 
 	// Parse the configuration file, line by line.
@@ -2109,7 +2119,7 @@ as_config_init(const char *config_file)
 		case LOGGING_FILE:
 			switch(cfg_find_tok(line.name_tok, LOGGING_FILE_OPTS, NUM_LOGGING_FILE_OPTS)) {
 			case CASE_LOG_FILE_CONTEXT:
-				if (0 != cf_fault_sink_addcontext(sink, line.val_tok_1, line.val_tok_2)) {
+				if (0 != cf_fault_sink_set_context_level(sink, line.val_tok_1, line.val_tok_2)) {
 					cf_crash_nostack(AS_CFG, "line %d :: can't add logging file context %s %s", line_num, line.val_tok_1, line.val_tok_2);
 				}
 				break;
@@ -2133,7 +2143,7 @@ as_config_init(const char *config_file)
 		case LOGGING_CONSOLE:
 			switch(cfg_find_tok(line.name_tok, LOGGING_CONSOLE_OPTS, NUM_LOGGING_CONSOLE_OPTS)) {
 			case CASE_LOG_CONSOLE_CONTEXT:
-				if (0 != cf_fault_sink_addcontext(sink, line.val_tok_1, line.val_tok_2)) {
+				if (0 != cf_fault_sink_set_context_level(sink, line.val_tok_1, line.val_tok_2)) {
 					cf_crash_nostack(AS_CFG, "line %d :: can't add logging console context %s %s", line_num, line.val_tok_1, line.val_tok_2);
 				}
 				break;
@@ -2812,13 +2822,16 @@ as_config_init(const char *config_file)
 		// Parse xdr context items.
 		//
 		case XDR:
-			switch(xdr_cfg_find_tok(line.name_tok, XDR_OPTS, NUM_XDR_OPTS)) {
+			switch(as_xdr_cfg_find_tok(line.name_tok, XDR_OPTS, NUM_XDR_OPTS)) {
 			case XDR_CASE_ENABLE_XDR:
 				c->xdr_cfg.xdr_global_enabled = cfg_bool(&line);
 				if (c->xdr_cfg.xdr_global_enabled && ! c->xdr_cfg.xdr_supported) {
 					cfg_not_supported(&line, "XDR");
 				}
 				break;
+			case XDR_CASE_NAMEDPIPE_PATH_OLD:
+				cfg_deprecated_name_tok(&line);
+				cf_warning(AS_AS, "Use 'xdr-namedpipe-path'");
 			case XDR_CASE_NAMEDPIPE_PATH:
 				c->xdr_cfg.xdr_digestpipe_path = cfg_strdup_no_checks(&line);
 				break;
@@ -2856,7 +2869,7 @@ as_config_init(const char *config_file)
 			// This is a hack to avoid defining a new array for the datacenter
 			// subsection. The server is not interested in the details. It just
 			// wants the subsection to end. So just check for the closing brace.
-			switch(xdr_cfg_find_tok(line.name_tok, XDR_DC_OPTS, NUM_XDR_DC_OPTS)) {
+			switch(as_xdr_cfg_find_tok(line.name_tok, XDR_DC_OPTS, NUM_XDR_DC_OPTS)) {
 			case XDR_CASE_CONTEXT_END:
 				cfg_end_context(&state);
 				break;
@@ -3074,8 +3087,10 @@ as_config_init(const char *config_file)
 //
 
 void
-as_config_post_process(as_config *c, const char *config_file)
+as_config_post_process()
 {
+	as_config *c = &g_config;
+
 	//--------------------------------------------
 	// Re-read the configuration file and print it to the logs, line by line.
 	// This will be the first thing to appear in the log file(s).
@@ -3083,8 +3098,8 @@ as_config_post_process(as_config *c, const char *config_file)
 
 	FILE* FD;
 
-	if (NULL == (FD = fopen(config_file, "r"))) {
-		cf_crash_nostack(AS_CFG, "couldn't re-open configuration file %s: %s", config_file, cf_strerror(errno));
+	if (NULL == (FD = fopen(g_config_file, "r"))) {
+		cf_crash_nostack(AS_CFG, "couldn't re-open configuration file %s: %s", g_config_file, cf_strerror(errno));
 	}
 
 	char iobuf[256];

@@ -35,7 +35,7 @@ ifeq ($(USE_XDR),1)
   ifeq ($(EEREPO), )
     $(error "To build with XDR support, the EEREPO environment variable must be set appropriately.")
   endif
-  all: $(SERVER)
+  all: $(XDR_LIBRARY)
 else
   all: $(XDR_CONFIG_LIBRARY)
 endif

@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#include "fault.h"
 #include "util.h"
 
 //Length definitions. This should be in sync with the server definitions.
@@ -77,21 +78,22 @@ typedef enum {
 
 	// Main XDR options:
 	XDR_CASE_ENABLE_XDR,
+	XDR_CASE_NAMEDPIPE_PATH_OLD,
 	XDR_CASE_NAMEDPIPE_PATH,
+	XDR_CASE_DIGESTLOG_PATH_OLD,
 	XDR_CASE_DIGESTLOG_PATH,
+	XDR_CASE_ERRORLOG_PATH_OLD,
 	XDR_CASE_ERRORLOG_PATH,
-	XDR_CASE_LOCAL_NODE_PORT,
+	XDR_CASE_INFO_PORT_OLD,
 	XDR_CASE_INFO_PORT,
 	XDR_CASE_DATACENTER_BEGIN,
+	XDR_CASE_MAX_RECS_INFLIGHT_OLD,
 	XDR_CASE_MAX_RECS_INFLIGHT,
-	XDR_CASE_DIGESTLOG_OVERWRITE,
-	XDR_CASE_DIGESTLOG_PERSIST,
 	XDR_CASE_FORWARD_XDR_WRITES,
+	XDR_CASE_THREADS_OLD,
 	XDR_CASE_THREADS,
 	XDR_CASE_TIMEOUT,
 	XDR_CASE_STOP_WRITES_NOXDR,
-	XDR_CASE_XDR_BATCH_NUM_RETRY,
-	XDR_CASE_XDR_BATCH_RETRY_SLEEP,
 	XDR_CASE_XDR_DELETE_SHIPPING_ENABLED,
 	XDR_CASE_XDR_CHECK_DATA_BEFORE_DELETE,
 	XDR_CASE_XDR_NSUP_DELETES_ENABLED,
@@ -102,8 +104,6 @@ typedef enum {
 	XDR_CASE_XDR_PIDFILE,
 	XDR_CASE_XDR_WRITE_BATCH_SIZE,
 	XDR_CASE_XDR_READ_BATCH_SIZE,
-	XDR_CASE_XDR_READ_THREAD_COUNT,
-	XDR_CASE_XDR_READ_MODE,
 	XDR_CASE_XDR_DO_VERSION_CHECK,
 
 	// Remote datacenter options:
@@ -111,8 +111,9 @@ typedef enum {
 	XDR_CASE_DC_INT_EXT_IPMAP,
 	XDR_CASE_XDR_INFO_TIMEOUT,
 	XDR_CASE_XDR_COMPRESSION_THRESHOLD,
-	XDR_CASE_XDR_SHIP_DELAY
-
+	XDR_CASE_XDR_SHIP_DELAY,
+	XDR_CASE_XDR_SHIP_THREADS,
+	XDR_CASE_XDR_SHIP_SLAB_SIZE
 } xdr_cfg_case_id;
 
 /* Configuration parser token plus case-identifier pair. The server (cfg.c)
@@ -152,10 +153,6 @@ typedef struct xdr_lastship_s {
 	uint64_t	time[DC_MAX_NUM];
 } xdr_lastship_s;
 
-typedef enum {
-	XDR_MODE_BATCH_GET = 0,
-	XDR_MODE_SINGLE_RECORD_GET = 1
-} xdr_mode;
 
 // Config option in case the configuration value is changed
 typedef struct xdr_new_config_s {
@@ -163,8 +160,8 @@ typedef struct xdr_new_config_s {
 	int		xdr_max_recs_inflight;
 	int		xdr_read_batch_size;
 	int		xdr_threads;
-	xdr_mode 	xdr_read_mode;
-	int     	xdr_read_threads;	// configured number of threads
+	int		xdr_ship_threads;   // Coinfigured number of shipper threads·
+	int		xdr_ship_slab_size; // Coinfigured size of shipper thread slab size·
 } xdr_new_config;
 
 //Config option which is maintained both by the server and the XDR module
@@ -188,25 +185,26 @@ typedef struct xdr_config {
 	bool	xdr_digestlog_persist;
 	uint8_t xdr_num_digestlog_paths;
 	char	*xdr_errorlog_path;
+	cf_fault_severity xdr_errorlog_level;
 	int	xdr_digestpipe_fd;
 	int	xdr_local_port;
 	int	xdr_write_batch_size;
 	int	xdr_max_recs_inflight;
 	int	xdr_read_batch_size;
+	int	xdr_ship_slab_size;     // Maximum number of records, on receival of which, xdr start shipping.
+	int	xdr_ship_threads;       // Number threads which will read from server and ship records.
 	int	xdr_timeout;
 	int	xdr_nw_timeout;
 	int	xdr_threads;
 	int	xdr_forward_xdrwrites;
 	int	xdr_stop_writes_noxdr;
-	int xdr_internal_shipping_delay;
+	int 	xdr_internal_shipping_delay;
 	int	xdr_flag;
 	xdr_new_config xdr_new_cfg;
 	bool	xdr_shipping_enabled;
 	bool	xdr_delete_shipping_enabled;
 	bool	xdr_nsup_deletes_enabled;
 	int 	xdr_hotkey_maxskip;
-	int 	xdr_batch_retry_sleep;
-	int 	xdr_batch_num_retry;
 	bool	xdr_fwd_with_gencheck;
 	char	*xdr_conflict_digestdump_filepath;
 	FILE	*xdr_conflict_digestdump_file;
@@ -214,11 +212,18 @@ typedef struct xdr_config {
 	int		xdr_info_request_timeout_ms;
 	int     xdr_compression_threshold;
 	char	*xdr_pidfile;
-	int     xdr_read_threads;
-	xdr_mode xdr_read_mode;
 	char	*xdr_read_mode_string;
 	bool	xdr_do_version_check;
 } xdr_config;
 
 // Prototypes
 void xdr_config_defaults(xdr_config *c);
+
+// XDR states
+typedef enum xdr_state_e {
+	XDR_COMING_UP,
+	XDR_DLOG_WRITER_UP,
+	XDR_UP,
+	XDR_GOING_DOWN,
+	XDR_DOWN
+} xdr_state;

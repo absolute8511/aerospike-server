@@ -130,6 +130,8 @@ static cf_atomic32 g_rw_tid = 0;
 static rchash *g_write_hash = 0;
 static pthread_t g_rw_retransmit_th;
 
+extern xdr_state g_xdr_state;
+
 // HELPER
 void print_digest(u_char *d) {
 	printf("0x");
@@ -241,6 +243,9 @@ write_request_create(void) {
 	wr->shipped_op     = false;
 	wr->shipped_op_initiator = false;
 
+	// Data from XDR, in case it is initiated by XDR
+	wr->from_xdr = 0;
+
 	wr->dest_sz = 0;
 	UREQ_DATA_INIT(&wr->udata);
 	memset((void *) & (wr->dup_msg[0]), 0, sizeof(wr->dup_msg));
@@ -280,6 +285,9 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	UREQ_DATA_COPY(&tr->udata, &wr->udata);
 	UREQ_DATA_RESET(&wr->udata);
 	tr->microbenchmark_time = wr->microbenchmark_time;
+
+	// Data from XDR, in case this transaction is for XDR.
+	tr->from_xdr = wr->from_xdr;
 
 #if 0
 	if (wr->is_read) {
@@ -879,10 +887,10 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 			// and if the xdr digestpipe is not opened fail the writes with appropriate return value
 			// We cannot do this check inside write_local() because that function is used for replica
 			// writes as well. We do not want to stop the writes on replica if the master write succeeded.
-			if ((g_config.xdr_cfg.xdr_global_enabled == true)
-					&& (g_config.xdr_cfg.xdr_digestpipe_fd == -1)
-					&& (tr->rsv.ns && tr->rsv.ns->enable_xdr == true)
-					&& (g_config.xdr_cfg.xdr_stop_writes_noxdr == true)) {
+			if (g_config.xdr_cfg.xdr_global_enabled &&
+					g_xdr_state != XDR_UP &&
+					tr->rsv.ns && tr->rsv.ns->enable_xdr &&
+					g_config.xdr_cfg.xdr_stop_writes_noxdr) {
 				tr->result_code = AS_PROTO_RESULT_FAIL_NOXDR;
 				cf_atomic_int_incr(&g_config.err_write_fail_noxdr);
 				cf_debug(AS_RW,
@@ -1226,6 +1234,9 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 
 	wr->keyd = tr->keyd;
 
+	// Incase this transaction for XDR, from_xdr is data given by XDR.
+	wr->from_xdr = tr->from_xdr;
+
 	// Transaction Consistency Guarantees:
 	//   Use the client's requested guarantee level for this transaction
 	//   unless the corresponding server's namespace override is enabled.
@@ -1305,6 +1316,8 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			e->tr.proxy_msg = tr->proxy_msg;
 			tr->proxy_msg = 0;
 			e->tr.keyd = tr->keyd;
+			e->tr.from_xdr = tr->from_xdr;
+			tr->from_xdr = 0;
 			AS_PARTITION_RESERVATION_INIT(e->tr.rsv);
 			e->tr.result_code = AS_PROTO_RESULT_OK;
 			e->tr.msgp = tr->msgp;
@@ -3084,7 +3097,7 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 		// unless we have config setting of shipping these type of deletes.
 		// Ship the deletes coming from application directly.
 		if ((tr->flag & AS_TRANSACTION_FLAG_NSUP_DELETE)
-				&& (g_config.xdr_cfg.xdr_nsup_deletes_enabled == false)) {
+		&& (g_config.xdr_cfg.xdr_nsup_deletes_enabled == false)) {
 			cf_atomic_int_incr(&g_config.stat_nsup_deletes_not_shipped);
 			cf_detail(AS_RW, "write delete: Got delete from nsup.");
 		} else {
@@ -5526,6 +5539,10 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 				generation, void_time, ops, response_bins, n_bins, ns, tr->trid,
 				setname);
 		tr->proxy_msg = 0;
+	} else if (tr->from_xdr) {
+		// It is a read for XDR.
+		// Send data back to XDR.
+		xdr_internal_read_response(ns, tr->result_code, generation, void_time, response_bins, n_bins, setname, tr->from_xdr);
 	} else {
 		// In this case, this is a call from write_process() above.
 		// create the response message (this is a new malloc that will be handed off to fabric (see end of write_process())

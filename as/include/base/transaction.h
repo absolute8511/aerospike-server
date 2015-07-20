@@ -217,6 +217,9 @@ typedef struct as_transaction_s {
 	cf_node 	      proxy_node;
 	msg 		    * proxy_msg;
 
+	// Data from XDR, incase transaction is for XDR request.
+	void* from_xdr;
+
 	/* User data corresponsing to the internally created transaction
 	   first user is Scan UDF */
 	ureq_data         udata;

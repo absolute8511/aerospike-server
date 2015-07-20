@@ -45,6 +45,7 @@
  * NB: if you add or remove entries from this enum, you must also change
  * the corresponding strings structure in fault.c */
 typedef enum {
+	CF_FAULT_CONTEXT_ANY = -1,
 	CF_MISC = 0,
 	CF_ALLOC = 1,
 	CF_HASH = 2,
@@ -153,14 +154,24 @@ typedef enum {
 
 /* Function declarations */
 
-// note: passing a null sink sets for all currently known sinks
-extern int cf_fault_sink_addcontext(cf_fault_sink *s, char *context, char *severity);
-extern int cf_fault_sink_setcontext(cf_fault_sink *s, char *context, char *severity);
 extern cf_fault_sink *cf_fault_sink_add(char *path);
+extern int cf_fault_sink_remove(char *path);
 
 extern cf_fault_sink *cf_fault_sink_hold(char *path);
 extern int cf_fault_sink_activate_all_held();
 extern int cf_fault_sink_get_fd_list(int *fds);
+
+extern cf_fault_context cf_fault_sink_context(const char *context);
+extern cf_fault_severity cf_fault_sink_severity(const char *severity);
+
+// Passing null sink sets all sinks.
+extern int cf_fault_sink_set_severity(cf_fault_sink *s, cf_fault_context context, cf_fault_severity severity);
+
+static inline int
+cf_fault_sink_set_context_level(cf_fault_sink *s, const char *context, const char *severity)
+{
+	return cf_fault_sink_set_severity(s, cf_fault_sink_context(context), cf_fault_sink_severity(severity));
+}
 
 extern int cf_fault_sink_strlist(cf_dyn_buf *db); // pack all contexts into a string - using ids
 extern int cf_fault_sink_context_all_strlist(int sink_id, cf_dyn_buf *db);

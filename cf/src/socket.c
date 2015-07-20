@@ -360,7 +360,7 @@ cf_socket_init_client(cf_socket_cfg *s, int timeout)
 						goto Retry;
 					}
 					if (0 > epoll_ctl(epoll_fd, EPOLL_CTL_DEL, s->sock, &event)) {
-						cf_warning(CF_SOCKET, "epoll_ctl(DEL) on client socket failed (errno %d: \"%s\")", errno, cf_strerror(errno));
+						cf_debug(CF_SOCKET, "epoll_ctl(DEL) on client socket failed (errno %d: \"%s\")", errno, cf_strerror(errno));
 					}
 					close(epoll_fd);
 					goto Success;
