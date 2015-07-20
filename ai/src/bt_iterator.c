@@ -238,11 +238,6 @@ static void init_iter(btIterator  *iter, bt          *btr,
 }
 
 // AEROSPIKE MULTI_THREAD
-static pthread_mutex_t g_iter_lock = PTHREAD_MUTEX_INITIALIZER;
-
-#define MAX_NUM_ITER 512
-static cf_ll *IterList = NULL; //NOTE: this IS threadsafe
-
 static btSIter *newIter() {
 	btSIter *siter = cf_malloc(sizeof(btSIter));
 	bzero(siter, sizeof(btSIter));
