@@ -236,7 +236,7 @@ struct as_query_transaction_s {
 	as_aggr_call             agg_call; // Stream UDF Details 
 	as_sindex_qctx           qctx;     // Secondary Index details
 
-	as_partition_reservation rsv_arr[AS_PARTITIONS];
+	as_partition_reservation * rsv;
 };
 
 typedef enum {
@@ -2264,7 +2264,7 @@ as_query_init()
 	}
 
 	g_config.query_enable_histogram	= false;
-	g_config.qnodes_pre_reserved    = true;
+	g_config.qnodes_pre_reserved    = false;
 }
 
 /*
@@ -2668,6 +2668,7 @@ as_query(as_transaction *tr)
 	qtr->push_seq_number     = 0;
 	qtr->pop_seq_number      = 1;
 	qtr->blocking            = false;
+	qtr->rsv                 = NULL;
 
 	if (as_aggr_call_init(&qtr->agg_call, tr, qtr, &as_query_aggr_caller_qintf,
 			&query_agg_istream_hooks, &query_agg_ostream_hooks, ns, false) == AS_QUERY_OK) {
@@ -3106,7 +3107,7 @@ as_query_reserve_qnode(as_namespace * ns, as_query_transaction * qtr, as_partiti
 			cf_debug(AS_QUERY, "Getting digest in rec list which do not belong to qnode.");
 			return NULL;
 		}
-		return &qtr->rsv_arr[pid];
+		return &qtr->rsv[pid];
 	}
 	else {
 		// Works for scan aggregation
@@ -3141,7 +3142,11 @@ as_query_pre_reserve_qnodes(as_query_transaction * qtr)
 	}
 	uint32_t reserved = 0;
 	if (qtr->qctx.qnodes_pre_reserved) {
-		reserved = as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv_arr);
+		qtr->rsv = cf_malloc(sizeof(as_partition_reservation) * AS_PARTITIONS);
+		reserved = as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
+	}
+	else {
+		qtr->rsv = NULL;
 	}
 	cf_atomic32_add(&qtr->partition_reserved, reserved);
 }
@@ -3153,13 +3158,16 @@ as_query_post_release_qnodes(as_query_transaction * qtr)
 		cf_warning(AS_QUERY, "qtr is NULL");
 		return;
 	}
-	if (qtr->qctx.qnodes_pre_reserved) {
+	if (qtr->qctx.qnodes_pre_reserved && qtr->inited) {
 		for (int i=0; i<AS_PARTITIONS; i++) {
 			if (qtr->qctx.is_partition_qnode[i]) {
-				as_partition_release(&qtr->rsv_arr[i]);
+				as_partition_release(&qtr->rsv[i]);
 				cf_atomic_int_decr(&g_config.dup_tree_count);
 				cf_atomic32_incr(&qtr->partition_released);
 			}
+		}
+		if (qtr->rsv) {
+			cf_free(qtr->rsv);
 		}
 	}
 }
