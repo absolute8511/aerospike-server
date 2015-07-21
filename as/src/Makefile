@@ -4,6 +4,19 @@
 DEPTH = ../..
 include $(DEPTH)/make_in/Makefile.in
 
+# Use SystemTap?  [By default, no.]
+USE_SYSTEMTAP = 0
+
+ifeq ($(USE_SYSTEMTAP),1)
+CFLAGS +=	-DUSE_SYSTEMTAP
+endif
+
+ifeq ($(USE_SYSTEMTAP),1)
+SYSTEMTAP_PROBES_D = base/probes.d
+SYSTEMTAP_PROBES_H = $(GEN_DIR)/probes.h
+SYSTEMTAP_PROBES_O = $(OBJECT_DIR)/probes.o
+endif
+
 ifeq ($(USE_EE),1)
   include $(EEREPO)/as/make_in/Makefile.vars
 endif
@@ -118,13 +131,13 @@ ifeq ($(USE_KV),1)
   CFLAGS += -DUSE_KV
 endif
 
-OBJECTS = $(SOURCES:%.c=$(OBJECT_DIR)/%.o) $(VERSION_OBJ)
+OBJECTS = $(SOURCES:%.c=$(OBJECT_DIR)/%.o) $(VERSION_OBJ) $(SYSTEMTAP_PROBES_O)
 DEPENDENCIES = $(OBJECTS:%.o=%.d)
 MEXP_SOURCES = $(SOURCES:%=$(MEXP_DIR)/%)
 PREPROS = $(OBJECTS:%=%$(PREPRO_SUFFIX))
 
 .PHONY: all
-all: $(SERVER)
+all: $(SYSTEMTAP_PROBES_H) $(SERVER)
 
 .PHONY: clean
 clean:
@@ -140,3 +153,11 @@ ifneq ($(PREPRO),1)
 endif
 
 include $(DEPTH)/make_in/Makefile.targets
+
+ifeq ($(USE_SYSTEMTAP),1)
+$(SYSTEMTAP_PROBES_H):	$(SYSTEMTAP_PROBES_D)
+	dtrace -h -s $< -o $@
+
+$(SYSTEMTAP_PROBES_O):	$(SYSTEMTAP_PROBES_D)
+	dtrace -G -s $< -o $@
+endif

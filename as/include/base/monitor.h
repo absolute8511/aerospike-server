@@ -68,7 +68,7 @@ typedef struct as_mon_jobstat_s {
 	uint64_t	net_io_bytes;
 	uint64_t	mem;
 	float		cpu;
-	char		jdata[256];
+	char		jdata[512];
 } as_mon_jobstat;
 
 typedef struct as_mon_cb_s {

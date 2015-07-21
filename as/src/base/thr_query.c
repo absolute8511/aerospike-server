@@ -118,6 +118,7 @@
 #include "bt_iterator.h"
 
 #include "base/aggr.h"
+#include "base/as_stap.h"
 #include "base/datamodel.h"
 #include "base/secondary_index.h"
 #include "base/thr_tsvc.h"
@@ -774,8 +775,16 @@ as_query_release_fd(as_query_transaction *qtr)
 static void
 as_query_transaction_done(as_query_transaction *qtr)
 {
+
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	if (!qtr)
 		return;
+
+	ASD_QUERY_TRANS_DONE(nodeid, qtr->trid, (void *) qtr);
+
 
 	if (qtr->uit_queued != 0) {
 		cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
@@ -805,6 +814,11 @@ as_query_transaction_done(as_query_transaction *qtr)
 	}
 	as_query_release_fd(qtr);
 	as_query_teardown(qtr);
+
+	pthread_mutex_destroy(&qtr->buf_mutex);
+
+	ASD_QUERY_QTR_FREE(nodeid, qtr->trid, (void *) qtr);
+
 	as_query_qtr_free(qtr);
 }
 // **************************************************************************************************
@@ -930,10 +944,16 @@ as_query__netio_wait(as_query_transaction *qtr) {
 int 
 as_query__netio(as_query_transaction *qtr) 
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	uint64_t time_ns        = 0;
 	if (g_config.query_enable_histogram) {
 		time_ns = cf_getns();
 	}
+
+	ASD_QUERY_NETIO_STARTING(nodeid, qtr->trid);
 
 	as_netio        io;
 
@@ -958,6 +978,9 @@ as_query__netio(as_query_transaction *qtr)
 	int ret        = as_netio_send(&io, NULL, qtr->blocking);
 	qtr->bb_r      = as_query__bb_poolrequest();
    	cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
+
+	ASD_QUERY_NETIO_FINISHED(nodeid, qtr->trid);
+
 	return ret;
 }
 // **************************************************************************************************
@@ -1292,6 +1315,10 @@ as_query__add_response(void *void_qtr, as_index_ref *r_ref, as_storage_rd *rd)
 int
 as_query__add_fin(as_query_transaction *qtr)
 {
+
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
 	cf_detail(AS_QUERY, "Adding fin %p", qtr);
 	uint8_t *b;
 	// in case of aborted query, the bb_r is already released
@@ -1301,6 +1328,7 @@ as_query__add_fin(as_query_transaction *qtr)
 	}
 	cf_buf_builder_reserve(&qtr->bb_r, sizeof(as_msg), &b);
 
+	ASD_QUERY_ADDFIN(nodeid, qtr->trid);
 	// set up the header
 	uint8_t *buf      = b;
 	as_msg *msgp      = (as_msg *) buf;
@@ -1604,6 +1632,10 @@ as_query_aggr_match_record(query_record * qrecord, as_sindex_key * skey)
 int
 as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	as_namespace * ns = qtr->ns;
 	as_partition_reservation rsv_stack;
 	as_partition_reservation * rsv = &rsv_stack;
@@ -1617,6 +1649,8 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 	if (!rsv) {
 		return AS_QUERY_OK;
 	}
+
+	ASD_QUERY_IO_STARTING(nodeid, qtr->trid);
 
 	as_index_ref r_ref;
 	r_ref.skip_lock = false;
@@ -1654,6 +1688,7 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 			as_record_done(&r_ref, ns);
 			as_query_release_qnode(qtr, rsv);
 			cf_atomic64_incr(&g_config.query_false_positives);
+			ASD_QUERY_IO_NOTMATCH(nodeid, qtr->trid);
 			return AS_QUERY_OK;
 		}
 
@@ -1663,6 +1698,7 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 			as_record_done(&r_ref, ns);
 			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
 			as_query_release_qnode(qtr, rsv);
+			ASD_QUERY_IO_ERROR(nodeid, qtr->trid);
 			return AS_QUERY_ERR;
 		}
 		as_storage_record_close(r, &rd);
@@ -1678,6 +1714,9 @@ as_query__io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 	}
 CLEANUP :
 	as_query_release_qnode(qtr, rsv);
+
+	ASD_QUERY_IO_FINISHED(nodeid, qtr->trid);
+
 	return AS_QUERY_OK;
 }
 // **************************************************************************************************
@@ -1826,11 +1865,17 @@ Cleanup:
 static int
 as_query_process_ioreq(as_query_request *qio)
 {
+
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	as_query_transaction *qtr = qio->qtr;
 	if (!qtr) {
 		return AS_QUERY_ERR;
 	}
 
+	ASD_QUERY_IOREQ_STARTING(nodeid, qtr->trid);
 
 	cf_ll_element * ele   = NULL;
 	cf_ll_iterator * iter = NULL;
@@ -1881,6 +1926,8 @@ Cleanup:
 	QUERY_HIST_INSERT_DATA_POINT(query_batch_io_hist, time_ns);
 	SINDEX_HIST_INSERT_DATA_POINT(qtr->si, query_batch_io, time_ns);
 
+	ASD_QUERY_IOREQ_FINISHED(nodeid, qtr->trid);
+	
 	return AS_QUERY_OK;
 }
 
@@ -2092,7 +2139,17 @@ batchout:
 int
 as_query_transaction_init(as_query_transaction *qtr)
 {
+
+#if defined(USE_SYSTEMTAP)
+	// We'll need to preserve some values on the stack for tracing
+	// becuase the qtr is gone before the done event.
+	uint64_t nodeid = g_config.self_node;
+	uint64_t trid = qtr->trid;
+	size_t nrecs = 0;
+#endif
+
 	if (!as_query_inited(qtr)) {
+		ASD_QUERY_INIT(nodeid, qtr->trid);
 		QUERY_HIST_INSERT_DATA_POINT(query_query_q_wait_hist, qtr->start_time);
 		qtr->short_running       = true;
 		cf_atomic64_set(&qtr->num_records, 0);
@@ -2360,6 +2417,9 @@ as_query__generator(as_query_transaction *qtr)
 		if (qret == AS_QUERY_DONE) {
 			// In case all physical tree is done return. if not range loop
 			// till less than batch size results are returned
+#if defined(USE_SYSTEMTAP)
+			nrecs = qtr->num_records;
+#endif
 			as_query_set_done(qtr, AS_PROTO_RESULT_OK, __FILE__, __LINE__);
 		}
 	}
@@ -2371,6 +2431,7 @@ as_query__generator(as_query_transaction *qtr)
 	// deleting it from the global hash.
 	as_query__delete_qtr(qtr);
 	as_qtr_release(qtr, __FILE__, __LINE__);
+	ASD_QUERY_DONE(nodeid, trid, nrecs);
 }
 
 /*
@@ -2462,9 +2523,18 @@ as_query__queue(as_query_transaction *qtr)
 static int
 as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 {
+
+#if defined(USE_SYSTEMTAP)
+    uint64_t nodeid = g_config.self_node;
+    uint64_t trid = tr? tr->trid : 0;
+#endif
+
 	int rv = AS_QUERY_ERR;
 	*qtrp  = NULL;
 
+#if defined(USE_SYSTEMTAP)
+    ASD_QUERY_STARTING(nodeid, trid);
+#endif
 
 	uint64_t start_time     = cf_getns();
 	as_sindex *si           = NULL;
@@ -2499,6 +2569,7 @@ as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 		cf_debug(AS_QUERY, "No Index Defined in the Query");
 	}
 
+    ASD_SINDEX_MSGRANGE_STARTING(nodeid, trid);
 	int ret = as_sindex_rangep_from_msg(ns, &tr->msgp->msg, &srange);
 	if (AS_QUERY_OK != ret) {
 		cf_debug(AS_QUERY, "Could not instantiate index range metadata... "
@@ -2507,6 +2578,7 @@ as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 		goto Cleanup;
 	}
 
+	ASD_SINDEX_MSGRANGE_FINISHED(nodeid, trid);
 	// get optional set
 	as_msg_field *sfp = as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_SET);
 	if (sfp && as_msg_field_get_value_sz(sfp) > 0) {
@@ -2552,10 +2624,12 @@ as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 	cf_detail(AS_QUERY, "Query on index %s ",
 			((as_sindex_metadata *)si->imd)->iname);
 
+	ASD_QUERY_QTRSETUP_STARTING(nodeid, trid);
 	qtr = as_query_qtr_alloc();
 	if (!qtr) {
 		goto Cleanup;
 	}
+	ASD_QUERY_QTR_ALLOC(nodeid, trid, (void *) qtr);
 	// Be aware of the size of qtr
 	// Memset it partial
 	memset(qtr, 0, offsetof(as_query_transaction, bkey));
@@ -2573,6 +2647,8 @@ as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 	qtr->end_time            = tr->end_time;
 	qtr->msgp                = tr->msgp;
 	qtr->rsv                 = NULL;
+
+	ASD_QUERY_QTRSETUP_FINISHED(nodeid, trid);
 
 	if (as_aggr_call_init(&qtr->agg_call, tr, qtr, &as_query_aggr_caller_qintf,
 			&query_agg_istream_hooks, &query_agg_ostream_hooks, ns, false) == AS_QUERY_OK) {

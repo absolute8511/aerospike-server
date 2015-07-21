@@ -298,10 +298,7 @@ as_rw_process_result(int rv, as_transaction *tr, bool *free_msgp)
 			tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 
-		if (tr->proto_fd_h) {
-			as_transaction_error(tr, tr->result_code);
-		}
-		else if (tr->proxy_msg) {
+		if (tr->proxy_msg) {
 			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
 				cf_detail_digest(AS_RW, &(tr->keyd),
 						"SHIPPED_OP :: Sending ship op reply, rc %d to (%"PRIx64") ::",
@@ -314,6 +311,9 @@ as_rw_process_result(int rv, as_transaction *tr, bool *free_msgp)
 			}
 			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
 					tr->result_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
+		}
+		else {
+			as_transaction_error(tr, tr->result_code);
 		}
 		return -1;
 	}

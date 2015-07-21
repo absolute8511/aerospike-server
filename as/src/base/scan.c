@@ -131,7 +131,6 @@ static inline bool excluded_set(as_index* r, uint16_t set_id);
 
 const size_t INIT_BUF_BUILDER_SIZE = 1024 * 1024 * 2;
 const size_t SCAN_CHUNK_LIMIT = 1024 * 1024;
-const uint32_t MAX_UDF_ACTIVE_TRANSACTIONS = 256; // TODO - what ???
 
 
 
@@ -1001,7 +1000,7 @@ aggr_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 
 			const as_val* v = (as_val*)as_string_new(rs, false);
 
-			aggr_scan_add_val_response(&slice, v, true);
+			aggr_scan_add_val_response(&slice, v, false);
 			as_val_destroy(v);
 			cf_free(rs);
 			as_job_manager_abandon_job(_job->mgr, _job,
@@ -1334,8 +1333,9 @@ udf_bg_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 	udf_bg_scan_job* job = (udf_bg_scan_job*)_job;
 	char *extra = stat->jdata + strlen(stat->jdata);
 
-	sprintf(extra, ":udf-filename=%s:udf-function=%s:udf-success=%ld:udf-failed=%ld",
+	sprintf(extra, ":udf-filename=%s:udf-function=%s:udf-active=%u:udf-success=%lu:udf-failed=%lu",
 			job->call.filename, job->call.function,
+			cf_atomic32_get(job->n_active_tr),
 			cf_atomic64_get(job->n_successful_tr),
 			cf_atomic64_get(job->n_failed_tr));
 }
@@ -1363,11 +1363,6 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 		return;
 	}
 
-	// TODO - replace this mechanism with signal-based counter?
-	while (cf_atomic32_get(job->n_active_tr) > MAX_UDF_ACTIVE_TRANSACTIONS) {
-		usleep(50);
-	}
-
 	tr_create_data d;
 
 	d.digest	= r->key;
@@ -1381,6 +1376,12 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	// Release record lock before enqueuing transaction.
 	as_record_done(r_ref, ns);
+
+	// TODO - replace this mechanism with signal-based counter?
+	while (cf_atomic32_get(job->n_active_tr) >
+			g_config.scan_max_udf_transactions) {
+		usleep(50);
+	}
 
 	as_transaction tr;
 

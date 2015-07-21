@@ -140,6 +140,7 @@ cfg_set_defaults()
 	c->run_as_daemon = true; // set false only to run in debugger & see console output
 	c->scan_max_active = 100;
 	c->scan_max_done = 100;
+	c->scan_max_udf_transactions = 32;
 	c->scan_threads = 4;
 	c->storage_benchmarks = false;
 	c->ticker_interval = 10;
@@ -311,7 +312,7 @@ typedef enum {
 	CASE_SERVICE_RUN_AS_DAEMON,
 	CASE_SERVICE_SCAN_MAX_ACTIVE,
 	CASE_SERVICE_SCAN_MAX_DONE,
-	CASE_SERVICE_SCAN_PRIORITY,
+	CASE_SERVICE_SCAN_MAX_UDF_TRANSACTIONS,
 	CASE_SERVICE_SCAN_THREADS,
 	CASE_SERVICE_SINDEX_DATA_MAX_MEMORY,
 	CASE_SERVICE_SNUB_NODES,
@@ -351,6 +352,7 @@ typedef enum {
 	CASE_SERVICE_NSUP_REDUCE_SLEEP,
 	CASE_SERVICE_NSUP_THREADS,
 	CASE_SERVICE_SCAN_MEMORY,
+	CASE_SERVICE_SCAN_PRIORITY,
 	CASE_SERVICE_SCAN_RETRANSMIT,
 	CASE_SERVICE_SCHEDULER_PRIORITY,
 	CASE_SERVICE_SCHEDULER_TYPE,
@@ -692,7 +694,7 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "run-as-daemon",					CASE_SERVICE_RUN_AS_DAEMON },
 		{ "scan-max-active",				CASE_SERVICE_SCAN_MAX_ACTIVE },
 		{ "scan-max-done",					CASE_SERVICE_SCAN_MAX_DONE },
-		{ "scan-priority",					CASE_SERVICE_SCAN_PRIORITY },
+		{ "scan-max-udf-transactions",		CASE_SERVICE_SCAN_MAX_UDF_TRANSACTIONS },
 		{ "scan-threads",					CASE_SERVICE_SCAN_THREADS },
 		{ "sindex-data-max-memory",			CASE_SERVICE_SINDEX_DATA_MAX_MEMORY },
 		{ "snub-nodes",						CASE_SERVICE_SNUB_NODES },
@@ -730,6 +732,7 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "nsup-reduce-sleep",				CASE_SERVICE_NSUP_REDUCE_SLEEP },
 		{ "nsup-threads",					CASE_SERVICE_NSUP_THREADS },
 		{ "scan-memory",					CASE_SERVICE_SCAN_MEMORY },
+		{ "scan-priority",					CASE_SERVICE_SCAN_PRIORITY },
 		{ "scan-retransmit",				CASE_SERVICE_SCAN_RETRANSMIT },
 		{ "scheduler-priority",				CASE_SERVICE_SCHEDULER_PRIORITY },
 		{ "scheduler-type",					CASE_SERVICE_SCHEDULER_TYPE },
@@ -2027,6 +2030,9 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_SERVICE_SCAN_MAX_DONE:
 				c->scan_max_done = cfg_u32(&line, 0, 1000);
+				break;
+			case CASE_SERVICE_SCAN_MAX_UDF_TRANSACTIONS:
+				c->scan_max_udf_transactions = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_SCAN_THREADS:
 				c->scan_threads = cfg_u32(&line, 0, 32);

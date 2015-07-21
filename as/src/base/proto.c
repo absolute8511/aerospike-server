@@ -46,13 +46,13 @@
 #include "fault.h"
 #include "jem.h"
 
+#include "base/as_stap.h"
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "base/udf_rw.h"
 #include "storage/storage.h"
-
 
 void
 as_proto_swap(as_proto *p)
@@ -1155,6 +1155,10 @@ static cf_queue     * g_netio_slow_queue = 0;
 int
 as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offset, bool blocking)
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	uint32_t len  = bb_r->used_sz;
 	uint8_t *buf  = bb_r->buf;
 
@@ -1167,6 +1171,9 @@ as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offse
     memcpy(bb_r->buf, &proto, 8); 
 
 	uint32_t pos = *offset;
+
+	ASD_QUERY_SENDPACKET_STARTING(nodeid, pos, len);
+
 	int rv;
 	int retry = 0;
 	cf_detail(AS_PROTO," Start At %p %d %d", buf, pos, len);
@@ -1180,6 +1187,7 @@ as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offse
 			if (!blocking && (retry > AS_NETIO_MAX_IO_RETRY)) {
 				*offset = pos;
 				cf_detail(AS_PROTO," End At %p %d %d", buf, pos, len);
+				ASD_QUERY_SENDPACKET_CONTINUE(nodeid, pos);
 				return AS_NETIO_CONTINUE;
 			}
 			retry++;
@@ -1190,6 +1198,7 @@ as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offse
 			pos += rv;
 		}
 	}
+	ASD_QUERY_SENDPACKET_FINISHED(nodeid);
 	return AS_NETIO_OK;
 }
 

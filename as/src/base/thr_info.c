@@ -2005,7 +2005,7 @@ info_command_mon_cmd(char *name, char *params, cf_dyn_buf *db)
 		return 0;
 	}
 
-	cf_info(AS_SCAN, "%s %s %lu %u", module, cmd, trid, value);
+	cf_info(AS_INFO, "%s %s %lu %u", module, cmd, trid, value);
 	as_mon_info_cmd(module, cmd, trid, value, db);
 	return 0;
 }
@@ -2067,6 +2067,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_int(db, g_config.scan_max_active);
 	cf_dyn_buf_append_string(db, ";scan-max-done=");
 	cf_dyn_buf_append_int(db, g_config.scan_max_done);
+	cf_dyn_buf_append_string(db, ";scan-max-udf-transactions=");
+	cf_dyn_buf_append_int(db, g_config.scan_max_udf_transactions);
 	cf_dyn_buf_append_string(db, ";scan-threads=");
 	cf_dyn_buf_append_int(db, g_config.scan_threads);
 
@@ -2716,6 +2718,12 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of scan-max-done from %d to %d ", g_config.scan_max_done, val);
 			g_config.scan_max_done = val;
 			as_scan_limit_finished_jobs(g_config.scan_max_done);
+		}
+		else if (0 == as_info_parameter_get(params, "scan-max-udf-transactions", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val))
+				goto Error;
+			cf_info(AS_INFO, "Changing value of scan-max-udf-transactions from %d to %d ", g_config.scan_max_udf_transactions, val);
+			g_config.scan_max_udf_transactions = val;
 		}
 		else if (0 == as_info_parameter_get(params, "scan-threads", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
