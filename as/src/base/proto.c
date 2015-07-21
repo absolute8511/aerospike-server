@@ -1178,7 +1178,7 @@ as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offse
 	int retry = 0;
 	cf_detail(AS_PROTO," Start At %p %d %d", buf, pos, len);
 	while (pos < len) {
-		rv = send(fd_h->fd, buf + pos, len - pos, MSG_NOSIGNAL );
+		rv = send(fd_h->fd, buf + pos, len - pos, MSG_NOSIGNAL);
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
 				cf_warning(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
