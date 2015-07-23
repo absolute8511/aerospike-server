@@ -82,7 +82,7 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 	int64_t     unswapped_int = 0;
 	uint8_t     *sp_p = *sp_pp;
 
-	uint32_t tsz = as_particle_size_from_mem((as_particle_type)vtype, (uint8_t *)val, (uint32_t)vlen);
+	uint32_t tsz = val ? as_particle_size_from_mem((as_particle_type)vtype, (uint8_t *)val, (uint32_t)vlen) : 0;
 
 	if (tsz > sp_sz) {
 		sp_p = cf_malloc(tsz);
@@ -122,7 +122,9 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 		}
 	}
 
-	as_bin_particle_stack_from_mem(bin, sp_p, vtype, v, vlen);
+	if (v) {
+		as_bin_particle_stack_from_mem(bin, sp_p, vtype, v, vlen);
+	}
 
 	*sp_pp = sp_p;
 	return 0;
