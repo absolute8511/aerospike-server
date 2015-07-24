@@ -2356,8 +2356,7 @@ as_sindex_range_from_msg(as_namespace *ns, as_msg *msgp, as_sindex_range *srange
 		strncpy(srange->bin_path, (char *)data, bin_path_len);
 		srange->bin_path[bin_path_len] = '\0';
 
-		char binname[BIN_NAME_MAX_SZ];
-		memset(binname, 0, BIN_NAME_MAX_SZ);
+		char binname[AS_ID_BIN_SZ];
 		if (as_sindex_extract_bin_from_path(srange->bin_path, binname) == AS_SINDEX_OK) {
 			int16_t id = as_bin_get_id(ns, binname);
 			if (id != -1) {
@@ -4972,8 +4971,8 @@ as_sindex_extract_bin_from_path(char * path_str, char *bin)
 	while (end < path_len && path_str[end] != '.' && path_str[end] != '[' && path_str[end] != ']') {
 		end++;
 	}
-	
-	if (end > 0 && end <= BIN_NAME_MAX_SZ) {
+
+	if (end > 0 && end < AS_ID_BIN_SZ) {
 		strncpy(bin, path_str, end);
 		bin[end] = '\0';
 	}

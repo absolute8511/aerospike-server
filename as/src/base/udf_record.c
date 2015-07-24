@@ -420,7 +420,7 @@ udf_record_cache_get(udf_record * urecord, const char * name)
 		cf_detail(AS_UDF, "udf_record_get: %s find", name);
 		for ( uint32_t i = 0; i < urecord->nupdates; i++ ) {
 			udf_record_bin * bin = &(urecord->updates[i]);
-			if ( strncmp(name, bin->name, BIN_NAME_MAX_SZ) == 0 ) {
+			if ( strncmp(name, bin->name, AS_ID_BIN_SZ) == 0 ) {
 				cf_detail(AS_UDF, "Bin %s found, type(%d)", name, bin->value->type );
 				if ( bin->value->type == AS_NIL ) {
 					cf_detail(AS_UDF, "udf_record_get: %s return NULL", name);
@@ -480,7 +480,7 @@ udf_record_cache_set(udf_record * urecord, const char * name, as_val * value,
 		udf_record_bin * bin = &(urecord->updates[i]);
 
 		// bin exists, then we will release old value and set new value.
-		if ( strncmp(name, bin->name, BIN_NAME_MAX_SZ) == 0 ) {
+		if ( strncmp(name, bin->name, AS_ID_BIN_SZ) == 0 ) {
 			cf_detail(AS_UDF, "udf_record_set: %s found", name);
 
 			// release previously set value
@@ -502,7 +502,7 @@ udf_record_cache_set(udf_record * urecord, const char * name, as_val * value,
 	// If not modified, then we will add the bin to the cache
 	if ( !modified && urecord->nupdates < UDF_RECORD_BIN_ULIMIT - 1 ) {
 		udf_record_bin * bin = &(urecord->updates[urecord->nupdates]);
-		strncpy(bin->name, name, BIN_NAME_MAX_SZ);
+		strncpy(bin->name, name, AS_ID_BIN_SZ);
 		bin->value = (as_val *) value;
 		bin->dirty = dirty;
 		bin->ishidden = false;
@@ -523,7 +523,7 @@ udf_record_cache_sethidden(udf_record * urecord, const char * name)
 		udf_record_bin * bin = &(urecord->updates[i]);
 
 		// bin exists, then we will release old value and set new value.
-		if ( strncmp(name, bin->name, BIN_NAME_MAX_SZ) == 0 ) {
+		if ( strncmp(name, bin->name, AS_ID_BIN_SZ) == 0 ) {
 			cf_detail(AS_UDF, "udf_record_cache_sethidden: %s found", name);
 			// TODO make sure it is initialized to false
 			bin->ishidden = true;
@@ -535,7 +535,7 @@ udf_record_cache_sethidden(udf_record * urecord, const char * name)
 	// If not modified, then we will add the bin to the cache
 	if ( !modified && urecord->nupdates < UDF_RECORD_BIN_ULIMIT - 1 ) {
 		udf_record_bin * bin = &(urecord->updates[urecord->nupdates]);
-		strncpy(bin->name, name, BIN_NAME_MAX_SZ);
+		strncpy(bin->name, name, AS_ID_BIN_SZ);
 		bin->ishidden = true;
 		bin->dirty    = true;
 		urecord->nupdates++;
@@ -1074,7 +1074,7 @@ udf_record_bin_names(const as_rec *rec, as_rec_bin_names_callback callback, void
 		}
 		else {
 			nbins = urecord->rd->n_bins;
-			bin_names = alloca(nbins * BIN_NAME_MAX_SZ);
+			bin_names = alloca(nbins * AS_ID_BIN_SZ);
 			for (uint16_t i = 0; i < nbins; i++) {
 				as_bin *b = &urecord->rd->bins[i];
 				if (! as_bin_inuse(b)) {
@@ -1082,17 +1082,17 @@ udf_record_bin_names(const as_rec *rec, as_rec_bin_names_callback callback, void
 					break;
 				}
 				const char * name = as_bin_get_name_from_id(urecord->rd->ns, b->id);
-				strcpy(bin_names + (i * BIN_NAME_MAX_SZ), name);
+				strcpy(bin_names + (i * AS_ID_BIN_SZ), name);
 			}
 		}
-		callback(bin_names, nbins, BIN_NAME_MAX_SZ, udata);
+		callback(bin_names, nbins, AS_ID_BIN_SZ, udata);
 		return 0;
 	}
 	else {
 		cf_warning(AS_UDF, "Error in getting bin names: no record found");
 		bin_names = alloca(1);
 		*bin_names = 0;
-		callback(bin_names, 1, BIN_NAME_MAX_SZ, udata);
+		callback(bin_names, 1, AS_ID_BIN_SZ, udata);
 		return -1;
 	}
 }
