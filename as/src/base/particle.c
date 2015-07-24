@@ -859,6 +859,16 @@ as_particle_to_flat_blob(const as_particle *p, uint8_t *flat)
 
 
 //==========================================================
+// LIST particle.
+//
+
+// A LIST particle is blob-like for data-not-in-memory configuration, but is an
+// as_dequelist wrapped by particle metadata for data-in-memory.
+
+// TODO
+
+
+//==========================================================
 // Particle function tables.
 //
 
@@ -2026,6 +2036,31 @@ as_bin_particle_to_pickled(const as_bin *b, uint8_t *pickled)
 	uint8_t *value = (uint8_t *)p32;
 
 	return 1 + 4 + g_particle_to_wire_table[type](b->particle, value);
+}
+
+//
+// CDTs are special.
+//
+
+int
+as_bin_cdt_read_from_client(const as_bin *b, as_msg_op *op, as_bin *result)
+{
+	// TODO
+	return -1;
+}
+
+int
+as_bin_cdt_alloc_modify_from_client(as_bin *b, as_msg_op *op, as_bin *result)
+{
+	// TODO
+	return -1;
+}
+
+int
+as_bin_cdt_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, as_msg_op *op, as_bin *result)
+{
+	// TODO
+	return -1;
 }
 
 //
