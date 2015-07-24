@@ -44,7 +44,7 @@
 typedef struct ldt_record_s ldt_record;
 
 typedef struct udf_record_bin_s {
-	char				name[BIN_NAME_MAX_SZ];
+	char				name[AS_ID_BIN_SZ];
 	as_val *			value;
 	as_val *			oldvalue; // keeps track of old value in case rollback is required
 	bool				dirty;

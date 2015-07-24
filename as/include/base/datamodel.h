@@ -144,7 +144,7 @@ struct as_index_tree_s;
 #define AS_ID_NAMESPACE_SZ 32
 #define AS_ID_BIN_SZ 15 // size used in storage format
 #define AS_ID_INAME_SZ 256
-#define BIN_NAME_MAX_SZ ((AS_ID_BIN_SZ + 3) & ~3) // round up to multiple of 4
+#define VMAP_BIN_NAME_MAX_SZ ((AS_ID_BIN_SZ + 3) & ~3) // round up to multiple of 4
 #define MAX_BIN_NAMES 0x10000 // no need for more - numeric ID is 16 bits
 #define BIN_NAMES_QUOTA (MAX_BIN_NAMES / 2) // don't add more names than this via client transactions
 

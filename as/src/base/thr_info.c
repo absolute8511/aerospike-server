@@ -6478,10 +6478,10 @@ as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn
 
 	imd->num_bins = bincount;
 	for (int i = 0; i < imd->num_bins; i++) {
-		if (imd->bnames[i] && (strlen(imd->bnames[i]) >= BIN_NAME_MAX_SZ)) {
+		if (imd->bnames[i] && (strlen(imd->bnames[i]) >= AS_ID_BIN_SZ)) {
 			cf_warning(AS_INFO, "Failed to create secondary creation: Bin Name %s longer "
 					"than allowed (%d) for sindex creation %s", imd->bnames[i],
-					BIN_NAME_MAX_SZ, indexname_str);
+					AS_ID_BIN_SZ - 1, indexname_str);
 			INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER, "Bin Name too long");
 			return AS_SINDEX_ERR_PARAM;
 		}

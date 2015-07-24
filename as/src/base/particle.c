@@ -46,6 +46,42 @@
 
 
 //==========================================================
+// Local utilities.
+//
+
+//------------------------------------------------
+// Particle type check.
+//
+
+static inline as_particle_type
+safe_particle_type(uint8_t type)
+{
+	switch ((as_particle_type)type) {
+	case AS_PARTICLE_TYPE_INTEGER:
+	case AS_PARTICLE_TYPE_FLOAT:
+	case AS_PARTICLE_TYPE_STRING:
+	case AS_PARTICLE_TYPE_BLOB:
+	case AS_PARTICLE_TYPE_TIMESTAMP:
+	case AS_PARTICLE_TYPE_JAVA_BLOB:
+	case AS_PARTICLE_TYPE_CSHARP_BLOB:
+	case AS_PARTICLE_TYPE_PYTHON_BLOB:
+	case AS_PARTICLE_TYPE_RUBY_BLOB:
+	case AS_PARTICLE_TYPE_PHP_BLOB:
+	case AS_PARTICLE_TYPE_ERLANG_BLOB:
+	case AS_PARTICLE_TYPE_MAP:
+	case AS_PARTICLE_TYPE_LIST:
+	case AS_PARTICLE_TYPE_HIDDEN_LIST:
+	case AS_PARTICLE_TYPE_HIDDEN_MAP:
+		return (as_particle_type)type;
+	// Note - AS_PARTICLE_TYPE_NULL is considered bad here.
+	default:
+		cf_warning(AS_PARTICLE, "encountered bad particle type %u", type);
+		return -1;
+	}
+}
+
+
+//==========================================================
 // NULL particle.
 //
 
@@ -56,12 +92,13 @@
 void
 as_particle_destruct_null(as_particle *p)
 {
-	cf_free(p); // TODO - really?
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_destruct_null()");
 }
 
 uint32_t
 as_particle_size_null(const as_particle *p)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_size_null()");
 	return 0;
 }
 
@@ -72,54 +109,63 @@ as_particle_size_null(const as_particle *p)
 int32_t
 as_particle_concat_size_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_concat_size_from_wire_null()");
 	return -1;
 }
 
 int
 as_particle_append_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_append_from_wire_null()");
 	return -1;
 }
 
 int
 as_particle_prepend_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_prepend_from_wire_null()");
 	return -1;
 }
 
 int
 as_particle_incr_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_incr_from_wire_null()");
 	return -1;
 }
 
 int32_t
 as_particle_size_from_wire_null(const uint8_t *wire_value, uint32_t value_size)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_size_from_wire_null()");
 	return -1;
 }
 
 int
 as_particle_from_wire_null(as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size, as_particle **pp)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_from_wire_null()");
 	return -1;
 }
 
 int
 as_particle_compare_from_wire_null(const as_particle *p, as_particle_type wire_type, const uint8_t *wire_value, uint32_t value_size)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_compare_from_wire_null()");
 	return -1;
 }
 
 uint32_t
 as_particle_wire_size_null(const as_particle *p)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_wire_size_null()");
 	return 0;
 }
 
 uint32_t
 as_particle_to_wire_null(const as_particle *p, uint8_t *wire)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_to_wire_null()");
 	return 0;
 }
 
@@ -130,23 +176,27 @@ as_particle_to_wire_null(const as_particle *p, uint8_t *wire)
 uint32_t
 as_particle_size_from_mem_null(as_particle_type type, const uint8_t *value, uint32_t value_size)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_size_from_mem_null()");
 	return 0;
 }
 
 void
 as_particle_from_mem_null(as_particle_type type, const uint8_t *mem_value, uint32_t value_size, as_particle **pp)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_from_mem_null()");
 }
 
 uint32_t
 as_particle_mem_size_null(const as_particle *p)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_mem_size_null()");
 	return 0;
 }
 
 uint32_t
 as_particle_to_mem_null(const as_particle *p, uint8_t *value)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_to_mem_null()");
 	return 0;
 }
 
@@ -157,32 +207,36 @@ as_particle_to_mem_null(const as_particle *p, uint8_t *value)
 int32_t
 as_particle_size_from_flat_null(const uint8_t *flat, uint32_t flat_size)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_size_from_flat_null()");
 	return -1;
 }
 
 int
 as_particle_cast_from_flat_null(uint8_t *flat, uint32_t flat_size, as_particle **pp)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_cast_from_flat_null()");
 	return -1;
 }
 
 int
 as_particle_from_flat_null(const uint8_t *flat, uint32_t flat_size, as_particle **pp)
 {
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_from_flat_null()");
 	return -1;
 }
 
 uint32_t
 as_particle_flat_size_null(const as_particle *p)
 {
-	return 1;
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_flat_size_null()");
+	return 0;
 }
 
 uint32_t
 as_particle_to_flat_null(const as_particle *p, uint8_t *flat)
 {
-	cf_warning(AS_PARTICLE, "unexpected - stored NULL particle");
-	return as_particle_flat_size_null(p);
+	cf_warning(AS_PARTICLE, "unexpected - called as_particle_to_flat_null()");
+	return 0;
 }
 
 
@@ -1396,7 +1450,12 @@ int32_t
 as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op)
 {
 	uint8_t operation = op->op;
-	as_particle_type op_type = (as_particle_type)op->particle_type;
+	as_particle_type op_type = safe_particle_type(op->particle_type);
+
+	if (op_type < 0) {
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
+
 	uint32_t op_value_size = as_msg_op_get_value_sz(op);
 	uint8_t *op_value = as_msg_op_get_value_p((as_msg_op *)op);
 
@@ -1438,7 +1497,12 @@ as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
 	// important on failure to leave the existing particle intact.
 
 	uint8_t operation = op->op;
-	as_particle_type op_type = (as_particle_type)op->particle_type;
+	as_particle_type op_type = safe_particle_type(op->particle_type);
+
+	if (op_type < 0) {
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
+
 	uint32_t op_value_size = as_msg_op_get_value_sz(op);
 	uint8_t *op_value = as_msg_op_get_value_p((as_msg_op *)op);
 
@@ -1563,7 +1627,12 @@ int
 as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op)
 {
 	uint8_t operation = op->op;
-	as_particle_type op_type = (as_particle_type)op->particle_type;
+	as_particle_type op_type = safe_particle_type(op->particle_type);
+
+	if (op_type < 0) {
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
+
 	uint32_t op_value_size = as_msg_op_get_value_sz(op);
 	uint8_t *op_value = as_msg_op_get_value_p((as_msg_op *)op);
 
@@ -1678,7 +1747,12 @@ as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op)
 	// the copy will be responsible for the existing particle. Therefore it's
 	// important on failure to leave the existing particle intact.
 
-	as_particle_type type = (as_particle_type)op->particle_type;
+	as_particle_type type = safe_particle_type(op->particle_type);
+
+	if (type < 0) {
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
+
 	uint32_t value_size = as_msg_op_get_value_sz(op);
 	uint8_t *value = as_msg_op_get_value_p((as_msg_op *)op);
 	int32_t mem_size = g_particle_size_from_wire_table[type](value, value_size);
@@ -1722,7 +1796,12 @@ as_bin_particle_stack_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_
 	// We assume that if we're using stack particles, the old particle is either
 	// nonexistent or also a stack particle - either way, don't destroy.
 
-	as_particle_type type = (as_particle_type)op->particle_type;
+	as_particle_type type = safe_particle_type(op->particle_type);
+
+	if (type < 0) {
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
+
 	uint32_t value_size = as_msg_op_get_value_sz(op);
 	uint8_t *value = as_msg_op_get_value_p((as_msg_op *)op);
 	int32_t mem_size = g_particle_size_from_wire_table[type](value, value_size);
@@ -1761,13 +1840,17 @@ as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled)
 	uint32_t old_mem_size = as_bin_inuse(b) ? g_particle_size_table[old_type](b->particle) : 0;
 
 	const uint8_t *pickled = (const uint8_t *)*p_pickled;
-	as_particle_type new_type = (as_particle_type)*pickled++;
+	as_particle_type new_type = safe_particle_type(*pickled++);
 	const uint32_t *p32 = (const uint32_t *)pickled;
 	uint32_t new_value_size = cf_swap_from_be32(*p32++);
 	const uint8_t *new_value = (const uint8_t *)p32;
 	int32_t new_mem_size = g_particle_size_from_wire_table[new_type](new_value, new_value_size);
 
 	*p_pickled = (uint8_t *)new_value + new_value_size;
+
+	if (new_type < 0) {
+		return (int)new_type;
+	}
 
 	if (new_mem_size < 0) {
 		// Leave existing particle intact.
@@ -1820,13 +1903,17 @@ as_bin_particle_stack_from_pickled(as_bin *b, uint8_t *stack, uint8_t **p_pickle
 	// nonexistent or also a stack particle - either way, don't destroy.
 
 	const uint8_t *pickled = (const uint8_t *)*p_pickled;
-	as_particle_type type = (as_particle_type)*pickled++;
+	as_particle_type type = safe_particle_type(*pickled++);
 	const uint32_t *p32 = (const uint32_t *)pickled;
 	uint32_t value_size = cf_swap_from_be32(*p32++);
 	const uint8_t *value = (const uint8_t *)p32;
 	int32_t mem_size = g_particle_size_from_wire_table[type](value, value_size);
 
 	*p_pickled = (uint8_t *)value + value_size;
+
+	if (type < 0) {
+		return (int)type;
+	}
 
 	if (mem_size < 0) {
 		// Leave existing particle intact.
@@ -1893,6 +1980,7 @@ uint32_t
 as_bin_particle_to_client(const as_bin *b, as_msg_op *op)
 {
 	if (! (b && as_bin_inuse(b))) {
+		// UDF result bin (bin name "SUCCESS" or "FAILURE") will get here.
 		// Ordered ops that find no bin will get here.
 		op->particle_type = AS_PARTICLE_TYPE_NULL;
 		return 0;
@@ -2086,7 +2174,11 @@ as_bin_particle_cast_from_flat(as_bin *b, uint8_t *flat, uint32_t flat_size)
 		return -1;
 	}
 
-	as_particle_type type = (as_particle_type)*flat;
+	as_particle_type type = safe_particle_type(*flat);
+
+	if (type < 0) {
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+	}
 
 	// Cast the new particle into the bin.
 	int result = g_particle_cast_from_flat_table[type](flat, flat_size, &b->particle);
@@ -2107,7 +2199,11 @@ int
 as_bin_particle_replace_from_flat(as_bin *b, const uint8_t *flat, uint32_t flat_size)
 {
 	uint8_t old_type = as_bin_get_particle_type(b);
-	as_particle_type new_type = (as_particle_type)*flat;
+	as_particle_type new_type = safe_particle_type(*flat);
+
+	if (new_type < 0) {
+		return (int)new_type;
+	}
 
 	// Just destroy the old particle, if any - we're replacing it.
 	g_particle_destructor_table[old_type](b->particle);

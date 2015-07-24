@@ -81,8 +81,8 @@ as_bin_get_or_assign_id(as_namespace *ns, const char *name)
 		return (uint16_t)idx;
 	}
 
-	// Verify length just once here at insertion.
-	if (strlen(name) >= BIN_NAME_MAX_SZ) {
+	// This should always have been checked by this point.
+	if (strlen(name) >= AS_ID_BIN_SZ) {
 		cf_crash(AS_BIN, "bin name %s too long", name);
 	}
 
