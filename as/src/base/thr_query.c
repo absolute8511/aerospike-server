@@ -1469,7 +1469,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 	as_sindex_bin_data *end   = &qtr->srange->end;
 
 	//TODO: Make it more general to support sindex over multiple bins	
-	as_bin * b = as_bin_get(rd, qtr->si->imd->bnames[0]);
+	as_bin * b = as_bin_get_by_id(rd, qtr->si->imd->binid[0]);
 
 	if (!b) {
 		cf_debug(AS_QUERY , "as_query_record_validation: "
@@ -2553,9 +2553,7 @@ as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 	int rv = AS_QUERY_ERR;
 	*qtrp  = NULL;
 
-#if defined(USE_SYSTEMTAP)
     ASD_QUERY_STARTING(nodeid, trid);
-#endif
 
 	uint64_t start_time     = cf_getns();
 	as_sindex *si           = NULL;
@@ -3019,16 +3017,14 @@ as_query_get_jobstat_all(int * size)
 	if(*size == 0) return AS_QUERY_OK;
 
 	as_mon_jobstat     * job_stats;
-	as_query_jobstat   * job_pool;
+	as_query_jobstat     job_pool;
 
 	job_stats          = (as_mon_jobstat *) cf_malloc(sizeof(as_mon_jobstat) * (*size));
-	job_pool           = (as_query_jobstat *) cf_malloc(sizeof(as_query_jobstat));
-	job_pool->jobstat  = &job_stats;
-	job_pool->index    = 0;
-	job_pool->max_size = *size;
-	rchash_reduce(g_query_job_hash, as_mon_query_jobstat_reduce_fn, job_pool);
-	*size              = job_pool->index;
-	cf_free(job_pool);
+	job_pool.jobstat  = &job_stats;
+	job_pool.index    = 0;
+	job_pool.max_size = *size;
+	rchash_reduce(g_query_job_hash, as_mon_query_jobstat_reduce_fn, &job_pool);
+	*size              = job_pool.index;
 	return job_stats;
 }
 
@@ -3095,7 +3091,7 @@ as_query_gconfig_default(as_config *c)
 	c->query_req_in_query_thread = 0;
 	c->query_untracked_time_ms   = AS_QUERY_UNTRACKED_TIME;
 
-	c->qnodes_pre_reserved    = true;
+	c->qnodes_pre_reserved       = false;
 
 	// Aggregation
 	c->udf_runtime_max_memory    = ULONG_MAX;

@@ -336,7 +336,7 @@ typedef struct as_sindex_metadata_s {
 	struct as_sindex_s  * si;
 	as_sindex_pmetadata * pimd;
 	unsigned char         dtype;   // Aerospike Index type
-	int                   binid[AS_SINDEX_BINMAX]; // Redundant info to aid search
+	uint32_t              binid[AS_SINDEX_BINMAX]; // Redundant info to aid search
 	byte                  mfd_slot; // slot on the persistent file
 
 	// Index Static Data (part persisted)
