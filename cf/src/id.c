@@ -122,7 +122,10 @@ cf_ipaddr_get(int socket, char *nic_id, char **node_ip )
 	return(0);
 }
 
-static const char *biosdevnames[] = {"eth%d", "bond%d", "wlan%d", "em%d", "p%dp%d", NULL};
+static const char *biosdevnames[] = {
+		"eth%d", "bond%d", "wlan%d", "em%d_%d", "p%dp%d_%d",
+		NULL
+};
 
 /**
  * @return true if name is a biosdevname
