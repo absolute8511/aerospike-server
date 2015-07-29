@@ -2241,7 +2241,9 @@ as_bin_particle_replace_from_flat(as_bin *b, const uint8_t *flat, uint32_t flat_
 	}
 
 	// Just destroy the old particle, if any - we're replacing it.
-	g_particle_destructor_table[old_type](b->particle);
+	if (as_bin_inuse(b)) {
+		g_particle_destructor_table[old_type](b->particle);
+	}
 
 	// Load the new particle into the bin.
 	int result = g_particle_from_flat_table[new_type](flat, flat_size, &b->particle);
