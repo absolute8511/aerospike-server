@@ -1478,9 +1478,8 @@ as_hb_tcp_close(int fd)
 		as_hb_nodes_discovered_hash_del_conn(g_hb.endpoint_txlist_node_id[fd], fd);
 	}
 	g_hb.endpoint_txlist_node_id[fd] = 0;
-	cf_atomic_int_incr(&g_config.heartbeat_connections_closed);
 	mesh_host_list_remove_fd(fd);
-	close(fd);
+	shutdown(fd, SHUT_RDWR);
 }
 
 /* as_hb_tcp_send
