@@ -2704,6 +2704,9 @@ as_query(as_transaction *tr)
 		// add this in the query_fail stat
 		cf_atomic64_incr(&g_config.query_fail);
 		rv = AS_QUERY_OK;
+		// If return value is AS_QUERY_OK, transaction layer does not release fd
+		// So release the fd here.
+		AS_RELEASE_FILE_HANDLE(tr->proto_fd_h);
 		goto Cleanup;
 	}
 	cf_detail(AS_QUERY, "Query on index %s ",
