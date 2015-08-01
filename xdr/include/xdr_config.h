@@ -199,7 +199,7 @@ typedef struct xdr_config {
 	int	xdr_forward_xdrwrites;
 	int	xdr_stop_writes_noxdr;
 	int xdr_internal_shipping_delay;
-	int	xdr_flag;
+	int	xdr_conf_change_flag;
 	xdr_new_config xdr_new_cfg;
 	bool	xdr_shipping_enabled;
 	bool	xdr_delete_shipping_enabled;
