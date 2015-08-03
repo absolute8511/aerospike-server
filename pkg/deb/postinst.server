@@ -7,7 +7,7 @@ case "$1" in
 
   # create aerospike group if it isn't already there
   if ! getent group aerospike >/dev/null; then
-    groupadd aerospike
+    groupadd -r aerospike
   fi
 
   # create aerospike user if it isn't already there

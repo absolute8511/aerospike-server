@@ -3810,30 +3810,6 @@ destroy_stack_bins(as_bin *stack_bins, uint32_t n_bins)
 
 
 //==============================================================================
-// Temporary, to be moved and implemented:
-//
-
-int
-as_bin_cdt_read_from_client(const as_bin *b, as_msg_op *op, as_bin *result)
-{
-	return -1;
-}
-
-int
-as_bin_cdt_alloc_modify_from_client(as_bin *b, as_msg_op *op, as_bin *result)
-{
-	return -1;
-}
-
-int
-as_bin_cdt_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, as_msg_op *op, as_bin *result)
-{
-	return -1;
-}
-
-
-
-//==============================================================================
 // write_local() bin operations, for all configurations.
 //
 

@@ -859,6 +859,16 @@ as_particle_to_flat_blob(const as_particle *p, uint8_t *flat)
 
 
 //==========================================================
+// LIST particle.
+//
+
+// A LIST particle is blob-like for data-not-in-memory configuration, but is an
+// as_dequelist wrapped by particle metadata for data-in-memory.
+
+// TODO
+
+
+//==========================================================
 // Particle function tables.
 //
 
@@ -2029,6 +2039,31 @@ as_bin_particle_to_pickled(const as_bin *b, uint8_t *pickled)
 }
 
 //
+// CDTs are special.
+//
+
+int
+as_bin_cdt_read_from_client(const as_bin *b, as_msg_op *op, as_bin *result)
+{
+	// TODO
+	return -1;
+}
+
+int
+as_bin_cdt_alloc_modify_from_client(as_bin *b, as_msg_op *op, as_bin *result)
+{
+	// TODO
+	return -1;
+}
+
+int
+as_bin_cdt_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, as_msg_op *op, as_bin *result)
+{
+	// TODO
+	return -1;
+}
+
+//
 // LDTs are special.
 //
 
@@ -2206,7 +2241,9 @@ as_bin_particle_replace_from_flat(as_bin *b, const uint8_t *flat, uint32_t flat_
 	}
 
 	// Just destroy the old particle, if any - we're replacing it.
-	g_particle_destructor_table[old_type](b->particle);
+	if (as_bin_inuse(b)) {
+		g_particle_destructor_table[old_type](b->particle);
+	}
 
 	// Load the new particle into the bin.
 	int result = g_particle_from_flat_table[new_type](flat, flat_size, &b->particle);
