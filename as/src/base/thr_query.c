@@ -55,28 +55,28 @@
  *
  *  1. thr_tsvc()
  *
- *                 ---------------------------------> as_query_generator
+ *                 ---------------------------------> query_generator
  *                /                                      /|\      |
  *  as_query -----                                        |       |   qtr released
  * (sets up qtr)  \   qtr reserved                        |      \|/
- *                 ----------------> g_query_q ------> as_query_th
+ *                 ----------------> g_query_q ------> query_th
  *
  *
  *  2. Query Threads
- *                          ---------------------------------> as_query_qwork_process
+ *                          ---------------------------------> qwork_process
  *                        /                                          /|\      |
- *  as_query_generator --                                            |       |  qtr released
- *  (sets up qwork)        \  qtr reserved                             |      \|/
- *                          --------------> g_query_work_queue -> as_query_th
+ *  query_generator --                                                |       |  qtr released
+ *  (sets up qwork)        \  qtr reserved                            |      \|/
+ *                          --------------> g_query_work_queue -> query_th
  *
  *
  *
  *  3. I/O threads
- *                                as_query_process_ioreq  --> as_query_io
+ *                                query_process_ioreq  --> query_io
  *                               /
- *  as_query_qwork_process ----- as_query_process_mrjreq  (NOT IMPLEMENTED)
+ *  qwork_process -----------------query_process_udfreq --> internal txn
  *                               \
- *                                as_query_process_aggreq --> as_query_agg
+ *                                query_process_aggreq --> ag_aggr_process
  *
  *  (Releases all the resources qtr and qwork if allocated)
  *
@@ -160,7 +160,7 @@ typedef enum {
 	AS_QTR_STATE_ABORT    = 2,
 	AS_QTR_STATE_ERR      = 3,
 	AS_QTR_STATE_DONE     = 4, 
-} as_qtr_state;
+} qtr_state;
 // **************************************************************************************************
 
 /*
@@ -172,7 +172,7 @@ typedef enum {
 	AS_QUERY_UDF    = 1,
 	AS_QUERY_AGG    = 2,
 	AS_QUERY_MRJ    = 3
-} as_query_type;
+} query_type;
 
 
 
@@ -191,7 +191,7 @@ struct as_query_transaction_s {
 	char                   * setname;
 	as_sindex              * si;
 	as_sindex_range        * srange;
-	as_query_type            job_type;  // Job type [LOOKUP/AGG/UDF/MRJ]
+	query_type               job_type;  // Job type [LOOKUP/AGG/UDF/MRJ]
 	cf_vector              * binlist;
 	as_file_handle         * fd_h;      // ref counted nonetheless
 	/************************** Run Time Data *********************************/
@@ -239,7 +239,7 @@ struct as_query_transaction_s {
 	/****************** Query State and Result Code **************************/ 
 	pthread_mutex_t          slock;
 	bool                     do_requeue;
-	as_qtr_state             state;
+	qtr_state                state;
 	int                      result_code;
 
     /********************* Fields Not Memzeroed **********************
@@ -271,7 +271,7 @@ typedef enum {
 	AS_QUERY_REQTYPE_UDF  =  1, // Request for running UDF on query result
 	AS_QUERY_REQTYPE_AGG  =  2, // Request for Aggregation
 	AS_QUERY_REQTYPE_MRJ  =  3  // Request for MRJ
-} as_query_work_type;
+} query_work_type;
 // **************************************************************************************************
 
 
@@ -279,12 +279,12 @@ typedef enum {
  * Query Request 
  */
 // **************************************************************************************************
-typedef struct as_query_work_s {
-	as_query_work_type    type;
-	as_query_transaction   * qtr;
-	cf_ll                  * recl;
-	uint64_t                 queued_time_ns;
-} as_query_work;
+typedef struct query_work_s {
+	query_work_type        type;
+	as_query_transaction * qtr;
+	cf_ll                * recl;
+	uint64_t               queued_time_ns;
+} query_work;
 // **************************************************************************************************
 
 
@@ -292,21 +292,21 @@ typedef struct as_query_work_s {
  * Job Monitoring
  */
 // **************************************************************************************************
-typedef struct as_query_jobstat_s {
+typedef struct query_jobstat_s {
 	int               index;
 	as_mon_jobstat ** jobstat;
 	int               max_size;
-} as_query_jobstat;
+} query_jobstat;
 // **************************************************************************************************
 
 /*
  * Skey list
  */
 // **************************************************************************************************
-typedef struct as_sindex_qtr_skey_s {
+typedef struct qtr_skey_s {
 	as_query_transaction * qtr;
 	as_sindex_key        * skey;
-} as_sindex_qtr_skey;
+} qtr_skey;
 // **************************************************************************************************
 
 
@@ -356,7 +356,7 @@ extern cf_vector * as_sindex_binlist_from_msg(as_namespace *ns, as_msg *msgp, in
  */
 // **************************************************************************************************
 
-static void as_query_qtr_finish(as_query_transaction *qtr, cf_atomic32 *stat, char *fname, int lineno, bool release);
+static void qtr_finish_work(as_query_transaction *qtr, cf_atomic32 *stat, char *fname, int lineno, bool release);
 
 // **************************************************************************************************
 
@@ -405,13 +405,13 @@ do {                                                                   \
  */
 // **************************************************************************************************
 static void
-as_qtr_lock(as_query_transaction *qtr) {
+qtr_lock(as_query_transaction *qtr) {
 	if (qtr) { 
 		pthread_mutex_lock(&qtr->slock);
 	}
 }
 static void
-as_qtr_unlock(as_query_transaction *qtr) {
+qtr_unlock(as_query_transaction *qtr) {
 	if (qtr) { 
 		pthread_mutex_unlock(&qtr->slock);
 	}
@@ -424,7 +424,7 @@ as_qtr_unlock(as_query_transaction *qtr) {
  */
 // **************************************************************************************************
 static as_query_transaction *
-as_query_qtr_alloc()
+qtr_alloc()
 {
 	pthread_mutex_lock(&g_query_pool_mutex);
 
@@ -444,7 +444,7 @@ as_query_qtr_alloc()
 }
 
 static void
-as_query_qtr_free(as_query_transaction * qtr)
+qtr_free(as_query_transaction * qtr)
 {
 	pthread_mutex_lock(&g_query_pool_mutex);
 
@@ -468,7 +468,7 @@ as_query_qtr_free(as_query_transaction * qtr)
  */
 // **************************************************************************************************
 static int
-as_query_bb_poolrelease(cf_buf_builder *bb_r)
+bb_poolrelease(cf_buf_builder *bb_r)
 {
 	int ret = AS_QUERY_OK;
 	if ((cf_queue_sz(g_query_response_bb_pool) > g_config.query_bufpool_size)
@@ -487,7 +487,7 @@ as_query_bb_poolrelease(cf_buf_builder *bb_r)
 }
 
 static cf_buf_builder *
-as_query_bb_poolrequest()
+bb_poolrequest()
 {
 	cf_buf_builder *bb_r;
 	int rv = cf_queue_pop(g_query_response_bb_pool, &bb_r, CF_QUEUE_NOWAIT);
@@ -509,7 +509,7 @@ as_query_bb_poolrequest()
  */
 // **************************************************************************************************
 static int
-as_query_qwork_poolrelease(as_query_work *qwork)
+qwork_poolrelease(query_work *qwork)
 {
 	if (!qwork) return AS_QUERY_OK;
 	qwork->qtr   = 0;
@@ -531,19 +531,19 @@ as_query_qwork_poolrelease(as_query_work *qwork)
 	return ret;
 }
 
-static as_query_work *
-as_query_qwork_poolrequest()
+static query_work *
+qwork_poolrequest()
 {
-	as_query_work *qwork = NULL;
+	query_work *qwork = NULL;
 	int rv = cf_queue_pop(g_query_qwork_pool, &qwork, CF_QUEUE_NOWAIT);
 	if (rv == CF_QUEUE_EMPTY) {
-		qwork = cf_malloc(sizeof(as_query_work));
+		qwork = cf_malloc(sizeof(query_work));
 		if (!qwork) {
 			cf_warning(AS_QUERY, "Failed to allocate query work");
 			return NULL;
 		}
 		cf_detail(AS_QUERY, " Created qwork %p", qwork);
-		memset(qwork, 0, sizeof(as_query_work));
+		memset(qwork, 0, sizeof(query_work));
 	} else if (rv == CF_QUEUE_OK) {
 		cf_detail(AS_QUERY, " Popped qwork %p", qwork);
 	} else {
@@ -562,111 +562,111 @@ as_query_qwork_poolrequest()
  */
 // **************************************************************************************************
 static void
-as_query_set_running(as_query_transaction *qtr) {
-	as_qtr_lock(qtr);
+qtr_set_running(as_query_transaction *qtr) {
+	qtr_lock(qtr);
 	if (qtr->state == AS_QTR_STATE_NONE) {
 		qtr->state       = AS_QTR_STATE_RUNNING;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 }
 
 static bool
-as_query_inited(as_query_transaction *qtr) {
-	as_qtr_lock(qtr);
+qtr_inited(as_query_transaction *qtr) {
+	qtr_lock(qtr);
 	bool inited = false;
 	if (qtr->state != AS_QTR_STATE_NONE) {
 		inited = true;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 	return inited;
 }
 
 static void
-as_query_set_abort(as_query_transaction *qtr, int result_code, char *fname, int lineno)
+qtr_set_abort(as_query_transaction *qtr, int result_code, char *fname, int lineno)
 {
-	as_qtr_lock(qtr);
+	qtr_lock(qtr);
 	if (qtr->state == AS_QTR_STATE_RUNNING) {
 		cf_debug(AS_QUERY, "Query %p Aborted at %s:%d", qtr, fname, lineno);
 		qtr->state       = AS_QTR_STATE_ABORT;
 		qtr->result_code = result_code;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 }
 
 static void
-as_query_set_err(as_query_transaction *qtr, int result_code, char *fname, int lineno)
+qtr_set_err(as_query_transaction *qtr, int result_code, char *fname, int lineno)
 {
-	as_qtr_lock(qtr);
+	qtr_lock(qtr);
 	if (qtr->state == AS_QTR_STATE_RUNNING) {
 		cf_debug(AS_QUERY, "Query %p Error at %s:%d", qtr, fname, lineno);
 		qtr->state       = AS_QTR_STATE_ERR;
 		qtr->result_code = result_code;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 }
 
 
 static void
-as_query_set_done(as_query_transaction *qtr, int result_code, char *fname, int lineno)
+qtr_set_done(as_query_transaction *qtr, int result_code, char *fname, int lineno)
 {
-	as_qtr_lock(qtr);
+	qtr_lock(qtr);
 	if (qtr->state == AS_QTR_STATE_RUNNING) {
 		cf_debug(AS_QUERY, "Query %p Done at %s:%d", qtr, fname, lineno);
 		qtr->state       = AS_QTR_STATE_DONE;
 		qtr->result_code = result_code;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 }
 
 static bool
-as_query_failed(as_query_transaction *qtr) 
+qtr_failed(as_query_transaction *qtr) 
 {
-	as_qtr_lock(qtr);
+	qtr_lock(qtr);
 	bool abort = false;
 	if ((qtr->state == AS_QTR_STATE_ABORT) 
 		 || (qtr->state == AS_QTR_STATE_ERR)) {
 		abort = true;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 	return abort;
 }
 
 static bool
-as_query_is_abort(as_query_transaction *qtr)
+qtr_is_abort(as_query_transaction *qtr)
 {
-	as_qtr_lock(qtr);
+	qtr_lock(qtr);
 	bool abort = false;
 	if (qtr->state == AS_QTR_STATE_ABORT) {
 		abort = true;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 	return abort;
-}
-
-static void
-as_query_check_timeout(as_query_transaction *qtr)
-{
-	if ((qtr)                        
-		&& (qtr->end_time != 0)    
-		&& (cf_getns() > qtr->end_time)) { 
-		cf_debug(AS_QUERY, "Query Timed-out %lu %lu", cf_getns(), qtr->end_time); 
-		as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT, __FILE__, __LINE__); 
-	}
 }
 
 // Finish clean
 static bool
-as_query_fin(as_query_transaction *qtr)
+qtr_finished(as_query_transaction *qtr)
 {
-	as_qtr_lock(qtr);
+	qtr_lock(qtr);
 	bool finished = false;
 	if ((qtr->state == AS_QTR_STATE_DONE)
 		|| (qtr->state == AS_QTR_STATE_ERR)
 		|| (qtr->state == AS_QTR_STATE_ABORT)) {
 		finished = true;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 	return finished;
+}
+
+static void
+query_check_timeout(as_query_transaction *qtr)
+{
+	if ((qtr)                        
+		&& (qtr->end_time != 0)    
+		&& (cf_getns() > qtr->end_time)) { 
+		cf_debug(AS_QUERY, "Query Timed-out %lu %lu", cf_getns(), qtr->end_time); 
+		qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT, __FILE__, __LINE__); 
+	}
 }
 // **************************************************************************************************
 
@@ -676,13 +676,13 @@ as_query_fin(as_query_transaction *qtr)
  */
 // **************************************************************************************************
 static void
-as_query_post_release_qnodes(as_query_transaction * qtr)
+query_post_release_qnode(as_query_transaction * qtr)
 {
 	if (!qtr) {
 		cf_warning(AS_QUERY, "qtr is NULL");
 		return;
 	}
-	if (as_query_inited(qtr) && qtr->qctx.qnodes_pre_reserved) {
+	if (qtr_inited(qtr) && qtr->qctx.qnodes_pre_reserved) {
 		for (int i=0; i<AS_PARTITIONS; i++) {
 			if (qtr->qctx.is_partition_qnode[i]) {
 				as_partition_release(&qtr->rsv[i]);
@@ -696,7 +696,7 @@ as_query_post_release_qnodes(as_query_transaction * qtr)
 }
 
 static inline void
-as_query_update_stats(as_query_transaction *qtr)
+query_update_stats(as_query_transaction *qtr)
 {
 	uint64_t rows = cf_atomic64_get(qtr->n_result_records);
 
@@ -721,7 +721,7 @@ as_query_update_stats(as_query_transaction *qtr)
 	}
 
 	if( qtr->job_type == AS_QUERY_AGG) {
-		if (!as_query_failed(qtr))
+		if (!qtr_failed(qtr))
 			cf_atomic64_incr(&g_config.n_agg_success);
 		cf_atomic64_incr(&qtr->si->stats.n_aggregation);
 		cf_atomic64_add(&qtr->si->stats.agg_response_size, qtr->net_io_bytes);
@@ -731,7 +731,7 @@ as_query_update_stats(as_query_transaction *qtr)
 	}
 	else if( qtr->job_type == AS_QUERY_LOOKUP )
 	{
-		if (!as_query_failed(qtr))
+		if (!qtr_failed(qtr))
 			cf_atomic64_incr(&g_config.n_lookup_success);
 		cf_atomic64_incr(&qtr->si->stats.n_lookup);
 		cf_atomic64_add(&qtr->si->stats.lookup_response_size, qtr->net_io_bytes);
@@ -756,7 +756,7 @@ as_query_update_stats(as_query_transaction *qtr)
 }
 
 static void
-as_query_teardown(as_query_transaction *qtr)
+query_teardown(as_query_transaction *qtr)
 {
 	if (qtr->srange)      as_sindex_range_free(&qtr->srange);
 	if (qtr->si)          AS_SINDEX_RELEASE(qtr->si);
@@ -766,10 +766,10 @@ as_query_teardown(as_query_transaction *qtr)
 }
 
 static void
-as_query_release_fd(as_query_transaction *qtr)
+query_release_fd(as_query_transaction *qtr)
 {
 	if (qtr && qtr->fd_h) {
-		if (as_query_is_abort(qtr)) {
+		if (qtr_is_abort(qtr)) {
 			shutdown(qtr->fd_h->fd, SHUT_RDWR);
 		}
 		qtr->fd_h->fh_info &= ~FH_INFO_DONOT_REAP;
@@ -779,7 +779,7 @@ as_query_release_fd(as_query_transaction *qtr)
 }
 
 static void
-as_query_transaction_done(as_query_transaction *qtr)
+query_transaction_done(as_query_transaction *qtr)
 {
 
 #if defined(USE_SYSTEMTAP)
@@ -809,23 +809,23 @@ as_query_transaction_done(as_query_transaction *qtr)
 	}
 
 	// Release all the qnodes
-	as_query_post_release_qnodes(qtr);
+	query_post_release_qnode(qtr);
 
-	as_query_update_stats(qtr);
+	query_update_stats(qtr);
 
 
 	if (qtr->bb_r) {
-		as_query_bb_poolrelease(qtr->bb_r);
+		bb_poolrelease(qtr->bb_r);
 		qtr->bb_r = NULL;
 	}
-	as_query_release_fd(qtr);
-	as_query_teardown(qtr);
+	query_release_fd(qtr);
+	query_teardown(qtr);
 
 	pthread_mutex_destroy(&qtr->buf_mutex);
 
 	ASD_QUERY_QTR_FREE(nodeid, qtr->trid, (void *) qtr);
 
-	as_query_qtr_free(qtr);
+	qtr_free(qtr);
 }
 // **************************************************************************************************
 
@@ -835,13 +835,13 @@ as_query_transaction_done(as_query_transaction *qtr)
  */
 // **************************************************************************************************
 int
-as_query_qtr_release(as_query_transaction *qtr, char *fname, int lineno)
+qtr_release(as_query_transaction *qtr, char *fname, int lineno)
 {
 	if (qtr) {
 		int val = cf_rc_release(qtr);
 		if (val == 0) { 
 			cf_detail(AS_QUERY, "Released qtr [%s:%d] %p %d ", fname, lineno, qtr, val);
-			as_query_transaction_done(qtr);
+			query_transaction_done(qtr);
 		}
 		cf_detail(AS_QUERY, "Released qtr [%s:%d] %p %d ", fname, lineno, qtr, val);
 	}
@@ -849,7 +849,7 @@ as_query_qtr_release(as_query_transaction *qtr, char *fname, int lineno)
 }
 
 static int
-as_query_qtr_reserve(as_query_transaction *qtr, char *fname, int lineno)
+qtr_reserve(as_query_transaction *qtr, char *fname, int lineno)
 {
 	if (!qtr) {
 		return AS_QUERY_ERR;
@@ -873,7 +873,7 @@ as_query_qtr_reserve(as_query_transaction *qtr, char *fname, int lineno)
  *    the request would send back with fin packed jammed in.
  */ 
 int
-as_query_netio_start_cb(void *udata, int seq) 
+query_netio_start_cb(void *udata, int seq) 
 {
 	as_netio *io               = (as_netio *)udata;
 	as_query_transaction *qtr  = (as_query_transaction *)io->data;
@@ -885,7 +885,7 @@ as_query_netio_start_cb(void *udata, int seq)
 		return AS_NETIO_CONTINUE;
 	}
 	
-	if (as_query_is_abort(qtr)) {
+	if (qtr_is_abort(qtr)) {
 		return AS_QUERY_ERR;
 	}
 
@@ -895,8 +895,8 @@ as_query_netio_start_cb(void *udata, int seq)
 	//
 	// NB: Let the half sent buffer fully finish. This is the exception
 	// case where io which when in half send state sees an abort.
-	as_query_check_timeout(qtr);
-	if (as_query_failed(qtr) && (io->offset == 0)) {
+	query_check_timeout(qtr);
+	if (qtr_failed(qtr) && (io->offset == 0)) {
 		return AS_NETIO_ERR;
 	}
 	return AS_NETIO_OK;
@@ -911,7 +911,7 @@ as_query_netio_start_cb(void *udata, int seq)
  * Abort it set if something goes wrong
  */ 
 int
-as_query_netio_finish_cb(void *data, int retcode)
+query_netio_finish_cb(void *data, int retcode)
 {
 	as_netio *io               = (as_netio *)data;
     cf_detail(AS_QUERY, "Query Finish Callback io seq %d with retCode %d", io->seq, retcode);
@@ -921,30 +921,30 @@ as_query_netio_finish_cb(void *data, int retcode)
 		if (retcode == AS_NETIO_OK) {
 			cf_atomic64_add(&qtr->net_io_bytes, io->bb_r->used_sz + 8);
 		} else {
-			as_query_set_abort(qtr, AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR, __FILE__, __LINE__);
+			qtr_set_abort(qtr, AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR, __FILE__, __LINE__);
 		}
 		QUERY_HIST_INSERT_DATA_POINT(query_net_io_hist, io->start_time);	
 
 		AS_RELEASE_FILE_HANDLE(io->fd_h);
-		as_query_bb_poolrelease(io->bb_r);
+		bb_poolrelease(io->bb_r);
 
 		cf_atomic32_incr(&qtr->netio_pop_seq);
 
-		as_query_qtr_finish(qtr, &qtr->n_io_outstanding, __FILE__, __LINE__, true);
+		qtr_finish_work(qtr, &qtr->n_io_outstanding, __FILE__, __LINE__, true);
 	}
 	return retcode;
 }
 
 #define MAX_OUTSTANDING_IO_REQ 2
 static int
-as_query_netio_wait(as_query_transaction *qtr)
+query_netio_wait(as_query_transaction *qtr)
 {
 	return (cf_atomic32_get(qtr->n_io_outstanding) > MAX_OUTSTANDING_IO_REQ) ? AS_QUERY_ERR : AS_QUERY_OK;
 } 
 
 // Returns AS_NETIO_OK always 
 static int 
-as_query_netio(as_query_transaction *qtr) 
+query_netio(as_query_transaction *qtr) 
 {
 #if defined(USE_SYSTEMTAP)
 	uint64_t nodeid = g_config.self_node;
@@ -959,10 +959,10 @@ as_query_netio(as_query_transaction *qtr)
 
 	as_netio        io;
 
-	io.finish_cb = as_query_netio_finish_cb;
-	io.start_cb  = as_query_netio_start_cb;
+	io.finish_cb = query_netio_finish_cb;
+	io.start_cb  = query_netio_start_cb;
 
-	as_query_qtr_reserve(qtr, __FILE__, __LINE__);
+	qtr_reserve(qtr, __FILE__, __LINE__);
 	io.data        = qtr;
 
 	io.bb_r        = qtr->bb_r;
@@ -978,7 +978,7 @@ as_query_netio(as_query_transaction *qtr)
 	io.start_time  = cf_getns();
 
 	int ret        = as_netio_send(&io, NULL, qtr->blocking);
-	qtr->bb_r      = as_query_bb_poolrequest();
+	qtr->bb_r      = bb_poolrequest();
    	cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 
 	ASD_QUERY_NETIO_FINISHED(nodeid, qtr->trid);
@@ -1052,7 +1052,7 @@ as_query_pre_reserve_qnodes(as_query_transaction * qtr)
 // **************************************************************************************************
 // Put qtr in a global hash
 static int
-as_query_put_qtr(as_query_transaction * qtr)
+hash_put_qtr(as_query_transaction * qtr)
 {
 	if (!qtr->track) {
 		return AS_QUERY_CONTINUE;
@@ -1068,7 +1068,7 @@ as_query_put_qtr(as_query_transaction * qtr)
 
 // Get Qtr from global hash
 static int
-as_query_get_qtr(uint64_t trid, as_query_transaction ** qtr)
+hash_get_qtr(uint64_t trid, as_query_transaction ** qtr)
 {
 	int rv = rchash_get(g_query_job_hash, &trid, sizeof(trid), (void **) qtr);
 	if (RCHASH_OK != rv) {
@@ -1079,7 +1079,7 @@ as_query_get_qtr(uint64_t trid, as_query_transaction ** qtr)
 
 // Delete Qtr from global hash
 static int
-as_query_delete_qtr(as_query_transaction *qtr)
+hash_delete_qtr(as_query_transaction *qtr)
 {
 	if (!qtr->track) {
 		return AS_QUERY_CONTINUE;
@@ -1095,19 +1095,19 @@ as_query_delete_qtr(as_query_transaction *qtr)
 // 		we are going to track it
 // else no.
 int
-as_query_qtr_track(as_query_transaction *qtr) 
+hash_track_qtr(as_query_transaction *qtr) 
 {
 	if (!qtr->track) {
 		if ((cf_getns() - qtr->start_time) > (g_config.query_untracked_time_ms * 1000000)) {
 			qtr->track = true;
-			as_query_qtr_reserve(qtr, __FILE__, __LINE__);
-			int ret = as_query_put_qtr(qtr);
+			qtr_reserve(qtr, __FILE__, __LINE__);
+			int ret = hash_put_qtr(qtr);
 			if (ret != 0 && ret != AS_QUERY_CONTINUE) {
 				// track should be disabled otherwise at the 
 				// qtr cleanup stage some other qtr with the same 
 				// trid can get cleaned up.
 				qtr->track     = false;
-				as_query_qtr_release(qtr, __FILE__, __LINE__);
+				qtr_release(qtr, __FILE__, __LINE__);
 				return AS_QUERY_ERR;
 			}
 		}
@@ -1123,7 +1123,7 @@ as_query_qtr_track(as_query_transaction *qtr)
  */
 // **************************************************************************************************
 static int
-as_query_add_val_response(void *void_qtr, const as_val *val, bool success)
+query_add_val_response(void *void_qtr, const as_val *val, bool success)
 {
 	as_query_transaction *qtr = (as_query_transaction *)void_qtr;
 	if (!qtr) {
@@ -1147,7 +1147,7 @@ as_query_add_val_response(void *void_qtr, const as_val *val, bool success)
 	}
 
 	if (msg_sz > (bb_r->alloc_sz - bb_r->used_sz) && bb_r->used_sz != 0) {
-		as_query_netio(qtr);
+		query_netio(qtr);
 	}
 
 	ret = as_msg_make_val_response_bufbuilder(val, &qtr->bb_r, msg_sz, success);
@@ -1172,7 +1172,7 @@ query_agg_ostream_write(const as_stream *s, as_val *v)
 	if (!v) {
 		return AS_STREAM_OK;
 	}
-	if (as_query_add_val_response((void *)qtr, v, true)) {
+	if (query_add_val_response((void *)qtr, v, true)) {
 		as_val_destroy(v);
 		return AS_STREAM_ERR;
 	}
@@ -1193,9 +1193,9 @@ const as_stream_hooks query_agg_ostream_hooks = {
 };
 
 static void
-as_query_set_error(void * caller)
+query_set_error(void * caller)
 {
-	as_query_set_err((as_query_transaction *)caller, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
+	qtr_set_err((as_query_transaction *)caller, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
 }
 
 as_aggr_caller_type as_query_get_type ( )
@@ -1204,22 +1204,22 @@ as_aggr_caller_type as_query_get_type ( )
 }
 
 const as_aggr_caller_intf as_query_aggr_caller_qintf = {
-	.set_error = as_query_set_error,
+	.set_error = query_set_error,
 	.mem_op = NULL,
 	.get_type = as_query_get_type
 };
 
 static void
-as_query_add_result(char *res, as_query_transaction *qtr, bool success)
+query_add_result(char *res, as_query_transaction *qtr, bool success)
 {
 	const as_val * v = (as_val *) as_string_new (res, false);
-	as_query_add_val_response((void *) qtr, v, success);
+	query_add_val_response((void *) qtr, v, success);
 	as_val_destroy(v);
 }
 
 
 static int
-as_query_process_aggreq(as_query_work *qagg)
+query_process_aggreq(query_work *qagg)
 {
 	int ret = AS_QUERY_ERR;
 	as_query_transaction *qtr = qagg->qtr;
@@ -1244,7 +1244,7 @@ as_query_process_aggreq(as_query_work *qagg)
                 sprintf(&rs[l_rs_len]," : %s",lua_err);
             }
         }
-        as_query_add_result(rs, qtr, false);
+        query_add_result(rs, qtr, false);
         cf_free(rs);
 	}
     as_result_destroy(res);
@@ -1261,7 +1261,7 @@ Cleanup:
  */
 // **************************************************************************************************
 /*
- * Function as_query_add_response
+ * Function query_add_response
  *
  * Returns -
  *		AS_QUERY_OK  - On success.
@@ -1279,7 +1279,7 @@ Cleanup:
  * 		Takes a lock over qtr->buf
  */
 static int
-as_query_add_response(void *void_qtr, as_index_ref *r_ref, as_storage_rd *rd)
+query_add_response(void *void_qtr, as_index_ref *r_ref, as_storage_rd *rd)
 {
 	as_record *r = r_ref->r;
 	as_query_transaction *qtr = (as_query_transaction *)void_qtr;
@@ -1296,7 +1296,7 @@ as_query_add_response(void *void_qtr, as_index_ref *r_ref, as_storage_rd *rd)
 	}
 	
 	if (msg_sz > (bb_r->alloc_sz - bb_r->used_sz) && bb_r->used_sz != 0) {
-		as_query_netio(qtr);
+		query_netio(qtr);
 	}
 
 	ret = as_msg_make_response_bufbuilder(r, rd, &qtr->bb_r, false,
@@ -1313,7 +1313,7 @@ as_query_add_response(void *void_qtr, as_index_ref *r_ref, as_storage_rd *rd)
 
 
 static int
-as_query_add_fin(as_query_transaction *qtr)
+query_add_fin(as_query_transaction *qtr)
 {
 
 #if defined(USE_SYSTEMTAP)
@@ -1348,22 +1348,22 @@ as_query_add_fin(as_query_transaction *qtr)
 }
 
 static int
-as_query_send_fin(as_query_transaction *qtr) {
+query_send_fin(as_query_transaction *qtr) {
 	// Send out the final data back
 	if (qtr->fd_h) {
-		as_query_add_fin(qtr);
-		as_query_netio(qtr);
+		query_add_fin(qtr);
+		query_netio(qtr);
 	} else {
 		cf_debug( AS_QUERY,
 				"query work: Not sending the fin packet as the connection is closed");
 		// Need to release qtr in case fd is not found.
-		as_query_qtr_release(qtr, __FILE__, __LINE__);
+		qtr_release(qtr, __FILE__, __LINE__);
 	}
 	return AS_QUERY_OK;
 }
 
-bool
-as_query_match_integer_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key *skey)
+static bool
+query_match_integer_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key *skey)
 {
 	as_sindex_bin_data *start = &qtr->srange->start;
 	as_sindex_bin_data *end   = &qtr->srange->end;
@@ -1371,7 +1371,7 @@ as_query_match_integer_fromval(as_query_transaction * qtr, as_val *v, as_sindex_
 	if ((AS_PARTICLE_TYPE_INTEGER != as_sindex_pktype(qtr->si->imd))
 			|| (AS_PARTICLE_TYPE_INTEGER != start->type)
 			|| (AS_PARTICLE_TYPE_INTEGER != end->type)) {
-		cf_debug(AS_QUERY, "as_query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
+		cf_debug(AS_QUERY, "query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
 				AS_PARTICLE_TYPE_INTEGER, start->type, end->type, as_sindex_pktype(qtr->si->imd),
 				qtr->si->imd->bnames[0], qtr->si->imd->iname);
 		return false;
@@ -1379,7 +1379,7 @@ as_query_match_integer_fromval(as_query_transaction * qtr, as_val *v, as_sindex_
 	as_integer * i = as_integer_fromval(v);
 	int64_t value  = as_integer_get(i);
 	if (skey->key.int_key != value) {
-		cf_debug(AS_QUERY, "as_query_record_matches: sindex key does " 
+		cf_debug(AS_QUERY, "query_record_matches: sindex key does " 
 			"not matches bin value in record. skey %ld bin value %ld", skey->key.int_key, value);
 		return false;
 	}
@@ -1387,8 +1387,8 @@ as_query_match_integer_fromval(as_query_transaction * qtr, as_val *v, as_sindex_
 	return true;
 }
 
-bool
-as_query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key *skey)
+static bool
+query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key *skey)
 {
 	as_sindex_bin_data *start = &qtr->srange->start;
 	as_sindex_bin_data *end   = &qtr->srange->end;
@@ -1396,7 +1396,7 @@ as_query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sindex_k
 	if ((AS_PARTICLE_TYPE_STRING != as_sindex_pktype(qtr->si->imd))
 			|| (AS_PARTICLE_TYPE_STRING != start->type)
 			|| (AS_PARTICLE_TYPE_STRING != end->type)) {
-		cf_debug(AS_QUERY, "as_query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
+		cf_debug(AS_QUERY, "query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
 				AS_PARTICLE_TYPE_STRING, start->type, end->type, as_sindex_pktype(qtr->si->imd),
 				qtr->si->imd->bnames[0], qtr->si->imd->iname);
 		return false;
@@ -1407,7 +1407,7 @@ as_query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sindex_k
 	cf_digest_compute(str_val, strlen(str_val), &str_digest);
 
 	if (memcmp(&str_digest, &skey->key.str_key, AS_DIGEST_KEY_SZ)) {
-		cf_debug(AS_QUERY, "as_query_record_matches: sindex key does not matches bin value in record."
+		cf_debug(AS_QUERY, "query_record_matches: sindex key does not matches bin value in record."
 				" skey %"PRIu64" value in bin %"PRIu64"", skey->key.str_key, str_digest);
 		return false;
 	}
@@ -1416,43 +1416,47 @@ as_query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sindex_k
 
 // If the value matches foreach should stop iterating the 
 bool 
-as_query_match_mapkeys_foreach(const as_val * key, const as_val * val, void * udata)
+query_match_mapkeys_foreach(const as_val * key, const as_val * val, void * udata)
 {
-	as_sindex_qtr_skey * q_s = (as_sindex_qtr_skey *)udata;
+	qtr_skey * q_s = (qtr_skey *)udata;
 	if (key->type == AS_STRING) {
 		// If matches return false
-		return !as_query_match_string_fromval(q_s->qtr, (as_val *)key, q_s->skey);
+		return !query_match_string_fromval(q_s->qtr, (as_val *)key, q_s->skey);
 	}
 	else if (key->type == AS_INTEGER) {
 		// If matches return false
-		return !as_query_match_integer_fromval(q_s->qtr,(as_val *) key, q_s->skey);
+		return !query_match_integer_fromval(q_s->qtr,(as_val *) key, q_s->skey);
 	}
 	return true;
 }
-static bool as_query_match_mapvalues_foreach(const as_val * key, const as_val * val, void * udata)
+
+static bool
+query_match_mapvalues_foreach(const as_val * key, const as_val * val, void * udata)
 {
-	as_sindex_qtr_skey * q_s = (as_sindex_qtr_skey *)udata;
+	qtr_skey * q_s = (qtr_skey *)udata;
 	if (val->type == AS_STRING) {
 		// If matches return false
-		return !as_query_match_string_fromval(q_s->qtr, (as_val *)val, q_s->skey);
+		return !query_match_string_fromval(q_s->qtr, (as_val *)val, q_s->skey);
 	}
 	else if (val->type == AS_INTEGER) {
 		// If matches return false
-		return !as_query_match_integer_fromval(q_s->qtr, (as_val *)val, q_s->skey);
+		return !query_match_integer_fromval(q_s->qtr, (as_val *)val, q_s->skey);
 	}
 	return true;
 
 }
-static bool as_query_match_listele_foreach(as_val * val, void * udata)
+
+static bool
+query_match_listele_foreach(as_val * val, void * udata)
 {
-	as_sindex_qtr_skey * q_s = (as_sindex_qtr_skey *)udata;
+	qtr_skey * q_s = (qtr_skey *)udata;
 	if (val->type == AS_STRING) {
 		// If matches return false
-		return !as_query_match_string_fromval(q_s->qtr, val, q_s->skey);
+		return !query_match_string_fromval(q_s->qtr, val, q_s->skey);
 	}
 	else if (val->type == AS_INTEGER) {
 		// If matches return false
-		return !as_query_match_integer_fromval(q_s->qtr, val, q_s->skey);
+		return !query_match_integer_fromval(q_s->qtr, val, q_s->skey);
 	}
 	return true;
 }
@@ -1463,8 +1467,8 @@ static bool as_query_match_listele_foreach(as_val * val, void * udata)
  * possible that it returns digest for which record may have changed. Do the
  * validation before returning the row.
  */
-bool
-as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_key * skey)
+static bool
+query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_key * skey)
 {
 	// TODO: Add counters and make sure it is not a performance hit
 	as_sindex_bin_data *start = &qtr->srange->start;
@@ -1494,7 +1498,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			if ((type != as_sindex_pktype(qtr->si->imd))
 			|| (type != start->type)
 			|| (type != end->type)) {
-				cf_debug(AS_QUERY, "as_query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
+				cf_debug(AS_QUERY, "query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
 					type, start->type, end->type, as_sindex_pktype(qtr->si->imd),
 					qtr->si->imd->bnames[0], qtr->si->imd->iname);
 				matches = false;
@@ -1504,7 +1508,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			int64_t   i = 0;
 			as_bin_particle_to_mem(b, (uint8_t *) &i);
 			if (skey->key.int_key != i) {
-				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does "
+				cf_debug(AS_QUERY, "query_record_matches: sindex key does "
 						"not matches bin value in record. bin value %ld skey value %ld", i, skey->key.int_key);
 				matches = false;
 				break;
@@ -1516,7 +1520,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			if ((type != as_sindex_pktype(qtr->si->imd))
 			|| (type != start->type)
 			|| (type != end->type)) {
-				cf_debug(AS_QUERY, "as_query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
+				cf_debug(AS_QUERY, "query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
 					type, start->type, end->type, as_sindex_pktype(qtr->si->imd),
 					qtr->si->imd->bnames[0], qtr->si->imd->iname);
 				matches = false;
@@ -1530,7 +1534,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 			cf_digest bin_digest;
 			cf_digest_compute( buf, psz, &bin_digest);
 			if (memcmp(&skey->key.str_key, &bin_digest, AS_DIGEST_KEY_SZ)) {
-				cf_debug(AS_QUERY, "as_query_record_matches: sindex key does not matches bin value in record."
+				cf_debug(AS_QUERY, "query_record_matches: sindex key does not matches bin value in record."
 				" skey %"PRIu64" value in bin %"PRIu64"", skey->key.str_key, bin_digest);
 	
 				matches = false;
@@ -1567,7 +1571,7 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 		if (res_val->type == AS_INTEGER) {
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_DEFAULT) {
-				matches = as_query_match_integer_fromval(qtr, res_val, skey);
+				matches = query_match_integer_fromval(qtr, res_val, skey);
 			}
 			else {
 				matches = false;
@@ -1576,38 +1580,38 @@ as_query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_
 		else if (res_val->type == AS_STRING) {
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_DEFAULT) {
-				matches = as_query_match_string_fromval(qtr, res_val, skey);
+				matches = query_match_string_fromval(qtr, res_val, skey);
 			}
 			else {
 				matches = false;
 			}
 		}
 		else if (res_val->type == AS_MAP) {
-			as_sindex_qtr_skey q_s;
+			qtr_skey q_s;
 			q_s.qtr  = qtr;
 			q_s.skey = skey;
 			// Defensive check.
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPKEYS) {
 				as_map * map = as_map_fromval(res_val);
-				matches = !as_map_foreach(map, as_query_match_mapkeys_foreach, &q_s);
+				matches = !as_map_foreach(map, query_match_mapkeys_foreach, &q_s);
 			}
 			else if (qtr->si->imd->itype == AS_SINDEX_ITYPE_MAPVALUES){
 				as_map * map = as_map_fromval(res_val);
-				matches = !as_map_foreach(map, as_query_match_mapvalues_foreach, &q_s);
+				matches = !as_map_foreach(map, query_match_mapvalues_foreach, &q_s);
 			}
 			else {
 				matches = false;
 			}
 		}
 		else if (res_val->type == AS_LIST) {
-			as_sindex_qtr_skey q_s;
+			qtr_skey q_s;
 			q_s.qtr  = qtr;
 			q_s.skey = skey;
 	
 			// Defensive check
 			if (qtr->si->imd->itype == AS_SINDEX_ITYPE_LIST) {
 				as_list * list = as_list_fromval(res_val);
-				matches = !as_list_foreach(list, as_query_match_listele_foreach, &q_s);
+				matches = !as_list_foreach(list, query_match_listele_foreach, &q_s);
 			}
 			else {
 				matches = false;
@@ -1626,11 +1630,11 @@ as_query_aggr_match_record(query_record * qrecord, as_sindex_key * skey)
 {
 	as_query_transaction * qtr = qrecord->caller; 
 	qtr->n_read_success++;
-	return as_query_record_matches(qtr, qrecord->urecord->rd, skey);
+	return query_record_matches(qtr, qrecord->urecord->rd, skey);
 }
 
-int
-as_query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
+static int
+query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 {
 #if defined(USE_SYSTEMTAP)
 	uint64_t nodeid = g_config.self_node;
@@ -1683,7 +1687,7 @@ as_query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 		rd.bins   = as_bin_get_all(r, &rd, stack_bins);
 		rd.n_bins = as_bin_inuse_count(&rd);
 		// Call Back
-		if (!as_query_record_matches(qtr, &rd, skey)) {
+		if (!query_record_matches(qtr, &rd, skey)) {
 			as_storage_record_close(r, &rd);
 			as_record_done(&r_ref, ns);
 			as_query_release_qnode(qtr, rsv);
@@ -1692,11 +1696,11 @@ as_query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 			return AS_QUERY_OK;
 		}
 
-		int ret = as_query_add_response(qtr, &r_ref, &rd);
+		int ret = query_add_response(qtr, &r_ref, &rd);
 		if (ret != 0) {
 			as_storage_record_close(r, &rd);
 			as_record_done(&r_ref, ns);
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
 			as_query_release_qnode(qtr, rsv);
 			ASD_QUERY_IO_ERROR(nodeid, qtr->trid);
 			return AS_QUERY_ERR;
@@ -1707,7 +1711,7 @@ as_query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 		// What do we do about empty records?
 		// 1. Should gin up an empty record
 		// 2. Current error is returned back to the client.
-		cf_detail(AS_QUERY, "as_query_generator: "
+		cf_detail(AS_QUERY, "query_generator: "
 				"as_record_get returned %d : key %"PRIx64, rec_rv,
 				*(uint64_t *)dig);
 		goto CLEANUP;
@@ -1741,7 +1745,7 @@ as_query_udf_finish_cb(as_transaction *tr, int retcode)
 	cf_detail(AS_QUERY, "UDF: Internal transaction remaining %d, total txn processing time %"PRIu64"",
 				cf_atomic32_get(&qtr->n_udf_tr_queued),
 				(cf_getns() - tr->start_time) / 1000000);
-	as_query_qtr_finish(qtr, &qtr->n_udf_tr_queued, __FILE__, __LINE__, true);
+	qtr_finish_work(qtr, &qtr->n_udf_tr_queued, __FILE__, __LINE__, true);
 	return AS_QUERY_OK;
 }
 
@@ -1749,7 +1753,7 @@ as_query_udf_finish_cb(as_transaction *tr, int retcode)
 // from inside generator. The generator could be scan job generating digest
 // or query generating digest.
 int
-as_internal_query_udf_txn_setup(tr_create_data * d)
+query_udf_txn_setup(tr_create_data * d)
 {
 	as_query_transaction *qtr = (as_query_transaction *)d->udata;
 
@@ -1759,8 +1763,8 @@ as_internal_query_udf_txn_setup(tr_create_data * d)
 				"configured limit", qtr->n_udf_tr_queued);
 
 		usleep(g_config.query_sleep_us);
-		as_query_check_timeout(qtr);
-		if (as_query_failed(qtr)) {
+		query_check_timeout(qtr);
+		if (qtr_failed(qtr)) {
 			return AS_QUERY_ERR;
 		}
 	}
@@ -1779,7 +1783,7 @@ as_internal_query_udf_txn_setup(tr_create_data * d)
 
 	cf_atomic32_incr(&qtr->n_udf_tr_queued);
 	cf_detail(AS_QUERY, "UDF: [%d] internal transactions enqueued", qtr->n_udf_tr_queued);
-	as_query_qtr_reserve(qtr, __FILE__, __LINE__);
+	qtr_reserve(qtr, __FILE__, __LINE__);
 	// Reset start time
 	tr.start_time = cf_getns();
 	if (0 != thr_tsvc_enqueue(&tr)) {
@@ -1788,14 +1792,14 @@ as_internal_query_udf_txn_setup(tr_create_data * d)
 				"transaction.. ", tr.keyd, qtr->n_udf_tr_queued);
 		cf_free(tr.msgp);
 		tr.msgp = 0;
-		as_query_qtr_finish(qtr, &qtr->n_udf_tr_queued, __FILE__, __LINE__, true);
+		qtr_finish_work(qtr, &qtr->n_udf_tr_queued, __FILE__, __LINE__, true);
 		return AS_QUERY_ERR;
 	}
 	return AS_QUERY_OK;
 }
 
 static int
-as_query_process_udfreq(as_query_work *qudf)
+query_process_udfreq(query_work *qudf)
 {
 	int ret               = AS_QUERY_OK;
 	cf_ll_element  * ele  = NULL;
@@ -1806,7 +1810,7 @@ as_query_process_udfreq(as_query_work *qudf)
 	iter                  = cf_ll_getIterator(qudf->recl, true /*forward*/);
 	if (!iter) {
 		ret              = AS_QUERY_ERR;
-		as_query_set_err(qtr, AS_SINDEX_ERR_NO_MEMORY, __FILE__, __LINE__);
+		qtr_set_err(qtr, AS_SINDEX_ERR_NO_MEMORY, __FILE__, __LINE__);
 		goto Cleanup;
 	}
 
@@ -1834,7 +1838,7 @@ as_query_process_udfreq(as_query_work *qudf)
 
 			// Setup the internal udf transaction. This includes creating an internal transaction
 			// and enqueuing it with throttling.
-			if (AS_QUERY_ERR == as_internal_query_udf_txn_setup(&d)) {
+			if (AS_QUERY_ERR == query_udf_txn_setup(&d)) {
 				as_index_keys_release_arr_to_queue(keys_arr);
 				ret = AS_QUERY_ERR;
 				goto Cleanup;
@@ -1855,7 +1859,7 @@ Cleanup:
 
 
 static int
-as_query_process_ioreq(as_query_work *qio)
+query_process_ioreq(query_work *qio)
 {
 
 #if defined(USE_SYSTEMTAP)
@@ -1879,7 +1883,7 @@ as_query_process_ioreq(as_query_work *qio)
 	}
 	iter                  = cf_ll_getIterator(qio->recl, true /*forward*/);
 	if (!iter) {
-		as_query_set_err(qtr, AS_SINDEX_ERR_NO_MEMORY, __FILE__, __LINE__);
+		qtr_set_err(qtr, AS_SINDEX_ERR_NO_MEMORY, __FILE__, __LINE__);
 		goto Cleanup;
 	}
 
@@ -1892,7 +1896,7 @@ as_query_process_ioreq(as_query_work *qio)
 		}
 		node->keys_arr     = NULL;
 		for (int i = 0; i < keys_arr->num; i++) {
-			if (AS_QUERY_OK != as_query_io(qtr, &keys_arr->pindex_digs[i], &keys_arr->sindex_keys[i])) {
+			if (AS_QUERY_OK != query_io(qtr, &keys_arr->pindex_digs[i], &keys_arr->sindex_keys[i])) {
 				as_index_keys_release_arr_to_queue(keys_arr);
 				goto Cleanup;
 			}
@@ -1900,8 +1904,8 @@ as_query_process_ioreq(as_query_work *qio)
 			if (cf_atomic64_get(qtr->n_result_records) % qtr->priority == 0)
 			{
 				usleep(g_config.query_sleep_us);
-				as_query_check_timeout(qtr);
-				if (as_query_failed(qtr)) {
+				query_check_timeout(qtr);
+				if (qtr_failed(qtr)) {
 					as_index_keys_release_arr_to_queue(keys_arr);
 					goto Cleanup;
 				}
@@ -1931,23 +1935,23 @@ Cleanup:
  */
 // **************************************************************************************************
 static int
-as_query_qwork_process(as_query_work *qworkp)
+qwork_process(query_work *qworkp)
 {
 	QUERY_HIST_INSERT_DATA_POINT(query_batch_io_q_wait_hist, qworkp->queued_time_ns);
 	cf_detail(AS_QUERY, "Processing Request %d", qworkp->type);
-	if (as_query_failed(qworkp->qtr)) {
+	if (qtr_failed(qworkp->qtr)) {
 		return AS_QUERY_ERR;
 	}
 	int ret = AS_QUERY_OK;
 	switch(qworkp->type) {
 		case AS_QUERY_REQTYPE_IO:
-			ret = as_query_process_ioreq(qworkp);
+			ret = query_process_ioreq(qworkp);
 			break;
 		case AS_QUERY_REQTYPE_UDF:
-			ret = as_query_process_udfreq(qworkp);
+			ret = query_process_udfreq(qworkp);
 			break;
 		case AS_QUERY_REQTYPE_AGG:
-			ret = as_query_process_aggreq(qworkp);
+			ret = query_process_aggreq(qworkp);
 			break;
 		default:
 			cf_warning(AS_QUERY, "Unsupported query type %d.. Dropping it", qworkp->type);
@@ -1957,9 +1961,9 @@ as_query_qwork_process(as_query_work *qworkp)
 }
 
 static void
-as_query_qwork_setup(as_query_work *qworkp, as_query_transaction *qtr)
+qwork_setup(query_work *qworkp, as_query_transaction *qtr)
 {
-	as_query_qtr_reserve(qtr, __FILE__, __LINE__);
+	qtr_reserve(qtr, __FILE__, __LINE__);
 	qworkp->qtr               = qtr;
 	qworkp->recl              = qtr->qctx.recl;
 	qtr->qctx.recl           = NULL;
@@ -1979,25 +1983,25 @@ as_query_qwork_setup(as_query_work *qworkp, as_query_transaction *qtr)
 }
 
 static void
-as_query_qwork_teardown(as_query_work *qworkp)
+qwork_teardown(query_work *qworkp)
 {
 	if (qworkp->recl) {
 		cf_ll_reduce(qworkp->recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
 		cf_free(qworkp->recl);
 		qworkp->recl = NULL;
 	} 
-	as_query_qtr_release(qworkp->qtr, __FILE__, __LINE__);
+	qtr_release(qworkp->qtr, __FILE__, __LINE__);
 	qworkp->qtr = NULL;
 }
 // **************************************************************************************************
 
 
 void *
-as_query_worker_th(void *q_to_wait_on)
+qwork_th(void *q_to_wait_on)
 {
 	unsigned int         thread_id = cf_atomic32_incr(&g_query_worker_threadcnt);
 	cf_detail(AS_QUERY, "Created Query Worker Thread %d", thread_id);
-	as_query_work   * qworkp     = NULL;
+	query_work   * qworkp     = NULL;
 	int                  ret       = AS_QUERY_OK;
 
 	while (1) {
@@ -2018,15 +2022,15 @@ as_query_worker_th(void *q_to_wait_on)
 		}
 		cf_detail(AS_QUERY, "Popped I/O work [%p,%p]", qworkp, qworkp->qtr);
 
-		ret = as_query_qwork_process(qworkp);
+		ret = qwork_process(qworkp);
 
 		as_query_transaction *qtr = qworkp->qtr;
-		if ((ret != AS_QUERY_OK) && !as_query_failed(qtr)) {
-			cf_warning(AS_QUERY, "Request processing failed but query is not as_query_failed .... ret %d", ret);
+		if ((ret != AS_QUERY_OK) && !qtr_failed(qtr)) {
+			cf_warning(AS_QUERY, "Request processing failed but query is not qtr_failed .... ret %d", ret);
 		}
-		as_query_qtr_finish(qtr, &qtr->n_qwork_active, __FILE__, __LINE__, false);
-		as_query_qwork_teardown(qworkp);
-		as_query_qwork_poolrelease(qworkp);
+		qtr_finish_work(qtr, &qtr->n_qwork_active, __FILE__, __LINE__, false);
+		qwork_teardown(qworkp);
+		qwork_poolrelease(qworkp);
 	}
 
 	return NULL;
@@ -2037,7 +2041,7 @@ as_query_worker_th(void *q_to_wait_on)
  */
 // **************************************************************************************************
 /*
- * Function as_query_generator_get_nextbatch
+ * Function query_get_nextbatch
  *
  * Notes-
  *		Function generates the next batch of digest list after looking up
@@ -2053,7 +2057,7 @@ as_query_worker_th(void *q_to_wait_on)
  * 		AS_QUERY_ERR: In case of error
  */
 int
-as_query_generator_get_nextbatch(as_query_transaction *qtr)
+query_get_nextbatch(as_query_transaction *qtr)
 {
 	int              ret     = AS_QUERY_OK;
 	as_sindex       *si      = qtr->si;
@@ -2077,7 +2081,7 @@ as_query_generator_get_nextbatch(as_query_transaction *qtr)
 		qctx->recl = cf_malloc(sizeof(cf_ll));
 		cf_ll_init(qctx->recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 		if (!qctx->recl) {
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_UNKNOWN, __FILE__, __LINE__);	
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_UNKNOWN, __FILE__, __LINE__);	
 			qctx->n_bdigs        = 0;
 			ret = AS_QUERY_ERR;
 			goto batchout;
@@ -2097,7 +2101,7 @@ as_query_generator_get_nextbatch(as_query_transaction *qtr)
 
 	qctx->new_ibtr           = false;
 	if (qret < 0) { // [AS_SINDEX_OK, AS_SINDEX_CONTINUE] -> OK
-		as_query_set_err(qtr, as_sindex_err_to_clienterr(qret, __FILE__, __LINE__), __FILE__, __LINE__);	
+		qtr_set_err(qtr, as_sindex_err_to_clienterr(qret, __FILE__, __LINE__), __FILE__, __LINE__);	
 		ret = AS_QUERY_ERR;
 		goto batchout;
 	}
@@ -2127,8 +2131,8 @@ batchout:
 }
 
 
-int
-as_query_transaction_init(as_query_transaction *qtr)
+static int
+query_transaction_init(as_query_transaction *qtr)
 {
 
 #if defined(USE_SYSTEMTAP)
@@ -2139,7 +2143,7 @@ as_query_transaction_init(as_query_transaction *qtr)
 	size_t nrecs = 0;
 #endif
 
-	if (!as_query_inited(qtr)) {
+	if (!qtr_inited(qtr)) {
 		ASD_QUERY_INIT(nodeid, qtr->trid);
 		QUERY_HIST_INSERT_DATA_POINT(query_query_q_wait_hist, qtr->start_time);
 		qtr->short_running       = true;
@@ -2171,7 +2175,7 @@ as_query_transaction_init(as_query_transaction *qtr)
 		as_query_pre_reserve_qnodes(qtr);
 
 		qtr->priority                 = g_config.query_priority;
-		qtr->bb_r                     = as_query_bb_poolrequest();
+		qtr->bb_r                     = bb_poolrequest();
 		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 
 		// Check if bufbuilder request was successful
@@ -2179,14 +2183,14 @@ as_query_transaction_init(as_query_transaction *qtr)
 			cf_warning(AS_QUERY, "Buf builder request was unsuccessful.");
 			return AS_QUERY_ERR;
 		}
-		as_query_set_running(qtr);
+		qtr_set_running(qtr);
 		cf_atomic64_incr(&g_config.query_short_running);
 	}
 	return AS_QUERY_OK;
 }
 
 static int
-as_query_qtr_enqueue(as_query_transaction *qtr, bool is_requeue)
+query_qtr_enqueue(as_query_transaction *qtr, bool is_requeue)
 {
 	uint64_t limit  = 0;
 	uint32_t size   = 0;
@@ -2221,12 +2225,12 @@ as_query_qtr_enqueue(as_query_transaction *qtr, bool is_requeue)
 }
 
 int 
-as_query_requeue(as_query_transaction *qtr)
+query_requeue(as_query_transaction *qtr)
 {
 	int ret = AS_QUERY_OK;
-	if (as_query_qtr_enqueue(qtr, true) != 0) {
+	if (query_qtr_enqueue(qtr, true) != 0) {
 		cf_warning(AS_QUERY, "Queuing Error... continue!!");
-		as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
+		qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
 		ret = AS_QUERY_ERR;
 	} else {
 		cf_detail(AS_QUERY, "Query Queued Due to Network");
@@ -2236,18 +2240,18 @@ as_query_requeue(as_query_transaction *qtr)
 }
 
 static void
-as_query_qtr_finish(as_query_transaction *qtr, cf_atomic32 *stat, char *fname, int lineno, bool release)
+qtr_finish_work(as_query_transaction *qtr, cf_atomic32 *stat, char *fname, int lineno, bool release)
 {
-	as_qtr_lock(qtr);
+	qtr_lock(qtr);
 	uint32_t val = cf_atomic32_decr(stat);
 	if ((val == 0) && qtr->do_requeue) {
-		as_query_requeue(qtr);
+		query_requeue(qtr);
 		cf_detail(AS_QUERY, "(%s:%d) Job Requeued %p", fname, lineno, qtr);
 		qtr->do_requeue = false;
 	}
-	as_qtr_unlock(qtr);
+	qtr_unlock(qtr);
 	if (release) {
-		as_query_qtr_release(qtr, fname, lineno);
+		qtr_release(qtr, fname, lineno);
 	}
 }
 
@@ -2257,13 +2261,13 @@ as_query_qtr_finish(as_query_transaction *qtr, cf_atomic32 *stat, char *fname, i
 // 1: Not requeued continue 
 // 2: Query finished
 //
-int 
-as_query_qtr_check_requeue(as_query_transaction *qtr)
+static int 
+query_qtr_check_requeue(as_query_transaction *qtr)
 {
 	bool do_enqueue = false;
 	// Step 1: If the query batch is done then wait for number of outstanding qwork to
 	// finish. This may slow down query responses get the better model
-	if (as_query_fin(qtr)) {
+	if (qtr_finished(qtr)) {
 		if ((cf_atomic32_get(qtr->n_qwork_active) == 0) 
 				&& (cf_atomic32_get(qtr->n_io_outstanding) == 0)
 				&& (cf_atomic32_get(qtr->n_udf_tr_queued) == 0)) {
@@ -2275,7 +2279,7 @@ as_query_qtr_check_requeue(as_query_transaction *qtr)
 	}
 
 	// Step 2: Client is slow requeue
-	if (as_query_netio_wait(qtr) != AS_QUERY_OK) {
+	if (query_netio_wait(qtr) != AS_QUERY_OK) {
 		do_enqueue = true;
 	}
 
@@ -2299,27 +2303,27 @@ as_query_qtr_check_requeue(as_query_transaction *qtr)
 
 	if (do_enqueue) {
 		int ret = AS_QUERY_OK;
-		as_qtr_lock(qtr);
+		qtr_lock(qtr);
 		if ((cf_atomic32_get(qtr->n_qwork_active) != 0)
 				|| (cf_atomic32_get(qtr->n_io_outstanding) != 0)
 				|| (cf_atomic32_get(qtr->n_udf_tr_queued) != 0)) {
 			cf_detail(AS_QUERY, "Job Setup for Requeue %p", qtr);
 
 			// Release of one of the above will perform requeue... look for
-			// as_query_qtr_finish();
+			// qtr_finish_work();
 			qtr->do_requeue = true;
 			ret = AS_QUERY_OK;
 		} else {
-			ret = as_query_requeue(qtr);	
+			ret = query_requeue(qtr);	
 		}
-		as_qtr_unlock(qtr);
+		qtr_unlock(qtr);
 		return ret;
 	}
 
 	return AS_QUERY_CONTINUE;
 }
 static bool
-as_query_process_inline(as_query_transaction *qtr)
+query_process_inline(as_query_transaction *qtr)
 {
 	if (   g_config.query_req_in_query_thread
 		|| (qtr && qtr->short_running)
@@ -2339,22 +2343,22 @@ as_query_process_inline(as_query_transaction *qtr)
  *     -1 : Fail
  *     0  : Success
  */
-int 
-as_query_qtr_process(as_query_transaction *qtr)
+static int 
+qtr_process(as_query_transaction *qtr)
 {
 	int ret = AS_QUERY_OK;
-	if (as_query_process_inline(qtr)) {
+	if (query_process_inline(qtr)) {
 
-		as_query_work qwork;
-		as_query_qwork_setup(&qwork, qtr);
+		query_work qwork;
+		qwork_setup(&qwork, qtr);
 
-		ret = as_query_qwork_process(&qwork);
+		ret = qwork_process(&qwork);
 
-		as_query_qwork_teardown(&qwork);
+		qwork_teardown(&qwork);
 		return ret;
 
 	} else {
-		as_query_work *qworkp = as_query_qwork_poolrequest();
+		query_work *qworkp = qwork_poolrequest();
 		if (!qworkp)  {
 			cf_warning(AS_QUERY, "Could not allocate query "
 					"request structure .. out of memory .. Aborting !!!");
@@ -2362,27 +2366,27 @@ as_query_qtr_process(as_query_transaction *qtr)
 		}
 		// Successfully queued
 		cf_atomic32_incr(&qtr->n_qwork_active);
-		as_query_qwork_setup(qworkp, qtr);
+		qwork_setup(qworkp, qtr);
 
 		if (cf_queue_push(g_query_work_queue, &qworkp)) {
 			cf_warning(AS_QUERY, "Could not push to worker queue... Aborting !!");
 
-			as_query_qtr_finish(qtr, &qtr->n_qwork_active, __FILE__, __LINE__, false);
+			qtr_finish_work(qtr, &qtr->n_qwork_active, __FILE__, __LINE__, false);
 
-			as_query_qwork_teardown(qworkp);
-			as_query_qwork_poolrelease(qworkp);
+			qwork_teardown(qworkp);
+			qwork_poolrelease(qworkp);
 			qworkp = NULL;
 			ret = AS_QUERY_ERR;
 		}
 		if (ret) {
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR , __FILE__, __LINE__);	
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR , __FILE__, __LINE__);	
 		}
 	}
 	return AS_QUERY_OK;
 }
 
-int
-as_query_check_bound(as_query_transaction *qtr)
+static int
+query_check_bound(as_query_transaction *qtr)
 {
 	if (cf_atomic64_get(qtr->n_result_records) > g_config.query_rec_count_bound) {
 		return AS_QUERY_ERR;
@@ -2390,7 +2394,7 @@ as_query_check_bound(as_query_transaction *qtr)
 	return AS_QUERY_OK;
 }
 /*
- * Function as_query_generator
+ * Function query_generator
  *
  * Does the following
  * 1. Calls the sindex layer for fetching digest list
@@ -2403,10 +2407,10 @@ as_query_check_bound(as_query_transaction *qtr)
  * 		Nothing, sets the qtr status accordingly
  */
 static void
-as_query_generator(as_query_transaction *qtr)
+query_generator(as_query_transaction *qtr)
 {
-	if (as_query_transaction_init(qtr)) {
-		as_query_qtr_release(qtr, __FILE__, __LINE__);
+	if (query_transaction_init(qtr)) {
+		qtr_release(qtr, __FILE__, __LINE__);
 		return;
 	}
 
@@ -2414,10 +2418,10 @@ as_query_generator(as_query_transaction *qtr)
 	while (true) {
 
 		// Step:4 Check for requeue
-		int ret = as_query_qtr_check_requeue(qtr);
+		int ret = query_qtr_check_requeue(qtr);
 		if (ret == AS_QUERY_ERR) {
 			cf_warning(AS_QUERY, "Unexpected requeue failure .. shutdown connection.. abort!!");
-			as_query_set_abort(qtr, AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR, __FILE__, __LINE__);
+			qtr_set_abort(qtr, AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR, __FILE__, __LINE__);
 			break;
 		} else if (ret == AS_QUERY_DONE) {
 			break;
@@ -2425,20 +2429,20 @@ as_query_generator(as_query_transaction *qtr)
 			return;
 		}
 		// Step 1: Check for timeout
-		as_query_check_timeout(qtr);
-		if (as_query_failed(qtr)) {
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT, __FILE__, __LINE__);
+		query_check_timeout(qtr);
+		if (qtr_failed(qtr)) {
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT, __FILE__, __LINE__);
 			continue;
 		}
 		// Step 2: Conditionally track
-		if (as_query_qtr_track(qtr)) {
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_DUPLICATE, __FILE__, __LINE__);
+		if (hash_track_qtr(qtr)) {
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_DUPLICATE, __FILE__, __LINE__);
 			continue;
 		}
 
 		// Step 3: If needs user based abort
-		if (as_query_check_bound(qtr)) {
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_USERABORT, __FILE__, __LINE__);
+		if (query_check_bound(qtr)) {
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_USERABORT, __FILE__, __LINE__);
 			continue;
 		}
 
@@ -2446,7 +2450,7 @@ as_query_generator(as_query_transaction *qtr)
 
 		// Step 5: Get Next Batch
 		loop++;
-		int qret    = as_query_generator_get_nextbatch(qtr);
+		int qret    = query_get_nextbatch(qtr);
 
 		cf_detail(AS_QUERY, "Loop=%d, Selected=%d, ret=%d", loop, qtr->qctx.n_bdigs, qret);
 		switch (qret) {
@@ -2464,8 +2468,8 @@ as_query_generator(as_query_transaction *qtr)
 
 		// Step 6: Prepare Query Request either to process inline or for
 		//         queueing up for offline processing
-		if (as_query_qtr_process(qtr)) {
-			as_query_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
+		if (qtr_process(qtr)) {
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
 			continue;
 		}
 
@@ -2475,17 +2479,17 @@ as_query_generator(as_query_transaction *qtr)
 #if defined(USE_SYSTEMTAP)
 			nrecs = qtr->n_result_records;
 #endif
-			as_query_set_done(qtr, AS_PROTO_RESULT_OK, __FILE__, __LINE__);
+			qtr_set_done(qtr, AS_PROTO_RESULT_OK, __FILE__, __LINE__);
 		}
 	}
 
-	if (!as_query_is_abort(qtr)) {
+	if (!qtr_is_abort(qtr)) {
 		// Send the fin packet in it is NOT a shutdown
-		as_query_send_fin(qtr);
+		query_send_fin(qtr);
 	} 
 	// deleting it from the global hash.
-	as_query_delete_qtr(qtr);
-	as_query_qtr_release(qtr, __FILE__, __LINE__);
+	hash_delete_qtr(qtr);
+	qtr_release(qtr, __FILE__, __LINE__);
 	ASD_QUERY_DONE(nodeid, trid, nrecs);
 }
 
@@ -2503,7 +2507,7 @@ as_query_generator(as_query_transaction *qtr)
  * 		Takes a global query lock while
  */
 void*
-as_query_th(void* q_to_wait_on)
+query_th(void* q_to_wait_on)
 {
 	cf_queue *           query_queue = (cf_queue*)q_to_wait_on;
 	unsigned int         thread_id    = cf_atomic32_incr(&g_query_threadcnt);
@@ -2527,7 +2531,7 @@ as_query_th(void* q_to_wait_on)
 			cf_crash(AS_QUERY, "Failed to pop from Query worker queue.");
 		}
 
-		as_query_generator(qtr);
+		query_generator(qtr);
 	}
 	return AS_QUERY_OK;
 }
@@ -2544,7 +2548,7 @@ as_query_th(void* q_to_wait_on)
  *  
  */
 static int
-as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
+query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 {
 
 #if defined(USE_SYSTEMTAP)
@@ -2646,7 +2650,7 @@ as_query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 			((as_sindex_metadata *)si->imd)->iname);
 
 	ASD_QUERY_QTRSETUP_STARTING(nodeid, trid);
-	qtr = as_query_qtr_alloc();
+	qtr = qtr_alloc();
 	if (!qtr) {
 		goto Cleanup;
 	}
@@ -2708,7 +2712,7 @@ Cleanup:
  * 		Allocates and reserves the qtr if query_in_transaction_thr
  * 		is set to false or data is in not in memory.
  * 		Has the responsibility to free tr->msgp.
- * 		Either call as_query_transaction_done or Cleanup to free the msgp
+ * 		Either call query_transaction_done or Cleanup to free the msgp
  */
 int
 as_query(as_transaction *tr)
@@ -2718,11 +2722,13 @@ as_query(as_transaction *tr)
 	}
 
 	as_query_transaction *qtr;
-	int rv = as_query_parse_setup(tr, &qtr);
+	int rv = query_parse_setup(tr, &qtr);
 
 	if (rv == AS_QUERY_DONE) {
 		// Send FIN packet to client to ignore this.
 		as_msg_send_fin(tr->proto_fd_h->fd, AS_PROTO_RESULT_OK);
+		AS_RELEASE_FILE_HANDLE(tr->proto_fd_h);
+		tr->proto_fd_h = NULL; // Paranoid
 		if (tr->msgp) {
 			cf_free(tr->msgp);
 			tr->msgp = NULL;
@@ -2741,17 +2747,17 @@ as_query(as_transaction *tr)
 	qtr->do_requeue = false;
 
 	if (g_config.query_in_transaction_thr) {
-		as_query_generator(qtr);
+		query_generator(qtr);
 	} else {
 		cf_atomic32_incr(&g_query_short_running);
-		if (as_query_qtr_enqueue(qtr, false)) {
+		if (query_qtr_enqueue(qtr, false)) {
 			// This error will be accounted by thr_tsvc layer. Thus
 			// reset fd_h and msgp before calling qtr release, let
 			// transaction deal with failure
 			cf_free(qtr->msgp);
 			qtr->msgp           = NULL;
 			qtr->fd_h           = NULL;
-			as_query_qtr_release(qtr, __FILE__, __LINE__);
+			qtr_release(qtr, __FILE__, __LINE__);
 			tr->result_code     = AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL;
 			return AS_QUERY_ERR;
 		}
@@ -2777,14 +2783,14 @@ as_query_kill(uint64_t trid)
 	as_query_transaction *qtr;
 	int rv = AS_QUERY_ERR;
 
-	rv =  as_query_get_qtr(trid, &qtr);
+	rv =  hash_get_qtr(trid, &qtr);
 
 	if (rv != AS_QUERY_OK) {
 		cf_warning(AS_QUERY, "Cannot kill query with trid [ %"PRIu64" ]",  trid);
 	} else {
-		as_query_set_abort(qtr, AS_PROTO_RESULT_FAIL_QUERY_USERABORT, __FILE__, __LINE__);
+		qtr_set_abort(qtr, AS_PROTO_RESULT_FAIL_QUERY_USERABORT, __FILE__, __LINE__);
 		rv = AS_QUERY_OK;
-		as_query_qtr_release(qtr, __FILE__, __LINE__);
+		qtr_release(qtr, __FILE__, __LINE__);
 	}
 
 	return rv;
@@ -2797,7 +2803,7 @@ as_query_set_priority(uint64_t trid, uint32_t priority)
 	as_query_transaction *qtr;
 	int rv = AS_QUERY_ERR;
 
-	rv =  as_query_get_qtr(trid, &qtr);
+	rv =  hash_get_qtr(trid, &qtr);
 
 	if (rv != AS_QUERY_OK) {
 		cf_warning(AS_QUERY, "Cannot set priority for query with trid [ %"PRIu64" ]",  trid);
@@ -2806,7 +2812,7 @@ as_query_set_priority(uint64_t trid, uint32_t priority)
 		qtr->priority = priority;
 		cf_info(AS_QUERY, "Query priority changed from %d to %d", old_priority, priority);
 		rv = AS_QUERY_OK;
-		as_query_qtr_release(qtr, __FILE__, __LINE__);
+		qtr_release(qtr, __FILE__, __LINE__);
 	}
 	return rv;
 }
@@ -2912,7 +2918,7 @@ as_query_list_job_reduce_fn (void *key, uint32_t keylen, void *object, void *uda
 	cf_dyn_buf_append_string(db, ":run_time=");
 	cf_dyn_buf_append_uint64(db, (cf_getns() - qtr->start_time) / 1000);
 	cf_dyn_buf_append_string(db, ":state=");
-	if(as_query_failed(qtr)) {
+	if(qtr_failed(qtr)) {
 		cf_dyn_buf_append_string(db, "ABORTED");
 	} else {
 		cf_dyn_buf_append_string(db, "RUNNING");
@@ -2983,7 +2989,7 @@ as_query_get_jobstat(uint64_t trid)
 	as_mon_jobstat *stat;
 	as_query_transaction *qtr;
 	int rv = AS_QUERY_ERR;
-	rv     =  as_query_get_qtr(trid, &qtr);
+	rv     =  hash_get_qtr(trid, &qtr);
 
 	if (rv != AS_QUERY_OK) {
 		cf_warning(AS_MON, "No query was found with trid [ %"PRIu64" ]", trid);
@@ -2992,7 +2998,7 @@ as_query_get_jobstat(uint64_t trid)
 	else {
 		stat = cf_malloc(sizeof(as_mon_jobstat));
 		as_query_fill_jobstat(qtr, stat);
-		as_query_qtr_release(qtr, __FILE__, __LINE__);
+		qtr_release(qtr, __FILE__, __LINE__);
 	}
 	return stat;
 }
@@ -3002,7 +3008,7 @@ int
 as_mon_query_jobstat_reduce_fn (void *key, uint32_t keylen, void *object, void *udata)
 {
 	as_query_transaction * qtr = (as_query_transaction*)object;
-	as_query_jobstat *job_pool = (as_query_jobstat*) udata;
+	query_jobstat *job_pool = (query_jobstat*) udata;
 
 	if ( job_pool->index >= job_pool->max_size) return AS_QUERY_OK;
 	as_mon_jobstat * stat = *(job_pool->jobstat);
@@ -3019,7 +3025,7 @@ as_query_get_jobstat_all(int * size)
 	if(*size == 0) return AS_QUERY_OK;
 
 	as_mon_jobstat     * job_stats;
-	as_query_jobstat     job_pool;
+	query_jobstat     job_pool;
 
 	job_stats          = (as_mon_jobstat *) cf_malloc(sizeof(as_mon_jobstat) * (*size));
 	job_pool.jobstat  = &job_stats;
@@ -3125,7 +3131,7 @@ as_query_init()
 	}
 
 	// I/O threads
-	g_query_qwork_pool = cf_queue_create(sizeof(as_query_work *), true);
+	g_query_qwork_pool = cf_queue_create(sizeof(query_work *), true);
 	if (!g_query_qwork_pool)
 		cf_crash(AS_QUERY, "Failed to create query io queue");
 
@@ -3134,7 +3140,7 @@ as_query_init()
 		cf_crash(AS_QUERY, "Failed to create response buffer query");
 
 
-	g_query_work_queue = cf_queue_create(sizeof(as_query_work *), true);
+	g_query_work_queue = cf_queue_create(sizeof(query_work *), true);
 	if (!g_query_work_queue)
 		cf_crash(AS_QUERY, "Failed to create query io queue");
 
@@ -3148,7 +3154,7 @@ as_query_init()
 	int max = g_config.query_worker_threads;
 	for (int i = 0; i < max; i++) {
 		pthread_create(&g_query_worker_threads[i], &g_query_worker_th_attr,
-				as_query_worker_th, (void*)g_query_work_queue);
+				qwork_th, (void*)g_query_work_queue);
 	}
 
 	g_query_short_queue = cf_queue_create(sizeof(as_query_transaction *), true);
@@ -3170,9 +3176,9 @@ as_query_init()
 	max = g_config.query_threads;
 	for (int i = 0; i < max; i += 2) {
 		if (pthread_create(&g_query_threads[i], &g_query_th_attr,
-					as_query_th, (void*)g_query_short_queue)
+					query_th, (void*)g_query_short_queue)
 				|| pthread_create(&g_query_threads[i + 1], &g_query_th_attr,
-						as_query_th, (void*)g_query_long_queue)) {
+						query_th, (void*)g_query_long_queue)) {
 			cf_crash(AS_QUERY, "Failed to create query transaction threads for query short queue");
 		}
 	}
@@ -3249,7 +3255,7 @@ as_query_worker_reinit(int set_size, int *actual_size)
 		for (; i < set_size; i++) {
 			cf_detail(AS_QUERY, "Creating thread %d", i);
 			if (0 != pthread_create(&g_query_worker_threads[i], &g_query_worker_th_attr,
-					as_query_worker_th, (void*)g_query_work_queue)) {
+					qwork_th, (void*)g_query_work_queue)) {
 				break;
 			}
 		}
@@ -3304,12 +3310,12 @@ as_query_reinit(int set_size, int *actual_size)
 		for (; i < set_size; i++) {
 			cf_detail(AS_QUERY, "Creating thread %d", i);
 			if (0 != pthread_create(&g_query_threads[i], &g_query_th_attr,
-					as_query_th, (void*)g_query_short_queue)) {
+					query_th, (void*)g_query_short_queue)) {
 				break;
 			}
 			i++;
 			if (0 != pthread_create(&g_query_threads[i], &g_query_th_attr,
-					as_query_th, (void*)g_query_long_queue)) {
+					query_th, (void*)g_query_long_queue)) {
 				break;
 			}
 		}
