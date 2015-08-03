@@ -2409,15 +2409,20 @@ query_check_bound(as_query_transaction *qtr)
 static void
 query_generator(as_query_transaction *qtr)
 {
+#if defined(USE_SYSTEMTAP)
+    uint64_t nodeid = g_config.self_node;
+    uint64_t trid = tr? tr->trid : 0;
+#endif
+
 	if (query_transaction_init(qtr)) {
-		qtr_release(qtr, __FILE__, __LINE__);
-		return;
+		qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
+		goto Cleanup;
 	}
 
 	int loop = 0;
 	while (true) {
 
-		// Step:4 Check for requeue
+		// Step 1: Check for requeue
 		int ret = query_qtr_check_requeue(qtr);
 		if (ret == AS_QUERY_ERR) {
 			cf_warning(AS_QUERY, "Unexpected requeue failure .. shutdown connection.. abort!!");
@@ -2428,25 +2433,23 @@ query_generator(as_query_transaction *qtr)
 		} else if (ret == AS_QUERY_OK) {
 			return;
 		}
-		// Step 1: Check for timeout
+		// Step 2: Check for timeout
 		query_check_timeout(qtr);
 		if (qtr_failed(qtr)) {
 			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT, __FILE__, __LINE__);
 			continue;
 		}
-		// Step 2: Conditionally track
+		// Step 3: Conditionally track
 		if (hash_track_qtr(qtr)) {
 			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_DUPLICATE, __FILE__, __LINE__);
 			continue;
 		}
 
-		// Step 3: If needs user based abort
+		// Step 4: If needs user based abort
 		if (query_check_bound(qtr)) {
 			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_USERABORT, __FILE__, __LINE__);
 			continue;
 		}
-
-
 
 		// Step 5: Get Next Batch
 		loop++;
@@ -2483,6 +2486,7 @@ query_generator(as_query_transaction *qtr)
 		}
 	}
 
+Cleanup:
 	if (!qtr_is_abort(qtr)) {
 		// Send the fin packet in it is NOT a shutdown
 		query_send_fin(qtr);
@@ -2728,7 +2732,6 @@ as_query(as_transaction *tr)
 		// Send FIN packet to client to ignore this.
 		as_msg_send_fin(tr->proto_fd_h->fd, AS_PROTO_RESULT_OK);
 		AS_RELEASE_FILE_HANDLE(tr->proto_fd_h);
-		tr->proto_fd_h = NULL; // Paranoid
 		if (tr->msgp) {
 			cf_free(tr->msgp);
 			tr->msgp = NULL;
