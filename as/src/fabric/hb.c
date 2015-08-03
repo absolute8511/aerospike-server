@@ -2099,6 +2099,12 @@ CloseSocket:
 						struct sockaddr_in so;
 						cf_sockaddr dest;
 						so.sin_family = AF_INET;
+						if (g_config.hb_tx_addr) {
+							inet_pton(AF_INET, g_config.hb_tx_addr, &so.sin_addr.s_addr);
+						} else {
+							inet_pton(AF_INET, g_config.hb_addr, &so.sin_addr.s_addr);
+						}
+
 						inet_pton(AF_INET, g_config.hb_addr, &so.sin_addr.s_addr);
 						so.sin_port = htons(g_config.hb_port);
 						cf_sockaddr_convertto(&so, &dest);
