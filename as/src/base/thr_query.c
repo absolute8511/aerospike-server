@@ -867,10 +867,11 @@ qtr_reserve(as_query_transaction *qtr, char *fname, int lineno)
 // **************************************************************************************************
 /* Call back function to determine if the IO should go ahead or not.
  * Purpose
- * 1. If we already have fin packet pushed in simply do send
- * 2. If our sequence number does not match requeue
- * 3. Do not send out result if the query has timedout. In those cases
- *    the request would send back with fin packed jammed in.
+ * 1. If our sequence number does not match requeue
+ * 2. If query aborted fail IO. 
+ * 3. In all other cases let the IO go through. That would mean
+ *    if IO is queued it will be done before the fin with error 
+ *    result_code is sent !!
  */ 
 int
 query_netio_start_cb(void *udata, int seq) 
@@ -889,16 +890,6 @@ query_netio_start_cb(void *udata, int seq)
 		return AS_QUERY_ERR;
 	}
 
-	// Check for abort or error. If timed out override the decision
-	//
-	// If not abort fail would mean the system simply has error out !!
-	//
-	// NB: Let the half sent buffer fully finish. This is the exception
-	// case where io which when in half send state sees an abort.
-	query_check_timeout(qtr);
-	if (qtr_failed(qtr) && (io->offset == 0)) {
-		return AS_NETIO_ERR;
-	}
 	return AS_NETIO_OK;
 }
 
@@ -2359,7 +2350,7 @@ qtr_process(as_query_transaction *qtr)
 
 	} else {
 		query_work *qworkp = qwork_poolrequest();
-		if (!qworkp)  {
+		if (!qworkp) {
 			cf_warning(AS_QUERY, "Could not allocate query "
 					"request structure .. out of memory .. Aborting !!!");
 			ret = AS_QUERY_ERR;
@@ -2377,10 +2368,9 @@ qtr_process(as_query_transaction *qtr)
 			qwork_poolrelease(qworkp);
 			qworkp = NULL;
 			ret = AS_QUERY_ERR;
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
 		}
-		if (ret) {
-			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR , __FILE__, __LINE__);	
-		}
+
 	}
 	return AS_QUERY_OK;
 }
@@ -2472,7 +2462,7 @@ query_generator(as_query_transaction *qtr)
 		// Step 6: Prepare Query Request either to process inline or for
 		//         queueing up for offline processing
 		if (qtr_process(qtr)) {
-			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);	
 			continue;
 		}
 
