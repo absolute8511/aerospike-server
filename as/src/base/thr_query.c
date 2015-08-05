@@ -477,10 +477,8 @@ bb_poolrelease(cf_buf_builder *bb_r)
 		cf_buf_builder_free(bb_r);
 	} else {
 		cf_detail(AS_QUERY, "Pushed %p %d %d ", bb_r, g_config.query_buf_size, cf_buf_builder_size(bb_r));
-		ret = cf_queue_push(g_query_response_bb_pool, &bb_r);
-		if (ret != CF_QUEUE_OK) {
-			cf_warning(AS_QUERY, "Failed to release bb into the pool.. freeing it ");
-			cf_buf_builder_free(bb_r);
+		if (cf_queue_push(g_query_response_bb_pool, &bb_r) != CF_QUEUE_OK) {
+			cf_crash(AS_QUERY, "Failed to push into bb pool queue !!");
 		}
 	}
 	return ret;
@@ -493,6 +491,9 @@ bb_poolrequest()
 	int rv = cf_queue_pop(g_query_response_bb_pool, &bb_r, CF_QUEUE_NOWAIT);
 	if (rv == CF_QUEUE_EMPTY) {
 		bb_r = cf_buf_builder_create_size(g_config.query_buf_size);
+		if (!bb_r) {
+			cf_crash(AS_QUERY, "Allocation Error in Buf builder Pool !!");
+		}
 	} else if (rv == CF_QUEUE_OK) {
 		bb_r->used_sz = 0;
 		cf_detail(AS_QUERY, "Popped %p", bb_r);
@@ -518,10 +519,8 @@ qwork_poolrelease(query_work *qwork)
 	int ret = AS_QUERY_OK;
 	if (cf_queue_sz(g_query_qwork_pool) < AS_QUERY_MAX_QREQ) {
 		cf_detail(AS_QUERY, "Pushed qwork %p", qwork);
-		ret = cf_queue_push(g_query_qwork_pool, &qwork);
-		if (ret != CF_QUEUE_OK) {
-			cf_warning(AS_QUERY, "Failed to release bb into the pool.. freeing it ");
-			cf_free(qwork);
+		if (cf_queue_push(g_query_qwork_pool, &qwork) != CF_QUEUE_OK) {
+			cf_crash(AS_QUERY, "Failed to push into query work object pool Queue !!");
 		}
 	} else {
 		cf_detail(AS_QUERY, "Freed qwork %p", qwork);
@@ -539,14 +538,10 @@ qwork_poolrequest()
 	if (rv == CF_QUEUE_EMPTY) {
 		qwork = cf_malloc(sizeof(query_work));
 		if (!qwork) {
-			cf_warning(AS_QUERY, "Failed to allocate query work");
-			return NULL;
+			cf_crash(AS_QUERY, "Allocation Error in Query Work Object Pool !!");
 		}
-		cf_detail(AS_QUERY, " Created qwork %p", qwork);
 		memset(qwork, 0, sizeof(query_work));
-	} else if (rv == CF_QUEUE_OK) {
-		cf_detail(AS_QUERY, " Popped qwork %p", qwork);
-	} else {
+	} else if (rv != CF_QUEUE_OK) {
 		cf_warning(AS_QUERY, "Failed to find query work in the pool");
 		return NULL;
 	}
@@ -1029,6 +1024,9 @@ as_query_pre_reserve_qnodes(as_query_transaction * qtr)
 	}
 	if (qtr->qctx.qnodes_pre_reserved) {
 		qtr->rsv = cf_malloc(sizeof(as_partition_reservation) * AS_PARTITIONS);
+		if (!qtr->rsv) {
+			cf_crash(AS_QUERY, "Allocation Error in Query Prereserve !!");
+		}
 		as_partition_prereserve_qnodes(qtr->ns, qtr->qctx.is_partition_qnode, qtr->rsv);
 	} else {
 		qtr->rsv = NULL;
@@ -1691,7 +1689,7 @@ query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 		if (ret != 0) {
 			as_storage_record_close(r, &rd);
 			as_record_done(&r_ref, ns);
-			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__); ///TODO fix error
 			as_query_release_qnode(qtr, rsv);
 			ASD_QUERY_IO_ERROR(nodeid, qtr->trid);
 			return AS_QUERY_ERR;
@@ -1799,13 +1797,8 @@ query_process_udfreq(query_work *qudf)
 	if (!qtr)           return AS_QUERY_ERR;
 	cf_detail(AS_QUERY, "Performing UDF");
 	iter                  = cf_ll_getIterator(qudf->recl, true /*forward*/);
-	if (!iter) {
-		ret              = AS_QUERY_ERR;
-		qtr_set_err(qtr, AS_SINDEX_ERR_NO_MEMORY, __FILE__, __LINE__);
-		goto Cleanup;
-	}
 
-	while((ele = cf_ll_getNext(iter))) {
+	while ((ele = cf_ll_getNext(iter))) {
 		as_index_keys_ll_element * node;
 		node                         = (as_index_keys_ll_element *) ele;
 		as_index_keys_arr * keys_arr  = node->keys_arr;
@@ -1874,8 +1867,7 @@ query_process_ioreq(query_work *qio)
 	}
 	iter                  = cf_ll_getIterator(qio->recl, true /*forward*/);
 	if (!iter) {
-		qtr_set_err(qtr, AS_SINDEX_ERR_NO_MEMORY, __FILE__, __LINE__);
-		goto Cleanup;
+		cf_crash(AS_QUERY, "Cannot allocate iterator... out of memory !!");
 	}
 
 	while ((ele = cf_ll_getNext(iter))) {
@@ -1930,11 +1922,14 @@ qwork_process(query_work *qworkp)
 {
 	QUERY_HIST_INSERT_DATA_POINT(query_batch_io_q_wait_hist, qworkp->queued_time_ns);
 	cf_detail(AS_QUERY, "Processing Request %d", qworkp->type);
+
 	if (qtr_failed(qworkp->qtr)) {
 		return AS_QUERY_ERR;
 	}
+
 	int ret = AS_QUERY_OK;
-	switch(qworkp->type) {
+
+	switch (qworkp->type) {
 		case AS_QUERY_REQTYPE_IO:
 			ret = query_process_ioreq(qworkp);
 			break;
@@ -2070,13 +2065,10 @@ query_get_nextbatch(as_query_transaction *qtr)
 	as_sindex_range *srange  = qtr->srange;
 	if (!qctx->recl) {
 		qctx->recl = cf_malloc(sizeof(cf_ll));
-		cf_ll_init(qctx->recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 		if (!qctx->recl) {
-			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_UNKNOWN, __FILE__, __LINE__);	
-			qctx->n_bdigs        = 0;
-			ret = AS_QUERY_ERR;
-			goto batchout;
-		}
+			cf_crash(AS_QUERY, "Allocation Error in Query !!");
+		} 
+		cf_ll_init(qctx->recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 		qctx->n_bdigs        = 0;
 	} else {
 		// Following condition may be true if the
@@ -2169,11 +2161,6 @@ query_transaction_init(as_query_transaction *qtr)
 		qtr->bb_r                     = bb_poolrequest();
 		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 
-		// Check if bufbuilder request was successful
-		if (!qtr->bb_r) {
-			cf_warning(AS_QUERY, "Buf builder request was unsuccessful.");
-			return AS_QUERY_ERR;
-		}
 		qtr_set_running(qtr);
 		cf_atomic64_incr(&g_config.query_short_running);
 	}
@@ -2205,8 +2192,8 @@ query_qtr_enqueue(as_query_transaction *qtr, bool is_requeue)
 	if (!is_requeue && (size > limit)) {
 		cf_atomic64_incr(queue_full_err);
 		return AS_QUERY_ERR;
-	} else if (cf_queue_push(q, &qtr) != 0) {
-		cf_warning(AS_QUERY, "Queuing Error !!");
+	} else if (cf_queue_push(q, &qtr) != CF_QUEUE_OK) {
+		cf_crash(AS_QUERY, "Failed to push into Query Queue !!");
 		return AS_QUERY_ERR;
 	} else {
 		cf_detail(AS_QUERY, "Logged query ");
@@ -2360,15 +2347,7 @@ qtr_process(as_query_transaction *qtr)
 		qwork_setup(qworkp, qtr);
 
 		if (cf_queue_push(g_query_work_queue, &qworkp)) {
-			cf_warning(AS_QUERY, "Could not push to worker queue... Aborting !!");
-
-			qtr_finish_work(qtr, &qtr->n_qwork_active, __FILE__, __LINE__, false);
-
-			qwork_teardown(qworkp);
-			qwork_poolrelease(qworkp);
-			qworkp = NULL;
-			ret = AS_QUERY_ERR;
-			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_QUEUEFULL, __FILE__, __LINE__);	
+			cf_crash(AS_QUERY, "Push into Query Work Queue fail ... !!!");
 		}
 
 	}
@@ -2404,10 +2383,7 @@ query_generator(as_query_transaction *qtr)
     uint64_t trid = tr? tr->trid : 0;
 #endif
 
-	if (query_transaction_init(qtr)) {
-		qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
-		goto Cleanup;
-	}
+	query_transaction_init(qtr);
 
 	int loop = 0;
 	while (true) {
@@ -2476,7 +2452,6 @@ query_generator(as_query_transaction *qtr)
 		}
 	}
 
-Cleanup:
 	if (!qtr_is_abort(qtr)) {
 		// Send the fin packet in it is NOT a shutdown
 		query_send_fin(qtr);
@@ -2990,6 +2965,10 @@ as_query_get_jobstat(uint64_t trid)
 	}
 	else {
 		stat = cf_malloc(sizeof(as_mon_jobstat));
+		if (!stat) {
+			cf_crash(AS_QUERY, "Allocation Error in job stat !!");
+		}
+
 		as_query_fill_jobstat(qtr, stat);
 		qtr_release(qtr, __FILE__, __LINE__);
 	}
@@ -3021,6 +3000,9 @@ as_query_get_jobstat_all(int * size)
 	query_jobstat     job_pool;
 
 	job_stats          = (as_mon_jobstat *) cf_malloc(sizeof(as_mon_jobstat) * (*size));
+	if (!job_stats) {
+		cf_crash(AS_QUERY, "Allocation Error in job stat all !!");
+	}
 	job_pool.jobstat  = &job_stats;
 	job_pool.index    = 0;
 	job_pool.max_size = *size;
