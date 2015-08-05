@@ -1003,7 +1003,6 @@ struct as_namespace_s {
 	uint16_t					replication_factor;
 	uint16_t					cfg_replication_factor;
 	conflict_resolution_policy	conflict_resolution_policy;
-	bool						allow_versions;	// allow consistancy errors to create duplicate versions
 	bool						single_bin;		// restrict the namespace to objects with exactly one bin
 	bool						data_in_index;	// with single-bin, allows warm restart for data-in-memory (with storage-engine device)
 	bool 						disallow_null_setname;
@@ -1067,9 +1066,6 @@ struct as_namespace_s {
 	cf_atomic32 n_reads_from_cache;
 	cf_atomic32 n_reads_from_device;
 	float cache_read_pct;
-
-	int demo_read_multiplier;
-	int demo_write_multiplier;
 
 	void *storage_private;
 

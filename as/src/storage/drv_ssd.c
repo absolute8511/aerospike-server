@@ -128,8 +128,8 @@ typedef struct drv_ssd_block_s {
 	cf_clock		void_time;
 	uint32_t		bins_offset;	// offset to bins from data
 	uint32_t		n_bins;
-	uint32_t		vinfo_offset;
-	uint32_t		vinfo_length;
+	uint32_t		vinfo_offset;	// deprecated
+	uint32_t		vinfo_length;	// deprecated
 	uint8_t			data[];
 } __attribute__ ((__packed__)) drv_ssd_block;
 
@@ -594,12 +594,6 @@ ssd_record_defrag(drv_ssd *ssd, drv_ssd_block *block, uint64_t rblock_id,
 
 			as_storage_rd rd;
 			as_storage_record_open(ns, r, &rd, &block->keyd);
-
-			as_index_vinfo_mask_set(r,
-					as_partition_vinfoset_mask_unpickle(rsv.p,
-							block->data + block->vinfo_offset,
-							block->vinfo_length),
-					ns->allow_versions);
 
 			rd.u.ssd.block = block;
 			rd.have_device_block = true;
@@ -1265,16 +1259,15 @@ as_storage_record_get_key_ssd(as_storage_rd *rd)
 	}
 
 	drv_ssd_block *block = rd->u.ssd.block;
-	uint32_t properties_offset = block->vinfo_offset + block->vinfo_length;
 	as_rec_props props;
 
-	props.size = block->bins_offset - properties_offset;
+	props.size = block->bins_offset;
 
 	if (props.size == 0) {
 		return false;
 	}
 
-	props.p_data = block->data + properties_offset;
+	props.p_data = block->data;
 
 	return as_rec_props_get_value(&props, CL_REC_PROPS_FIELD_KEY,
 			&rd->key_size, &rd->key) == 0;
@@ -1770,17 +1763,8 @@ ssd_start_write_worker_threads(drv_ssds *ssds)
 uint32_t
 as_storage_record_overhead_size(as_storage_rd *rd)
 {
-	size_t size = 0;
-
-	// Start with pickled size of vinfo, if any.
-	if (rd->ns->allow_versions &&
-			0 != as_partition_vinfoset_mask_pickle_getsz(
-					as_index_vinfo_mask_get(rd->r, true), &size)) {
-		cf_crash(AS_DRV_SSD, "unable to pickle vinfoset");
-	}
-
-	// Add size of record header struct.
-	size += sizeof(drv_ssd_block);
+	// Start with size of record header struct.
+	size_t size = sizeof(drv_ssd_block);
 
 	// Add size of any record properties.
 	if (rd->rec_props.p_data) {
@@ -1906,28 +1890,6 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 
 	buf += sizeof(drv_ssd_block);
 
-	// Pickle and write vinfo, if any.
-	size_t vinfo_buf_length = 0;
-
-	if (rd->ns->allow_versions) {
-		uint8_t vinfo_buf[AS_PARTITION_VINFOSET_PICKLE_MAX];
-		as_partition_id pid = as_partition_getid(rd->keyd);
-		as_partition_vinfoset *vinfoset = &rd->ns->partitions[pid].vinfoset;
-
-		vinfo_buf_length = AS_PARTITION_VINFOSET_PICKLE_MAX;
-
-		if (0 != as_partition_vinfoset_mask_pickle(vinfoset,
-				as_index_vinfo_mask_get(r, true), vinfo_buf,
-				&vinfo_buf_length)) {
-			cf_crash(AS_DRV_SSD, "unable to pickle vinfoset");
-		}
-
-		if (vinfo_buf_length != 0) {
-			memcpy(buf, vinfo_buf, vinfo_buf_length);
-			buf += vinfo_buf_length;
-		}
-	}
-
 	// Properties list goes just before bins.
 	if (rd->rec_props.p_data) {
 		memcpy(buf, rd->rec_props.p_data, rd->rec_props.size);
@@ -1978,10 +1940,10 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 	block->keyd = rd->keyd;
 	block->generation = r->generation;
 	block->void_time = r->void_time;
-	block->bins_offset = vinfo_buf_length + (rd->rec_props.p_data ? rd->rec_props.size : 0);
+	block->bins_offset = rd->rec_props.p_data ? rd->rec_props.size : 0;
 	block->n_bins = write_nbins;
-	block->vinfo_offset = 0;
-	block->vinfo_length = vinfo_buf_length;
+	block->vinfo_offset = 0; // deprecated
+	block->vinfo_length = 0; // deprecated
 
 	if (ssd->use_signature) {
 		cf_signature_compute(((uint8_t*)block) + SIGNATURE_OFFSET,
@@ -2958,11 +2920,10 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 	r_ref.skip_lock = false;
 
 	// Read LDT rec-prop.
-	uint32_t properties_offset = block->vinfo_offset + block->vinfo_length;
 	as_rec_props props;
 
-	props.p_data = block->data + properties_offset;
-	props.size = block->bins_offset - properties_offset;
+	props.p_data = block->data;
+	props.size = block->bins_offset;
 
 	bool is_ldt_sub;
 	bool is_ldt_parent;
@@ -3088,11 +3049,6 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 
 	// If data is in memory, load bins and particles.
 	if (ns->storage_data_in_memory) {
-		as_index_vinfo_mask_set(r,
-				as_partition_vinfoset_mask_unpickle(p_partition,
-						block->data + block->vinfo_offset, block->vinfo_length),
-				ns->allow_versions);
-
 		uint8_t* block_head = (uint8_t*)block;
 		drv_ssd_bin* ssd_bin = (drv_ssd_bin*)(block->data + block->bins_offset);
 		as_storage_rd rd;

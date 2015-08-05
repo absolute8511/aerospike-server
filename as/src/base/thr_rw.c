@@ -1644,13 +1644,8 @@ finish_rw_process_dup_ack(write_request *wr)
 	wr->shipped_op = false;
 	int winner_idx = -1;
 	if (comp_sz > 0) {
-		if (wr->rsv.ns->allow_versions) {
-			rv = as_record_merge(&wr->rsv, &wr->keyd, comp_sz,
-					components);
-		} else {
-			rv = as_record_flatten(&wr->rsv, &wr->keyd, comp_sz,
-					components, &winner_idx);
-		}
+		rv = as_record_flatten(&wr->rsv, &wr->keyd, comp_sz, components,
+				&winner_idx);
 	}
 
 	// Free up the dup messages
@@ -1663,32 +1658,27 @@ finish_rw_process_dup_ack(write_request *wr)
 
 	// In case remote node wins after resolution and has bin call returns
 	if (rv == -2) {
-		if (wr->rsv.ns->allow_versions) {
-			cf_warning(AS_LDT, "Dummy LDT shows up when allow_version is true ..."
-					" namespace has ... Unexpected ... abort merge.. keeping local ");
-		} else {
-			if (winner_idx < 0) {
-				cf_warning(AS_LDT, "Unexpected winner @ index %d.. resorting to 0", winner_idx);
-				winner_idx = 0;
-			}
-			cf_detail_digest(AS_RW, &wr->keyd,
-					"SHIPPED_OP %s Shipping %s op to %"PRIx64"",
-					wr->proxy_msg ? "NONORIG" : "ORIG",
-					wr->is_read ? "Read" : "Write",
-					wr->dest_nodes[winner_idx]);
-			as_ldt_shipop(wr, wr->dest_nodes[winner_idx]);
-			// Assume OK for now with respect to stats
-			as_rw_set_stat_counters(true, 0, 0);
-			return false;
+		if (winner_idx < 0) {
+			cf_warning(AS_LDT, "Unexpected winner @ index %d.. resorting to 0", winner_idx);
+			winner_idx = 0;
 		}
-	} else {
 		cf_detail_digest(AS_RW, &wr->keyd,
-				"SHIPPED_OP %s=WINNER locally apply %s op after "
-				"flatten @ %"PRIx64"",
+				"SHIPPED_OP %s Shipping %s op to %"PRIx64"",
 				wr->proxy_msg ? "NONORIG" : "ORIG",
 				wr->is_read ? "Read" : "Write",
-				g_config.self_node);
+				wr->dest_nodes[winner_idx]);
+		as_ldt_shipop(wr, wr->dest_nodes[winner_idx]);
+		// Assume OK for now with respect to stats
+		as_rw_set_stat_counters(true, 0, 0);
+		return false;
 	}
+
+	cf_detail_digest(AS_RW, &wr->keyd,
+			"SHIPPED_OP %s=WINNER locally apply %s op after "
+			"flatten @ %"PRIx64"",
+			wr->proxy_msg ? "NONORIG" : "ORIG",
+			wr->is_read ? "Read" : "Write",
+			g_config.self_node);
 
 	// move to next phase after duplicate merge
 	wr->dest_sz = 0;
@@ -2201,8 +2191,7 @@ rw_dup_prole(cf_node node, msg *m)
 	uint8_t vinfo_buf[AS_PARTITION_VINFOSET_PICKLE_MAX];
 	size_t vinfo_buf_len = sizeof(vinfo_buf);
 	if (0 != as_partition_vinfoset_mask_pickle(&rsv.p->vinfoset,
-			as_index_vinfo_mask_get(r, rsv.ns->allow_versions),
-			vinfo_buf, &vinfo_buf_len)) {
+			0, vinfo_buf, &vinfo_buf_len)) {
 		cf_info(AS_RW, "pickle: could not do vinfo mask");
 		msg_set_unset(m, RW_FIELD_VINFOSET);
 		cf_atomic_int_incr(&g_config.rw_err_dup_internal);

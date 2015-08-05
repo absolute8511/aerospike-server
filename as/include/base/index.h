@@ -106,9 +106,6 @@ typedef struct as_index_s {
 
 	// final size: 64
 
-	// Variable part, currently used only for vinfo.
-	uint8_t data[];
-
 } __attribute__ ((__packed__)) as_index;
 
 
@@ -116,8 +113,12 @@ typedef struct as_index_s {
 // Accessor functions for bits in as_index.
 //
 
-// Size in bytes of as_index including variable part, if any.
-extern int as_index_size_get(as_namespace *ns);
+// Size in bytes of as_index, currently the same for all namespaces.
+static inline
+uint32_t as_index_size_get(as_namespace *ns)
+{
+	return (uint32_t)sizeof(as_index);
+}
 
 // Clear the record portion of as_index - excluding variable part, for speed.
 // Note - relies on current layout and size of as_index!
@@ -128,38 +129,6 @@ void as_index_clear_record_info(as_index *index) {
 	*p_clear++	= 0;
 	*p_clear++	= 0;
 	*p_clear	= 0;
-}
-
-
-//------------------------------------------------
-// Vinfo.
-//
-
-// Will return 0 if struct has no vinfo mask.
-static inline
-as_partition_vinfo_mask as_index_vinfo_mask_get(as_index *index, bool allow_versions) {
-	if (allow_versions) {
-		return *(as_partition_vinfo_mask*)&index->data[0];
-	}
-	return 0;
-}
-
-static inline
-int as_index_vinfo_mask_union(as_index *index, as_partition_vinfo_mask m, bool allow_versions) {
-	if (allow_versions) {
-		*(as_partition_vinfo_mask*)&index->data[0] |= m;
-		return 0;
-	}
-	return -1;
-}
-
-static inline
-int as_index_vinfo_mask_set(as_index *index, as_partition_vinfo_mask m, bool allow_versions) {
-	if (allow_versions) {
-		*(as_partition_vinfo_mask*)&index->data[0] = m;
-		return 0;
-	}
-	return -1;
 }
 
 

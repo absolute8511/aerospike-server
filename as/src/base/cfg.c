@@ -461,7 +461,6 @@ typedef enum {
 	CASE_NAMESPACE_ALLOW_NONXDR_WRITES,
 	CASE_NAMESPACE_ALLOW_XDR_WRITES,
 	// Normally hidden:
-	CASE_NAMESPACE_ALLOW_VERSIONS,
 	CASE_NAMESPACE_COLD_START_EVICT_TTL,
 	CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY,
 	CASE_NAMESPACE_DATA_IN_INDEX,
@@ -482,6 +481,7 @@ typedef enum {
 	CASE_NAMESPACE_STOP_WRITES_PCT,
 	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE,
 	// Deprecated:
+	CASE_NAMESPACE_ALLOW_VERSIONS,
 	CASE_NAMESPACE_DEMO_READ_MULTIPLIER,
 	CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER,
 	CASE_NAMESPACE_HIGH_WATER_PCT,
@@ -845,7 +845,6 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "ns-forward-xdr-writes",			CASE_NAMESPACE_FORWARD_XDR_WRITES },
 		{ "allow-nonxdr-writes",			CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
 		{ "allow-xdr-writes",				CASE_NAMESPACE_ALLOW_XDR_WRITES },
-		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
 		{ "cold-start-evict-ttl",			CASE_NAMESPACE_COLD_START_EVICT_TTL },
 		{ "conflict-resolution-policy",		CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY },
 		{ "data-in-index",					CASE_NAMESPACE_DATA_IN_INDEX },
@@ -865,6 +864,7 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "single-bin",						CASE_NAMESPACE_SINGLE_BIN },
 		{ "stop-writes-pct",				CASE_NAMESPACE_STOP_WRITES_PCT },
 		{ "write-commit-level-override",	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE },
+		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
 		{ "demo-read-multiplier",			CASE_NAMESPACE_DEMO_READ_MULTIPLIER },
 		{ "demo-write-multiplier",			CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER },
 		{ "high-water-pct",					CASE_NAMESPACE_HIGH_WATER_PCT },
@@ -2496,9 +2496,6 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_XDR_REMOTE_DATACENTER:
 				// The server isn't interested in this, but the XDR module is!
 				break;
-			case CASE_NAMESPACE_ALLOW_VERSIONS:
-				ns->allow_versions = cfg_bool(&line);
-				break;
 			case CASE_NAMESPACE_COLD_START_EVICT_TTL:
 				ns->cold_start_evict_ttl = cfg_u32_no_checks(&line);
 				break;
@@ -2604,20 +2601,14 @@ as_config_init(const char *config_file)
 					break;
 				}
 				break;
+			case CASE_NAMESPACE_ALLOW_VERSIONS:
 			case CASE_NAMESPACE_DEMO_READ_MULTIPLIER:
-				ns->demo_read_multiplier = cfg_int_no_checks(&line);
-				break;
 			case CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER:
-				ns->demo_write_multiplier = cfg_int_no_checks(&line);
-				break;
 			case CASE_NAMESPACE_HIGH_WATER_PCT:
 			case CASE_NAMESPACE_LOW_WATER_PCT:
 				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_CONTEXT_END:
-				if (ns->allow_versions && ns->single_bin) {
-					cf_crash_nostack(AS_CFG, "ns %s single-bin and allow-versions can't both be true", ns->name);
-				}
 				if (ns->data_in_index && ! (ns->single_bin && ns->storage_data_in_memory && ns->storage_type == AS_STORAGE_ENGINE_SSD)) {
 					cf_crash_nostack(AS_CFG, "ns %s data-in-index can't be true unless storage-engine is device and both single-bin and data-in-memory are true", ns->name);
 				}
@@ -2628,13 +2619,8 @@ as_config_init(const char *config_file)
 					// the two cases. So, No warning if the user sets it.
 					ns->storage_post_write_queue = 0;
 				}
-				if (ns->ldt_enabled) {
-					if (ns->single_bin) {
-						cf_crash_nostack(AS_CFG, "ns %s single-bin and ldt-enabled can't both be true", ns->name);
-					}
-					if (ns->allow_versions) {
-						cf_crash_nostack(AS_CFG, "ns %s allow-versions and ldt-enabled can't both be true", ns->name);
-					}
+				if (ns->ldt_enabled && ns->single_bin) {
+					cf_crash_nostack(AS_CFG, "ns %s single-bin and ldt-enabled can't both be true", ns->name);
 				}
 				if (ns->storage_data_in_memory) {
 					c->n_namespaces_in_memory++;

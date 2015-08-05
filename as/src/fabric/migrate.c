@@ -1401,25 +1401,15 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 					}
 				}
 				else {
-					if (mc->rsv.ns->allow_versions) {
-						// cf_info(AS_MIGRATE, "migrate rx: merge insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
-						if (0 != as_record_merge(&mc->rsv, key, 1, &c)) {
-							cf_warning(AS_MIGRATE, "migrate: record migrate failed %"PRIx64, *(uint64_t *)key);
+					// cf_info(AS_MIGRATE, "migrate rx: flatten insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
+					int rv = as_record_flatten(&mc->rsv, key, 1, &c, &winner_idx);
+					if (rv) {
+						if (rv != -3) {
+							// -3 is not a failure. It is get_create failure inside as_record_flatten which is
+							// possible in case of race.
+							cf_warning_digest(AS_MIGRATE, key, "migrate: record flatten failed %d", rv);
 							migrate_recv_control_release(mc);
 							goto Done;
-						}
-					}
-					else {
-						// cf_info(AS_MIGRATE, "migrate rx: flatten insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
-						int rv = as_record_flatten(&mc->rsv, key, 1, &c, &winner_idx);
-						if (rv) {
-							if (rv != -3) {
-								// -3 is not a failure. It is get_create failure inside as_record_flatten which is 
-								// possible in case of race.
-								cf_warning_digest(AS_MIGRATE, key, "migrate: record flatten failed %d", rv);
-								migrate_recv_control_release(mc);
-								goto Done;
-							} 
 						}
 					}
 				}
@@ -1892,7 +1882,7 @@ migrate_tree_reduce(as_index_ref *r_ref, void *udata)
 	as_index *r = r_ref->r;
 
 	pr->vinfo_buf_len = sizeof(pr->vinfo_buf);
-	if (0 != as_partition_vinfoset_mask_pickle(&mig->rsv.p->vinfoset, as_index_vinfo_mask_get(r, mig->rsv.ns->allow_versions), pr->vinfo_buf, &pr->vinfo_buf_len)) {
+	if (0 != as_partition_vinfoset_mask_pickle(&mig->rsv.p->vinfoset, 0, pr->vinfo_buf, &pr->vinfo_buf_len)) {
 		// this only happens if the record we have is too small. Do the best we can: send a null pickled value
 		pr->vinfo_buf_len = 4;
 		pr->vinfo_buf[0] = pr->vinfo_buf[1] = pr->vinfo_buf[2] = pr->vinfo_buf[3] = 0;
