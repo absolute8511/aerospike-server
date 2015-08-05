@@ -1342,11 +1342,6 @@ query_send_fin(as_query_transaction *qtr) {
 	if (qtr->fd_h) {
 		query_add_fin(qtr);
 		query_netio(qtr);
-	} else {
-		cf_debug( AS_QUERY,
-				"query work: Not sending the fin packet as the connection is closed");
-		// Need to release qtr in case fd is not found.
-		qtr_release(qtr, __FILE__, __LINE__);
 	}
 	return AS_QUERY_OK;
 }
