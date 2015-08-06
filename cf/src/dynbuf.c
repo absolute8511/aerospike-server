@@ -221,7 +221,7 @@ cf_buf_builder_reserve_internal(cf_buf_builder **bb_r, size_t sz)
 			cf_buf_builder	*_t = cf_malloc(new_sz);
 			if (!_t)	return(-1);
 			memcpy(_t->buf, bb->buf, bb->used_sz);
-			cf_free(bb->buf);
+			cf_free(bb);
 			bb = _t;
 		}
 		bb->alloc_sz = new_sz - sizeof(cf_buf_builder);
