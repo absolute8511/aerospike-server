@@ -333,7 +333,7 @@ static cf_queue       * g_query_short_queue     = 0;
 static cf_queue       * g_query_long_queue      = 0;
 static cf_atomic32      g_query_threadcnt       = 0;
 static cf_atomic32      g_query_short_running   = 0;
-static cf_atomic32      g_query_long_running   = 0;
+static cf_atomic32      g_query_long_running    = 0;
 
 // I/O & AGGREGATOR
 static pthread_t       g_query_worker_threads[AS_QUERY_MAX_WORKER_THREADS];
@@ -1698,7 +1698,6 @@ query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 		cf_detail(AS_QUERY, "query_generator: "
 				"as_record_get returned %d : key %"PRIx64, rec_rv,
 				*(uint64_t *)dig);
-		goto CLEANUP;
 	}
 CLEANUP :
 	as_query_release_qnode(qtr, rsv);
@@ -1727,7 +1726,7 @@ as_query_udf_finish_cb(as_transaction *tr, int retcode)
 		return AS_QUERY_ERR;
 	}
 	cf_detail(AS_QUERY, "UDF: Internal transaction remaining %d, total txn processing time %"PRIu64"",
-				cf_atomic32_get(&qtr->n_udf_tr_queued),
+				cf_atomic32_get(qtr->n_udf_tr_queued),
 				(cf_getns() - tr->start_time) / 1000000);
 	qtr_finish_work(qtr, &qtr->n_udf_tr_queued, __FILE__, __LINE__, true);
 	return AS_QUERY_OK;
@@ -2062,7 +2061,7 @@ query_get_nextbatch(as_query_transaction *qtr)
 		qctx->recl = cf_malloc(sizeof(cf_ll));
 		if (!qctx->recl) {
 			cf_crash(AS_QUERY, "Allocation Error in Query !!");
-		} 
+		}
 		cf_ll_init(qctx->recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 		qctx->n_bdigs        = 0;
 	} else {
@@ -2157,7 +2156,8 @@ query_transaction_init(as_query_transaction *qtr)
 		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 
 		qtr_set_running(qtr);
-		cf_atomic64_incr(&g_config.query_short_running);
+		cf_atomic64_incr(&g_config.query_short_reqs);
+		cf_atomic32_incr(&g_query_short_running);
 	}
 	return AS_QUERY_OK;
 }
@@ -2189,7 +2189,6 @@ query_qtr_enqueue(as_query_transaction *qtr, bool is_requeue)
 		return AS_QUERY_ERR;
 	} else if (cf_queue_push(q, &qtr) != CF_QUEUE_OK) {
 		cf_crash(AS_QUERY, "Failed to push into Query Queue !!");
-		return AS_QUERY_ERR;
 	} else {
 		cf_detail(AS_QUERY, "Logged query ");
 	}
@@ -2267,10 +2266,9 @@ query_qtr_check_requeue(as_query_transaction *qtr)
 		qtr->qctx.bsize          = g_config.query_bsize;
 		cf_atomic32_decr(&g_query_short_running);
 		cf_atomic32_incr(&g_query_long_running);
-
+		cf_atomic64_incr(&g_config.query_long_reqs);
+		cf_atomic64_decr(&g_config.query_short_reqs);
 		cf_detail(AS_QUERY, "Query Queued Into Long running thread pool %ld %d", cf_atomic64_get(qtr->n_result_records), qtr->short_running);
-		cf_atomic64_incr(&g_config.query_long_running);
-		cf_atomic64_decr(&g_config.query_short_running);
 		do_enqueue = true;
 	}
 
@@ -2669,8 +2667,9 @@ Cleanup:
  *		tr - transaction coming from the client.
  *
  *	Returns -
- *		AS_QUERY_OK  - on success.
+ *		AS_QUERY_OK  - on success. Responds, frees msgp and proto_fd
  *		AS_QUERY_ERR - on failure. That means the query was not even started.
+ *		               frees msgp, response is responsibility of caller
  *
  * 	Notes -
  * 		Allocates and reserves the qtr if query_in_transaction_thr
@@ -2692,17 +2691,18 @@ as_query(as_transaction *tr)
 		// Send FIN packet to client to ignore this.
 		as_msg_send_fin(tr->proto_fd_h->fd, AS_PROTO_RESULT_OK);
 		AS_RELEASE_FILE_HANDLE(tr->proto_fd_h);
+		tr->proto_fd_h = NULL; // Paranoid
 		if (tr->msgp) {
 			cf_free(tr->msgp);
 			tr->msgp = NULL;
 		}
-		return rv;
+		return AS_QUERY_OK;
 	} else if (rv == AS_QUERY_ERR) {
 		if (tr->msgp) {
 			cf_free(tr->msgp);
 			tr->msgp = NULL;
 		}
-		return rv;
+		return AS_QUERY_ERR;
 	}
 
 	pthread_mutex_init(&qtr->slock, NULL);
@@ -2712,7 +2712,6 @@ as_query(as_transaction *tr)
 	if (g_config.query_in_transaction_thr) {
 		query_generator(qtr);
 	} else {
-		cf_atomic32_incr(&g_query_short_running);
 		if (query_qtr_enqueue(qtr, false)) {
 			// This error will be accounted by thr_tsvc layer. Thus
 			// reset fd_h and msgp before calling qtr release, let
@@ -2812,11 +2811,11 @@ as_query_stat(char *name, cf_dyn_buf *db)
 	cf_dyn_buf_append_uint64(db,  (agg + lkup) ? ( agg_records + lkup_records )
 									/ (agg + lkup) : 0);
 
-	cf_dyn_buf_append_string(db, ";query_short_queue_size=");
-	cf_dyn_buf_append_uint64(db, cf_queue_sz(g_query_short_queue));
+	cf_dyn_buf_append_string(db, ";query_short_running=");
+	cf_dyn_buf_append_uint32(db, cf_atomic32_get(g_query_short_running));
 
-	cf_dyn_buf_append_string(db, ";query_long_queue_size=");
-	cf_dyn_buf_append_uint64(db, cf_queue_sz(g_query_long_queue));
+	cf_dyn_buf_append_string(db, ";query_long_running=");
+	cf_dyn_buf_append_uint32(db, cf_atomic32_get(g_query_long_running));
 	
 	cf_dyn_buf_append_string(db, ";query_short_queue_full=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_short_queue_full));
@@ -2824,11 +2823,11 @@ as_query_stat(char *name, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ";query_long_queue_full=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_long_queue_full));
 
-	cf_dyn_buf_append_string(db, ";query_short_running=");
-	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_short_running));
+	cf_dyn_buf_append_string(db, ";query_short_reqs=");
+	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_short_reqs));
 
-	cf_dyn_buf_append_string(db, ";query_long_running=");
-	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_long_running));
+	cf_dyn_buf_append_string(db, ";query_long_reqs=");
+	cf_dyn_buf_append_uint64(db, cf_atomic64_get(g_config.query_long_reqs));
 
 	// Aggregation stats
 	cf_dyn_buf_append_string(db, ";query_agg=");
