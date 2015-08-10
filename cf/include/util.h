@@ -169,7 +169,7 @@ typedef enum hb_mode_enum { AS_HB_MODE_UNDEF, AS_HB_MODE_MCAST, AS_HB_MODE_MESH 
 typedef enum hb_protocol_enum { AS_HB_PROTOCOL_UNDEF, AS_HB_PROTOCOL_NONE, AS_HB_PROTOCOL_V1, AS_HB_PROTOCOL_V2, AS_HB_PROTOCOL_RESET } hb_protocol_enum;
 typedef enum paxos_protocol_enum { AS_PAXOS_PROTOCOL_UNDEF, AS_PAXOS_PROTOCOL_NONE, AS_PAXOS_PROTOCOL_V1, AS_PAXOS_PROTOCOL_V2, AS_PAXOS_PROTOCOL_V3, AS_PAXOS_PROTOCOL_V4 } paxos_protocol_enum;
 typedef enum paxos_recovery_policy_enum { AS_PAXOS_RECOVERY_POLICY_UNDEF, AS_PAXOS_RECOVERY_POLICY_MANUAL, AS_PAXOS_RECOVERY_POLICY_AUTO_DUN_MASTER, AS_PAXOS_RECOVERY_POLICY_AUTO_DUN_ALL } paxos_recovery_policy_enum;
-extern int cf_nodeid_get( unsigned short port, cf_node *id, char **node_ipp, hb_mode_enum hb_mode, char **hb_addrp, char **interface_names);
+extern int cf_nodeid_get( unsigned short port, cf_node *id, char **node_ipp, hb_mode_enum hb_mode, char **hb_addrp, const char **interface_names);
 extern unsigned short cf_nodeid_get_port(cf_node id);
 
 extern int cf_sort_firstk(uint64_t *v, size_t sz, int k);

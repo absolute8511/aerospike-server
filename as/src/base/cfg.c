@@ -844,7 +844,7 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "xdr-remote-datacenter",			CASE_NAMESPACE_XDR_REMOTE_DATACENTER },
 		{ "ns-forward-xdr-writes",			CASE_NAMESPACE_FORWARD_XDR_WRITES },
 		{ "allow-nonxdr-writes",			CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
-		{ "allow-xdr-writes",				CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
+		{ "allow-xdr-writes",				CASE_NAMESPACE_ALLOW_XDR_WRITES },
 		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
 		{ "cold-start-evict-ttl",			CASE_NAMESPACE_COLD_START_EVICT_TTL },
 		{ "conflict-resolution-policy",		CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY },
@@ -3553,10 +3553,10 @@ void
 cfg_use_hardware_values(as_config* c)
 {
 	// Use this array if interface name is configured in config file.
-	char *config_interface_names[] = { 0, 0 };
+	const char *config_interface_names[] = { 0, 0 };
 
 	if (c->self_node == 0) {
-		char **interface_names = NULL;
+		const char **interface_names = NULL;
 		if (c->network_interface_name) {
 			// Use network interface name provided in the configuration.
 			config_interface_names[0] = c->network_interface_name;
