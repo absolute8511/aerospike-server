@@ -686,7 +686,7 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "query-in-transaction-thread",	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD },
 		{ "query-pre-reserve-qnodes", 		CASE_SERVICE_QUERY_PRE_RESERVE_QNODES },
 		{ "query-priority", 				CASE_SERVICE_QUERY_PRIORITY },
-		{ "query-priority-sleep-us", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS },
+		{ "query-priority-sleep-us", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_US },
 		{ "query-threshold", 				CASE_SERVICE_QUERY_THRESHOLD },
 		{ "query-untracked-time-ms",		CASE_SERVICE_QUERY_UNTRACKED_TIME_MS },
 		{ "replication-fire-and-forget",	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET },

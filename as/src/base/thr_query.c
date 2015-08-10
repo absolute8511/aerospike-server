@@ -1684,7 +1684,7 @@ query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 		if (ret != 0) {
 			as_storage_record_close(r, &rd);
 			as_record_done(&r_ref, ns);
-			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__); ///TODO fix error
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
 			as_query_release_qnode(qtr, rsv);
 			ASD_QUERY_IO_ERROR(nodeid, qtr->trid);
 			return AS_QUERY_ERR;
@@ -2298,7 +2298,7 @@ query_process_inline(as_query_transaction *qtr)
 {
 	if (   g_config.query_req_in_query_thread
 		|| (qtr && qtr->short_running)
-		|| (qtr && qtr->ns->storage_data_in_memory)
+		|| (qtr && qtr_finished(qtr)) 
 		|| (qtr && (cf_atomic32_get((qtr)->n_qwork_active) > g_config.query_req_max_inflight))) {
 		return true;
 	}
