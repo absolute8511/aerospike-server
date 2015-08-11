@@ -3539,10 +3539,10 @@ void
 cfg_use_hardware_values(as_config* c)
 {
 	// Use this array if interface name is configured in config file.
-	char *config_interface_names[] = { 0, 0 };
+	const char *config_interface_names[] = { 0, 0 };
 
 	if (c->self_node == 0) {
-		char **interface_names = NULL;
+		const char **interface_names = NULL;
 		if (c->network_interface_name) {
 			// Use network interface name provided in the configuration.
 			config_interface_names[0] = c->network_interface_name;

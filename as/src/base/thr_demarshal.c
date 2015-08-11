@@ -351,7 +351,7 @@ thr_demarshal(void *arg)
 				uint32_t conns_open = g_config.proto_connections_opened - g_config.proto_connections_closed;
 				if (conns_open > g_config.n_proto_fd_max) {
 					if ((last_fd_print + 5000L) < cf_getms()) { // no more than 5 secs
-						cf_info(AS_DEMARSHAL, "dropping incoming client connection: hit limit %d connections", conns_open);
+						cf_warning(AS_DEMARSHAL, "dropping incoming client connection: hit limit %d connections", conns_open);
 						last_fd_print = cf_getms();
 					}
 					shutdown(csocket, SHUT_RDWR);
