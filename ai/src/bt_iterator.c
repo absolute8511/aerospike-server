@@ -238,16 +238,24 @@ static void init_iter(btIterator  *iter, bt          *btr,
 }
 
 // AEROSPIKE MULTI_THREAD
-static pthread_mutex_t g_iter_lock = PTHREAD_MUTEX_INITIALIZER;
-
-#define MAX_NUM_ITER 512
-static cf_ll *IterList = NULL; //NOTE: this IS threadsafe
-
 static btSIter *newIter() {
 	btSIter *siter = cf_malloc(sizeof(btSIter));
 	bzero(siter, sizeof(btSIter));
 	return siter;
 }
+
+static btSIter *getIterator() {
+	return newIter();
+}
+
+static void releaseIterator(btSIter *siter) {
+	if (siter) {
+		cf_free(siter);
+	}
+	return;
+}
+
+/*
 static btSIter *getIterator() {
 	pthread_mutex_lock  (&g_iter_lock); // -->>>>>>>>>>>>>>>> LOCK
 	if (!IterList) {
@@ -276,6 +284,7 @@ static void releaseIterator(btSIter *siter) {
 	else                              cf_free(siter);
 	pthread_mutex_unlock(&g_iter_lock); // <<<<<<<<<<<<<<<<-- UNLOCK
 }
+*/
 
 static btSIter *createIterator(bt *btr, iter_single *itl, iter_single *itn) {
 	btSIter *siter = getIterator();

@@ -103,19 +103,18 @@ typedef struct as_config_s {
 	uint32_t			query_threads;
 	uint32_t			query_worker_threads;
 	uint32_t			query_priority;
-	uint64_t			query_sleep_ns;
+	uint64_t			query_sleep_us;
 	uint32_t			query_bsize;
-	bool				query_job_tracking;
 	bool				query_in_transaction_thr;
 	uint64_t			query_buf_size;
 	uint32_t			query_threshold;
-	uint32_t			query_rec_count_bound;
+	uint64_t			query_rec_count_bound;
 	bool				query_req_in_query_thread;
 	uint32_t			query_req_max_inflight;
 	uint32_t			query_bufpool_size;
 	uint32_t			query_short_q_max_size;
 	uint32_t			query_long_q_max_size;
-	uint64_t			query_untracked_time_ns;
+	uint64_t			query_untracked_time_ms;
 
 	int					n_transaction_queues;
 	int					n_transaction_threads_per_queue;
@@ -322,9 +321,8 @@ typedef struct as_config_s {
 	cf_atomic64			query_fail;
 	cf_atomic64			query_short_queue_full;
 	cf_atomic64			query_long_queue_full;
-	cf_atomic64			query_short_running;
-	cf_atomic64			query_long_running;
-	cf_atomic64			query_tracked;
+	cf_atomic64			query_short_reqs;
+	cf_atomic64			query_long_reqs;
 	cf_atomic64			query_false_positives;
 	bool				query_enable_histogram;
 

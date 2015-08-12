@@ -208,7 +208,7 @@ extern const as_rec_hooks udf_record_hooks;
 #define AS_AGGR_OK AS_QUERY_OK
 
 int 
-as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_result * ap_res)
+as_aggr_process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_result * ap_res)
 {
 	// input stream
 	int ret           = AS_AGGR_OK;

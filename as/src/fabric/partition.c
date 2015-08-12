@@ -1300,7 +1300,7 @@ as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_
 			// Theoretically, any partition which is qnode whould either belong to sync or 
 			// zombie state. Its better to know if some other state is becoming qnode.
 			if (AS_PARTITION_STATE_SYNC != p->state && AS_PARTITION_STATE_ZOMBIE != p->state) {
-				cf_warning(AS_PARTITION, "Not expected - Partition is qnode and partition %d is in %d state", i, p->state);
+				cf_debug(AS_PARTITION, "Not expected - Partition is qnode and partition %d is in %d state", i, p->state);
 			}
 			cf_atomic_int_incr(&g_config.dup_tree_count);
 		}

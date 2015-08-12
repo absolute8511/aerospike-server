@@ -326,18 +326,8 @@ as_bin_create_from_buf(as_storage_rd *rd, byte *name, size_t namesz)
 }
 
 as_bin *
-as_bin_get(as_storage_rd *rd, const char *name)
+as_bin_get_by_id(as_storage_rd *rd, uint32_t id)
 {
-	if (rd->ns->single_bin) {
-		return as_bin_inuse_has(rd) ? rd->bins : NULL;
-	}
-
-	uint32_t id;
-
-	if (cf_vmapx_get_index(rd->ns->p_bin_name_vmap, name, &id) != CF_VMAPX_OK) {
-		return NULL;
-	}
-
 	for (uint16_t i = 0; i < rd->n_bins; i++) {
 		as_bin *b = &rd->bins[i];
 
@@ -351,6 +341,22 @@ as_bin_get(as_storage_rd *rd, const char *name)
 	}
 
 	return NULL;
+}
+
+as_bin *
+as_bin_get(as_storage_rd *rd, const char *name)
+{
+	if (rd->ns->single_bin) {
+		return as_bin_inuse_has(rd) ? rd->bins : NULL;
+	}
+
+	uint32_t id;
+
+	if (cf_vmapx_get_index(rd->ns->p_bin_name_vmap, name, &id) != CF_VMAPX_OK) {
+		return NULL;
+	}
+
+	return as_bin_get_by_id(rd, id);
 }
 
 as_bin *

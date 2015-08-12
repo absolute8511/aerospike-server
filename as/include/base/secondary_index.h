@@ -31,6 +31,7 @@
 #include "base/monitor.h"
 #include "base/proto.h"
 #include "base/system_metadata.h"
+#include "base/transaction.h"
 
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_digest.h"
@@ -336,7 +337,7 @@ typedef struct as_sindex_metadata_s {
 	struct as_sindex_s  * si;
 	as_sindex_pmetadata * pimd;
 	unsigned char         dtype;   // Aerospike Index type
-	int                   binid[AS_SINDEX_BINMAX]; // Redundant info to aid search
+	uint32_t              binid[AS_SINDEX_BINMAX]; // Redundant info to aid search
 	byte                  mfd_slot; // slot on the persistent file
 
 	// Index Static Data (part persisted)
@@ -709,6 +710,7 @@ extern int  as_sindex_smd_merge_cb(char *module, as_smd_item_list_t **item_list_
  */
 // **************************************************************************************************
 extern void                 as_query_init();
+extern int                  as_query(as_transaction *tr);
 extern int                  as_query_reinit(int set_size, int *actual_size);
 extern int                  as_query_worker_reinit(int set_size, int *actual_size);
 extern int                  as_query_stat(char *name, cf_dyn_buf *db);
