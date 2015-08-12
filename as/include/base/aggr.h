@@ -91,4 +91,4 @@ as_val * as_aggr_istream_read(const as_stream *s);
 int as_aggr_call_init(as_aggr_call *call, as_transaction *txn, void *caller,
 		const as_aggr_caller_intf *caller_intf, const as_stream_hooks *istream_hooks,
 		const as_stream_hooks *ostream_hooks, as_namespace *ns, bool is_scan);
-int as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_result * ap_res);
+int as_aggr_process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_result * ap_res);

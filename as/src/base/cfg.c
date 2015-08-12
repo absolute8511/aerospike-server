@@ -304,9 +304,9 @@ typedef enum {
 	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD,
 	CASE_SERVICE_QUERY_PRE_RESERVE_QNODES,
 	CASE_SERVICE_QUERY_PRIORITY,
-	CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS,
+	CASE_SERVICE_QUERY_PRIORITY_SLEEP_US,
 	CASE_SERVICE_QUERY_THRESHOLD,
-	CASE_SERVICE_QUERY_UNTRACKED_TIME,
+	CASE_SERVICE_QUERY_UNTRACKED_TIME_MS,
 	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET,
 	CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION,
 	CASE_SERVICE_RUN_AS_DAEMON,
@@ -686,9 +686,9 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "query-in-transaction-thread",	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD },
 		{ "query-pre-reserve-qnodes", 		CASE_SERVICE_QUERY_PRE_RESERVE_QNODES },
 		{ "query-priority", 				CASE_SERVICE_QUERY_PRIORITY },
-		{ "query-priority-sleep-ms", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS },
+		{ "query-priority-sleep-us", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_US },
 		{ "query-threshold", 				CASE_SERVICE_QUERY_THRESHOLD },
-		{ "query-untracked-time",			CASE_SERVICE_QUERY_UNTRACKED_TIME },
+		{ "query-untracked-time-ms",		CASE_SERVICE_QUERY_UNTRACKED_TIME_MS },
 		{ "replication-fire-and-forget",	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET },
 		{ "respond-client-on-master-completion", CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION },
 		{ "run-as-daemon",					CASE_SERVICE_RUN_AS_DAEMON },
@@ -2007,14 +2007,14 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_QUERY_PRIORITY:
 				c->query_priority = cfg_int_no_checks(&line);
 				break;
-			case CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS:
-				c->query_sleep_ns = cfg_u64_no_checks(&line) * 1000000;
+			case CASE_SERVICE_QUERY_PRIORITY_SLEEP_US:
+				c->query_sleep_us = cfg_u64_no_checks(&line);
 				break;
 			case CASE_SERVICE_QUERY_THRESHOLD:
 				c->query_threshold = cfg_int_no_checks(&line);
 				break;
-			case CASE_SERVICE_QUERY_UNTRACKED_TIME:
-				c->query_untracked_time_ns = cfg_u64_no_checks(&line) * 1000000;
+			case CASE_SERVICE_QUERY_UNTRACKED_TIME_MS:
+				c->query_untracked_time_ms = cfg_u64_no_checks(&line);
 				break;
 			case CASE_SERVICE_REPLICATION_FIRE_AND_FORGET:
 				c->replication_fire_and_forget = cfg_bool(&line);
@@ -2858,7 +2858,7 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_SINDEX_NUM_PARTITIONS:
 				// FIXME - minimum should be 1, but currently crashes.
-				ns->sindex_num_partitions = cfg_u32(&line, 2, 128);
+				ns->sindex_num_partitions = cfg_u32(&line, MIN_PARTITIONS_PER_INDEX, MAX_PARTITIONS_PER_INDEX);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);

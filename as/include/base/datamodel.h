@@ -471,6 +471,7 @@ extern void as_bin_get_all_p(as_storage_rd *rd, as_bin **bin_ptrs);
 extern as_bin *as_bin_create(as_storage_rd *rd, const char *name);
 extern as_bin *as_bin_create_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
 extern as_bin *as_bin_get(as_storage_rd *rd, const char *name);
+extern as_bin *as_bin_get_by_id(as_storage_rd *rd, uint32_t id);
 extern as_bin *as_bin_get_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
 extern as_bin *as_bin_get_or_create(as_storage_rd *rd, const char *name);
 extern as_bin *as_bin_get_or_create_from_buf(as_storage_rd *rd, byte *name, size_t namesz, bool create_only, bool replace_only, int *p_result);
@@ -877,6 +878,9 @@ void as_partition_map_dump();
 
 #define AS_SINDEX_BINMAX	4
 #define AS_SINDEX_MAX		256
+
+#define MIN_PARTITIONS_PER_INDEX 1
+#define MAX_PARTITIONS_PER_INDEX 256
 
 // as_sindex structure which hangs from the ns.
 #define AS_SINDEX_INACTIVE			1 // On init, pre-loading

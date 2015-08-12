@@ -41,6 +41,7 @@
 #include "base/datamodel.h"
 #include "base/proto.h"
 #include "base/scan.h"
+#include "base/secondary_index.h"
 #include "base/security.h"
 #include "base/thr_batch.h"
 #include "base/thr_info.h"
@@ -49,8 +50,6 @@
 #include "base/transaction.h"
 #include "fabric/fabric.h"
 #include "storage/storage.h"
-
-extern int as_query(as_transaction *tr);
 
 // These must all be OFF in production.
 // #define DEBUG 1

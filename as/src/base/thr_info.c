@@ -2190,10 +2190,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_uint64(db, g_config.query_bufpool_size);
 	cf_dyn_buf_append_string(db, ";query-batch-size=");
 	cf_dyn_buf_append_uint64(db, g_config.query_bsize);
-	cf_dyn_buf_append_string(db, ";query-sleep=");
-	cf_dyn_buf_append_uint64(db, g_config.query_sleep_ns/1000);	// Show uSec
-	cf_dyn_buf_append_string(db, ";query-job-tracking=");
-	cf_dyn_buf_append_string(db, (g_config.query_job_tracking) ? "true" : "false");
+	cf_dyn_buf_append_string(db, ";query-priority-sleep-us=");
+	cf_dyn_buf_append_uint64(db, g_config.query_sleep_us);	// Show uSec
 	cf_dyn_buf_append_string(db, ";query-short-q-max-size=");
 	cf_dyn_buf_append_uint64(db, g_config.query_short_q_max_size);
 	cf_dyn_buf_append_string(db, ";query-long-q-max-size=");
@@ -2202,8 +2200,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_uint64(db, g_config.query_rec_count_bound);
 	cf_dyn_buf_append_string(db, ";query-threshold=");
 	cf_dyn_buf_append_uint64(db, g_config.query_threshold);
-	cf_dyn_buf_append_string(db, ";query-untracked-time=");
-	cf_dyn_buf_append_uint64(db, g_config.query_untracked_time_ns/1000000); // Show it in ms seconds
+	cf_dyn_buf_append_string(db, ";query-untracked-time-ms=");
+	cf_dyn_buf_append_uint64(db, g_config.query_untracked_time_ms); // Show it in ms seconds
 	cf_dyn_buf_append_string(db, ";pre-reserve-qnodes=");
 	cf_dyn_buf_append_string(db, (g_config.qnodes_pre_reserved) ? "true" : "false");
 
@@ -3079,15 +3077,15 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of query-threshold from %"PRIu64" to %"PRIu64"", g_config.query_threshold, val);
 			g_config.query_threshold = val;
 		}
-		else if (0 == as_info_parameter_get(params, "query-untracked-time", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "query-untracked-time-ms", context, &context_len)) {
 			uint64_t val = atoll(context);
 			cf_debug(AS_INFO, "query-untracked-time = %"PRIu64" milli seconds", val);
 			if (val < 0) {
 				goto Error;
 			}
 			cf_info(AS_INFO, "Changing value of query-untracked-time from %"PRIu64" milli seconds to %"PRIu64" milli seconds",
-						g_config.query_untracked_time_ns/1000000, val);
-			g_config.query_untracked_time_ns = val * 1000000;
+						g_config.query_untracked_time_ms, val);
+			g_config.query_untracked_time_ms = val;
 		}
 		else if (0 == as_info_parameter_get(params, "query-rec-count-bound", context, &context_len)) {
 			uint64_t val = atoll(context);
@@ -3163,14 +3161,14 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			cf_info(AS_INFO, "Changing value of query-priority from %d to %d ", g_config.query_priority, val);
 			g_config.query_priority = val;
 		}
-		else if (0 == as_info_parameter_get(params, "query-sleep", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "query-priority-sleep-us", context, &context_len)) {
 			uint64_t val = atoll(context);
 			if(val == 0) {
 				cf_warning(AS_INFO, "query_sleep should be a number %s", context);
 				goto Error;
 			}
-			cf_info(AS_INFO, "Changing value of query-sleep from %"PRIu64" uSec to %"PRIu64" uSec ", g_config.query_sleep_ns/1000, val);
-			g_config.query_sleep_ns = val * 1000;
+			cf_info(AS_INFO, "Changing value of query-sleep from %"PRIu64" uSec to %"PRIu64" uSec ", g_config.query_sleep_us, val);
+			g_config.query_sleep_us = val;
 		}
 		else if (0 == as_info_parameter_get(params, "query-batch-size", context, &context_len)) {
 			uint64_t val = atoll(context);
@@ -3227,18 +3225,6 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			else
 				goto Error;
 		}
-		else if (0 == as_info_parameter_get(params, "query-job-tracking", context, &context_len)) {
-			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
-				cf_info(AS_INFO, "Changing value of query-job-tracking from %s to %s", bool_val[g_config.query_job_tracking], context);
-				as_query_set_job_tracking(true);
-			}
-			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
-				cf_info(AS_INFO, "Changing value of query-job-tracking from %s to %s", bool_val[g_config.query_job_tracking], context);
-				as_query_set_job_tracking(false);
-			}
-			else
-				goto Error;
-		}
 		else if (0 == as_info_parameter_get(params, "query-short-q-max-size", context, &context_len)) {
 			uint64_t val = atoll(context);
 			cf_info(AS_INFO, "query-short-q-max-size = %d", val);
@@ -3282,7 +3268,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 				goto Error;
 			}
 		}
-		else if (0 == as_info_parameter_get(params, "pre-reserve-qnodes", context, &context_len)) {
+		else if (0 == as_info_parameter_get(params, "query-pre-reserve-qnodes", context, &context_len)) {
 			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
 				cf_info(AS_INFO, "Changing value of reserve-qnodes-upfront to %s", context);
 				g_config.qnodes_pre_reserved = true;
