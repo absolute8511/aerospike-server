@@ -315,6 +315,7 @@ as_job_slice(void* task)
 	as_partition_reservation rsv;
 
 	if ((pid = as_job_partition_reserve(_job, pid, &rsv)) == AS_PARTITIONS) {
+		_job->next_pid = AS_PARTITIONS;
 		as_job_active_release(_job);
 		return;
 	}
