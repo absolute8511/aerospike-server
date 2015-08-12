@@ -135,8 +135,8 @@
 // **************************************************************************************************
 #define QUERY_BATCH_SIZE              100
 #define AS_MAX_NUM_SCRIPT_PARAMS      10
-#define AS_QUERY_BUF_SIZE             1024 * 128
-#define AS_QUERY_MAX_BUFS             256	// That makes it 32 meg max in steady state
+#define AS_QUERY_BUF_SIZE             1024 * 1024 * 2 // At least 2 Meg
+#define AS_QUERY_MAX_BUFS             256	// That makes it 512 meg max in steady state
 #define AS_QUERY_MAX_QREQ             1024	// this is 4 kb
 #define AS_QUERY_MAX_QTR_POOL		  128	// They are 4MB+ each ...
 #define AS_QUERY_MAX_THREADS          32
@@ -2272,6 +2272,10 @@ query_qtr_check_requeue(as_query_transaction *qtr)
 		do_enqueue = true;
 	}
 
+	if (cf_atomic32_get((qtr)->n_qwork_active) > g_config.query_worker_threads) {
+		do_enqueue = true;
+	}
+
 	if (do_enqueue) {
 		int ret = AS_QUERY_OK;
 		qtr_lock(qtr);
@@ -2298,8 +2302,7 @@ query_process_inline(as_query_transaction *qtr)
 {
 	if (   g_config.query_req_in_query_thread
 		|| (qtr && qtr->short_running)
-		|| (qtr && qtr_finished(qtr)) 
-		|| (qtr && (cf_atomic32_get((qtr)->n_qwork_active) > g_config.query_req_max_inflight))) {
+		|| (qtr && qtr_finished(qtr))) { 
 		return true;
 	}
 	else {
@@ -2428,13 +2431,6 @@ query_generator(as_query_transaction *qtr)
 				continue;
 		}
 
-		// Step 6: Prepare Query Request either to process inline or for
-		//         queueing up for offline processing
-		if (qtr_process(qtr)) {
-			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);	
-			continue;
-		}
-
 		if (qret == AS_QUERY_DONE) {
 			// In case all physical tree is done return. if not range loop
 			// till less than batch size results are returned
@@ -2442,6 +2438,13 @@ query_generator(as_query_transaction *qtr)
 			nrecs = qtr->n_result_records;
 #endif
 			qtr_set_done(qtr, AS_PROTO_RESULT_OK, __FILE__, __LINE__);
+		}
+
+		// Step 6: Prepare Query Request either to process inline or for
+		//         queueing up for offline processing
+		if (qtr_process(qtr)) {
+			qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);	
+			continue;
 		}
 	}
 
