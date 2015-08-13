@@ -139,7 +139,7 @@ typedef struct drv_ssd_block_s {
 //
 typedef struct drv_ssd_bin_s {
 	char		name[AS_ID_BIN_SZ];	// 15 aligns well
-	uint8_t		version;
+	uint8_t		version;			// now unused
 	uint32_t	offset;				// offset of bin data within block
 	uint32_t	len;				// size of bin data
 	uint32_t	next;				// location of next bin: block offset
@@ -485,7 +485,6 @@ log_bad_record(const char* ns_name, uint32_t n_bins, uint32_t block_bins,
 	cf_info(AS_DRV_SSD, "   bin %" PRIu32 " [of %" PRIu32 "]", (block_bins - n_bins) + 1, block_bins);
 
 	if (ssd_bin) {
-		cf_info(AS_DRV_SSD, "   ssd_bin->version = %" PRIu32, (uint32_t)ssd_bin->version);
 		cf_info(AS_DRV_SSD, "   ssd_bin->offset = %" PRIu32, ssd_bin->offset);
 		cf_info(AS_DRV_SSD, "   ssd_bin->len = %" PRIu32, ssd_bin->len);
 		cf_info(AS_DRV_SSD, "   ssd_bin->next = %" PRIu32, ssd_bin->next);
@@ -510,11 +509,6 @@ is_valid_record(const drv_ssd_block* block, const char* ns_name)
 	while (n_bins > 0) {
 		if (ssd_bin > ssd_bin_end) {
 			log_bad_record(ns_name, n_bins, block->n_bins, NULL, "bin ptr");
-			return false;
-		}
-
-		if (ssd_bin->version >= 16) {
-			log_bad_record(ns_name, n_bins, block->n_bins, ssd_bin, "version");
 			return false;
 		}
 
@@ -1231,7 +1225,6 @@ as_storage_particle_read_all_ssd(as_storage_rd *rd)
 	drv_ssd_bin *ssd_bin = (drv_ssd_bin*)(block->data + block->bins_offset);
 
 	for (uint16_t i = 0; i < block->n_bins; i++) {
-		as_bin_set_version(&rd->bins[i], ssd_bin->version, rd->ns->single_bin);
 		as_bin_set_id_from_name(rd->ns, &rd->bins[i], ssd_bin->name);
 
 		int rv = as_bin_particle_cast_from_flat(&rd->bins[i],
@@ -1913,7 +1906,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 			ssd_bin = (drv_ssd_bin*)buf;
 			buf += sizeof(drv_ssd_bin);
 
-			ssd_bin->version = as_bin_get_version(bin, rd->ns->single_bin);
+			ssd_bin->version = 0;
 
 			if (! rd->ns->single_bin) {
 				strcpy(ssd_bin->name, as_bin_get_name_from_id(rd->ns, bin->id));
@@ -3154,7 +3147,6 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 				if (has_sindex) {	
 					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
 				}
-				as_bin_set_version(b, ssd_bin->version, ns->single_bin);
 				as_bin_set_id_from_name(ns, b, ssd_bin->name);
 			}
 			else {

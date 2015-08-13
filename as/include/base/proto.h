@@ -291,7 +291,7 @@ typedef struct as_msg_op_s {
 	uint32_t op_sz;
 	uint8_t  op;
 	uint8_t  particle_type;
-	uint8_t  version;
+	uint8_t  version; // now unused
 	uint8_t  name_sz;
 	uint8_t	 name[]; // UTF-8
 	// there's also a value here but you can't have two variable size arrays

@@ -635,7 +635,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 			as_msg_op *op = (as_msg_op *)buf;
 
 			op->op = AS_MSG_OP_READ;
-			op->version = as_bin_inuse(p_bin) ? as_bin_get_version(p_bin, rd->ns->single_bin) : 0;
+			op->version = 0;
 			op->name_sz = as_bin_memcpy_name(rd->ns, op->name, p_bin);
 			op->op_sz = 4 + op->name_sz;
 
@@ -658,7 +658,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 			as_msg_op *op = (as_msg_op *)buf;
 
 			op->op = AS_MSG_OP_READ;
-			op->version = as_bin_inuse(&rd->bins[i]) ? as_bin_get_version(&rd->bins[i], rd->ns->single_bin) : 0;
+			op->version = 0;
 			op->name_sz = as_bin_memcpy_name(rd->ns, op->name, &rd->bins[i]);
 			op->op_sz = 4 + op->name_sz;
 

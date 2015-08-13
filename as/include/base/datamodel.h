@@ -206,7 +206,7 @@ typedef struct as_particle_s {
 #define AS_BIN_STATE_INUSE_FLOAT	4
 
 typedef struct as_particle_iparticle_s {
-	uint8_t		version: 4;		// can only be used in multi bin
+	uint8_t		version: 4;		// now unused - and can't be used in single-bin config
 	uint8_t		state: 4;		// see AS_BIN_STATE_...
 	uint8_t		data[];
 } __attribute__ ((__packed__)) as_particle_iparticle;
@@ -438,18 +438,6 @@ as_bin_get_particle_type(const as_bin *b) {
 			return b->particle->metadata;
 		default:
 			return AS_PARTICLE_TYPE_NULL;
-	}
-}
-
-static inline uint8_t
-as_bin_get_version(const as_bin *b, bool single_bin) {
-	return (single_bin ? 0 : ((as_particle_iparticle *)b)->version);
-}
-
-static inline void
-as_bin_set_version(as_bin *b, uint8_t version, bool single_bin) {
-	if (! single_bin) {
-		((as_particle_iparticle *)b)->version = version;
 	}
 }
 

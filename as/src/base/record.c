@@ -384,7 +384,7 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 		byte namelen = (byte)as_bin_memcpy_name(rd->ns, buf + 1, b);
 		*buf++ = namelen;
 		buf += namelen;
-		*buf++ = as_bin_get_version(b, rd->ns->single_bin);
+		*buf++ = 0; // was bin version
 
 		buf += as_bin_particle_to_pickled(b, buf);
 	}
@@ -497,14 +497,13 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		byte name_sz     = *buf++;
 		byte *name       = buf;
 		buf             += name_sz;
-		uint8_t version  = *buf++;
+		buf++; // skipped byte was bin version
 		as_bin *b;
 		if (i < old_n_bins) {
 			b = &rd->bins[i];
 			if (has_sindex) {
 				sindex_found      += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
 			}
-			as_bin_set_version(b, version, ns->single_bin);
 			as_bin_set_id_from_name_buf(ns, b, name, name_sz);
 		}
 		else {
