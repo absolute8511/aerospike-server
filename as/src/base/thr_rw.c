@@ -1575,20 +1575,8 @@ finish_rw_process_dup_ack(write_request *wr)
 		// take the different components for passing to merge
 		uint8_t *buf = 0;
 		size_t buf_sz = 0;
-		if (0 != msg_get_buf(m, RW_FIELD_VINFOSET, &buf, &buf_sz,
-					MSG_GET_DIRECT)) {
-			cf_info(AS_RW,
-					"finish_rw_process_dup_ack: received dup-response with no vinfoset, illegal, %"PRIx64"",
-					wr->keyd);
-			continue;
-		}
 
-		if (0 != as_partition_vinfoset_unpickle(
-					&components[comp_sz].vinfoset, buf, buf_sz, "RW")) {
-			cf_warning(AS_RW,
-					"finish_rw_process_dup_ack: receive ununpickleable vinfoset, skipping response");
-			continue;
-		}
+		// Note - older versions expect RW_FIELD_VINFOSET field here.
 
 		uint32_t generation = 0;
 		if (0 != msg_get_uint32(m, RW_FIELD_GENERATION, &generation)) {
@@ -2188,16 +2176,9 @@ rw_dup_prole(cf_node node, msg *m)
 	/* Indicate it is a duplicate resolution / migration  write */
 	msg_set_uint32(m, RW_FIELD_INFO, info);
 
-	uint8_t vinfo_buf[AS_PARTITION_VINFOSET_PICKLE_MAX];
-	size_t vinfo_buf_len = sizeof(vinfo_buf);
-	if (0 != as_partition_vinfoset_mask_pickle(&rsv.p->vinfoset,
-			0, vinfo_buf, &vinfo_buf_len)) {
-		cf_info(AS_RW, "pickle: could not do vinfo mask");
-		msg_set_unset(m, RW_FIELD_VINFOSET);
-		cf_atomic_int_incr(&g_config.rw_err_dup_internal);
-		goto Out3;
-	}
-	msg_set_buf(m, RW_FIELD_VINFOSET, vinfo_buf, vinfo_buf_len, MSG_SET_COPY);
+	// Note - older versions expect RW_FIELD_VINFOSET, so must send it for now.
+	static const uint8_t VINFO_BUF_0[] = { 0, 0, 0, 0 };
+	msg_set_buf(m, RW_FIELD_VINFOSET, VINFO_BUF_0, 4, MSG_SET_COPY);
 
 	msg_set_uint32(m, RW_FIELD_GENERATION, r->generation);
 	msg_set_uint32(m, RW_FIELD_VOID_TIME, r->void_time);

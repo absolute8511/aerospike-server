@@ -1351,7 +1351,6 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				msg_get_buf(m, MIG_FIELD_REC_PROPS, &rec_props.p_data, (size_t*)&rec_props.size, MSG_GET_DIRECT);
 
 				as_record_merge_component c;
-				// c.vinfoset unused in c from here on.
 				c.record_buf    = value;
 				c.record_buf_sz = value_sz;
 				c.generation    = generation;
