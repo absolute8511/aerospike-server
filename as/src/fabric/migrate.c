@@ -180,7 +180,7 @@
 #define MIG_FIELD_GENERATION 6
 #define MIG_FIELD_RECORD 7
 #define MIG_FIELD_CLUSTER_KEY 8
-#define MIG_FIELD_VINFOSET 9    	// sent with INSERT
+#define MIG_FIELD_VINFOSET 9 // deprecated
 #define MIG_FIELD_VOID_TIME 10
 #define MIG_FIELD_TYPE 11
 #define MIG_FIELD_REC_PROPS 12
@@ -247,8 +247,6 @@ typedef struct pickled_record_s {
 	byte 					*record_buf;   // pickled!
 	size_t					record_len;
 	as_rec_props            rec_props;
-	size_t                  vinfo_buf_len;
-	uint8_t                 vinfo_buf[AS_PARTITION_VINFOSET_PICKLE_MAX ];
 	cf_digest				pkey;
 	cf_digest				ekey;
 	uint64_t                version;
@@ -403,7 +401,6 @@ typedef struct migrate_recv_control_t {
 	cf_node source_node;
 	as_migrate_type mig_type;
 	as_partition_mig_rx_state rxstate;
-	as_partition_vinfoset    vinfoset;
 	uint64_t                 incoming_ldt_version;
 	as_partition_id          pid;
 } migrate_recv_control;
@@ -1346,27 +1343,6 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 					cf_debug(AS_MIGRATE, "received key with no ttl, setting to 0 as a default ");
 				}
 
-				// Deal with incomplete vinfo
-				as_partition_vinfoset vinfoset;
-
-				/* extract the vinfoset */
-				uint8_t *vinfo_buf = 0;
-				size_t vinfo_buf_len = 0;
-				if (0 != msg_get_buf(m, MIG_FIELD_VINFOSET, &vinfo_buf, &vinfo_buf_len, MSG_GET_DIRECT)) {
-					cf_debug(AS_MIGRATE, "migrate: no vinfoset");
-					memset(&vinfoset, 0, sizeof(vinfoset));
-					// migrate_recv_control_release(mc);
-					// goto Done;
-				}
-				else if (0 != as_partition_vinfoset_unpickle( &vinfoset, vinfo_buf, vinfo_buf_len, "MIG")) {
-					cf_info(AS_MIGRATE, "migrate: could not unpickle vinfoset");
-					memset(&vinfoset, 0, sizeof(vinfoset));
-					// migrate_recv_control_release(mc);
-					// goto Done;
-				}
-
-//				as_partition_vinfoset_dump(vinfoset, "migrate INSERT");
-
 				void *value = NULL;
 				as_rec_props rec_props;
 				as_rec_props_clear(&rec_props);
@@ -1375,7 +1351,7 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				msg_get_buf(m, MIG_FIELD_REC_PROPS, &rec_props.p_data, (size_t*)&rec_props.size, MSG_GET_DIRECT);
 
 				as_record_merge_component c;
-				c.vinfoset      = vinfoset;  // kind of sucks. We should have copied directly into here
+				// c.vinfoset unused in c from here on.
 				c.record_buf    = value;
 				c.record_buf_sz = value_sz;
 				c.generation    = generation;
@@ -1881,17 +1857,6 @@ migrate_tree_reduce(as_index_ref *r_ref, void *udata)
 
 	as_index *r = r_ref->r;
 
-	pr->vinfo_buf_len = sizeof(pr->vinfo_buf);
-	if (0 != as_partition_vinfoset_mask_pickle(&mig->rsv.p->vinfoset, 0, pr->vinfo_buf, &pr->vinfo_buf_len)) {
-		// this only happens if the record we have is too small. Do the best we can: send a null pickled value
-		pr->vinfo_buf_len = 4;
-		pr->vinfo_buf[0] = pr->vinfo_buf[1] = pr->vinfo_buf[2] = pr->vinfo_buf[3] = 0;
-		cf_warning(AS_MIGRATE, "migrate: could not pickle vinfoset, internal error");
-	}
-	if (pr->vinfo_buf[1] || pr->vinfo_buf[2] || pr->vinfo_buf[3]) {
-		cf_info(AS_MIGRATE, "migrate-reduce-vinfo very flawed! len %d : %02x %02x %02x", pr->vinfo_buf_len, pr->vinfo_buf[1], pr->vinfo_buf[2] , pr->vinfo_buf[3]);
-	}
-
 	as_storage_rd rd;
 	if (0 != as_storage_record_open(mig->rsv.ns, r, &rd, &r->key)) {
 		cf_debug(AS_RECORD, "pickle: couldn't open record");
@@ -2100,7 +2065,7 @@ as_migrate_tree(migration *mig, as_index_tree *tree, bool is_subrecord)
 			msg_set_uint32(m, MIG_FIELD_GENERATION, pr->generation);
 			msg_set_uint32(m, MIG_FIELD_VOID_TIME,  pr->void_time);
 			msg_set_buf   (m, MIG_FIELD_NAMESPACE,  (byte *) mig->rsv.ns->name, strlen(mig->rsv.ns->name), MSG_SET_COPY);
-			msg_set_buf   (m, MIG_FIELD_VINFOSET,   pr->vinfo_buf, pr->vinfo_buf_len, MSG_SET_COPY);
+			// Note - older versions handle missing MIG_FIELD_VINFOSET field.
 
 			if (pr->rec_props.p_data) {
 				msg_set_buf(m, MIG_FIELD_REC_PROPS, (void *)pr->rec_props.p_data, pr->rec_props.size, MSG_SET_HANDOFF_MALLOC);
