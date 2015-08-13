@@ -730,7 +730,9 @@ sbld_job_info(as_job* _job, as_mon_jobstat* stat)
 
 		char *extra = stat->jdata + strlen(stat->jdata);
 
-		sprintf(extra, ":sindex-name=%s", job->si->imd->iname);
+		// TODO - could keep a copy of the sindex name in case the sindex was
+		// removed, but for now assume that's an unusual thing.
+		sprintf(extra, ":sindex-name=%s", job->si->imd ? job->si->imd->iname : "<lost>");
 	}
 	else {
 		strcpy(stat->job_type, "sindex-build-all");
