@@ -168,8 +168,8 @@ int as_index_vinfo_mask_set(as_index *index, as_partition_vinfo_mask m, bool all
 //
 
 typedef struct as_index_flag_bits_s {
-	uint8_t flag_bits: 6;
-	uint8_t do_not_use: 2; // These are used in single-bin mode.
+	uint8_t flag_bits: 4;
+	uint8_t do_not_use: 4; // These are used in single-bin mode.
 } as_index_flag_bits;
 
 typedef enum {
