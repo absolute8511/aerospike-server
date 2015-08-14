@@ -38,7 +38,7 @@
 
 
 // Maximum number of bins that can be updated in a single UDF.
-#define UDF_RECORD_BIN_ULIMIT 100
+#define UDF_RECORD_BIN_ULIMIT 512
 #define UDF_BIN_NONAME " "
 
 typedef struct ldt_record_s ldt_record;
@@ -60,13 +60,12 @@ typedef struct udf_record_s {
 	as_transaction 		*tr;
 	as_storage_rd 		*rd;
 	cf_digest			keyd;
-	// TODO currently only 256 bins is supported
-	as_bin				stack_bins[256];
+	as_bin				stack_bins[UDF_RECORD_BIN_ULIMIT]; // TODO increase bin limit?
 
 	// UDF CHANGE CACHE
 	int8_t				ldt_rectype_bit_update; // ESR  / LDT / PARENT LDT / NOTHING
 	udf_record_bin		updates[UDF_RECORD_BIN_ULIMIT]; // stores cache bin value
-                                                        // if ditry is set modified bins. internal to udf module
+                                                        // if dirty flag is set the bin is being modified
 	uint32_t			nupdates; // reset after every cache free, incremented in every cache set
 
 	// RUNTIME ACCOUNTING

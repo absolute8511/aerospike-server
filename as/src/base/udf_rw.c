@@ -1194,7 +1194,16 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		urecord.flag   |= UDF_RECORD_FLAG_OPEN;
 		urecord.flag   |= UDF_RECORD_FLAG_PREEXISTS;
 		cf_detail(AS_UDF, "Open %p %x %"PRIx64"", &urecord, urecord.flag, *(uint64_t *)&tr->keyd);
-		udf_storage_record_open(&urecord);
+		rec_rv = udf_storage_record_open(&urecord);
+
+		if (rec_rv == -1) {
+			udf_record_close(&urecord);
+			call->transaction->result_code = AS_PROTO_RESULT_FAIL_BIN_NAME; // overloaded... add bin_count error?
+			send_response(call, "FAILURE", AS_PARTICLE_TYPE_NULL, NULL, 0);
+			ldt_record_destroy(lrec);
+			as_rec_destroy(lrec);
+			return 0;
+		}
 
 		as_msg *m = &tr->msgp->msg;
 

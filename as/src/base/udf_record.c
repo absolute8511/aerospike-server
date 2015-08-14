@@ -64,7 +64,8 @@ udf_record_ldt_enabled(const as_rec * rec)
  * Parameters:
  * 		urec    : UDF record
  *
- * Return value : 0 always
+ * Return value :  0 on success
+ * 				  -1 if the record's bin count exceeds the UDF limit
  *
  * Callers:
  * 		udf_record_open
@@ -92,11 +93,17 @@ udf_storage_record_open(udf_record *urecord)
 	rd->n_bins = as_bin_get_n_bins(r, rd);
 	// if multibin storage, we will use urecord->stack_bins, so set the size appropriately
 	if ( ! tr->rsv.ns->storage_data_in_memory && ! tr->rsv.ns->single_bin ) {
-		rd->n_bins = sizeof(urecord->stack_bins) / sizeof(as_bin);
+		uint16_t n_stack_bins = sizeof(urecord->stack_bins) / sizeof(as_bin);
+
+		if (n_stack_bins < rd->n_bins) {
+			cf_warning(AS_UDF, "record has too many bins (%d) for UDF processing", rd->n_bins);
+			as_storage_record_close(r, rd);
+			return -1;
+		}
+
+		rd->n_bins = n_stack_bins;
 	}
 
-	// stack bins are used when data-on-storage will not work for
-	// namespace going beyond stack size !! Currently set to 256
 	rd->bins = as_bin_get_all(r, rd, urecord->stack_bins);
 	if (tr->rsv.ns->storage_data_in_memory) {
 		urecord->starting_memory_bytes = as_storage_record_get_n_bytes_memory(rd);
@@ -229,14 +236,14 @@ udf_record_open(udf_record * urecord)
 			urecord->flag   |= UDF_RECORD_FLAG_OPEN;
 			urecord->flag   |= UDF_RECORD_FLAG_PREEXISTS;
 			cf_detail_digest(AS_UDF, &tr->keyd, "Open %p %x Digest:", urecord, urecord->flag);
-			udf_storage_record_open(urecord);
+			rec_rv = udf_storage_record_open(urecord);
 		}
 	} else {
 		cf_detail_digest(AS_UDF, &urecord->tr->keyd, "udf_record_open: %s rec_get returned with %d", 
 				(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) ? "sub" : "", rec_rv);
 	}
 	return rec_rv;
-} // end udf_re
+}
 
 /*
  * Function: Close storage record for udf record. Release
@@ -500,7 +507,7 @@ udf_record_cache_set(udf_record * urecord, const char * name, as_val * value,
 	}
 
 	// If not modified, then we will add the bin to the cache
-	if ( !modified && urecord->nupdates < UDF_RECORD_BIN_ULIMIT - 1 ) {
+	if ( !modified && urecord->nupdates < UDF_RECORD_BIN_ULIMIT ) {
 		udf_record_bin * bin = &(urecord->updates[urecord->nupdates]);
 		strncpy(bin->name, name, AS_ID_BIN_SZ);
 		bin->value = (as_val *) value;
@@ -533,7 +540,7 @@ udf_record_cache_sethidden(udf_record * urecord, const char * name)
 	}
 
 	// If not modified, then we will add the bin to the cache
-	if ( !modified && urecord->nupdates < UDF_RECORD_BIN_ULIMIT - 1 ) {
+	if ( !modified && urecord->nupdates < UDF_RECORD_BIN_ULIMIT ) {
 		udf_record_bin * bin = &(urecord->updates[urecord->nupdates]);
 		strncpy(bin->name, name, AS_ID_BIN_SZ);
 		bin->ishidden = true;
