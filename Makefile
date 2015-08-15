@@ -189,11 +189,8 @@ $(JEMALLOC)/Makefile: $(JEMALLOC)/configure
 $(LUAJIT)/src/luaconf.h: $(LUAJIT)/src/luaconf.h.orig
 	ln -s $(notdir $<) $@
 
-
-
 .PHONY: source
 source: src
-
 
 tags etags:
 	etags `find ai as cf modules xdr $(EEREPO) -name "*.[ch]" | egrep -v '(target/Linux|m4)'` `find /usr/include -name "*.h"`
