@@ -85,11 +85,12 @@ init:
 
 start:
 	@echo "Running the Aerospike Server locally..."
+	@PIDFILE=run/asd.pid ; if [ -f $$PIDFILE ]; then echo "Aerospike already running?  Please do \"make stop\" first."; exit -1; fi
 	$(BIN_DIR)/asd --config-file as/etc/aerospike_dev.conf
 
 stop:
 	@echo "Stopping the local Aerospike Server..."
-	PIDFILE=run/asd.pid ; if [ -f $$PIDFILE ]; then kill `cat $$PIDFILE`; rm $$PIDFILE; fi
+	@PIDFILE=run/asd.pid ; if [ -f $$PIDFILE ]; then kill `cat $$PIDFILE`; rm $$PIDFILE; fi
 
 .PHONY: clean
 clean:	cleanmodules cleandist
