@@ -601,7 +601,6 @@ typedef struct as_config_s {
 
 	cf_atomic_int		err_replica_null_node;
 	cf_atomic_int		err_replica_non_null_node;
-	cf_atomic_int		err_sync_copy_null_node;
 	cf_atomic_int		err_sync_copy_null_master;
 
 	cf_atomic_int		err_storage_queue_full;
