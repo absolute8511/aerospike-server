@@ -809,46 +809,6 @@ int find_in_replica_list(as_partition *p, cf_node self) {
 	return (my_index);
 }
 
-
-static cf_atomic32 random_replica_counter = 0;
-
-cf_node get_random_replica(as_partition *p) {
-	cf_assert(p, AS_PARTITION, CF_CRITICAL, "invalid partition");
-	cf_node n;
-	int i;
-
-//	cf_debug(AS_PARTITION, "Get Random Replica for Partition Pid(%u) Pkey(%lu)\n",
-//			p->partition_id, p->cluster_key);
-//	cf_debug(AS_PARTITION, "Target(%lu) origin(%lu) Replica(%lu)\n",
-//			p->target, p->origin, p->replica );
-
-	for (i = 0; i < g_config.paxos_max_cluster_size; i++) {
-		if (0 == p->replica[i])
-			break;
-	}
-
-	/* If no nodes were found, return zero; otherwise, pick a random
-	 * member of the replica set, excluding yourself */
-	if (0 == i)
-		n = 0;
-	else if (1 == i) {
-		n = p->replica[0];
-	}
-	else {
-		int infinite_guard = 0;
-retry:
-		n = p->replica[(cf_atomic32_incr(&random_replica_counter) % i)];
-		if (g_config.self_node == n) {
-			if (infinite_guard++ > g_config.paxos_max_cluster_size) {
-				return(p->replica[0]);
-			}
-			goto retry;
-		}
-	}
-	cf_debug(AS_PARTITION, "[EXIT]:: Replica Returns(%016lx) \n", n );
-	return n;
-}
-
 static
 cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_read)
 {
@@ -907,25 +867,27 @@ cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_re
 	 * 		node is master and desync
 	 * Read: Return this node if
 	 *		node is replica and has no origin set
-	 * Read: Return random replica node for all other cases
-	 * Write: Return master node for all other cases
+	 * Everything else: Return master
+	 *		this node is not in the replica list. 
 	 *
 	 */
-	if ( (is_master && is_sync) || migrating_to_master)
+	if ( (is_master && is_sync) || migrating_to_master) {
 		n = self;
-	else if (is_master && is_desync)
+	} 
+	else if (is_master && is_desync) {
 		n = p->origin;
-	else if (is_read && is_replica)
+	}
+	else if (is_read && is_replica) {
 		n = (p->origin == (cf_node)0) ? self : p->replica[0];
-	else
-		n = is_read ? get_random_replica(p) : p->replica[0];
+	}
+	else {
+		n = p->replica[0];
+	}
 
 	if (n == 0 && as_partition_balance_is_init_resolved()) {
-		cf_debug(AS_PARTITION, "{%s:%d} Returning null node, could not find sync copy of this partition my_index %d, master %"PRIx64" replica %"PRIx64"", ns->name, pid, my_index, p->replica[0], p->replica[1]);
-		cf_atomic_int_incr(&g_config.err_sync_copy_null_node);
-		n = p->replica[0];
-		if (n == 0)
-			cf_atomic_int_incr(&g_config.err_sync_copy_null_master);
+		cf_debug(AS_PARTITION, "{%s:%d} Returning null node, could not find sync copy of this partition my_index %d, master %"PRIx64" replica %"PRIx64" origin %"PRIx64"", 
+					ns->name, pid, my_index, p->replica[0], p->replica[1], p->origin);
+		cf_atomic_int_incr(&g_config.err_sync_copy_null_master);
 	}
 	return n;
 }

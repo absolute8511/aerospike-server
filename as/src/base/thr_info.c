@@ -696,8 +696,6 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	APPEND_STAT_COUNTER(db, g_config.err_replica_null_node);
 	cf_dyn_buf_append_string(db, ";err_replica_non_null_node=");
 	APPEND_STAT_COUNTER(db, g_config.err_replica_non_null_node);
-	cf_dyn_buf_append_string(db, ";err_sync_copy_null_node=");
-	APPEND_STAT_COUNTER(db, g_config.err_sync_copy_null_node);
 	cf_dyn_buf_append_string(db, ";err_sync_copy_null_master=");
 	APPEND_STAT_COUNTER(db, g_config.err_sync_copy_null_master);
 
@@ -4852,10 +4850,9 @@ info_debug_ticker_fn(void *unused)
 					cf_atomic_int_get(g_config.migrate_tx_object_count),
 					cf_atomic_int_get(g_config.migrate_rx_object_count)
 				 	);
-			cf_info(AS_INFO, " replica errs :: null %"PRIu64" non-null %"PRIu64" ::: sync copy errs :: node %"PRIu64" :: master %"PRIu64" ",
+			cf_info(AS_INFO, " replica errs :: null %"PRIu64" non-null %"PRIu64" ::: sync copy errs :: master %"PRIu64" ",
 					cf_atomic_int_get(g_config.err_replica_null_node),
 					cf_atomic_int_get(g_config.err_replica_non_null_node),
-					cf_atomic_int_get(g_config.err_sync_copy_null_node),
 					cf_atomic_int_get(g_config.err_sync_copy_null_master)
 					);
 
