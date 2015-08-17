@@ -55,12 +55,10 @@ typedef struct as_index_s {
 	cf_arenax_handle parent_h;
 
 	// offset: 36
-	// Color and migrate mark are accessed outside the main transaction thread.
-	// So, don't use the free bits here unless you know what you're doing...
+	// Don't use the free bits here for record info - this is accessed outside
+	// the record lock.
 	uint32_t color: 1; // one bit
-	uint32_t unused_but_unsafe_1: 15;
-	uint32_t migrate_mark: 1;
-	uint32_t unused_but_unsafe_2: 15;
+	uint32_t unused_but_unsafe: 31;
 
 	// Everything below here is used under the record lock.
 

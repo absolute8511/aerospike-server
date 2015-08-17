@@ -89,7 +89,6 @@ void as_record_initialize(as_index_ref *r_ref, as_namespace *ns)
 	}
 
 	// clear everything owned by record
-	r->migrate_mark = 0;
 	r->generation = 0;
 	r->void_time = 0;
 
@@ -908,8 +907,6 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 		cf_info(AS_RECORD, "record merge: bad reservation. tree %p ns %p part %p", rsv->tree, rsv->ns, rsv->p);
 		return(-1);
 	}
-
-	r->migrate_mark = 0;
 
 	// and after here it's GONE
 	as_record_done(&r_ref, rsv->ns);
