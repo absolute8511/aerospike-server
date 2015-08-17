@@ -809,18 +809,13 @@ int find_in_replica_list(as_partition *p, cf_node self) {
 	return (my_index);
 }
 
+/*
+ * Do some health checks of the partition map
+ * Should always be called within partition lock
+ */
 static
-cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_read)
+void as_partition_health_check(as_namespace *ns, size_t pid, as_partition *p, int my_index)
 {
-	cf_assert(ns, AS_PARTITION, CF_CRITICAL, "invalid namespace");
-	cf_assert((pid < AS_PARTITIONS), AS_PARTITION, CF_CRITICAL, "invalid partition id");
-	cf_assert(p, AS_PARTITION, CF_CRITICAL, "invalid partition");
-
-	cf_node n = (cf_node)0;
-	cf_node self = g_config.self_node;
-	// find location of node in replica list, returns -1 if node is not found
-	int my_index = find_in_replica_list(p, self);
-
 	as_partition_vinfo *pvinfo = &ns->partitions[pid].version_info;
 	bool is_sync 	= (p->state == AS_PARTITION_STATE_SYNC);
 	bool is_desync 	= (p->state == AS_PARTITION_STATE_DESYNC);
@@ -831,6 +826,7 @@ cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_re
 	bool migrating_to_master = (p->target != 0);
 
 	// State consistency checks
+	// TODO: We should ideally convert the below to warnings if we are confident
 	if ( migrating_to_master ) {
 		if (p->target != p->replica[0])
 			cf_debug(AS_PARTITION, "{%s:%d} Partition state error on write reservation. Target of migration not master node", ns->name, pid);
@@ -851,11 +847,44 @@ cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_re
 			cf_atomic_int_incr(&g_config.err_replica_null_node);
 		}
 	}
+
+	// This is relatively much expensive check. Its defensive.
 	for (int i = p->p_repl_factor; i < g_config.paxos_max_cluster_size; i++) {
 		if (p->replica[i] != (cf_node) 0) {
 			cf_debug(AS_PARTITION, "{%s:%d} Detected state error. Replica list contains non null node %"PRIx64" at position %d", ns->name, pid, p->replica[i], i);
 			cf_atomic_int_incr(&g_config.err_replica_non_null_node);
 		}
+	}
+
+}
+
+static inline
+bool as_partition_random_check() {
+	// Using bitwise operation as its relatively lightweight
+	// return true roughly once in 4095 times. i.e about 244 times in 1 million
+	// 4095 = 2^12-1. returns true for all numbers whose last 12 bits are set
+	return ((rand() & 4095) == 4095);
+}
+
+/*
+ * Find the node which is eligible to perform read/write
+ * Should always be called within partition lock
+ */
+static
+cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_read)
+{
+	cf_assert(ns, AS_PARTITION, CF_CRITICAL, "invalid namespace");
+	cf_assert((pid < AS_PARTITIONS), AS_PARTITION, CF_CRITICAL, "invalid partition id");
+	cf_assert(p, AS_PARTITION, CF_CRITICAL, "invalid partition");
+
+	cf_node n = (cf_node)0;
+	cf_node self = g_config.self_node;
+	// find location of node in replica list, returns -1 if node is not found
+	int my_index = find_in_replica_list(p, self);
+
+	// Do health check randomly (as its expensive to do for every read/write)
+	if (as_partition_random_check()) {
+		as_partition_health_check(ns, pid, p, my_index);
 	}
 
 	/* Find a sync copy of this partition:
@@ -871,6 +900,12 @@ cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_re
 	 *		this node is not in the replica list. 
 	 *
 	 */
+	bool is_sync 	= (p->state == AS_PARTITION_STATE_SYNC);
+	bool is_desync 	= (p->state == AS_PARTITION_STATE_DESYNC);
+	bool is_master 	= (0 == my_index);
+	bool is_replica = (0 < my_index) && (my_index < p->p_repl_factor);
+	bool migrating_to_master = (p->target != 0);
+
 	if ( (is_master && is_sync) || migrating_to_master) {
 		n = self;
 	} 
@@ -2777,7 +2812,6 @@ bool as_partition_valid_cluster_topology( as_paxos *paxos_p ) {
 	// list and dump it to the log, in group order.
 	cc_group_t remember_group_id = 0;
 	cc_group_t group_id = 0;
-	cc_node_t node_id;
 	cluster_config_t cc; // structure to hold state of the group
 	cc_cluster_config_defaults( &cc );
 
@@ -2794,7 +2828,6 @@ bool as_partition_valid_cluster_topology( as_paxos *paxos_p ) {
 	for (int i = 0; i < cluster_size; i++) {
 		if (succession[i] == (cf_node)0)  continue;
 		// Build up our cluster state -- so we can measure cluster health
-		node_id = cc_compute_node_id( succession[i] );
 		group_id = cc_compute_group_id( succession[i] );
 		cc_add_fullnode_group_entry( &cc, succession[i] );
 		if( remember_group_id == 0 ) {
