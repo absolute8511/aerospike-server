@@ -62,7 +62,7 @@ histogram_create(const char *name, histogram_scale scale)
 	}
 
 	strcpy(h->name, name);
-	memset(&h->counts, 0, sizeof(h->counts));
+	memset((void *) &h->counts, 0, sizeof(h->counts));
 
 	switch (scale) {
 	case HIST_MILLISECONDS:
@@ -342,7 +342,7 @@ linear_histogram_create(char *name, uint64_t start, uint64_t max_offset,
 		h->bucket_width = 1;
 	}
 
-	memset(&h->counts, 0, sizeof(h->counts));
+	memset((void *) &h->counts, 0, sizeof(h->counts));
 	h->info_snapshot[0] = 0;
 
 	return h;
@@ -375,7 +375,7 @@ linear_histogram_clear(linear_histogram *h, uint64_t start, uint64_t max_offset)
 		h->bucket_width = 1;
 	}
 
-	memset(&h->counts, 0, sizeof(h->counts));
+	memset((void *) &h->counts, 0, sizeof(h->counts));
 }
 
 //------------------------------------------------

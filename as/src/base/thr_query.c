@@ -969,6 +969,8 @@ query_netio(as_query_transaction *qtr)
 
 	ASD_QUERY_NETIO_FINISHED(nodeid, qtr->trid);
 
+	(void) time_ns; // silences compiler warning
+
 	return ret;
 }
 // **************************************************************************************************

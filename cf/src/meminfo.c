@@ -133,6 +133,11 @@ cf_meminfo(uint64_t *physmem, uint64_t *freemem, int *freepct, bool *swapping)
 			fprintf(stderr, " SWAPPING: %"PRIu64" %"PRIu64" %"PRIu64,
 				swapUsedPct, swapTotal, swapFree);
 		}
+#else
+        // Silence compiler warnings.
+        (void) swapFree;
+        (void) swapTotal;
+        (void) freeMem;
 #endif
 	}
 

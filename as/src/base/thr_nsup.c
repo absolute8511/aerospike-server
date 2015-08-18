@@ -1277,6 +1277,8 @@ thr_ldt_sup(void *arg)
 		}
 	}
 
+	(void) last_time;
+
 	return NULL;
 }
 

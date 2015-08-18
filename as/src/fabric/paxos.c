@@ -1384,6 +1384,7 @@ as_paxos_transaction_vote(as_paxos_transaction *s, cf_node n, as_paxos_transacti
 		if (s->votes[i])
 			v++;
 	}
+	(void) j;	// silences compiler warning
 
 	//r = ((v >= ((c >> 1) + 1)) || ((v == c) && (v == 1))) ? AS_PAXOS_TRANSACTION_VOTE_QUORUM : AS_PAXOS_TRANSACTION_VOTE_ACCEPT;
 	r = (v == ((c >> 1) + 1)) ? AS_PAXOS_TRANSACTION_VOTE_QUORUM : AS_PAXOS_TRANSACTION_VOTE_ACCEPT;
@@ -2427,6 +2428,7 @@ as_paxos_process_retransmit_check()
 					snprintf(sbuf + strlen(sbuf), 18, "%"PRIx64",", missing_nodes[i]);
 					nodes_missing = true;
 				}
+				(void) nodes_missing;	// silences compiler warning
 
 				if (p->cluster_size > 1) {
 					if (are_nodes_not_dunned) {
@@ -2468,6 +2470,7 @@ as_paxos_process_retransmit_check()
 					snprintf(sbuf + strlen(sbuf), 18, "%"PRIx64",", missing_nodes[i]);
 					nodes_missing = true;
 				}
+				(void) nodes_missing;	// silences compiler warning
 
 				if ((p->cluster_size > 1) && are_nodes_not_dunned) {
 					principal = as_paxos_succession_getprincipal();

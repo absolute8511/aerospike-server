@@ -3682,6 +3682,8 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 		return true;
 	}
 
+    (void) sindex_ret; // silences compiler warning
+    
 	return false;
 }
 

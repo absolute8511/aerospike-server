@@ -6763,7 +6763,8 @@ int info_command_sindex_repair(char *name, char *params, cf_dyn_buf *db) {
 		hasset = false;
 		set_str[0] = '\0';
 	}
-
+    (void) hasset;	// silences compiler warning
+    
 	as_sindex_metadata imd;
 	memset(&imd, 0, sizeof(imd));
 	imd.ns_name = cf_strdup(ns->name);
@@ -6877,6 +6878,7 @@ int info_command_sindex_stat(char *name, char *params, cf_dyn_buf *db) {
 		hasset = false;
 		set_str[0] = '\0';
 	}
+	(void) hasset; // silences compiler warning
 
 	as_sindex_metadata imd;
 	memset(&imd, 0, sizeof(imd));
@@ -6930,6 +6932,7 @@ int info_command_sindex_histogram(char *name, char *params, cf_dyn_buf *db)
 		hasset = false;
 		set_str[0] = '\0';
 	}
+	(void) hasset; // silences compiler warning
 
 	char op[64];
 	int op_len = sizeof(op);

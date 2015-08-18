@@ -53,6 +53,7 @@ udf_memtracker_generic(mem_tracker *mt, const uint32_t num_bytes, memtracker_op 
 		cf_detail(AS_UDF, "%ld: Memory Tracker %p reset",
 				  pthread_self(), mt);
 	}
+	(void) ret;
 	return 0;
 }
 

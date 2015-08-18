@@ -1449,6 +1449,7 @@ fabric_worker_fn(void *argv)
 					byte note_byte;
 					int  rv;
 					rv = read(note_fd, &note_byte, sizeof(note_byte));
+					(void) rv;	// silences compiler warning
 
 					// Got some kind of notification - check my queue
 					worker_queue_element wqe;

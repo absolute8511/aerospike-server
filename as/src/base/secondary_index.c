@@ -322,6 +322,8 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 		return AS_SINDEX_ERR_NOTFOUND;
 	}
 
+	(void) simatch;	// silences compiler warning
+    
 	// 		If any element matches
 	// 			Delete from the list
 	if (to_delete && ele) {
@@ -3961,6 +3963,7 @@ as_sindex_sbin_free(as_sindex_bin *sbin)
 			return AS_SINDEX_ERR;
 		}
 		cf_free(sbin->values);
+		(void) datasz;	// silences compiler warning.
 	}
     return AS_SINDEX_OK;
 }
