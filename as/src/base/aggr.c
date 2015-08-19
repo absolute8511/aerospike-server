@@ -119,7 +119,10 @@ as_aggr_reserve_qnode(as_namespace * ns, query_record * qrecord, as_partition_id
 		return as_query_reserve_qnode(ns, qrecord->caller, pid, qrecord->rsv);
 	}
 	else if (agg_type == AS_AGGR_SCAN) {
-		if (0 != as_partition_reserve_qnode(ns, pid, qrecord->rsv)) {
+		// NB: This is a short term fix. Before entire re-org shows. This is based
+		// on fact that we know only possibly way to get here with scan is with 
+		// write reservation. Just do the same instead of qnode
+		if (0 != as_partition_reserve_write(ns, pid, qrecord->rsv, NULL, NULL)) {
 			qrecord->rsv   = NULL;
 			return NULL;
 		}
