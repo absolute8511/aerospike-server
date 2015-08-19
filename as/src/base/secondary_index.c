@@ -323,7 +323,7 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 	}
 
 	(void) simatch;	// silences compiler warning
-    
+
 	// 		If any element matches
 	// 			Delete from the list
 	if (to_delete && ele) {

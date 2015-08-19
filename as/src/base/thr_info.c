@@ -6763,8 +6763,8 @@ int info_command_sindex_repair(char *name, char *params, cf_dyn_buf *db) {
 		hasset = false;
 		set_str[0] = '\0';
 	}
-    (void) hasset;	// silences compiler warning
-    
+	(void) hasset;	// silences compiler warning
+
 	as_sindex_metadata imd;
 	memset(&imd, 0, sizeof(imd));
 	imd.ns_name = cf_strdup(ns->name);

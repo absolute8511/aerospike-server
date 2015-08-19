@@ -134,10 +134,10 @@ cf_meminfo(uint64_t *physmem, uint64_t *freemem, int *freepct, bool *swapping)
 				swapUsedPct, swapTotal, swapFree);
 		}
 #else
-        // Silence compiler warnings.
-        (void) swapFree;
-        (void) swapTotal;
-        (void) freeMem;
+		// Silence compiler warnings.
+		(void) swapFree;
+		(void) swapTotal;
+		(void) freeMem;
 #endif
 	}
 

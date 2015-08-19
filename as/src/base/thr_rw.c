@@ -3592,9 +3592,7 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 		cf_digest *keyd, as_bin* old_bins, uint32_t n_old_bins,
 		as_bin* new_bins, uint32_t n_new_bins)
 {
-	int sindex_ret = AS_SINDEX_OK;
 	int sindex_found = 0;
-
 	bool not_just_created[n_new_bins];
 
 	for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
@@ -3672,7 +3670,7 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 	if (sindex_found) {
 		uint64_t start_ns = g_config.microbenchmarks ? cf_getns() : 0;
 
-		sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sindex_found, keyd);
+		as_sindex_update_by_sbin(ns, set_name, sbins, sindex_found, keyd);
 		as_sindex_sbin_freeall(sbins, sindex_found);
 
 		if (start_ns != 0) {
@@ -3682,8 +3680,6 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 		return true;
 	}
 
-    (void) sindex_ret; // silences compiler warning
-    
 	return false;
 }
 
