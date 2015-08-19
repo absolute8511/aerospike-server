@@ -79,7 +79,6 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 			  const char *key, int  vtype,  void *val, size_t vlen)
 {
 	uint8_t *   v           = NULL;
-	int64_t     unswapped_int = 0;
 	uint8_t     *sp_p = *sp_pp;
 
 	uint32_t tsz = val ? as_particle_size_from_mem((as_particle_type)vtype, (uint8_t *)val, (uint32_t)vlen) : 0;
@@ -103,17 +102,24 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 		case AS_PARTICLE_TYPE_INTEGER:
 		{
 			if (vlen != 8) {
-				cf_crash(AS_UDF, "unexpected int %d", vlen);
+				cf_crash(AS_UDF, "unexpected int size %d", vlen);
 			}
-            unswapped_int = * (int64_t *) val;
-			v = (uint8_t *) &unswapped_int;
+			v = (uint8_t *) val;
+			break;
+		}
+		case AS_PARTICLE_TYPE_FLOAT:
+		{
+			if (vlen != 8) {
+				cf_crash(AS_UDF, "unexpected double size %d", vlen);
+			}
+			v = (uint8_t *) val;
 			break;
 		}
 		case AS_PARTICLE_TYPE_BLOB:
 		case AS_PARTICLE_TYPE_STRING:
 		case AS_PARTICLE_TYPE_LIST:
 		case AS_PARTICLE_TYPE_MAP:
-			v = val;
+			v = (uint8_t *) val;
 			break;
 		default:
 		{
@@ -449,6 +455,13 @@ send_result(as_result * res, udf_call * call, void *udata)
 					as_integer * i = as_integer_fromval(v);
 					int64_t ri = as_integer_toint(i);
 					send_success(call, AS_PARTICLE_TYPE_INTEGER, &ri, 8);
+					break;
+				}
+				case AS_DOUBLE:
+				{
+					as_double * x = as_double_fromval(v);
+					double rx = as_double_get(x);
+					send_success(call, AS_PARTICLE_TYPE_FLOAT, &rx, 8);
 					break;
 				}
 				case AS_STRING:
@@ -1457,6 +1470,16 @@ as_val_tobuf(const as_val *v, uint8_t *buf, uint32_t *size)
 				}
 				break;
 			}
+			case AS_DOUBLE:
+			{
+				*size = 8;
+				if (buf) {
+					double x = as_double_get(as_double_fromval(v));
+					uint64_t ri = __cpu_to_be64(*(uint64_t*)&x);
+					memcpy(buf, &ri, *size);
+				}
+				break;
+			}
 			case AS_STRING:
 			{
 				as_string * s = as_string_fromval(v);
@@ -1569,6 +1592,13 @@ as_val_frombin(as_bin *bb)
 			value = (as_val *) as_integer_new(i);
 			break;
 		}
+		case AS_PARTICLE_TYPE_FLOAT:
+		{
+			double x = 0;
+			as_bin_particle_to_mem(bb, (uint8_t *) &x);
+			value = (as_val *) as_double_new(x);
+			break;
+		}
 		case AS_PARTICLE_TYPE_STRING:
 		{
 			uint32_t psz = as_bin_particle_mem_size(bb);
@@ -1638,6 +1668,9 @@ to_particle_type(int from_as_type)
 		case AS_BOOLEAN:
 		case AS_INTEGER:
 			return AS_PARTICLE_TYPE_INTEGER;
+			break;
+		case AS_DOUBLE:
+			return AS_PARTICLE_TYPE_FLOAT;
 			break;
 		case AS_STRING:
 			return AS_PARTICLE_TYPE_STRING;

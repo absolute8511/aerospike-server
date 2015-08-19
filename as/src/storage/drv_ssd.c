@@ -4297,13 +4297,18 @@ as_storage_record_close_ssd(as_record *r, as_storage_rd *rd)
 {
 	int result = 0;
 
-	// All record writes come through here!
+	// All record writes come through here! (Note - can get here twice if
+	// ssd_write() fails - make sure second call will be a no-op.)
+
 	if (rd->write_to_device && as_bin_inuse_has(rd)) {
 		result = ssd_write(r, rd);
+		rd->write_to_device = false;
 	}
 
 	if (rd->u.ssd.must_free_block) {
 		cf_free(rd->u.ssd.must_free_block);
+		rd->u.ssd.must_free_block = NULL;
+		rd->u.ssd.block = NULL;
 	}
 
 	return result;
