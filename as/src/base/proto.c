@@ -1181,7 +1181,7 @@ as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offse
 		rv = send(fd_h->fd, buf + pos, len - pos, MSG_NOSIGNAL);
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
-				cf_warning(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
+				cf_debug(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
 				return AS_NETIO_IO_ERR;
 			}
 			if (!blocking && (retry > AS_NETIO_MAX_IO_RETRY)) {
