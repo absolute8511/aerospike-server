@@ -3992,16 +3992,11 @@ as_sindex_partition_isqnode(as_namespace *ns, cf_digest *digest)
 
 	int pid       = as_partition_getid(*(digest));
 	p             = &ns->partitions[pid];
-
-	if (0 != pthread_mutex_lock(&p->lock))
-		cf_crash(AS_SINDEX, "couldn't acquire partition state lock: %s", cf_strerror(errno));
-
-	bool is_qnode = (p->qnode == g_config.self_node);
-
-	if (0 != pthread_mutex_unlock(&p->lock))
-		cf_crash(AS_SINDEX, "couldn't release partition state lock: %s", cf_strerror(errno));
-
-	return is_qnode;
+	// NB: This is lockless check could result is false positives. Query
+	// does the reservation before reading which would make sure these 
+	// are filtered out. Only possible case this could happen is when 
+	// qnode information is changing
+	return (p->qnode == g_config.self_node);
 }
 
 
