@@ -2275,10 +2275,6 @@ query_qtr_check_requeue(as_query_transaction *qtr)
 		do_enqueue = true;
 	}
 
-	if (cf_atomic32_get((qtr)->n_qwork_active) > g_config.query_worker_threads) {
-		do_enqueue = true;
-	}
-
 	if (do_enqueue) {
 		int ret = AS_QUERY_OK;
 		qtr_lock(qtr);
@@ -2304,6 +2300,7 @@ static bool
 query_process_inline(as_query_transaction *qtr)
 {
 	if (   g_config.query_req_in_query_thread
+		|| (cf_atomic32_get((qtr)->n_qwork_active) > g_config.query_req_max_inflight)
 		|| (qtr && qtr->short_running)
 		|| (qtr && qtr_finished(qtr))) { 
 		return true;
