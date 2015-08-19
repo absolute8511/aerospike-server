@@ -787,36 +787,39 @@ query_transaction_done(as_query_transaction *qtr)
 	ASD_QUERY_TRANS_DONE(nodeid, qtr->trid, (void *) qtr);
 
 
-	if (qtr->n_udf_tr_queued != 0) {
-		cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
+	if (qtr_inited(qtr)) { 
+		if (qtr->n_udf_tr_queued != 0) {
+			cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
+		}
+	
+		if (qtr->qctx.recl) {
+			cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
+			cf_free(qtr->qctx.recl);
+			qtr->qctx.recl = NULL;
+		}
+	
+		if (qtr->short_running) {
+			cf_atomic32_decr(&g_query_short_running);
+		} else {
+			cf_atomic32_decr(&g_query_long_running);
+		}
+	
+		// Release all the qnodes
+		query_post_release_qnode(qtr);
+	
+		query_update_stats(qtr);
+	
+		if (qtr->bb_r) {
+			bb_poolrelease(qtr->bb_r);
+			qtr->bb_r = NULL;
+		}
+	
+		pthread_mutex_destroy(&qtr->buf_mutex);
 	}
 
-	if (qtr->qctx.recl) {
-		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
-		cf_free(qtr->qctx.recl);
-		qtr->qctx.recl = NULL;
-	}
-
-	if (qtr->short_running) {
-		cf_atomic32_decr(&g_query_short_running);
-	} else {
-		cf_atomic32_decr(&g_query_long_running);
-	}
-
-	// Release all the qnodes
-	query_post_release_qnode(qtr);
-
-	query_update_stats(qtr);
-
-
-	if (qtr->bb_r) {
-		bb_poolrelease(qtr->bb_r);
-		qtr->bb_r = NULL;
-	}
 	query_release_fd(qtr);
 	query_teardown(qtr);
 
-	pthread_mutex_destroy(&qtr->buf_mutex);
 
 	ASD_QUERY_QTR_FREE(nodeid, qtr->trid, (void *) qtr);
 
@@ -1946,10 +1949,10 @@ qwork_setup(query_work *qworkp, as_query_transaction *qtr)
 	qtr_reserve(qtr, __FILE__, __LINE__);
 	qworkp->qtr               = qtr;
 	qworkp->recl              = qtr->qctx.recl;
-	qtr->qctx.recl           = NULL;
+	qtr->qctx.recl            = NULL;
 	qworkp->queued_time_ns    = cf_getns();
-	qtr->n_digests          += qtr->qctx.n_bdigs;
-	qtr->qctx.n_bdigs        = 0;
+	qtr->n_digests           += qtr->qctx.n_bdigs;
+	qtr->qctx.n_bdigs         = 0;
 	if (qtr->job_type == AS_QUERY_AGG) {
 		qworkp->type          = AS_QUERY_REQTYPE_AGG;
 	} else if (qtr->job_type == AS_QUERY_MRJ) {
