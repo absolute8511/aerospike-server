@@ -562,6 +562,8 @@ qtr_set_running(as_query_transaction *qtr) {
 	qtr_lock(qtr);
 	if (qtr->state == AS_QTR_STATE_INIT) {
 		qtr->state       = AS_QTR_STATE_RUNNING;
+	} else {
+		cf_crash(AS_QUERY, "Invalid Query state %d while moving to running state ...", qtr->state);
 	}
 	qtr_unlock(qtr);
 }
@@ -772,37 +774,34 @@ query_update_stats(as_query_transaction *qtr)
 static void
 query_run_teardown(as_query_transaction *qtr)
 {
-	if (qtr_started(qtr)) { 
-		
-		query_update_stats(qtr);
+	query_update_stats(qtr);
 
-		if (qtr->n_udf_tr_queued != 0) {
-			cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
-		}
-
-		if (qtr->qctx.recl) {
-			cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
-			cf_free(qtr->qctx.recl);
-			qtr->qctx.recl = NULL;
-		}
-
-		if (qtr->short_running) {
-			cf_atomic32_decr(&g_query_short_running);
-		} else {
-			cf_atomic32_decr(&g_query_long_running);
-		}
-
-		// Release all the qnodes
-		query_post_release_qnode(qtr);
-	
-
-		if (qtr->bb_r) {
-			bb_poolrelease(qtr->bb_r);
-			qtr->bb_r = NULL;
-		}
-
-		pthread_mutex_destroy(&qtr->buf_mutex);
+	if (qtr->n_udf_tr_queued != 0) {
+		cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
 	}
+
+	if (qtr->qctx.recl) {
+		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
+		cf_free(qtr->qctx.recl);
+		qtr->qctx.recl = NULL;
+	}
+
+	if (qtr->short_running) {
+		cf_atomic32_decr(&g_query_short_running);
+	} else {
+		cf_atomic32_decr(&g_query_long_running);
+	}
+
+	// Release all the qnodes
+	query_post_release_qnode(qtr);
+
+
+	if (qtr->bb_r) {
+		bb_poolrelease(qtr->bb_r);
+		qtr->bb_r = NULL;
+	}
+
+	pthread_mutex_destroy(&qtr->buf_mutex);
 }
 
 static void
@@ -813,6 +812,7 @@ query_teardown(as_query_transaction *qtr)
 	if (qtr->binlist)     cf_vector_destroy(qtr->binlist);
 	if (qtr->setname)     cf_free(qtr->setname);
 	if (qtr->msgp)        cf_free(qtr->msgp);
+	pthread_mutex_destroy(&qtr->slock);
 }
 
 static void
@@ -842,7 +842,9 @@ query_transaction_done(as_query_transaction *qtr)
 	ASD_QUERY_TRANS_DONE(nodeid, qtr->trid, (void *) qtr);
 
 
-	query_run_teardown(qtr);
+	if (qtr_started(qtr)) { 
+		query_run_teardown(qtr);
+	}
 
 
 	query_release_fd(qtr);
@@ -2155,44 +2157,42 @@ query_run_setup(as_query_transaction *qtr)
 	size_t nrecs = 0;
 #endif
 
-	if (!qtr_started(qtr)) {
-		ASD_QUERY_INIT(nodeid, qtr->trid);
-		QUERY_HIST_INSERT_DATA_POINT(query_query_q_wait_hist, qtr->start_time);
-		cf_atomic64_set(&qtr->n_result_records, 0);
-		qtr->track               = false;
-		qtr->querying_ai_time_ns = 0;
-		qtr->n_io_outstanding    = 0;
-		qtr->netio_push_seq      = 0;
-		qtr->netio_pop_seq       = 1;
-		qtr->blocking            = false;
-		pthread_mutex_init(&qtr->buf_mutex, NULL);
+	ASD_QUERY_INIT(nodeid, qtr->trid);
+	QUERY_HIST_INSERT_DATA_POINT(query_query_q_wait_hist, qtr->start_time);
+	cf_atomic64_set(&qtr->n_result_records, 0);
+	qtr->track               = false;
+	qtr->querying_ai_time_ns = 0;
+	qtr->n_io_outstanding    = 0;
+	qtr->netio_push_seq      = 0;
+	qtr->netio_pop_seq       = 1;
+	qtr->blocking            = false;
+	pthread_mutex_init(&qtr->buf_mutex, NULL);
 
-		// Aerospike Index object initialization
-		qtr->result_code              = AS_PROTO_RESULT_OK;
-		
-		// Initialize qctx
-		// start with the threshold value
-		qtr->qctx.bsize               = g_config.query_threshold;
-		qtr->qctx.new_ibtr            = true;
-		qtr->qctx.nbtr_done           = false;
-		qtr->qctx.pimd_idx            = -1;
-		qtr->qctx.recl                = NULL;
-		qtr->qctx.n_bdigs             = 0;
-		qtr->qctx.qnodes_pre_reserved = g_config.qnodes_pre_reserved;
-		qtr->qctx.bkey                = &qtr->bkey;
-		init_ai_obj(qtr->qctx.bkey);
-		bzero(&qtr->qctx.bdig, sizeof(cf_digest));
-		// Populate all the paritions for which this node is a qnode.
-		as_query_pre_reserve_qnodes(qtr);
+	// Aerospike Index object initialization
+	qtr->result_code              = AS_PROTO_RESULT_OK;
+	
+	// Initialize qctx
+	// start with the threshold value
+	qtr->qctx.bsize               = g_config.query_threshold;
+	qtr->qctx.new_ibtr            = true;
+	qtr->qctx.nbtr_done           = false;
+	qtr->qctx.pimd_idx            = -1;
+	qtr->qctx.recl                = NULL;
+	qtr->qctx.n_bdigs             = 0;
+	qtr->qctx.qnodes_pre_reserved = g_config.qnodes_pre_reserved;
+	qtr->qctx.bkey                = &qtr->bkey;
+	init_ai_obj(qtr->qctx.bkey);
+	bzero(&qtr->qctx.bdig, sizeof(cf_digest));
+	// Populate all the paritions for which this node is a qnode.
+	as_query_pre_reserve_qnodes(qtr);
 
-		qtr->priority                 = g_config.query_priority;
-		qtr->bb_r                     = bb_poolrequest();
-		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
+	qtr->priority                 = g_config.query_priority;
+	qtr->bb_r                     = bb_poolrequest();
+	cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 
-		qtr_set_running(qtr);
-		cf_atomic64_incr(&g_config.query_short_reqs);
-		cf_atomic32_incr(&g_query_short_running);
-	}
+	qtr_set_running(qtr);
+	cf_atomic64_incr(&g_config.query_short_reqs);
+	cf_atomic32_incr(&g_query_short_running);
 	return AS_QUERY_OK;
 }
 
@@ -2410,7 +2410,11 @@ query_generator(as_query_transaction *qtr)
     uint64_t trid = tr? tr->trid : 0;
 #endif
 
-	query_run_setup(qtr);
+	// Query can get requeue for many different reason. Check if it is 
+	// already started before indulging in act to setting it up for run
+	if (!qtr_started(qtr)) {
+		query_run_setup(qtr);
+	}
 
 	int loop = 0;
 	while (true) {
