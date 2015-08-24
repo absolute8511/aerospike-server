@@ -925,10 +925,13 @@ aggr_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	as_job_init(_job, &aggr_scan_job_vtable, &g_scan_manager, RSV_WRITE,
 			tr->trid, ns, set_id, options.priority);
 
+	job->msgp = tr->msgp;
+
 	if (as_aggr_call_init(&job->aggr_call, tr, job, &aggr_scan_caller_intf,
 			&aggr_scan_istream_hooks, &aggr_scan_ostream_hooks, ns,
 			true) != 0) {
 		cf_warning(AS_SCAN, "aggregation scan job failed call init");
+		job->msgp = NULL;
 		as_job_destroy(_job);
 		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
@@ -946,11 +949,10 @@ aggr_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 		cf_warning(AS_SCAN, "aggregation scan job %lu failed to start (%d)",
 				_job->trid, result);
 		conn_scan_job_disown_fd((conn_scan_job*)job);
+		job->msgp = NULL;
 		as_job_destroy(_job);
 		return result;
 	}
-
-	job->msgp = tr->msgp;
 
 	return AS_PROTO_RESULT_OK;
 }
@@ -1248,12 +1250,14 @@ udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	as_job_init(_job, &udf_bg_scan_job_vtable, &g_scan_manager, RSV_WRITE,
 			tr->trid, ns, set_id, options.priority);
 
+	job->msgp = tr->msgp;
 	job->n_active_tr = 0;
 	job->n_successful_tr = 0;
 	job->n_failed_tr = 0;
 
 	if (udf_call_init(&job->call, tr) != 0) {
 		cf_warning(AS_SCAN, "udf-bg scan job failed call init");
+		job->msgp = NULL;
 		as_job_destroy(_job);
 		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
@@ -1267,6 +1271,7 @@ udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	if (result != 0) {
 		cf_warning(AS_SCAN, "udf-bg scan job %lu failed to start (%d)",
 				_job->trid, result);
+		job->msgp = NULL;
 		as_job_destroy(_job);
 		return result;
 	}
@@ -1279,8 +1284,6 @@ udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	tr->proto_fd_h->last_used = cf_getms();
 	AS_RELEASE_FILE_HANDLE(tr->proto_fd_h);
 	tr->proto_fd_h = NULL;
-
-	job->msgp = tr->msgp;
 
 	return AS_PROTO_RESULT_OK;
 }
