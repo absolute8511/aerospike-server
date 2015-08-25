@@ -664,7 +664,7 @@ as_ldt_digest_randomizer(cf_digest *dig)
 	//
 	// Reasonably ok Randomizer of digest bits
 	as_config * c = &g_config;
-	uint32_t digest_randomizer_seed =  c->hw_self_node & 0xffffffff;
+	uint32_t digest_randomizer_seed =  (c->hw_self_node & 0xffff0000) + (cf_getus() & 0xffff);
 	srand(digest_randomizer_seed);
 
 	// 3 bytes make there could be 10^8 digest generated in a microsecond
