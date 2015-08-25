@@ -6657,61 +6657,6 @@ int info_command_sindex_dump(char *name, char *params, cf_dyn_buf *db) {
 	return 0;
 }
 
-int info_command_sindex_describe(char *name, char *params, cf_dyn_buf *db) {
-	// get namespace and make sure it exists
-	char ns_str[128];
-	int ns_len = sizeof(ns_str);
-	if (as_info_parameter_get(params, "ns", ns_str, &ns_len)) {
-		cf_info(AS_INFO, "invalid ns");
-		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
-				"Namespace Not Specified");
-		return 0;
-	}
-	as_namespace *ns = as_namespace_get_byname(ns_str);
-	if (!ns) {
-		cf_info(AS_INFO, "ns not found");
-		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
-				"Namespace Not Found");
-		return 0;
-	}
-
-	// get optional set
-	char set_str[AS_SET_NAME_MAX_SIZE];
-	int set_len = sizeof(set_str);
-	if (as_info_parameter_get(params, STR_SET, set_str, &set_len)) {
-		set_str[0] = '\0';
-	}
-	// get indexname
-	char index_name_str[128];
-	int  index_len = sizeof(index_name_str);
-	if (as_info_parameter_get(params, "indexname", index_name_str, &index_len)) {
-		cf_info(AS_INFO, "invalid indexname");
-		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
-				"Index Name Not Specified");
-		return 0;
-	}
-
-	as_sindex_metadata	imd;
-	memset((void *)&imd, 0, sizeof(imd));
-	imd.ns_name = cf_strdup(ns->name);
-	imd.iname   = cf_strdup(index_name_str);
-	imd.set		= cf_strdup(set_str);
-
-	int resp = as_sindex_describe_str(ns, &imd, db);
-	if (resp) {
-		cf_info(AS_INFO, "Describe For Index %s Fail with error %s",
-				index_name_str, as_sindex_err_str(resp));
-		INFO_COMMAND_SINDEX_FAILCODE(
-			as_sindex_err_to_clienterr(resp, __FILE__, __LINE__),
-			as_sindex_err_str(resp));
-	}
-	if (imd.ns_name)    cf_free(imd.ns_name);
-	if (imd.iname)      cf_free(imd.iname);
-	if (imd.set)        cf_free(imd.set);
-
-	return(0);
-}
-
 int info_command_sindex_repair(char *name, char *params, cf_dyn_buf *db) {
 	char ns_str[AS_ID_NAMESPACE_SZ];
 	int ns_len = sizeof(ns_str);
@@ -7230,7 +7175,6 @@ as_info_init()
 	as_info_set_command("scan-abort", info_command_abort_scan, PERM_SCAN_MANAGE);            // Abort a scan with a given id.
 	as_info_set_command("scan-abort-all", info_command_abort_all_scans, PERM_SCAN_MANAGE);   // Abort all scans.
 	as_info_set_dynamic("scan-list", as_scan_list, false);                                   // List info for all scan jobs.
-	as_info_set_command("sindex-describe", info_command_sindex_describe, PERM_NONE);
 	as_info_set_command("sindex-stat", info_command_sindex_stat, PERM_NONE);
 	as_info_set_command("sindex-list", info_command_sindex_list, PERM_NONE);
 	as_info_set_dynamic("sindex-builder-list", as_sbld_list, false);                         // List info for all secondary index builder jobs.
