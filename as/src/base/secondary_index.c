@@ -1719,24 +1719,31 @@ as_sindex_query(as_sindex *si, as_sindex_range *srange, as_sindex_qctx *qctx)
 	return ret;
 }
 
+// TODO : sindex repair should drop the index and repopulate it
+// Currently we only populate the sindex again. This does not clean the uncleanable 
+// garbage accumulated in the secondary index tree.
 int
 as_sindex_repair(as_namespace *ns, as_sindex_metadata *imd)
 {
-	if (!ns)
-		return AS_SINDEX_ERR_PARAM;
 	as_sindex *si = as_sindex_lookup_by_iname(ns, imd->iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
 	if (si) {
 		if (si->desync_cnt == 0) {
+			cf_warning(AS_SINDEX, "SINDEX REPAIR : index %s is found in sync with primary."
+						" No need to repair index", imd->iname);
+			AS_SINDEX_RELEASE(si);
 			return AS_SINDEX_OK;
 		}
 		int rv = cf_queue_push(g_sindex_populate_q, &si);
 		if (CF_QUEUE_OK != rv) {
-			cf_warning(AS_SINDEX, "Failed to queue up for population... index=%s "
+			cf_warning(AS_SINDEX, "SINDEX REPAIR : Failed to queue up for population. index=%s "
 					"Internal Queue Error rv=%d, retry repair", si->imd->iname, rv);
 			AS_SINDEX_RELEASE(si);
 			return AS_SINDEX_ERR;
 		}
 		return AS_SINDEX_OK;
+	}
+	else {
+		cf_warning(AS_SINDEX, "SINDEX REPAIR : index %s not found", imd->iname);
 	}
 	return AS_SINDEX_ERR_NOTFOUND;
 }

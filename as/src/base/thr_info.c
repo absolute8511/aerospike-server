@@ -6713,38 +6713,54 @@ int info_command_sindex_describe(char *name, char *params, cf_dyn_buf *db) {
 }
 
 int info_command_sindex_repair(char *name, char *params, cf_dyn_buf *db) {
-	char ns_str[128];
+	char ns_str[AS_ID_NAMESPACE_SZ];
 	int ns_len = sizeof(ns_str);
-	if (0 != as_info_parameter_get(params, "ns", ns_str, &ns_len)) {
-		cf_info(AS_INFO, "invalid ns");
-		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
-				"Namespace Not Specified");
+	int ret    = 0;
+	
+	ret = as_info_parameter_get(params, "ns", ns_str, &ns_len);
+	if (ret) {
+		if (ret == -2) {
+			cf_warning(AS_INFO, "SINDEX REPAIR : namespace name exceeds max length %d", 
+				AS_ID_NAMESPACE_SZ);
+			INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
+				"Namespace name exceeds max length");
+		}
+		else {
+			cf_warning(AS_INFO, "SINDEX REPAIR : invalid ns");
+			INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
+				"Namespace Not Specified");		
+		}
 		return 0;
 	}
-	as_namespace *ns = as_namespace_get_byname(ns_str);
+
+	as_namespace * ns = as_namespace_get_byname(ns_str);
 	if (!ns) {
-		cf_info(AS_INFO, "ns not found");
+		cf_warning(AS_INFO, "SINDEX REPAIR : namespace not found");
 		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
 				"Namespace Not Found");
 		return 0;
 	}
 
 	// get indexname
-	char index_name_str[128];
+	char index_name_str[AS_ID_INAME_SZ];
 	int  index_len = sizeof(index_name_str);
-	if (as_info_parameter_get(params, "indexname", index_name_str, &index_len)) {
-		cf_info(AS_INFO, "invalid indexname");
-		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
+	ret = as_info_parameter_get(params, "indexname", index_name_str, &index_len);
+	if (ret) {
+		if (ret == -2) {
+			cf_warning(AS_INFO, "SINDEX REPAIR : indexname exceeds max length %d", AS_ID_INAME_SZ);
+			INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
+				"Index Name exceeds max length");
+		}
+		else {
+			cf_warning(AS_INFO, "SINDEX REPAIR : invalid indexname");
+			INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
 				"Index Name Not Specified");
+		}
 		return 0;
 	}
 
-	// get optional set
-	char set_str[AS_SET_NAME_MAX_SIZE];
-	int set_len = sizeof(set_str);
-	if (as_info_parameter_get(params, STR_SET, set_str, &set_len)) {
-		set_str[0] = '\0';
-	}
+	cf_info(AS_SINDEX, "SINDEX REPAIR : received request to repair index %s on namespace %s", 
+			index_name_str, ns->name);
 
 	as_sindex_metadata imd;
 	memset(&imd, 0, sizeof(imd));
@@ -6753,16 +6769,21 @@ int info_command_sindex_repair(char *name, char *params, cf_dyn_buf *db) {
 
 	int resp = as_sindex_repair(ns, &imd);
 	if (resp) {
-		cf_dyn_buf_append_string(db, "Invalid Repair");
+		cf_dyn_buf_append_string(db, "Sindex repair failed");
 		INFO_COMMAND_SINDEX_FAILCODE(
-				as_sindex_err_to_clienterr(resp, __FILE__, __LINE__),
-				as_sindex_err_str(resp));
+			as_sindex_err_to_clienterr(resp, __FILE__, __LINE__),
+			as_sindex_err_str(resp));
 	}
 	else {
 		cf_dyn_buf_append_string(db, "Ok");
 	}
-	if (imd.ns_name) cf_free(imd.ns_name);
-	if (imd.iname) cf_free(imd.iname);
+
+	if (imd.ns_name) {
+		cf_free(imd.ns_name);
+	}
+	if (imd.iname) {
+		cf_free(imd.iname);
+	}
 	return(0);
 }
 
