@@ -520,11 +520,19 @@ send_result(as_result * res, udf_call * call, void *udata)
 			send_success(call, AS_PARTICLE_TYPE_NULL, NULL, 0);
 		}
 	} else { // Else -- NOT success
-		as_string * s   = as_string_fromval(v);
-		char *      rs  = (char *) as_string_tostring(s);
+		if (as_val_type(v) == AS_STRING) {
+			as_string * s   = as_string_fromval(v);
+			char *      rs  = (char *) as_string_tostring(s);
 
-		cf_debug(AS_UDF, "FAILURE when calling %s %s %s", call->filename, call->function, rs);
-		send_udf_failure(call, AS_PARTICLE_TYPE_STRING, rs, as_string_len(s));
+			cf_debug(AS_UDF, "FAILURE when calling %s %s %s", call->filename, call->function, rs);
+			send_udf_failure(call, AS_PARTICLE_TYPE_STRING, rs, as_string_len(s));
+		} else {
+			char lua_err_str[1024];
+			size_t len = (size_t)sprintf(lua_err_str, "%s:0: in function %s() - error() argument type not handled", call->filename, call->function);
+
+			cf_debug(AS_UDF, "FAILURE when calling %s %s", call->filename, call->function);
+			send_udf_failure(call, AS_PARTICLE_TYPE_STRING, lua_err_str, len);
+		}
 	}
 }
 
