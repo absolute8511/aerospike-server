@@ -3044,6 +3044,10 @@ int as_smd_majority_consensus_merge(char *module, as_smd_item_list_t **merged_li
 
 			// Note: The value (not key) of the metadata item is used as the key in merge_hash.
 			char  key[AS_SMD_MAJORITY_CONSENSUS_KEYSIZE] = {"\0"};
+			if (!(curitem->value) || !(strlen(curitem->value))) {
+				cf_warning(AS_SMD, "In SMD module \"%s\", in metadata item list %d from node %016lX, item %d, key \"%s\" has an invalid NULL value ~~ skipping it for consideration during merge resolution", curitem->module_name, i, curitem->node_id, j, curitem->key);
+				continue;
+			}
 			int keylen = strlen(curitem->value);
 			if (keylen > AS_SMD_MAJORITY_CONSENSUS_KEYSIZE) {
 				cf_warning(AS_SMD, "Metadata item from module %s with key %s is not considered for merge resolution as the key is too large (%d)", curitem->module_name, curitem->value, keylen);
