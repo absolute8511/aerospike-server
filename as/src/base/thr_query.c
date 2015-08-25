@@ -155,7 +155,7 @@
  */
 // **************************************************************************************************
 typedef enum {
-	AS_QTR_STATE_NONE     = 0,
+	AS_QTR_STATE_INIT     = 0,
 	AS_QTR_STATE_RUNNING  = 1,
 	AS_QTR_STATE_ABORT    = 2,
 	AS_QTR_STATE_ERR      = 3,
@@ -373,7 +373,8 @@ histogram * query_query_q_wait_hist;             // Histogram to track time spen
 histogram * query_prepare_batch_hist;            // Histogram to track time spend while preparing batches. Secondary index
 												 // slow. Check batch is too big 
 histogram * query_batch_io_q_wait_hist;          // Histogram to track time spend waiting in queue for worker thread. 
-histogram * query_batch_io_hist;                 // Histogram to track time spend doing I/O per batch. 
+histogram * query_batch_io_hist;                 // Histogram to track time spend doing I/O per batch. This includes
+												 // priority based sleep after n units of work. 
 												 // For above two Query worker thread busy if not IO bound then try bumping
 												 // up the priority. Query thread may be yielding too much.
 histogram * query_net_io_hist;                   // Histogram to track time spend sending results to client. Network problem!!
@@ -559,21 +560,27 @@ qwork_poolrequest()
 static void
 qtr_set_running(as_query_transaction *qtr) {
 	qtr_lock(qtr);
-	if (qtr->state == AS_QTR_STATE_NONE) {
+	if (qtr->state == AS_QTR_STATE_INIT) {
 		qtr->state       = AS_QTR_STATE_RUNNING;
+	} else {
+		cf_crash(AS_QUERY, "Invalid Query state %d while moving to running state ...", qtr->state);
 	}
 	qtr_unlock(qtr);
 }
 
+/*
+ * Query in non init state (picked up by generator) means it is 
+ * running. Could be RUNNING/ABORT/FAIL/DONE
+ */
 static bool
-qtr_inited(as_query_transaction *qtr) {
+qtr_started(as_query_transaction *qtr) {
 	qtr_lock(qtr);
-	bool inited = false;
-	if (qtr->state != AS_QTR_STATE_NONE) {
-		inited = true;
+	bool started = false;
+	if (qtr->state != AS_QTR_STATE_INIT) {
+		started = true;
 	}
 	qtr_unlock(qtr);
-	return inited;
+	return started;
 }
 
 static void
@@ -638,7 +645,7 @@ qtr_is_abort(as_query_transaction *qtr)
 	return abort;
 }
 
-// Finish clean
+
 static bool
 qtr_finished(as_query_transaction *qtr)
 {
@@ -677,7 +684,7 @@ query_post_release_qnode(as_query_transaction * qtr)
 		cf_warning(AS_QUERY, "qtr is NULL");
 		return;
 	}
-	if (qtr_inited(qtr) && qtr->qctx.qnodes_pre_reserved) {
+	if (qtr->qctx.qnodes_pre_reserved) {
 		for (int i=0; i<AS_PARTITIONS; i++) {
 			if (qtr->qctx.is_partition_qnode[i]) {
 				as_partition_release(&qtr->rsv[i]);
@@ -690,6 +697,11 @@ query_post_release_qnode(as_query_transaction * qtr)
 	}
 }
 
+/*
+ * NB: These stats come into picture only if query really started 
+ * running. If it fails before even running it is accounted in
+ * fail
+ */
 static inline void
 query_update_stats(as_query_transaction *qtr)
 {
@@ -734,13 +746,22 @@ query_update_stats(as_query_transaction *qtr)
 		cf_atomic64_add(&g_config.lookup_response_size, qtr->net_io_bytes);
 		cf_atomic64_add(&g_config.lookup_num_records, rows);
 	}
-	cf_hist_track_insert_raw(g_config.q_rcnt_hist, rows);
-	cf_hist_track_insert_data_point(g_config.q_hist, qtr->start_time);
-	QUERY_HIST_INSERT_RAW(query_prepare_batch_hist, qtr->querying_ai_time_ns);
 
+	cf_hist_track_insert_data_point(g_config.q_hist, qtr->start_time);
 	SINDEX_HIST_INSERT_DATA_POINT(qtr->si, query_hist, qtr->start_time);
-	SINDEX_HIST_INSERT_RAW(qtr->si, query_rcnt_hist, qtr->n_digests);
-	SINDEX_HIST_INSERT_RAW(qtr->si, query_diff_hist, qtr->n_digests - qtr->n_result_records);
+
+	if (qtr->querying_ai_time_ns) {
+		QUERY_HIST_INSERT_RAW(query_prepare_batch_hist, qtr->querying_ai_time_ns);
+	}
+
+	if (qtr->n_digests) {
+		SINDEX_HIST_INSERT_RAW(qtr->si, query_rcnt_hist, qtr->n_digests);
+		if (rows) {
+			cf_hist_track_insert_raw(g_config.q_rcnt_hist, rows);
+			SINDEX_HIST_INSERT_RAW(qtr->si, query_diff_hist, qtr->n_digests - rows);
+		}
+	}	
+
 
 
 	uint64_t query_stop_time = cf_getns();
@@ -751,6 +772,39 @@ query_update_stats(as_query_transaction *qtr)
 }
 
 static void
+query_run_teardown(as_query_transaction *qtr)
+{
+	query_update_stats(qtr);
+
+	if (qtr->n_udf_tr_queued != 0) {
+		cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
+	}
+
+	if (qtr->qctx.recl) {
+		cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
+		cf_free(qtr->qctx.recl);
+		qtr->qctx.recl = NULL;
+	}
+
+	if (qtr->short_running) {
+		cf_atomic32_decr(&g_query_short_running);
+	} else {
+		cf_atomic32_decr(&g_query_long_running);
+	}
+
+	// Release all the qnodes
+	query_post_release_qnode(qtr);
+
+
+	if (qtr->bb_r) {
+		bb_poolrelease(qtr->bb_r);
+		qtr->bb_r = NULL;
+	}
+
+	pthread_mutex_destroy(&qtr->buf_mutex);
+}
+
+static void
 query_teardown(as_query_transaction *qtr)
 {
 	if (qtr->srange)      as_sindex_range_free(&qtr->srange);
@@ -758,6 +812,7 @@ query_teardown(as_query_transaction *qtr)
 	if (qtr->binlist)     cf_vector_destroy(qtr->binlist);
 	if (qtr->setname)     cf_free(qtr->setname);
 	if (qtr->msgp)        cf_free(qtr->msgp);
+	pthread_mutex_destroy(&qtr->slock);
 }
 
 static void
@@ -787,35 +842,10 @@ query_transaction_done(as_query_transaction *qtr)
 	ASD_QUERY_TRANS_DONE(nodeid, qtr->trid, (void *) qtr);
 
 
-	if (qtr_inited(qtr)) { 
-		if (qtr->n_udf_tr_queued != 0) {
-			cf_warning(AS_QUERY, "QUEUED UDF not equal to zero when query transaction is done");
-		}
-	
-		if (qtr->qctx.recl) {
-			cf_ll_reduce(qtr->qctx.recl, true /*forward*/, as_index_keys_ll_reduce_fn, NULL);
-			cf_free(qtr->qctx.recl);
-			qtr->qctx.recl = NULL;
-		}
-	
-		if (qtr->short_running) {
-			cf_atomic32_decr(&g_query_short_running);
-		} else {
-			cf_atomic32_decr(&g_query_long_running);
-		}
-	
-		// Release all the qnodes
-		query_post_release_qnode(qtr);
-	
-		query_update_stats(qtr);
-	
-		if (qtr->bb_r) {
-			bb_poolrelease(qtr->bb_r);
-			qtr->bb_r = NULL;
-		}
-	
-		pthread_mutex_destroy(&qtr->buf_mutex);
+	if (qtr_started(qtr)) { 
+		query_run_teardown(qtr);
 	}
+
 
 	query_release_fd(qtr);
 	query_teardown(qtr);
@@ -2113,8 +2143,12 @@ batchout:
 }
 
 
+/*
+ * Phase II setup just after the generator picks up query for
+ * the first time
+ */
 static int
-query_transaction_init(as_query_transaction *qtr)
+query_run_setup(as_query_transaction *qtr)
 {
 
 #if defined(USE_SYSTEMTAP)
@@ -2125,45 +2159,42 @@ query_transaction_init(as_query_transaction *qtr)
 	size_t nrecs = 0;
 #endif
 
-	if (!qtr_inited(qtr)) {
-		ASD_QUERY_INIT(nodeid, qtr->trid);
-		QUERY_HIST_INSERT_DATA_POINT(query_query_q_wait_hist, qtr->start_time);
-		qtr->short_running       = true;
-		cf_atomic64_set(&qtr->n_result_records, 0);
-		qtr->track               = false;
-		qtr->querying_ai_time_ns = 0;
-		qtr->n_io_outstanding  = 0;
-		qtr->netio_push_seq     = 0;
-		qtr->netio_pop_seq      = 1;
-		qtr->blocking            = false;
-		pthread_mutex_init(&qtr->buf_mutex, NULL);
+	ASD_QUERY_INIT(nodeid, qtr->trid);
+	QUERY_HIST_INSERT_DATA_POINT(query_query_q_wait_hist, qtr->start_time);
+	cf_atomic64_set(&qtr->n_result_records, 0);
+	qtr->track               = false;
+	qtr->querying_ai_time_ns = 0;
+	qtr->n_io_outstanding    = 0;
+	qtr->netio_push_seq      = 0;
+	qtr->netio_pop_seq       = 1;
+	qtr->blocking            = false;
+	pthread_mutex_init(&qtr->buf_mutex, NULL);
 
-		// Aerospike Index object initialization
-		qtr->result_code              = AS_PROTO_RESULT_OK;
-		
-		// Initialize qctx
-		// start with the threshold value
-		qtr->qctx.bsize               = g_config.query_threshold;
-		qtr->qctx.new_ibtr            = true;
-		qtr->qctx.nbtr_done           = false;
-		qtr->qctx.pimd_idx            = -1;
-		qtr->qctx.recl                = NULL;
-		qtr->qctx.n_bdigs             = 0;
-		qtr->qctx.qnodes_pre_reserved = g_config.qnodes_pre_reserved;
-		qtr->qctx.bkey                = &qtr->bkey;
-		init_ai_obj(qtr->qctx.bkey);
-		bzero(&qtr->qctx.bdig, sizeof(cf_digest));
-		// Populate all the paritions for which this node is a qnode.
-		as_query_pre_reserve_qnodes(qtr);
+	// Aerospike Index object initialization
+	qtr->result_code              = AS_PROTO_RESULT_OK;
+	
+	// Initialize qctx
+	// start with the threshold value
+	qtr->qctx.bsize               = g_config.query_threshold;
+	qtr->qctx.new_ibtr            = true;
+	qtr->qctx.nbtr_done           = false;
+	qtr->qctx.pimd_idx            = -1;
+	qtr->qctx.recl                = NULL;
+	qtr->qctx.n_bdigs             = 0;
+	qtr->qctx.qnodes_pre_reserved = g_config.qnodes_pre_reserved;
+	qtr->qctx.bkey                = &qtr->bkey;
+	init_ai_obj(qtr->qctx.bkey);
+	bzero(&qtr->qctx.bdig, sizeof(cf_digest));
+	// Populate all the paritions for which this node is a qnode.
+	as_query_pre_reserve_qnodes(qtr);
 
-		qtr->priority                 = g_config.query_priority;
-		qtr->bb_r                     = bb_poolrequest();
-		cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
+	qtr->priority                 = g_config.query_priority;
+	qtr->bb_r                     = bb_poolrequest();
+	cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 
-		qtr_set_running(qtr);
-		cf_atomic64_incr(&g_config.query_short_reqs);
-		cf_atomic32_incr(&g_query_short_running);
-	}
+	qtr_set_running(qtr);
+	cf_atomic64_incr(&g_config.query_short_reqs);
+	cf_atomic32_incr(&g_query_short_running);
 	return AS_QUERY_OK;
 }
 
@@ -2239,7 +2270,7 @@ qtr_finish_work(as_query_transaction *qtr, cf_atomic32 *stat, char *fname, int l
 // 2: Query finished
 //
 static int 
-query_qtr_check_requeue(as_query_transaction *qtr)
+query_qtr_check_and_requeue(as_query_transaction *qtr)
 {
 	bool do_enqueue = false;
 	// Step 1: If the query batch is done then wait for number of outstanding qwork to
@@ -2381,13 +2412,17 @@ query_generator(as_query_transaction *qtr)
     uint64_t trid = tr? tr->trid : 0;
 #endif
 
-	query_transaction_init(qtr);
+	// Query can get requeue for many different reason. Check if it is 
+	// already started before indulging in act to setting it up for run
+	if (!qtr_started(qtr)) {
+		query_run_setup(qtr);
+	}
 
 	int loop = 0;
 	while (true) {
 
 		// Step 1: Check for requeue
-		int ret = query_qtr_check_requeue(qtr);
+		int ret = query_qtr_check_and_requeue(qtr);
 		if (ret == AS_QUERY_ERR) {
 			cf_warning(AS_QUERY, "Unexpected requeue failure .. shutdown connection.. abort!!");
 			qtr_set_abort(qtr, AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR, __FILE__, __LINE__);
@@ -2505,6 +2540,7 @@ query_th(void* q_to_wait_on)
 
 
 /*
+ * Phase I query setup which happens just before query is queued for generator
  * Populates valid qtrp in case of success and NULL in case of failure. 
  * All the query related parsing code sits here
  *
@@ -2515,7 +2551,7 @@ query_th(void* q_to_wait_on)
  *  
  */
 static int
-query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
+query_setup(as_transaction *tr, as_query_transaction **qtrp)
 {
 
 #if defined(USE_SYSTEMTAP)
@@ -2655,6 +2691,12 @@ query_parse_setup(as_transaction *tr, as_query_transaction **qtrp)
 		cf_atomic64_incr(&g_config.n_lookup);
 	}
 	rv = AS_QUERY_OK;
+
+	pthread_mutex_init(&qtr->slock, NULL);
+	qtr->state         = AS_QTR_STATE_INIT;
+	qtr->do_requeue    = false;
+	qtr->short_running = true;
+
 	*qtrp = qtr;
 	return rv;
 
@@ -2690,7 +2732,7 @@ as_query(as_transaction *tr)
 	}
 
 	as_query_transaction *qtr;
-	int rv = query_parse_setup(tr, &qtr);
+	int rv = query_setup(tr, &qtr);
 
 	if (rv == AS_QUERY_DONE) {
 		// Send FIN packet to client to ignore this.
@@ -2709,10 +2751,6 @@ as_query(as_transaction *tr)
 		}
 		return AS_QUERY_ERR;
 	}
-
-	pthread_mutex_init(&qtr->slock, NULL);
-	qtr->state = AS_QTR_STATE_NONE;
-	qtr->do_requeue = false;
 
 	if (g_config.query_in_transaction_thr) {
 		query_generator(qtr);
