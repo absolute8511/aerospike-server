@@ -3008,17 +3008,17 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 
 				SINDEX_GRLOCK();
 				SINDEX_BINS_SETUP(sbins, ns->sindex_cnt);
-				int sindex_found = 0;
+				int sbins_populated = 0;
 				for (int i = 0; i < rd.n_bins; i++) {
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, &rd.bins[i], &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+					sbins_populated += as_sindex_sbins_from_bin(ns, set_name, &rd.bins[i], &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 				}
 				SINDEX_GUNLOCK();
 
 				cf_debug(AS_SINDEX,
 						"Delete @ %s %d digest %ld", __FILE__, __LINE__, *(uint64_t *)&rd.keyd);
-				if (sindex_found) {
-					sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sindex_found, &rd.keyd);
-					as_sindex_sbin_freeall(sbins, sindex_found);
+				if (sbins_populated) {
+					sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sbins_populated, &rd.keyd);
+					as_sindex_sbin_freeall(sbins, sbins_populated);
 				}
 				if (sindex_ret != AS_SINDEX_OK)
 					cf_debug(AS_SINDEX,
@@ -3561,7 +3561,7 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 		cf_digest *keyd, as_bin* old_bins, uint32_t n_old_bins,
 		as_bin* new_bins, uint32_t n_new_bins)
 {
-	int sindex_found = 0;
+	int sbins_populated = 0;
 	bool not_just_created[n_new_bins];
 
 	for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
@@ -3600,8 +3600,8 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 					// TODO - might want a "diff" method that takes two bins and
 					// detects the (rare) case when a particle was rewritten
 					// with the exact old value.
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+					sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
+					sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 				}
 
 				found = true;
@@ -3619,7 +3619,7 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 		}
 
 		if (! found) {
-			sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+			sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 		}
 	}
 
@@ -3631,16 +3631,16 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 			continue;
 		}
 
-		sindex_found += as_sindex_sbins_from_bin(ns, set_name, &new_bins[i_new], &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+		sbins_populated += as_sindex_sbins_from_bin(ns, set_name, &new_bins[i_new], &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 	}
 
 	SINDEX_GUNLOCK();
 
-	if (sindex_found) {
+	if (sbins_populated) {
 		uint64_t start_ns = g_config.microbenchmarks ? cf_getns() : 0;
 
-		as_sindex_update_by_sbin(ns, set_name, sbins, sindex_found, keyd);
-		as_sindex_sbin_freeall(sbins, sindex_found);
+		as_sindex_update_by_sbin(ns, set_name, sbins, sbins_populated, keyd);
+		as_sindex_sbin_freeall(sbins, sbins_populated);
 
 		if (start_ns != 0) {
 			histogram_insert_data_point(g_config.write_sindex_hist, start_ns);

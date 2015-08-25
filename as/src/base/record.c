@@ -453,9 +453,9 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 	uint16_t old_n_bins =  (ns->storage_data_in_memory || ns->single_bin) ?
 			rd->n_bins : as_bin_inuse_count(rd);
 
-	int32_t  delta_bins   = (int32_t)newbins - (int32_t)old_n_bins;
-	int      sindex_ret   = AS_SINDEX_OK;
-	int      sindex_found = 0;
+	int32_t  delta_bins      = (int32_t)newbins - (int32_t)old_n_bins;
+	int      sindex_ret      = AS_SINDEX_OK;
+	int      sbins_populated = 0;
 
 	if (has_sindex) {
 		SINDEX_GRLOCK();
@@ -465,7 +465,7 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 	SINDEX_BINS_SETUP(sbins, 2 * ns->sindex_cnt);
 
 	if ((delta_bins < 0) && has_sindex) {
-		 sindex_found += as_sindex_sbins_from_rd(rd, newbins, old_n_bins, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+		 sbins_populated += as_sindex_sbins_from_rd(rd, newbins, old_n_bins, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 	}
 
 	if (ns->storage_data_in_memory && ! ns->single_bin) {
@@ -501,7 +501,7 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		if (i < old_n_bins) {
 			b = &rd->bins[i];
 			if (has_sindex) {
-				sindex_found      += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+				sbins_populated      += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 			}
 			as_bin_set_id_from_name_buf(ns, b, name, name_sz);
 		}
@@ -518,7 +518,7 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		}
 
 		if (has_sindex) {
-			sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+			sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 		}
 	}
 
@@ -531,8 +531,8 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		SINDEX_GUNLOCK();
 	}
 	if (ret == 0) {
-		if (has_sindex && sindex_found) {
-			sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sindex_found, &rd->keyd);
+		if (has_sindex && sbins_populated) {
+			sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sbins_populated, &rd->keyd);
 			if (sindex_ret != AS_SINDEX_OK) {
 				cf_warning(AS_RECORD, "Failed: %s", as_sindex_err_str(sindex_ret));
 			}
@@ -541,8 +541,8 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 	}
 
 
-	if (has_sindex && sindex_found) {
-		as_sindex_sbin_freeall(sbins, sindex_found);
+	if (has_sindex && sbins_populated) {
+		as_sindex_sbin_freeall(sbins, sbins_populated);
 	}
 
 	return ret;

@@ -3121,7 +3121,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		 */
 
 		bool has_sindex   = as_sindex_ns_has_sindex(ns);
-		int sindex_found  = 0;
+		int sbins_populated  = 0;
 
 		if (has_sindex) {
 			SINDEX_GRLOCK();
@@ -3134,7 +3134,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 			if (delta_bins) {
 				uint16_t new_size = (uint16_t)block->n_bins;
 				if ((delta_bins < 0) && has_sindex) {
-					sindex_found += as_sindex_sbins_from_rd(&rd, new_size, old_n_bins, sbins, AS_SINDEX_OP_DELETE);
+					sbins_populated += as_sindex_sbins_from_rd(&rd, new_size, old_n_bins, sbins, AS_SINDEX_OP_DELETE);
 				}
 				as_bin_allocate_bin_space(r, &rd, delta_bins);
 			}
@@ -3145,7 +3145,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 			if (i < old_n_bins) {
 				b = &rd.bins[i];
 				if (has_sindex) {	
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+					sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 				}
 				as_bin_set_id_from_name(ns, b, ssd_bin->name);
 			}
@@ -3161,16 +3161,15 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 			ssd_bin = (drv_ssd_bin*)(block_head + ssd_bin->next);
 
 			if (has_sindex) {
-				sindex_found += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+				sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 			}
 		}
 
 		if (has_sindex) {
 			SINDEX_GUNLOCK();
-			// Delete should precede insert.
-			if (sindex_found > 0) {
-				as_sindex_update_by_sbin(ns, as_index_get_set_name(r, ns), sbins, sindex_found, &rd.keyd);
-				as_sindex_sbin_freeall(sbins, sindex_found);
+			if (sbins_populated > 0) {
+				as_sindex_update_by_sbin(ns, as_index_get_set_name(r, ns), sbins, sbins_populated, &rd.keyd);
+				as_sindex_sbin_freeall(sbins, sbins_populated);
 			}
 		}
 
