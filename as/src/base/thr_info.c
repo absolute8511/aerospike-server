@@ -6741,13 +6741,10 @@ int info_command_sindex_repair(char *name, char *params, cf_dyn_buf *db) {
 
 	// get optional set
 	char set_str[AS_SET_NAME_MAX_SIZE];
-	bool hasset = false;
 	int set_len = sizeof(set_str);
 	if (as_info_parameter_get(params, STR_SET, set_str, &set_len)) {
-		hasset = false;
 		set_str[0] = '\0';
 	}
-	(void) hasset;	// silences compiler warning
 
 	as_sindex_metadata imd;
 	memset(&imd, 0, sizeof(imd));
@@ -6856,13 +6853,10 @@ int info_command_sindex_stat(char *name, char *params, cf_dyn_buf *db) {
 
 	// get optional set
 	char set_str[AS_SET_NAME_MAX_SIZE];
-	bool hasset = false;
 	int set_len = sizeof(set_str);
 	if (as_info_parameter_get(params, STR_SET, set_str, &set_len)) {
-		hasset = false;
 		set_str[0] = '\0';
 	}
-	(void) hasset; // silences compiler warning
 
 	as_sindex_metadata imd;
 	memset(&imd, 0, sizeof(imd));
@@ -6910,13 +6904,10 @@ int info_command_sindex_histogram(char *name, char *params, cf_dyn_buf *db)
 
 	// get optional set
 	char set_str[AS_SET_NAME_MAX_SIZE];
-	bool hasset = false;
 	int set_len = sizeof(set_str);
 	if (as_info_parameter_get(params, STR_SET, set_str, &set_len)) {
-		hasset = false;
 		set_str[0] = '\0';
 	}
-	(void) hasset; // silences compiler warning
 
 	char op[64];
 	int op_len = sizeof(op);

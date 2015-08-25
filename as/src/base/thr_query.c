@@ -969,11 +969,6 @@ query_netio(as_query_transaction *qtr)
 	uint64_t nodeid = g_config.self_node;
 #endif
 
-	uint64_t time_ns        = 0;
-	if (g_config.query_enable_histogram) {
-		time_ns = cf_getns();
-	}
-
 	ASD_QUERY_NETIO_STARTING(nodeid, qtr->trid);
 
 	as_netio        io;
@@ -1001,8 +996,6 @@ query_netio(as_query_transaction *qtr)
    	cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 
 	ASD_QUERY_NETIO_FINISHED(nodeid, qtr->trid);
-
-	(void) time_ns; // silences compiler warning
 
 	return ret;
 }

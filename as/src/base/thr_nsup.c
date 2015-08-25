@@ -1245,16 +1245,10 @@ thr_ldt_sup(void *arg)
 {
 	cf_info(AS_LDT, "LDT supervisor started");
 
-	uint64_t last_time = cf_get_seconds();
-
 	for ( ; ; ) {
-		// Wake up every 1 second to check the nsup timeout.
+		// Skip 1 second between LDT nsup cycles.
 		struct timespec delay = { 1, 0 };
 		nanosleep(&delay, NULL);
-
-		uint64_t curr_time = cf_get_seconds();
-
-		last_time = curr_time;
 
 		// Iterate over every namespace.
 		for (int i = 0; i < g_config.namespaces; i++) {
@@ -1276,8 +1270,6 @@ thr_ldt_sup(void *arg)
 			sub_reduce_partitions(ns, as_ldt_sub_gc_fn, &linfo, &n_general_waits, "ldt subtree gc");
 		}
 	}
-
-	(void) last_time;
 
 	return NULL;
 }

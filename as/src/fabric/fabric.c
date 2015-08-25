@@ -1447,9 +1447,8 @@ fabric_worker_fn(void *argv)
 
 					// read the notification byte out
 					byte note_byte;
-					int  rv;
-					rv = read(note_fd, &note_byte, sizeof(note_byte));
-					(void) rv;	// silences compiler warning
+
+					read(note_fd, &note_byte, sizeof(note_byte));
 
 					// Got some kind of notification - check my queue
 					worker_queue_element wqe;

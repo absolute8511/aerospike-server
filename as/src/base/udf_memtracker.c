@@ -37,12 +37,11 @@ static as_memtracker   g_udf_memtracker;
 static int
 udf_memtracker_generic(mem_tracker *mt, const uint32_t num_bytes, memtracker_op op)
 {
-	bool ret = true;
 	if (!mt || !mt->udata || !mt->cb) {
 		return false;
 	}
 
-	ret = mt->cb(mt, num_bytes, op);
+	mt->cb(mt, num_bytes, op);
 	if (op == MEM_RESERVE) {
 		cf_detail(AS_UDF, "%ld: Memory Tracker %p reserved = %d (bytes)",
 				  pthread_self(), mt, num_bytes);
@@ -53,7 +52,6 @@ udf_memtracker_generic(mem_tracker *mt, const uint32_t num_bytes, memtracker_op 
 		cf_detail(AS_UDF, "%ld: Memory Tracker %p reset",
 				  pthread_self(), mt);
 	}
-	(void) ret;
 	return 0;
 }
 

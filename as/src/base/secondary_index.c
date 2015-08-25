@@ -301,7 +301,6 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 	// If the list exist 
 	// 		match the path and type of incoming si to the existing sindexes in the list	
 	bool    to_delete                    = false;
-	int     simatch                      = -1;
 	cf_ll_element * ele                  = NULL;
 	sindex_set_binid_hash_ele * prop_ele = NULL;
 	if (simatch_ll) {
@@ -312,7 +311,6 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 			if (strcmp(si->imd->path_str, imd->path_str) == 0 && 
 				si->imd->btype[0] == imd->btype[0] && si->imd->itype == imd->itype) {
 				to_delete  = true;
-				simatch    = prop_ele->simatch;
 				break;
 			}
 			ele = ele->next;
@@ -321,8 +319,6 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 	else {
 		return AS_SINDEX_ERR_NOTFOUND;
 	}
-
-	(void) simatch;	// silences compiler warning
 
 	// 		If any element matches
 	// 			Delete from the list
@@ -3950,20 +3946,12 @@ as_sindex_sbins_from_rd(as_storage_rd *rd, uint16_t from_bin, uint16_t to_bin, a
 int
 as_sindex_sbin_free(as_sindex_bin *sbin)
 {
-	uint32_t datasz = 0;
 	if (sbin->to_free) {
-		if (sbin->type == AS_PARTICLE_TYPE_INTEGER) {
-			datasz = sizeof(uint64_t);
-		}
-		else  if (sbin->type == AS_PARTICLE_TYPE_STRING){
-			datasz = sizeof(cf_digest);
-		}
-		else {
-			cf_debug(AS_SINDEX, "sbin free got invalid dtaa type in sbin %d", sbin->type);
+		if (! (sbin->type == AS_PARTICLE_TYPE_INTEGER || sbin->type == AS_PARTICLE_TYPE_STRING)) {
+			cf_debug(AS_SINDEX, "sbin free got invalid data type in sbin %d", sbin->type);
 			return AS_SINDEX_ERR;
 		}
 		cf_free(sbin->values);
-		(void) datasz;	// silences compiler warning.
 	}
     return AS_SINDEX_OK;
 }
