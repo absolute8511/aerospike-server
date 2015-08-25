@@ -441,7 +441,6 @@ as_partition_reinit(as_partition *p, as_namespace *ns, int pid)
 	p->waiting_for_master = false;
 	memset(&p->primary_version_info, 0, sizeof(p->primary_version_info));
 	memset(&p->version_info, 0, sizeof(p->version_info));
-	memset(&p->vinfoset, 0, sizeof(p->vinfoset));
 	memset(p->old_sl, 0, sizeof(p->old_sl));
 	p->p_repl_factor = ns->replication_factor;
 	p->current_outgoing_ldt_version = 0;
@@ -701,8 +700,6 @@ as_partition_init(as_partition *p, as_namespace *ns, int pid)
 
 	if (0 != pthread_mutex_init(&p->lock, 0))
 		cf_crash(AS_PARTITION, "couldn't initialize partition state lock: %s", cf_strerror(errno));
-	if (0 != pthread_mutex_init(&p->vinfoset_lock, 0))
-		cf_crash(AS_PARTITION, "couldn't initialize partition vinfo set lock: %s", cf_strerror(errno));
 
 	p->vp = (as_index_tree *) NULL;
 	p->sub_vp = (as_index_tree *) NULL;

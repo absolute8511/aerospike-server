@@ -1051,17 +1051,3 @@ as_index_tree_release(as_index_tree *tree, void *destructor_udata)
 
 	return(0);
 }
-
-// returns the number of bytes required to hold this index for allocation
-
-int
-as_index_size_get(as_namespace *ns)
-{
-	int sz = sizeof(struct as_index_s);
-
-	if (ns->allow_versions) sz += 4;
-
-//	cf_info(AS_RECORD, " INDEX SIZE IS %d",sz);
-
-	return(sz);
-}

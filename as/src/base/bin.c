@@ -142,11 +142,9 @@ as_bin_all_dump(as_storage_rd *rd, char *msg)
 }
 
 static inline void
-as_bin_init_nameless(as_namespace *ns, as_bin *b)
+as_bin_init_nameless(as_bin *b)
 {
 	as_bin_state_set(b, AS_BIN_STATE_UNUSED);
-	as_bin_set_version(b, 0, ns->single_bin);
-
 	b->particle = NULL;
 }
 
@@ -154,8 +152,6 @@ void
 as_bin_init(as_namespace *ns, as_bin *b, const char *name)
 {
 	as_bin_state_set(b, AS_BIN_STATE_UNUSED);
-	as_bin_set_version(b, 0, ns->single_bin);
-
 	b->particle = NULL;
 
 	as_bin_set_id_from_name(ns, b, name);
@@ -265,7 +261,7 @@ as_bin_create(as_storage_rd *rd, const char *name)
 			cf_crash(AS_BIN, "single bin create found bin in use");
 		}
 
-		as_bin_init_nameless(rd->ns, rd->bins);
+		as_bin_init_nameless(rd->bins);
 
 		return rd->bins;
 	}
@@ -294,7 +290,7 @@ as_bin_create_from_buf(as_storage_rd *rd, byte *name, size_t namesz)
 			cf_crash(AS_BIN, "single bin create found bin in use");
 		}
 
-		as_bin_init_nameless(rd->ns, rd->bins);
+		as_bin_init_nameless(rd->bins);
 
 		return rd->bins;
 	}
@@ -394,7 +390,7 @@ as_bin_get_or_create(as_storage_rd *rd, const char *name)
 {
 	if (rd->ns->single_bin) {
 		if (! as_bin_inuse_has(rd)) {
-			as_bin_init_nameless(rd->ns, rd->bins);
+			as_bin_init_nameless(rd->bins);
 		}
 
 		return rd->bins;
@@ -436,7 +432,7 @@ as_bin_get_or_create(as_storage_rd *rd, const char *name)
 		as_bin_init(rd->ns, b, name);
 	}
 	else {
-		as_bin_init_nameless(rd->ns, b);
+		as_bin_init_nameless(b);
 		b->id = (uint16_t)id;
 	}
 
@@ -451,7 +447,7 @@ as_bin_get_or_create_from_buf(as_storage_rd *rd, byte *name, size_t namesz,
 {
 	if (rd->ns->single_bin) {
 		if (! as_bin_inuse_has(rd)) {
-			as_bin_init_nameless(rd->ns, rd->bins);
+			as_bin_init_nameless(rd->bins);
 		}
 
 		// Ignored bin-level policy - single-bin needs only record-level policy.
@@ -516,7 +512,7 @@ as_bin_get_or_create_from_buf(as_storage_rd *rd, byte *name, size_t namesz,
 		as_bin_init(rd->ns, b, zname);
 	}
 	else {
-		as_bin_init_nameless(rd->ns, b);
+		as_bin_init_nameless(b);
 		b->id = (uint16_t)id;
 	}
 

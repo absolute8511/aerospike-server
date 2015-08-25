@@ -2254,9 +2254,6 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 		cf_dyn_buf_append_string(db, "undefined");
 	}
 
-	cf_dyn_buf_append_string(db, ";allow_versions=");
-	cf_dyn_buf_append_string(db, ns->allow_versions ? "true" : "false");
-
 	cf_dyn_buf_append_string(db, ";single-bin=");
 	cf_dyn_buf_append_string(db, ns->single_bin ? "true" : "false");
 
@@ -3460,19 +3457,6 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			else if (strncmp(context, "ttl", 3) == 0) {
 				cf_info(AS_INFO, "Changing value of conflict-resolution-policy of ns %s from %d to %s", ns->name, ns->conflict_resolution_policy, context);
 				ns->conflict_resolution_policy = AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_TTL;
-			}
-			else {
-				goto Error;
-			}
-		}
-		else if (0 == as_info_parameter_get(params, "allow-versions", context, &context_len)) {
-			if (strncmp(context, "true", 4) == 0 || strncmp(context, "yes", 3) == 0) {
-				cf_info(AS_INFO, "Changing value of allow-versions of ns %s from %s to %s", ns->name, bool_val[ns->allow_versions], context);
-				ns->allow_versions = true;
-			}
-			else if (strncmp(context, "false", 5) == 0 || strncmp(context, "no", 2) == 0) {
-				cf_info(AS_INFO, "Changing value of allow-versions of ns %s from %s to %s", ns->name, bool_val[ns->allow_versions], context);
-				ns->allow_versions = false;
 			}
 			else {
 				goto Error;
