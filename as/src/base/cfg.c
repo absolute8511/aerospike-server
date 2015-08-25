@@ -2612,17 +2612,11 @@ as_config_init(const char *config_file)
 				if (ns->data_in_index && ! (ns->single_bin && ns->storage_data_in_memory && ns->storage_type == AS_STORAGE_ENGINE_SSD)) {
 					cf_crash_nostack(AS_CFG, "ns %s data-in-index can't be true unless storage-engine is device and both single-bin and data-in-memory are true", ns->name);
 				}
-				if (ns->storage_data_in_memory) {
-					// Post write queue should not be used for in-memory cases.
-					// This will override the default or if the user sets it by
-					// mistake for in-memory namespace. We cannot distinguish
-					// the two cases. So, No warning if the user sets it.
-					ns->storage_post_write_queue = 0;
-				}
 				if (ns->ldt_enabled && ns->single_bin) {
-					cf_crash_nostack(AS_CFG, "ns %s single-bin and ldt-enabled can't both be true", ns->name);
+					cf_crash_nostack(AS_CFG, "ns %s ldt-enabled and single-bin can't both be true", ns->name);
 				}
 				if (ns->storage_data_in_memory) {
+					ns->storage_post_write_queue = 0; // override default (or configuration mistake)
 					c->n_namespaces_in_memory++;
 				}
 				else {
