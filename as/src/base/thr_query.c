@@ -314,7 +314,6 @@ typedef struct qtr_skey_s {
  * Query Engine Global
  */
 // **************************************************************************************************
-static cf_atomic32      g_query_init            = 0;
 static int              g_current_queries_count = 0;
 static pthread_rwlock_t g_query_lock
 						= PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP;
@@ -3123,10 +3122,6 @@ void
 as_query_init()
 {
 	g_current_queries_count = 0;
-	if (cf_atomic32_incr(&g_query_init) != 1) {
-		cf_warning(AS_QUERY, "Cannot do multiple initialization");
-		return;
-	}
 	cf_detail(AS_QUERY, "Initialize %d Query Worker threads.", g_config.query_threads);
 
 	// global job hash to keep track of the query job
@@ -3240,11 +3235,6 @@ as_query_init()
 int
 as_query_worker_reinit(int set_size, int *actual_size)
 {
-	if (g_query_init == 0) {
-		cf_warning(AS_QUERY, "Query threads not initialized cannot reinitialize");
-		return AS_QUERY_ERR;
-	}
-
 	if (set_size > AS_QUERY_MAX_WORKER_THREADS) {
 		cf_warning(AS_QUERY, "Cannot increase query threads more than %d",
 				AS_QUERY_MAX_WORKER_THREADS);
@@ -3291,11 +3281,6 @@ as_query_worker_reinit(int set_size, int *actual_size)
 int
 as_query_reinit(int set_size, int *actual_size)
 {
-	if (g_query_init == 0) {
-		cf_warning(AS_QUERY, "Query threads not initialized cannot reinitialize");
-		return AS_QUERY_ERR;
-	}
-
 	if (set_size > AS_QUERY_MAX_THREADS) {
 		cf_warning(AS_QUERY, "Cannot increase query threads more than %d",
 				AS_QUERY_MAX_THREADS);

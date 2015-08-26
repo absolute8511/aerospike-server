@@ -96,7 +96,6 @@ msg_template rw_mt[] =
 // #define DEBUG_MSG 1
 // #define TRACK_WR 1
 // #define EXTRA_CHECKS 1
-static cf_atomic32 init_counter = 0;
 static cf_atomic32 g_rw_tid = 0;
 static rchash *g_write_hash = 0;
 static pthread_t g_rw_retransmit_th;
@@ -5818,10 +5817,6 @@ as_write_inprogress()
 void
 as_write_init()
 {
-	if (1 != cf_atomic32_incr(&init_counter)) {
-		return;
-	}
-
 	rchash_create(&g_write_hash, write_digest_hash, write_request_destructor,
 			sizeof(global_keyd), 32 * 1024, RCHASH_CR_MT_MANYLOCK);
 

@@ -112,8 +112,6 @@ typedef struct {
 } proxy_request;
 
 
-static cf_atomic32   init_counter = 0;
-
 static cf_atomic32   g_proxy_tid = 0;
 
 static shash *g_proxy_hash = 0;
@@ -1137,10 +1135,6 @@ as_proxy_inprogress()
 void
 as_proxy_init()
 {
-	if (1 != cf_atomic32_incr(&init_counter)) {
-		return;
-	}
-
 	shash_create(&g_proxy_hash, proxy_id_hash, sizeof(uint32_t), sizeof(proxy_request), 4 * 1024, SHASH_CR_MT_MANYLOCK);
 
 	pthread_create(&g_proxy_retransmit_th, 0, proxy_retransmit_fn, 0);
