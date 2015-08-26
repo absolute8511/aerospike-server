@@ -51,7 +51,7 @@
 #include "storage/storage.h"
 
 
-static cf_atomic32 namespace_id_counter = 0;
+static as_namespace_id g_namespace_id_counter = 0;
 
 // Create a new namespace and hook it up in the data structure
 
@@ -88,7 +88,7 @@ as_namespace_create(char *name, uint16_t replication_factor)
 
 	strncpy(ns->name, name, AS_ID_NAMESPACE_SZ - 1);
 	ns->name[AS_ID_NAMESPACE_SZ - 1] = '\0';
-	ns->id = cf_atomic32_incr(&namespace_id_counter);
+	ns->id = ++g_namespace_id_counter; // note that id is 1-based
 
 #ifdef USE_JEM
 	if (-1 == (ns->jem_arena = jem_create_arena())) {

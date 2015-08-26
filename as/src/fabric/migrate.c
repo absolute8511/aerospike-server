@@ -2530,15 +2530,9 @@ as_migrate(cf_node *dst_node, uint dst_sz, as_namespace *ns, as_partition_id par
 	return(0);
 }
 
-static cf_atomic32 init_counter = 0;
-
 void
 as_migrate_init()
 {
-	if (1 != cf_atomic32_incr(&init_counter)) {
-		return;
-	}
-
 	// a queue of the migrations that have been requested.
 	g_migrate_q = cf_queue_priority_create(sizeof(void *), true);
 
