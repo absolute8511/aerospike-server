@@ -586,7 +586,6 @@ typedef struct as_config_s {
 	cf_atomic_int		stat_expired_objects;
 	cf_atomic_int		stat_evicted_objects;
 	cf_atomic_int		stat_deleted_set_objects;
-	cf_atomic_int		stat_evicted_set_objects;
 	cf_atomic_int		stat_evicted_objects_time;
 	cf_atomic_int		stat_zero_bin_records;
 	cf_atomic_int		stat_nsup_deletes_not_shipped;

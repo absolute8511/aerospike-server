@@ -549,10 +549,10 @@ typedef enum {
 
 	// Namespace set options:
 	CASE_NAMESPACE_SET_ENABLE_XDR,
-	CASE_NAMESPACE_SET_EVICT_HWM_COUNT,
-	CASE_NAMESPACE_SET_STOP_WRITE_COUNT,
 	// Deprecated:
+	CASE_NAMESPACE_SET_EVICT_HWM_COUNT,
 	CASE_NAMESPACE_SET_EVICT_HWM_PCT,
+	CASE_NAMESPACE_SET_STOP_WRITE_COUNT,
 	CASE_NAMESPACE_SET_STOP_WRITE_PCT,
 
 	// Namespace set set-enable-xdr options (value tokens):
@@ -940,8 +940,8 @@ const cfg_opt NAMESPACE_STORAGE_KV_OPTS[] = {
 const cfg_opt NAMESPACE_SET_OPTS[] = {
 		{ "set-enable-xdr",					CASE_NAMESPACE_SET_ENABLE_XDR },
 		{ "set-evict-hwm-count",			CASE_NAMESPACE_SET_EVICT_HWM_COUNT },
-		{ "set-stop-write-count",			CASE_NAMESPACE_SET_STOP_WRITE_COUNT },
 		{ "set-evict-hwm-pct",				CASE_NAMESPACE_SET_EVICT_HWM_PCT },
+		{ "set-stop-write-count",			CASE_NAMESPACE_SET_STOP_WRITE_COUNT },
 		{ "set-stop-write-pct",				CASE_NAMESPACE_SET_STOP_WRITE_PCT },
 		{ "}",								CASE_CONTEXT_END }
 };
@@ -2779,12 +2779,8 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case CASE_NAMESPACE_SET_EVICT_HWM_COUNT:
-				p_set->evict_hwm_count = cfg_u64_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_SET_STOP_WRITE_COUNT:
-				p_set->stop_write_count = cfg_u64_no_checks(&line);
-				break;
 			case CASE_NAMESPACE_SET_EVICT_HWM_PCT:
+			case CASE_NAMESPACE_SET_STOP_WRITE_COUNT:
 			case CASE_NAMESPACE_SET_STOP_WRITE_PCT:
 				cfg_deprecated_name_tok(&line);
 				break;

@@ -1035,7 +1035,6 @@ struct as_namespace_s {
 	cf_atomic_int	n_expired_objects;
 	cf_atomic_int	n_evicted_objects;
 	cf_atomic_int	n_deleted_set_objects;
-	cf_atomic_int	n_evicted_set_objects;
 
 	// the maximum void time of all records in the namespace
 	cf_atomic_int max_void_time;
@@ -1092,11 +1091,6 @@ struct as_namespace_s {
 	linear_histogram 	*evict_hist;
 	linear_histogram 	*ttl_hist;
 
-	// Histograms used for set eviction.
-	// (If AS_SET_MAX_COUNT ever gets too big, malloc based on vmap count.)
-	linear_histogram 	*set_evict_hists[AS_SET_MAX_COUNT + 1];
-	linear_histogram 	*set_ttl_hists[AS_SET_MAX_COUNT + 1];
-
 	as_partition partitions[AS_PARTITIONS];
 
 	ns_ldt_stats        lstats;
@@ -1109,8 +1103,6 @@ struct as_namespace_s {
 #define AS_NAMESPACE_SET_THRESHOLD_EXCEEDED -2
 
 // Set state bit-field:
-//#define AS_SET_STOP_WRITES	0x00000001	// not using this so far
-#define AS_SET_EVICT_RECORDS	0x00000002	// may soon be deprecated
 #define AS_SET_DELETE 			0x00000004	// Delete this set
 
 #define IS_SET_DELETED(p_set)	(cf_atomic32_get(p_set->state) & AS_SET_DELETE)
@@ -1127,10 +1119,10 @@ typedef enum {
 struct as_set_s {
 	char			name[AS_SET_NAME_MAX_SIZE];
 	cf_atomic64		num_elements;
-	cf_atomic64		stop_write_count;	// Stop writes in the set after this count is reached.
-	cf_atomic32		unused;				// Stub variable to be reclaimed for future needs.
-	cf_atomic64		evict_hwm_count;	// Evict records from set after this count is reached.
-	cf_atomic32     enable_xdr;			// White or black-list a set-name for XDR replication for true/false of this set-level flag.
+	cf_atomic64		unused1;			// Stub variable to be reclaimed for future needs.
+	cf_atomic64		unused2;			// Stub variable to be reclaimed for future needs.
+	cf_atomic64		unused3;			// Stub variable to be reclaimed for future needs.
+	cf_atomic32		enable_xdr;			// White or black-list a set-name for XDR replication for true/false of this set-level flag.
 	cf_atomic32		state;				// Current state of the set.
 };
 

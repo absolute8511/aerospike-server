@@ -715,102 +715,6 @@ queue_for_delete(as_namespace* ns, cf_digest* p_digest)
 }
 
 //------------------------------------------------
-// Reduce callback prepares to evict sets.
-// - does set deletion
-// - does general expiration
-// - builds set eviction & set TTL histograms
-//
-typedef struct sets_evict_prep_info_s {
-	as_namespace*	ns;
-	uint32_t		now;
-	bool*			sets_deleting;
-	bool*			sets_evicting;
-	uint32_t		num_deleted;
-	uint32_t		num_expired;
-} sets_evict_prep_info;
-
-static void
-sets_evict_prep_reduce_cb(as_index_ref* r_ref, void* udata)
-{
-	sets_evict_prep_info* p_info = (sets_evict_prep_info*)udata;
-	as_namespace* ns = p_info->ns;
-	uint32_t set_id = as_index_get_set_id(r_ref->r);
-
-	if (p_info->sets_deleting[set_id]) {
-		queue_for_delete(ns, &r_ref->r->key);
-		p_info->num_deleted++;
-
-		as_record_done(r_ref, ns);
-		return;
-	}
-
-	uint32_t void_time = r_ref->r->void_time;
-
-	if (void_time != 0) {
-		if (p_info->now > void_time) {
-			queue_for_delete(ns, &r_ref->r->key);
-			p_info->num_expired++;
-		}
-		else if (set_id != 0) { // TODO - build no-set histograms?
-			if (p_info->sets_evicting[set_id]) {
-				linear_histogram_insert_data_point(ns->set_evict_hists[set_id], void_time);
-			}
-
-			if (ns->set_ttl_hists[set_id]) {
-				linear_histogram_insert_data_point(ns->set_ttl_hists[set_id], void_time);
-			}
-		}
-	}
-
-	as_record_done(r_ref, ns);
-}
-
-//------------------------------------------------
-// Reduce callback evicts sets.
-// - evicts based on sets' thresholds
-// - builds object size & general TTL histograms
-// - counts 0-void-time records
-//
-typedef struct sets_evict_info_s {
-	as_namespace*	ns;
-	bool*			sets_evicting;
-	uint32_t*		low_void_times;
-	uint32_t*		high_void_times;
-	uint32_t*		mid_tenths_pcts;
-	uint32_t		num_evicted;
-	uint32_t		num_0_void_time;
-} sets_evict_info;
-
-static void
-sets_evict_reduce_cb(as_index_ref* r_ref, void* udata)
-{
-	sets_evict_info* p_info = (sets_evict_info*)udata;
-	as_namespace* ns = p_info->ns;
-	uint32_t set_id = as_index_get_set_id(r_ref->r);
-	uint32_t void_time = r_ref->r->void_time;
-
-	if (void_time != 0) {
-		if (p_info->sets_evicting[set_id] &&
-				(void_time < p_info->low_void_times[set_id] ||
-						(void_time < p_info->high_void_times[set_id] &&
-								random_delete(p_info->mid_tenths_pcts[set_id])))) {
-			queue_for_delete(ns, &r_ref->r->key);
-			p_info->num_evicted++;
-		}
-		else {
-			linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
-			linear_histogram_insert_data_point(ns->ttl_hist, void_time);
-		}
-	}
-	else {
-		linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
-		p_info->num_0_void_time++;
-	}
-
-	as_record_done(r_ref, ns);
-}
-
-//------------------------------------------------
 // Reduce callback deletes sets.
 // - does set deletion
 // - does general expiration
@@ -1058,106 +962,6 @@ get_ttl_range(as_namespace* ns, uint32_t now)
 }
 
 //------------------------------------------------
-// Lazily create and clear a set's eviction
-// histogram.
-//
-static void
-clear_set_evict_hist(as_namespace* ns, uint32_t set_id, uint32_t now, uint64_t ttl_range)
-{
-	if (! ns->set_evict_hists[set_id]) {
-		char hist_name[HISTOGRAM_NAME_SIZE];
-
-		sprintf(hist_name, "%s set %u evict histogram", ns->name, set_id);
-		ns->set_evict_hists[set_id] = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
-	}
-
-	linear_histogram_clear(ns->set_evict_hists[set_id], now, MIN(ttl_range, EVICT_HIST_TTL_RANGE));
-}
-
-//------------------------------------------------
-// Lazily create and clear a set's TTL histogram.
-//
-static void
-clear_set_ttl_hist(as_namespace* ns, uint32_t set_id, uint32_t now, uint64_t ttl_range)
-{
-	if (! ns->set_ttl_hists[set_id]) {
-		char hist_name[HISTOGRAM_NAME_SIZE];
-
-		sprintf(hist_name, "%s set %u ttl histogram", ns->name, set_id);
-		ns->set_ttl_hists[set_id] = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
-	}
-
-	linear_histogram_clear(ns->set_ttl_hists[set_id], now, ttl_range);
-}
-
-//------------------------------------------------
-// Get sets' eviction thresholds.
-//
-static void
-get_set_thresholds(as_namespace* ns, bool* sets_evicting, uint32_t num_sets, uint32_t now, uint32_t* low_void_times, uint32_t* high_void_times, uint32_t* mid_tenths_pcts)
-{
-	for (uint32_t j = 0; j < num_sets; j++) {
-		uint32_t set_id = j + 1;
-
-		if (! sets_evicting[set_id]) {
-			continue;
-		}
-
-		as_set* p_set;
-
-		if (cf_vmapx_get_by_index(ns->p_sets_vmap, j, (void**)&p_set) != CF_VMAPX_OK) {
-			continue;
-		}
-
-		// A set's num_elements and evict_hwm_count include both master and
-		// prole records, but we evict only masters.
-		uint64_t master_limit = cf_atomic64_get(p_set->evict_hwm_count) / ns->replication_factor;
-		uint64_t n_masters = linear_histogram_get_total(ns->set_evict_hists[set_id]);
-
-		// If we're under the limit, turn eviction round into more expiration.
-		// (Either the prep round deleted or expired records, or num_elements
-		// was bigger than evict_hwm_count due only to excess proles.)
-		if (master_limit >= n_masters) {
-			low_void_times[set_id] = high_void_times[set_id] = as_record_void_time_get();
-			continue;
-		}
-
-		// We're over the limit - evict excess master records.
-		uint64_t master_excess = n_masters - master_limit;
-
-		uint64_t low_void_time;
-		uint64_t high_void_time;
-		uint32_t mid_tenths_pct;
-		bool is_last = linear_histogram_get_thresholds_for_subtotal(ns->set_evict_hists[set_id], master_excess, &low_void_time, &high_void_time, &mid_tenths_pct);
-
-		if (is_last || high_void_time == 0) {
-			cf_info(AS_NSUP, "{%s} set %s evicting using ttl histogram", ns->name, p_set->name);
-
-			is_last = linear_histogram_get_thresholds_for_subtotal(ns->set_ttl_hists[set_id], master_excess, &low_void_time, &high_void_time, &mid_tenths_pct);
-		}
-
-		if (high_void_time == 0) {
-			cf_warning(AS_NSUP, "{%s} set %s can't evict %s", ns->name, p_set->name, is_last ? "everything" : "- no records eligible");
-		}
-		else if (is_last) {
-			cf_info(AS_NSUP, "{%s} set %s evicting into last bucket: using infinity for high void-time %u", ns->name, p_set->name, (uint32_t)high_void_time);
-		}
-
-		// See comment in get_thresholds() about evicting from last bucket.
-
-		low_void_times[set_id] = (uint32_t)low_void_time;
-		high_void_times[set_id] = is_last ? 0xFFFFffff : (uint32_t)high_void_time;
-		mid_tenths_pcts[set_id] = mid_tenths_pct;
-
-		cf_info(AS_NSUP, "{%s} set %s evict ttls %u,%d,0.%03u", ns->name, p_set->name,
-				void_time_to_ttl(low_void_times[set_id], now), void_time_to_ttl(high_void_times[set_id], now), mid_tenths_pct);
-
-		linear_histogram_save_info(ns->set_evict_hists[set_id]);
-		linear_histogram_save_info(ns->set_ttl_hists[set_id]);
-	}
-}
-
-//------------------------------------------------
 // Get general eviction thresholds.
 //
 static void
@@ -1194,8 +998,7 @@ get_thresholds(as_namespace* ns, uint32_t* p_low_void_time, uint32_t* p_high_voi
 //
 static void
 update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
-		uint64_t n_expired_records, uint64_t n_evicted_records,
-		uint64_t n_deleted_set_records, uint64_t n_evicted_set_records,
+		uint64_t n_expired_records, uint64_t n_evicted_records, uint64_t n_deleted_set_records,
 		uint32_t evict_ttl_low, uint32_t evict_ttl_high, uint32_t evict_mid_tenths_pct,
 		uint32_t n_set_waits, uint32_t n_clear_waits, uint32_t n_general_waits, uint64_t start_ms)
 {
@@ -1215,11 +1018,6 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 		cf_atomic_int_add(&ns->n_deleted_set_objects, n_deleted_set_records);
 	}
 
-	if (n_evicted_set_records != 0) {
-		cf_atomic_int_add(&g_config.stat_evicted_set_objects, n_evicted_set_records);
-		cf_atomic_int_add(&ns->n_evicted_set_objects, n_evicted_set_records);
-	}
-
 	ns->non_expirable_objects = n_0_void_time;
 
 	uint64_t total_duration_ms = cf_getms() - start_ms;
@@ -1229,11 +1027,11 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 
 	cf_info(AS_NSUP, "{%s} Records: %"PRIu64", %"PRIu64" 0-vt, %"
 			PRIu64"(%"PRIu64") expired, %"PRIu64"(%"PRIu64") evicted, %"
-			PRIu64"(%"PRIu64") set deletes, %"PRIu64"(%"PRIu64") set evicted. "
+			PRIu64"(%"PRIu64") set deletes. "
 			"Evict ttls: %u,%d,0.%03u. Waits: %u,%u,%u. Total time: %"PRIu64" ms",
 			ns->name, n_master, n_0_void_time,
 			n_expired_records, ns->n_expired_objects, n_evicted_records, ns->n_evicted_objects,
-			n_deleted_set_records, ns->n_deleted_set_objects, n_evicted_set_records, ns->n_evicted_set_objects,
+			n_deleted_set_records, ns->n_deleted_set_objects,
 			evict_ttl_low, evict_ttl_high, evict_mid_tenths_pct, n_set_waits, n_clear_waits, n_general_waits, total_duration_ms);
 }
 
@@ -1325,28 +1123,20 @@ thr_nsup(void *arg)
 			uint64_t n_expired_records = 0;
 			uint64_t n_0_void_time_records = 0;
 			uint64_t n_deleted_set_records = 0;
-			uint64_t n_evicted_set_records = 0;
 			uint32_t n_set_waits = 0;
 
 			uint32_t num_sets = cf_vmapx_count(ns->p_sets_vmap);
 
 			bool do_set_deletion = false;
-			bool do_set_eviction = false;
 
 			// Giving these max possible size to spare us checking each record's
 			// set-id during index reduce.
 			bool sets_deleting[AS_SET_MAX_COUNT + 1];
-			bool sets_evicting[AS_SET_MAX_COUNT + 1];
 
 			memset(sets_deleting, 0, sizeof(sets_deleting));
-			memset(sets_evicting, 0, sizeof(sets_evicting));
 
 			for (uint32_t j = 0; j < num_sets; j++) {
 				uint32_t set_id = j + 1;
-
-				clear_set_evict_hist(ns, set_id, now, ttl_range);
-				clear_set_ttl_hist(ns, set_id, now, ttl_range);
-
 				as_set* p_set;
 
 				if (cf_vmapx_get_by_index(ns->p_sets_vmap, j, (void**)&p_set) == CF_VMAPX_OK) {
@@ -1364,65 +1154,10 @@ thr_nsup(void *arg)
 
 						SET_DELETED_OFF(p_set);
 					}
-
-					uint64_t evict_hwm_count = cf_atomic64_get(p_set->evict_hwm_count);
-
-					if (evict_hwm_count != 0 && num_elements > evict_hwm_count) {
-						sets_evicting[set_id] = true;
-						do_set_eviction = true;
-
-						cf_info(AS_NSUP, "{%s} evicting set %s [%d %d]", ns->name, p_set->name, num_elements, evict_hwm_count);
-					}
 				}
 			}
 
-			if (do_set_eviction) {
-				// Set eviction is necessary.
-
-				sets_evict_prep_info cb_info1;
-
-				memset(&cb_info1, 0, sizeof(cb_info1));
-				cb_info1.ns = ns;
-				cb_info1.now = now;
-				cb_info1.sets_deleting = sets_deleting;
-				cb_info1.sets_evicting = sets_evicting;
-
-				// Reduce master partitions, building histograms to calculate
-				// set thresholds. Also do set deletion and general expiration.
-				reduce_master_partitions(ns, sets_evict_prep_reduce_cb, &cb_info1, &n_set_waits, "sets-evict-prep");
-
-				n_deleted_set_records = cb_info1.num_deleted;
-				n_expired_records = cb_info1.num_expired;
-
-				// Determine sets' eviction thresholds.
-				uint32_t low_void_times[num_sets];
-				uint32_t high_void_times[num_sets];
-				uint32_t mid_tenths_pcts[num_sets];
-
-				memset(low_void_times, 0, sizeof(low_void_times));
-				memset(high_void_times, 0, sizeof(high_void_times));
-				memset(mid_tenths_pcts, 0, sizeof(mid_tenths_pcts));
-
-				get_set_thresholds(ns, sets_evicting, num_sets, now, low_void_times, high_void_times, mid_tenths_pcts);
-
-				sets_evict_info cb_info2;
-
-				memset(&cb_info2, 0, sizeof(cb_info2));
-				cb_info2.ns = ns;
-				cb_info2.sets_evicting = sets_evicting;
-				cb_info2.low_void_times = low_void_times;
-				cb_info2.high_void_times = high_void_times;
-				cb_info2.mid_tenths_pcts = mid_tenths_pcts;
-
-				// Reduce master partitions, deleting records up to thresholds.
-				reduce_master_partitions(ns, sets_evict_reduce_cb, &cb_info2, &n_set_waits, "sets-evict");
-
-				n_evicted_set_records = cb_info2.num_evicted;
-				n_0_void_time_records = cb_info2.num_0_void_time;
-			}
-			else if (do_set_deletion) {
-				// Set eviction is not necessary, only set deletion.
-
+			if (do_set_deletion) {
 				sets_delete_info cb_info;
 
 				memset(&cb_info, 0, sizeof(cb_info));
@@ -1510,10 +1245,9 @@ thr_nsup(void *arg)
 				// used to speed up cold start.
 				as_storage_save_evict_void_time(ns, cb_info2.low_void_time);
 			}
-			else if (! (do_set_deletion || do_set_eviction)) {
+			else if (! do_set_deletion) {
 				// Eviction is not necessary, only expiration. (But if set
-				// deletion and/or eviction was done, expiration has already
-				// been done.)
+				// deletion was done, expiration has already been done.)
 
 				expire_info cb_info;
 
@@ -1534,8 +1268,7 @@ thr_nsup(void *arg)
 			linear_histogram_save_info(ns->ttl_hist);
 
 			update_stats(ns, linear_histogram_get_total(ns->ttl_hist) + n_0_void_time_records, n_0_void_time_records,
-					n_expired_records, n_evicted_records,
-					n_deleted_set_records, n_evicted_set_records,
+					n_expired_records, n_evicted_records, n_deleted_set_records,
 					evict_ttl_low, evict_ttl_high, evict_mid_tenths_pct,
 					n_set_waits, n_clear_waits, n_general_waits, start_ms);
 

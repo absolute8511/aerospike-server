@@ -259,8 +259,6 @@ as_namespace_configure_sets(as_namespace *ns)
 			}
 
 			// Rewrite configurable metadata - config values may have changed.
-			p_set->stop_write_count = ns->sets_cfg_array[i].stop_write_count;
-			p_set->evict_hwm_count = ns->sets_cfg_array[i].evict_hwm_count;
 			p_set->enable_xdr = ns->sets_cfg_array[i].enable_xdr;
 		}
 		else if (result != CF_VMAPX_OK) {
@@ -469,13 +467,8 @@ as_namespace_bless(as_namespace *ns)
 }
 
 int as_namespace_check_set_limits(as_set *p_set, as_namespace *ns) {
-	// Check limits on the num_elements in a set.
-	uint64_t stop_write_count = cf_atomic64_get(p_set->stop_write_count);
-	uint64_t num_elements = cf_atomic64_get(p_set->num_elements);
-
-	// If the number of objects crossed the stop_write_count or the set
-	// is to deleted, return error.
-	if ((stop_write_count && (num_elements >= stop_write_count)) || IS_SET_DELETED(p_set)) {
+	// If the set is being deleted, return error.
+	if (IS_SET_DELETED(p_set)) {
 		return AS_NAMESPACE_SET_THRESHOLD_EXCEEDED;
 	}
 
@@ -697,12 +690,6 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, "n_objects=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->num_elements));
 	cf_dyn_buf_append_char(db, ':');
-	cf_dyn_buf_append_string(db, "set-stop-write-count=");
-	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->stop_write_count));
-	cf_dyn_buf_append_char(db, ':');
-	cf_dyn_buf_append_string(db, "set-evict-hwm-count=");
-	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->evict_hwm_count));
-	cf_dyn_buf_append_char(db, ':');
 	cf_dyn_buf_append_string(db, "set-enable-xdr=");
 	if (cf_atomic32_get(p_set->enable_xdr) == AS_SET_ENABLE_XDR_TRUE) {
 		cf_dyn_buf_append_string(db, "true");
@@ -831,25 +818,8 @@ as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,
 	} else {
 		uint16_t set_id = as_namespace_get_set_id(ns, set_name);
 		if (set_id != INVALID_SET_ID) {
-			if (strcmp(hist_name, "ttl") == 0) {
-				if (ns->set_ttl_hists[set_id]) {
-					cf_dyn_buf_append_string(db, "ttl=");
-					linear_histogram_get_info(ns->set_ttl_hists[set_id], db);
-					cf_dyn_buf_append_char(db, ';');
-				} else {
-					cf_dyn_buf_append_string(db, "hist-unavailable");
-				}
-			} else if (strcmp(hist_name, "evict") == 0) {
-				if (ns->set_evict_hists[set_id]) {
-					cf_dyn_buf_append_string(db, "evict=");
-					linear_histogram_get_info(ns->set_evict_hists[set_id], db);
-					cf_dyn_buf_append_char(db, ';');
-				} else {
-					cf_dyn_buf_append_string(db, "hist-unavailable");
-				}
-			} else {
-				cf_dyn_buf_append_string(db, "error-unknown-hist-name");
-			}
+			// TODO - sets' objsz histograms.
+			cf_dyn_buf_append_string(db, "error-unknown-hist-name");
 		} else {
 			cf_dyn_buf_append_string(db, "error-unknown-set-name");
 		}

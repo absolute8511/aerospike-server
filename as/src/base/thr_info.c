@@ -460,8 +460,6 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	APPEND_STAT_COUNTER(db, g_config.stat_evicted_objects);
 	cf_dyn_buf_append_string(db, ";stat_deleted_set_objects=");
 	APPEND_STAT_COUNTER(db, g_config.stat_deleted_set_objects);
-	cf_dyn_buf_append_string(db, ";stat_evicted_set_objects=");
-	APPEND_STAT_COUNTER(db, g_config.stat_evicted_set_objects);
 	cf_dyn_buf_append_string(db, ";stat_evicted_objects_time=");
 	APPEND_STAT_COUNTER(db, g_config.stat_evicted_objects_time);
 	cf_dyn_buf_append_string(db, ";stat_zero_bin_records=");
@@ -3345,17 +3343,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			as_set * p_set = as_namespace_init_set(ns, context);
 			cf_debug(AS_INFO, "set name is %s\n", p_set->name);
 			context_len = sizeof(context);
-			if (0 == as_info_parameter_get(params, "set-stop-write-count", context, &context_len)) {
-				uint64_t val = atoll(context);
-				cf_info(AS_INFO, "Changing value of set-stop-write-count of ns %s set %s to %"PRIu64, ns->name, p_set->name, val);
-				cf_atomic64_set(&p_set->stop_write_count, val);
-			}
-			else if (0 == as_info_parameter_get(params, "set-evict-hwm-count", context, &context_len)) {
-				uint64_t val = atoll(context);
-				cf_info(AS_INFO, "Changing value of set-evict-hwm-count of ns %s set %s to %"PRIu64, ns->name, p_set->name, val);
-				cf_atomic64_set(&p_set->evict_hwm_count, val);
-			}
-			else if (0 == as_info_parameter_get(params, "set-enable-xdr", context, &context_len)) {
+			if (0 == as_info_parameter_get(params, "set-enable-xdr", context, &context_len)) {
 				// TODO - make sure context is null-terminated.
 				if ((strncmp(context, "true", 4) == 0) || (strncmp(context, "yes", 3) == 0)) {
 					cf_info(AS_INFO, "Changing value of set-enable-xdr of ns %s set %s to %s", ns->name, p_set->name, context);
@@ -5773,7 +5761,6 @@ info_get_namespace_info(as_namespace *ns, cf_dyn_buf *db)
 	info_append_uint64("", "expired-objects",  ns->n_expired_objects, db);
 	info_append_uint64("", "evicted-objects",  ns->n_evicted_objects, db);
 	info_append_uint64("", "set-deleted-objects", ns->n_deleted_set_objects, db);
-	info_append_uint64("", "set-evicted-objects", ns->n_evicted_set_objects, db);
 	info_append_uint64("", "nsup-cycle-duration", (uint64_t)ns->nsup_cycle_duration, db);
 	info_append_uint64("", "nsup-cycle-sleep-pct", (uint64_t)ns->nsup_cycle_sleep_pct, db);
 
