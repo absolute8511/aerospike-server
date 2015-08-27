@@ -1098,17 +1098,11 @@ struct as_namespace_s {
 
 #define AS_SET_NAME_MAX_SIZE	64		// includes space for null-terminator
 
-#define AS_SINDEX_PROP_KEY_SIZE ( AS_SET_NAME_MAX_SIZE + 20) // setname_binid_typeid
 #define INVALID_SET_ID 0
-#define AS_NAMESPACE_SET_THRESHOLD_EXCEEDED -2
 
-// Set state bit-field:
-#define AS_SET_DELETE 			0x00000004	// Delete this set
-
-#define IS_SET_DELETED(p_set)	(cf_atomic32_get(p_set->state) & AS_SET_DELETE)
-
-#define SET_DELETED_ON(p_set)	(cf_atomic32_set(&p_set->state, cf_atomic32_get(p_set->state) |  AS_SET_DELETE))
-#define SET_DELETED_OFF(p_set)	(cf_atomic32_set(&p_set->state, cf_atomic32_get(p_set->state) &  ~AS_SET_DELETE))
+#define IS_SET_DELETED(p_set)	(cf_atomic32_get(p_set->deleted) == 1)
+#define SET_DELETED_ON(p_set)	(cf_atomic32_set(&p_set->deleted, 1))
+#define SET_DELETED_OFF(p_set)	(cf_atomic32_set(&p_set->deleted, 0))
 
 typedef enum {
 	AS_SET_ENABLE_XDR_DEFAULT = 0,
@@ -1119,11 +1113,12 @@ typedef enum {
 struct as_set_s {
 	char			name[AS_SET_NAME_MAX_SIZE];
 	cf_atomic64		num_elements;
-	cf_atomic64		unused1;			// Stub variable to be reclaimed for future needs.
-	cf_atomic64		unused2;			// Stub variable to be reclaimed for future needs.
-	cf_atomic64		unused3;			// Stub variable to be reclaimed for future needs.
-	cf_atomic32		enable_xdr;			// White or black-list a set-name for XDR replication for true/false of this set-level flag.
-	cf_atomic32		state;				// Current state of the set.
+	cf_atomic64		n_bytes_memory;		// for data-in-memory only - sets's total record data size
+	cf_atomic64		unused1;
+	cf_atomic32		unused2;
+	cf_atomic32		deleted;			// empty a set (triggered via info command only)
+	cf_atomic32		disable_eviction;	// don't evict anything in this set (note - expiration still works)
+	cf_atomic32		enable_xdr;			// white-list (AS_SET_ENABLE_XDR_TRUE) or black-list (AS_SET_ENABLE_XDR_FALSE) a set for XDR replication
 };
 
 // These bin functions must be below definition of struct as_namespace_s:

@@ -4704,7 +4704,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
 			return -1;
 		}
-		else if (rv_set == AS_NAMESPACE_SET_THRESHOLD_EXCEEDED) {
+		else if (rv_set == -2) {
 			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_FORBIDDEN);
 			return -1;
 		}

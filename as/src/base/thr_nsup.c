@@ -1136,24 +1136,22 @@ thr_nsup(void *arg)
 			memset(sets_deleting, 0, sizeof(sets_deleting));
 
 			for (uint32_t j = 0; j < num_sets; j++) {
-				uint32_t set_id = j + 1;
 				as_set* p_set;
 
-				if (cf_vmapx_get_by_index(ns->p_sets_vmap, j, (void**)&p_set) == CF_VMAPX_OK) {
-					uint64_t num_elements = cf_atomic64_get(p_set->num_elements);
+				if (cf_vmapx_get_by_index(ns->p_sets_vmap, j, (void**)&p_set) != CF_VMAPX_OK) {
+					cf_crash(AS_NSUP, "failed to get set index %u from vmap", j);
+				}
 
-					if (IS_SET_DELETED(p_set)) {
-						if (num_elements != 0) {
-							sets_deleting[set_id] = true;
-							do_set_deletion = true;
+				if (IS_SET_DELETED(p_set)) {
+					if (cf_atomic64_get(p_set->num_elements) != 0) {
+						sets_deleting[j + 1] = true; // set-id is j + 1
+						do_set_deletion = true;
 
-							cf_info(AS_NSUP, "{%s} deleting set %s", ns->name, p_set->name);
-							// If we're deleting, that'll take care of eviction.
-							continue;
-						}
-
-						SET_DELETED_OFF(p_set);
+						cf_info(AS_NSUP, "{%s} deleting set %s", ns->name, p_set->name);
+						continue;
 					}
+
+					SET_DELETED_OFF(p_set);
 				}
 			}
 

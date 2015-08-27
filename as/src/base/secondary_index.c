@@ -109,6 +109,7 @@
 #include "fault.h"
 
 #include "base/cfg.h"
+#include "base/datamodel.h"
 #include "base/index.h"
 #include "base/system_metadata.h"
 #include "base/thr_sindex.h"
@@ -118,6 +119,7 @@
 #define SINDEX_CRASH(str, ...) \
 	cf_crash(AS_SINDEX, "SINDEX_ASSERT: "str, ##__VA_ARGS__);
 
+#define AS_SINDEX_PROP_KEY_SIZE (AS_SET_NAME_MAX_SIZE + 20) // setname_binid_typeid
 
 static cf_queue *g_q_index_keys_arr = NULL;
 

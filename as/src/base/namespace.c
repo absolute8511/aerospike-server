@@ -466,15 +466,6 @@ as_namespace_bless(as_namespace *ns)
 	}
 }
 
-int as_namespace_check_set_limits(as_set *p_set, as_namespace *ns) {
-	// If the set is being deleted, return error.
-	if (IS_SET_DELETED(p_set)) {
-		return AS_NAMESPACE_SET_THRESHOLD_EXCEEDED;
-	}
-
-	return 0;
-}
-
 const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id)
 {
 	// Note that set_id is 1-based, but cf_vmap index is 0-based.
@@ -556,7 +547,7 @@ uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name)
 	return INVALID_SET_ID;
 }
 
-int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool check_threshold)
+int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool fail_if_deleted)
 {
 	if (! set_name) {
 		// Should be impossible.
@@ -618,10 +609,9 @@ int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t
 			return -1;
 		}
 
-		// If check is requested, don't exceed set's limits.
-		if (check_threshold &&
-				as_namespace_check_set_limits(p_set, ns) == AS_NAMESPACE_SET_THRESHOLD_EXCEEDED) {
-			return AS_NAMESPACE_SET_THRESHOLD_EXCEEDED;
+		// If requested, fail if emptying set.
+		if (fail_if_deleted && IS_SET_DELETED(p_set)) {
+			return -2;
 		}
 
 		// The set passed all tests - need to increment its num_elements.
