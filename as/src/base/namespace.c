@@ -808,8 +808,21 @@ as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,
 	} else {
 		uint16_t set_id = as_namespace_get_set_id(ns, set_name);
 		if (set_id != INVALID_SET_ID) {
-			// TODO - sets' objsz histograms.
-			cf_dyn_buf_append_string(db, "error-unknown-hist-name");
+			if (strcmp(hist_name, "objsz") == 0) {
+				if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
+					if (ns->set_obj_size_hists[set_id]) {
+						cf_dyn_buf_append_string(db, "objsz=");
+						linear_histogram_get_info(ns->set_obj_size_hists[set_id], db);
+						cf_dyn_buf_append_char(db, ';');
+					} else {
+						cf_dyn_buf_append_string(db, "hist-unavailable");
+					}
+				} else {
+					cf_dyn_buf_append_string(db, "hist-not-applicable");
+				}
+			} else {
+				cf_dyn_buf_append_string(db, "error-unknown-hist-name");
+			}
 		} else {
 			cf_dyn_buf_append_string(db, "error-unknown-set-name");
 		}

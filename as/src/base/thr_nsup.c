@@ -754,11 +754,13 @@ sets_delete_reduce_cb(as_index_ref* r_ref, void* udata)
 		}
 		else {
 			linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
+			linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
 			linear_histogram_insert_data_point(ns->ttl_hist, void_time);
 		}
 	}
 	else {
 		linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
+		linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
 		p_info->num_0_void_time++;
 	}
 
@@ -780,9 +782,11 @@ evict_prep_reduce_cb(as_index_ref* r_ref, void* udata)
 {
 	evict_prep_info* p_info = (evict_prep_info*)udata;
 	as_namespace* ns = p_info->ns;
+	uint32_t set_id = as_index_get_set_id(r_ref->r);
 	uint32_t void_time = r_ref->r->void_time;
 
 	linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
+	linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
 
 	if (void_time != 0) {
 		linear_histogram_insert_data_point(ns->evict_hist, void_time);
@@ -843,6 +847,7 @@ expire_reduce_cb(as_index_ref* r_ref, void* udata)
 {
 	expire_info* p_info = (expire_info*)udata;
 	as_namespace* ns = p_info->ns;
+	uint32_t set_id = as_index_get_set_id(r_ref->r);
 	uint32_t void_time = r_ref->r->void_time;
 
 	if (void_time != 0) {
@@ -852,11 +857,13 @@ expire_reduce_cb(as_index_ref* r_ref, void* udata)
 		}
 		else {
 			linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
+			linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
 			linear_histogram_insert_data_point(ns->ttl_hist, void_time);
 		}
 	}
 	else {
 		linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
+		linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
 		p_info->num_0_void_time++;
 	}
 
@@ -921,6 +928,22 @@ sub_reduce_partitions(as_namespace* ns, as_index_reduce_fn cb, void* udata, uint
 
 		cf_debug(AS_NSUP, "{%s} %s done partition index %d, waits %u", ns->name, tag, n, *p_n_waits);
 	}
+}
+
+//------------------------------------------------
+// Lazily create and clear a set's size histogram.
+//
+static void
+clear_set_obj_size_hist(as_namespace* ns, uint32_t set_id)
+{
+	if (! ns->set_obj_size_hists[set_id]) {
+		char hist_name[HISTOGRAM_NAME_SIZE];
+
+		sprintf(hist_name, "%s set %u object size histogram", ns->name, set_id);
+		ns->set_obj_size_hists[set_id] = linear_histogram_create(hist_name, 0, 0, OBJ_SIZE_HIST_NUM_BUCKETS);
+	}
+
+	linear_histogram_clear(ns->set_obj_size_hists[set_id], 0, cf_atomic32_get(ns->obj_size_hist_max));
 }
 
 //------------------------------------------------
@@ -1136,6 +1159,10 @@ thr_nsup(void *arg)
 			memset(sets_deleting, 0, sizeof(sets_deleting));
 
 			for (uint32_t j = 0; j < num_sets; j++) {
+				uint32_t set_id = j + 1;
+
+				clear_set_obj_size_hist(ns, set_id);
+
 				as_set* p_set;
 
 				if (cf_vmapx_get_by_index(ns->p_sets_vmap, j, (void**)&p_set) != CF_VMAPX_OK) {
@@ -1144,7 +1171,7 @@ thr_nsup(void *arg)
 
 				if (IS_SET_DELETED(p_set)) {
 					if (cf_atomic64_get(p_set->num_elements) != 0) {
-						sets_deleting[j + 1] = true; // set-id is j + 1
+						sets_deleting[set_id] = true;
 						do_set_deletion = true;
 
 						cf_info(AS_NSUP, "{%s} deleting set %s", ns->name, p_set->name);
@@ -1205,6 +1232,10 @@ thr_nsup(void *arg)
 				linear_histogram_clear(ns->evict_hist, now, MIN(ttl_range, EVICT_HIST_TTL_RANGE));
 				linear_histogram_clear(ns->ttl_hist, now, ttl_range);
 
+				for (uint32_t j = 0; j < num_sets; j++) {
+					linear_histogram_clear(ns->set_obj_size_hists[j + 1], 0, cf_atomic32_get(ns->obj_size_hist_max));
+				}
+
 				evict_prep_info cb_info1;
 
 				memset(&cb_info1, 0, sizeof(cb_info1));
@@ -1264,6 +1295,13 @@ thr_nsup(void *arg)
 			linear_histogram_save_info(ns->obj_size_hist);
 			linear_histogram_dump(ns->ttl_hist);
 			linear_histogram_save_info(ns->ttl_hist);
+
+			for (uint32_t j = 0; j < num_sets; j++) {
+				uint32_t set_id = j + 1;
+
+				linear_histogram_dump(ns->set_obj_size_hists[set_id]);
+				linear_histogram_save_info(ns->set_obj_size_hists[set_id]);
+			}
 
 			update_stats(ns, linear_histogram_get_total(ns->ttl_hist) + n_0_void_time_records, n_0_void_time_records,
 					n_expired_records, n_evicted_records, n_deleted_set_records,

@@ -1083,8 +1083,10 @@ struct as_namespace_s {
 	cf_atomic32		cold_start_threshold_void_time;
 	uint32_t		cold_start_max_void_time;
 
-	// Histogram of all master object storage sizes. (Meaningful for drive-backed namespaces only.)
+	// Histograms of master object storage sizes. (Meaningful for drive-backed
+	// namespaces only.)
 	linear_histogram 	*obj_size_hist;
+	linear_histogram 	*set_obj_size_hists[AS_SET_MAX_COUNT + 1];
 	cf_atomic32			obj_size_hist_max;
 
 	// Histograms used for general eviction and expiration.
