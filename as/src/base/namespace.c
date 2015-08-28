@@ -684,6 +684,9 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, "n_objects=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->num_elements));
 	cf_dyn_buf_append_char(db, ':');
+	cf_dyn_buf_append_string(db, "n_bytes_memory=");
+	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->n_bytes_memory));
+	cf_dyn_buf_append_char(db, ':');
 	cf_dyn_buf_append_string(db, "set-enable-xdr=");
 	if (cf_atomic32_get(p_set->enable_xdr) == AS_SET_ENABLE_XDR_TRUE) {
 		cf_dyn_buf_append_string(db, "true");
@@ -738,6 +741,26 @@ void as_namespace_get_set_info(as_namespace *ns, const char *set_name, cf_dyn_bu
 			cf_dyn_buf_append_char(db, ':');
 			append_set_props(p_set, db);
 		}
+	}
+}
+
+void
+as_namespace_adjust_set_memory(as_namespace *ns, uint16_t set_id,
+		int64_t delta_bytes)
+{
+	if (set_id == INVALID_SET_ID) {
+		return;
+	}
+
+	as_set *p_set;
+
+	if (cf_vmapx_get_by_index(ns->p_sets_vmap, set_id - 1, (void**)&p_set) != CF_VMAPX_OK) {
+		cf_warning(AS_NAMESPACE, "set_id %u - failed to get as_set from vmap", set_id);
+		return;
+	}
+
+	if (cf_atomic64_add(&p_set->n_bytes_memory, delta_bytes) < 0) {
+		cf_warning(AS_NAMESPACE, "set_id %u - n_bytes_memory went negative!", set_id);
 	}
 }
 

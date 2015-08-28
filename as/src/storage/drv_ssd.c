@@ -3174,13 +3174,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 			}
 		}
 
-		uint64_t end_bytes_memory = as_storage_record_get_n_bytes_memory(&rd);
-		int64_t delta_bytes = end_bytes_memory - bytes_memory;
-
-		if (delta_bytes) {
-			cf_atomic_int_add(&ns->n_bytes_memory, delta_bytes);
-		}
-
+		as_storage_record_adjust_mem_stats(&rd, bytes_memory);
 		as_storage_record_close(r, &rd);
 	}
 

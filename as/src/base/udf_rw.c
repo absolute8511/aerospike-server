@@ -711,9 +711,7 @@ udf_rw_write_post_processing(as_transaction *tr, as_storage_rd *rd,
 	tr->generation = rd->r->generation;
 	tr->void_time = rd->r->void_time;
 
-	if (tr->rsv.ns->storage_data_in_memory) {
-		account_memory(tr, rd, memory_bytes);
-	}
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 }
 
 /* Internal Function: Does the post processing for the UDF record after the

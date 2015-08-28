@@ -1182,6 +1182,7 @@ extern const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id);
 extern uint16_t as_namespace_get_set_id(as_namespace *ns, const char *set_name);
 extern uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name);
 extern void as_namespace_get_set_info(as_namespace *ns, const char *set_name, cf_dyn_buf *db);
+extern void as_namespace_adjust_set_memory(as_namespace *ns, uint16_t set_id, int64_t delta_bytes);
 extern void as_namespace_release_set_id(as_namespace *ns, uint16_t set_id);
 extern void as_namespace_get_bins_info(as_namespace *ns, cf_dyn_buf *db, bool show_ns);
 extern void as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,

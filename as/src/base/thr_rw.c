@@ -2458,7 +2458,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		goto Out;
 	}
 
-	if (rv != 1 && rd.ns->storage_data_in_memory) {
+	if (rv != 1) {
 		memory_bytes = as_storage_record_get_n_bytes_memory(&rd);
 	}
 
@@ -2476,14 +2476,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 	r->generation = generation;
 	r->void_time = void_time;
 
-	if (rd.ns->storage_data_in_memory) {
-		uint64_t end_memory_bytes = as_storage_record_get_n_bytes_memory(&rd);
-
-		int64_t delta_bytes = end_memory_bytes - memory_bytes;
-		if (delta_bytes) {
-			cf_atomic_int_add(&rsv->ns->n_bytes_memory, delta_bytes);
-		}
-	}
+	as_storage_record_adjust_mem_stats(&rd, memory_bytes);
 
 	uint64_t version_to_set = 0;
     bool     set_version    = false;
@@ -3186,17 +3179,6 @@ pickle_all(as_storage_rd *rd, pickle_info *pickle)
 	}
 
 	return true;
-}
-
-void
-account_memory(as_transaction *tr, as_storage_rd *rd, uint64_t start_bytes)
-{
-	uint64_t end_bytes = as_storage_record_get_n_bytes_memory(rd);
-	int64_t delta_bytes = (int64_t)end_bytes - (int64_t)start_bytes;
-
-	if (delta_bytes) {
-		cf_atomic_int_add(&tr->rsv.ns->n_bytes_memory, delta_bytes);
-	}
 }
 
 
@@ -4152,7 +4134,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 	destroy_stack_bins(cleanup_bins, n_cleanup_bins);
 
-	account_memory(tr, rd, memory_bytes);
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
@@ -4331,7 +4313,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		as_index_set_flags(r, AS_INDEX_FLAG_KEY_STORED);
 	}
 
-	account_memory(tr, rd, memory_bytes);
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
