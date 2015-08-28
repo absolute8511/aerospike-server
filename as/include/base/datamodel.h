@@ -657,8 +657,6 @@ struct as_partition_s {
 
 	uint64_t cluster_key;
 
-	// the number of bytes in the tree below
-	cf_atomic_int n_bytes_memory; // memory bytes
 	// the maximum void time of all records in the tree below
 	cf_atomic_int max_void_time;
 

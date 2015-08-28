@@ -2482,7 +2482,6 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		int64_t delta_bytes = end_memory_bytes - memory_bytes;
 		if (delta_bytes) {
 			cf_atomic_int_add(&rsv->ns->n_bytes_memory, delta_bytes);
-			cf_atomic_int_add(&rsv->p->n_bytes_memory, delta_bytes);
 		}
 	}
 
@@ -2994,15 +2993,13 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 		}
 
 		if (ns->storage_data_in_memory) {
-			rd.n_bins = as_bin_get_n_bins(r, &rd);
-			rd.bins = as_bin_get_all(r, &rd, 0);
-			cf_atomic_int_sub(&tr->rsv.p->n_bytes_memory,
-					as_storage_record_get_n_bytes_memory(&rd));
-
 			// Remove record from secondary index. In case data is not in memory
 			// then we won't have record in that case secondary index entry is
 			// cleaned up by background sindex defrag thread.
 			if (as_sindex_ns_has_sindex(ns)) {
+				rd.n_bins = as_bin_get_n_bins(r, &rd);
+				rd.bins = as_bin_get_all(r, &rd, NULL);
+
 				int sindex_ret = AS_SINDEX_OK;
 				const char* set_name = as_index_get_set_name(r, ns);
 
@@ -3199,7 +3196,6 @@ account_memory(as_transaction *tr, as_storage_rd *rd, uint64_t start_bytes)
 
 	if (delta_bytes) {
 		cf_atomic_int_add(&tr->rsv.ns->n_bytes_memory, delta_bytes);
-		cf_atomic_int_add(&tr->rsv.p->n_bytes_memory, delta_bytes);
 	}
 }
 

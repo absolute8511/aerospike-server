@@ -174,18 +174,6 @@ cold_start_evict_reduce_cb(as_index_ref* r_ref, void* udata)
 	if (void_time != 0) {
 		if (void_time < ns->cold_start_threshold_void_time ||
 				(void_time < p_info->high_void_time && random_delete(p_info->mid_tenths_pct))) {
-			// TODO - should be done as part of as_record_destroy().
-			if (ns->storage_data_in_memory) {
-				as_storage_rd rd;
-
-				rd.r = r_ref->r;
-				rd.ns = ns;
-				rd.n_bins = as_bin_get_n_bins(r_ref->r, &rd);
-				rd.bins = as_bin_get_all(r_ref->r, &rd, NULL);
-
-				cf_atomic_int_sub(&p_partition->n_bytes_memory, as_storage_record_get_n_bytes_memory(&rd));
-			}
-
 			as_index_delete(p_partition->vp, &r_ref->r->key);
 			p_info->num_evicted++;
 		}

@@ -448,7 +448,6 @@ as_partition_reinit(as_partition *p, as_namespace *ns, int pid)
 	p->cluster_key = 0;
 
 	as_index_tree *t = p->vp;
-	cf_atomic_int_set(&p->n_bytes_memory, 0);
 
 	// First initialization is the only time there's a null tree pointer.
 	if (! p->vp && ! ns->cold_start) {
@@ -522,7 +521,6 @@ void set_partition_desync_lockfree(as_partition *p, as_partition_vinfo *vinfo, a
 	cf_debug(AS_PARTITION, "{%s:%d}set_partition_desync_lockfree: OLD SUBRECORD TREE %p  ref count %d", ns->name, pid, t, cf_rc_count(sub_t));
 	as_index_tree_release(sub_t, ns);
 
-	cf_atomic_int_set(&p->n_bytes_memory, 0);
 	clear_partition_version_in_storage(ns, pid, flush);
 	memset(vinfo, 0, sizeof(as_partition_vinfo));
 	// Currently both tree have same property
@@ -570,7 +568,6 @@ void set_partition_absent_lockfree(as_partition *p, as_partition_vinfo *vinfo, a
 		return;
 	// as_partition_reinit(p, ns);
 	as_index_tree *t = p->vp;
-	cf_atomic_int_set(&p->n_bytes_memory, 0);
 	p->vp = as_index_tree_create(ns->arena, (as_index_value_destructor)&as_record_destroy, ns, ns->tree_roots ? &ns->tree_roots[pid] : NULL);
 	cf_debug(AS_PARTITION, "{%s:%d} TREE %p ", ns->name, pid, p->vp);
 	// A Change:  Set the State BEFORE the tree release, just in case that
@@ -1868,8 +1865,6 @@ as_partition_getinfo_str(cf_dyn_buf *db)
 			cf_dyn_buf_append_uint64_x(db, p->pending_migrate_tx);   // Pending outgoing Migrates
 			cf_dyn_buf_append_char(db, ':');
 			cf_dyn_buf_append_uint64_x(db, p->pending_migrate_rx);   // Pending incoming migrates
-			cf_dyn_buf_append_char(db, ':');
-			cf_dyn_buf_append_uint64(db, (uint64_t) p->n_bytes_memory);    // Size
 			cf_dyn_buf_append_char(db, ':');
 			cf_dyn_buf_append_uint64(db, (uint64_t) p->vp->elements);      // Records
 			cf_dyn_buf_append_char(db, ':');

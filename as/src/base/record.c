@@ -706,7 +706,6 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 		int64_t delta_bytes = end_memory_bytes - memory_bytes;
 		if (delta_bytes) {
 			cf_atomic_int_add(&rsv->ns->n_bytes_memory, delta_bytes);
-			cf_atomic_int_add(&rsv->p->n_bytes_memory, delta_bytes);
 		}
 	}
 	rd->write_to_device = true;

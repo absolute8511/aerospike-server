@@ -6978,8 +6978,6 @@ int info_command_sindex_qnodemap(char *name, char *params, cf_dyn_buf *db)
 			if (g_config.self_node == p->qnode)
 				cf_dyn_buf_append_string(db, "Q");
 			cf_dyn_buf_append_string(db, ":");
-			cf_dyn_buf_append_uint64(db, (uint64_t) p->n_bytes_memory);
-			cf_dyn_buf_append_char(db, ':');
 			cf_dyn_buf_append_uint64(db, (uint64_t) p->vp->elements);
 			cf_dyn_buf_append_char(db, ';');
 		}

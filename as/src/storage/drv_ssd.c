@@ -3179,7 +3179,6 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 
 		if (delta_bytes) {
 			cf_atomic_int_add(&ns->n_bytes_memory, delta_bytes);
-			cf_atomic_int_add(&p_partition->n_bytes_memory, delta_bytes);
 		}
 
 		as_storage_record_close(r, &rd);
