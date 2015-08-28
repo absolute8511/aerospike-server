@@ -180,7 +180,7 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	sprintf(hist_name, "%s evict histogram", name);
 	ns->evict_hist = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
 
-	sprintf(hist_name, "%s evict rough histogram", name);
+	sprintf(hist_name, "%s evict coarse histogram", name);
 	ns->evict_coarse_hist = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
 
 	sprintf(hist_name, "%s ttl histogram", name);
