@@ -1091,7 +1091,9 @@ struct as_namespace_s {
 
 	// Histograms used for general eviction and expiration.
 	linear_histogram 	*evict_hist;
+	linear_histogram 	*evict_coarse_hist;
 	linear_histogram 	*ttl_hist;
+	linear_histogram 	*set_ttl_hists[AS_SET_MAX_COUNT + 1]; // only for info
 
 	as_partition partitions[AS_PARTITIONS];
 
@@ -1105,6 +1107,9 @@ struct as_namespace_s {
 #define IS_SET_DELETED(p_set)	(cf_atomic32_get(p_set->deleted) == 1)
 #define SET_DELETED_ON(p_set)	(cf_atomic32_set(&p_set->deleted, 1))
 #define SET_DELETED_OFF(p_set)	(cf_atomic32_set(&p_set->deleted, 0))
+
+#define IS_SET_EVICTION_DISABLED(p_set)		(cf_atomic32_get(p_set->disable_eviction) == 1)
+#define DISABLE_SET_EVICTION(p_set, on_off)	(cf_atomic32_set(&p_set->disable_eviction, on_off ? 1 : 0))
 
 typedef enum {
 	AS_SET_ENABLE_XDR_DEFAULT = 0,

@@ -3361,6 +3361,19 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 					goto Error;
 				}
 			}
+			else if (0 == as_info_parameter_get(params, "set-disable-eviction", context, &context_len)) {
+				if ((strncmp(context, "true", 4) == 0) || (strncmp(context, "yes", 3) == 0)) {
+					cf_info(AS_INFO, "Changing value of set-disable-eviction of ns %s set %s to %s", ns->name, p_set->name, context);
+					DISABLE_SET_EVICTION(p_set, true);
+				}
+				else if ((strncmp(context, "false", 5) == 0) || (strncmp(context, "no", 2) == 0)) {
+					cf_info(AS_INFO, "Changing value of set-disable-eviction of ns %s set %s to %s", ns->name, p_set->name, context);
+					DISABLE_SET_EVICTION(p_set, false);
+				}
+				else {
+					goto Error;
+				}
+			}
 			else if (0 == as_info_parameter_get(params, "set-delete", context, &context_len)) {
 				if ((strncmp(context, "true", 4) == 0) || (strncmp(context, "yes", 3) == 0)) {
 					cf_info(AS_INFO, "Changing value of set-delete of ns %s set %s to %s", ns->name, p_set->name, context);

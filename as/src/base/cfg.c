@@ -548,6 +548,7 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_KV_COND_WRITE,
 
 	// Namespace set options:
+	CASE_NAMESPACE_SET_DISABLE_EVICTION,
 	CASE_NAMESPACE_SET_ENABLE_XDR,
 	// Deprecated:
 	CASE_NAMESPACE_SET_EVICT_HWM_COUNT,
@@ -938,6 +939,7 @@ const cfg_opt NAMESPACE_STORAGE_KV_OPTS[] = {
 };
 
 const cfg_opt NAMESPACE_SET_OPTS[] = {
+		{ "set-disable-eviction",			CASE_NAMESPACE_SET_DISABLE_EVICTION },
 		{ "set-enable-xdr",					CASE_NAMESPACE_SET_ENABLE_XDR },
 		{ "set-evict-hwm-count",			CASE_NAMESPACE_SET_EVICT_HWM_COUNT },
 		{ "set-evict-hwm-pct",				CASE_NAMESPACE_SET_EVICT_HWM_PCT },
@@ -2761,6 +2763,9 @@ as_config_init(const char *config_file)
 		//
 		case NAMESPACE_SET:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_SET_OPTS, NUM_NAMESPACE_SET_OPTS)) {
+			case CASE_NAMESPACE_SET_DISABLE_EVICTION:
+				DISABLE_SET_EVICTION(p_set, cfg_bool(&line));
+				break;
 			case CASE_NAMESPACE_SET_ENABLE_XDR:
 				switch(cfg_find_tok(line.val_tok_1, NAMESPACE_SET_ENABLE_XDR_OPTS, NUM_NAMESPACE_SET_ENABLE_XDR_OPTS)) {
 				case CASE_NAMESPACE_SET_ENABLE_XDR_USE_DEFAULT:

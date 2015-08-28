@@ -715,10 +715,44 @@ queue_for_delete(as_namespace* ns, cf_digest* p_digest)
 }
 
 //------------------------------------------------
+// Insert data into object size histograms.
+//
+static void
+add_to_obj_size_histograms(as_namespace* ns, as_index* r)
+{
+	uint32_t set_id = as_index_get_set_id(r);
+	linear_histogram* set_obj_size_hist = ns->set_obj_size_hists[set_id];
+	uint64_t n_rblocks = r->storage_key.ssd.n_rblocks;
+
+	linear_histogram_insert_data_point(ns->obj_size_hist, n_rblocks);
+
+	if (set_obj_size_hist) {
+		linear_histogram_insert_data_point(set_obj_size_hist, n_rblocks);
+	}
+}
+
+//------------------------------------------------
+// Insert data into TTL histograms.
+//
+static void
+add_to_ttl_histograms(as_namespace* ns, as_index* r)
+{
+	uint32_t set_id = as_index_get_set_id(r);
+	linear_histogram* set_ttl_hist = ns->set_ttl_hists[set_id];
+	uint32_t void_time = r->void_time;
+
+	linear_histogram_insert_data_point(ns->ttl_hist, void_time);
+
+	if (set_ttl_hist) {
+		linear_histogram_insert_data_point(set_ttl_hist, void_time);
+	}
+}
+
+//------------------------------------------------
 // Reduce callback deletes sets.
 // - does set deletion
-// - does general expiration
-// - builds object size & general TTL histograms
+// - does expiration
+// - builds object size & TTL histograms
 // - counts 0-void-time records
 //
 typedef struct sets_delete_info_s {
@@ -733,34 +767,33 @@ typedef struct sets_delete_info_s {
 static void
 sets_delete_reduce_cb(as_index_ref* r_ref, void* udata)
 {
+	as_index* r = r_ref->r;
 	sets_delete_info* p_info = (sets_delete_info*)udata;
 	as_namespace* ns = p_info->ns;
-	uint32_t set_id = as_index_get_set_id(r_ref->r);
+	uint32_t set_id = as_index_get_set_id(r);
 
 	if (p_info->sets_deleting[set_id]) {
-		queue_for_delete(ns, &r_ref->r->key);
+		queue_for_delete(ns, &r->key);
 		p_info->num_deleted++;
 
 		as_record_done(r_ref, ns);
 		return;
 	}
 
-	uint32_t void_time = r_ref->r->void_time;
+	uint32_t void_time = r->void_time;
 
 	if (void_time != 0) {
 		if (p_info->now > void_time) {
-			queue_for_delete(ns, &r_ref->r->key);
+			queue_for_delete(ns, &r->key);
 			p_info->num_expired++;
 		}
 		else {
-			linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
-			linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
-			linear_histogram_insert_data_point(ns->ttl_hist, void_time);
+			add_to_obj_size_histograms(ns, r);
+			add_to_ttl_histograms(ns, r);
 		}
 	}
 	else {
-		linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
-		linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
+		add_to_obj_size_histograms(ns, r);
 		p_info->num_0_void_time++;
 	}
 
@@ -768,29 +801,34 @@ sets_delete_reduce_cb(as_index_ref* r_ref, void* udata)
 }
 
 //------------------------------------------------
-// Reduce callback prepares for general eviction.
-// - builds object size, general eviction & TTL histograms
+// Reduce callback prepares for eviction.
+// - builds object size, eviction & TTL histograms
 // - counts 0-void-time records
 //
 typedef struct evict_prep_info_s {
 	as_namespace*	ns;
+	bool*			sets_not_evicting;
 	uint32_t		num_0_void_time;
 } evict_prep_info;
 
 static void
 evict_prep_reduce_cb(as_index_ref* r_ref, void* udata)
 {
+	as_index* r = r_ref->r;
 	evict_prep_info* p_info = (evict_prep_info*)udata;
 	as_namespace* ns = p_info->ns;
-	uint32_t set_id = as_index_get_set_id(r_ref->r);
-	uint32_t void_time = r_ref->r->void_time;
+	uint32_t set_id = as_index_get_set_id(r);
+	uint32_t void_time = r->void_time;
 
-	linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
-	linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
+	add_to_obj_size_histograms(ns, r);
 
 	if (void_time != 0) {
-		linear_histogram_insert_data_point(ns->evict_hist, void_time);
-		linear_histogram_insert_data_point(ns->ttl_hist, void_time);
+		if (! p_info->sets_not_evicting[set_id]) {
+			linear_histogram_insert_data_point(ns->evict_hist, void_time);
+			linear_histogram_insert_data_point(ns->evict_coarse_hist, void_time);
+		}
+
+		add_to_ttl_histograms(ns, r);
 	}
 	else {
 		p_info->num_0_void_time++;
@@ -805,6 +843,7 @@ evict_prep_reduce_cb(as_index_ref* r_ref, void* udata)
 //
 typedef struct evict_info_s {
 	as_namespace*	ns;
+	bool*			sets_not_evicting;
 	uint32_t		low_void_time;
 	uint32_t		high_void_time;
 	uint32_t		mid_tenths_pct;
@@ -814,14 +853,16 @@ typedef struct evict_info_s {
 static void
 evict_reduce_cb(as_index_ref* r_ref, void* udata)
 {
+	as_index* r = r_ref->r;
 	evict_info* p_info = (evict_info*)udata;
 	as_namespace* ns = p_info->ns;
-	uint32_t void_time = r_ref->r->void_time;
+	uint32_t set_id = as_index_get_set_id(r);
+	uint32_t void_time = r->void_time;
 
-	if (void_time != 0) {
+	if (void_time != 0 && ! p_info->sets_not_evicting[set_id]) {
 		if (void_time < p_info->low_void_time ||
 				(void_time < p_info->high_void_time && random_delete(p_info->mid_tenths_pct))) {
-			queue_for_delete(ns, &r_ref->r->key);
+			queue_for_delete(ns, &r->key);
 			p_info->num_evicted++;
 		}
 	}
@@ -831,8 +872,8 @@ evict_reduce_cb(as_index_ref* r_ref, void* udata)
 
 //------------------------------------------------
 // Reduce callback expires records.
-// - does general expiration
-// - builds object size & general TTL histograms
+// - does expiration
+// - builds object size & TTL histograms
 // - counts 0-void-time records
 //
 typedef struct expire_info_s {
@@ -845,25 +886,23 @@ typedef struct expire_info_s {
 static void
 expire_reduce_cb(as_index_ref* r_ref, void* udata)
 {
+	as_index* r = r_ref->r;
 	expire_info* p_info = (expire_info*)udata;
 	as_namespace* ns = p_info->ns;
-	uint32_t set_id = as_index_get_set_id(r_ref->r);
-	uint32_t void_time = r_ref->r->void_time;
+	uint32_t void_time = r->void_time;
 
 	if (void_time != 0) {
 		if (p_info->now > void_time) {
-			queue_for_delete(ns, &r_ref->r->key);
+			queue_for_delete(ns, &r->key);
 			p_info->num_expired++;
 		}
 		else {
-			linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
-			linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
-			linear_histogram_insert_data_point(ns->ttl_hist, void_time);
+			add_to_obj_size_histograms(ns, r);
+			add_to_ttl_histograms(ns, r);
 		}
 	}
 	else {
-		linear_histogram_insert_data_point(ns->obj_size_hist, r_ref->r->storage_key.ssd.n_rblocks);
-		linear_histogram_insert_data_point(ns->set_obj_size_hists[set_id], r_ref->r->storage_key.ssd.n_rblocks);
+		add_to_obj_size_histograms(ns, r);
 		p_info->num_0_void_time++;
 	}
 
@@ -947,6 +986,22 @@ clear_set_obj_size_hist(as_namespace* ns, uint32_t set_id)
 }
 
 //------------------------------------------------
+// Lazily create and clear a set's TTL histogram.
+//
+static void
+clear_set_ttl_hist(as_namespace* ns, uint32_t set_id, uint32_t now, uint64_t ttl_range)
+{
+	if (! ns->set_ttl_hists[set_id]) {
+		char hist_name[HISTOGRAM_NAME_SIZE];
+
+		sprintf(hist_name, "%s set %u ttl histogram", ns->name, set_id);
+		ns->set_ttl_hists[set_id] = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
+	}
+
+	linear_histogram_clear(ns->set_ttl_hists[set_id], now, ttl_range);
+}
+
+//------------------------------------------------
 // Get the TTL range for histograms.
 //
 static uint64_t
@@ -995,9 +1050,9 @@ get_thresholds(as_namespace* ns, uint32_t* p_low_void_time, uint32_t* p_high_voi
 	bool is_last = linear_histogram_get_thresholds_for_fraction(ns->evict_hist, ns->evict_tenths_pct, &low_void_time, &high_void_time, p_mid_tenths_pct);
 
 	if (is_last || high_void_time == 0) {
-		cf_info(AS_NSUP, "{%s} evicting using ttl histogram", ns->name);
+		cf_info(AS_NSUP, "{%s} evicting using coarse histogram", ns->name);
 
-		is_last = linear_histogram_get_thresholds_for_fraction(ns->ttl_hist, ns->evict_tenths_pct, &low_void_time, &high_void_time, p_mid_tenths_pct);
+		is_last = linear_histogram_get_thresholds_for_fraction(ns->evict_coarse_hist, ns->evict_tenths_pct, &low_void_time, &high_void_time, p_mid_tenths_pct);
 	}
 
 	if (high_void_time == 0) {
@@ -1155,18 +1210,25 @@ thr_nsup(void *arg)
 			// Giving these max possible size to spare us checking each record's
 			// set-id during index reduce.
 			bool sets_deleting[AS_SET_MAX_COUNT + 1];
+			bool sets_not_evicting[AS_SET_MAX_COUNT + 1];
 
 			memset(sets_deleting, 0, sizeof(sets_deleting));
+			memset(sets_not_evicting, 0, sizeof(sets_not_evicting));
 
 			for (uint32_t j = 0; j < num_sets; j++) {
 				uint32_t set_id = j + 1;
 
 				clear_set_obj_size_hist(ns, set_id);
+				clear_set_ttl_hist(ns, set_id, now, ttl_range);
 
 				as_set* p_set;
 
 				if (cf_vmapx_get_by_index(ns->p_sets_vmap, j, (void**)&p_set) != CF_VMAPX_OK) {
 					cf_crash(AS_NSUP, "failed to get set index %u from vmap", j);
+				}
+
+				if (IS_SET_EVICTION_DISABLED(p_set)) {
+					sets_not_evicting[set_id] = true;
 				}
 
 				if (IS_SET_DELETED(p_set)) {
@@ -1230,16 +1292,21 @@ thr_nsup(void *arg)
 
 				linear_histogram_clear(ns->obj_size_hist, 0, cf_atomic32_get(ns->obj_size_hist_max));
 				linear_histogram_clear(ns->evict_hist, now, MIN(ttl_range, EVICT_HIST_TTL_RANGE));
+				linear_histogram_clear(ns->evict_coarse_hist, now, ttl_range);
 				linear_histogram_clear(ns->ttl_hist, now, ttl_range);
 
 				for (uint32_t j = 0; j < num_sets; j++) {
-					linear_histogram_clear(ns->set_obj_size_hists[j + 1], 0, cf_atomic32_get(ns->obj_size_hist_max));
+					uint32_t set_id = j + 1;
+
+					linear_histogram_clear(ns->set_obj_size_hists[set_id], 0, cf_atomic32_get(ns->obj_size_hist_max));
+					linear_histogram_clear(ns->set_ttl_hists[set_id], now, ttl_range);
 				}
 
 				evict_prep_info cb_info1;
 
 				memset(&cb_info1, 0, sizeof(cb_info1));
 				cb_info1.ns = ns;
+				cb_info1.sets_not_evicting = sets_not_evicting;
 
 				// Reduce master partitions, building histograms to calculate
 				// general eviction threshold.
@@ -1251,6 +1318,7 @@ thr_nsup(void *arg)
 
 				memset(&cb_info2, 0, sizeof(cb_info2));
 				cb_info2.ns = ns;
+				cb_info2.sets_not_evicting = sets_not_evicting;
 
 				// Determine general eviction thresholds.
 				get_thresholds(ns, &cb_info2.low_void_time, &cb_info2.high_void_time, &cb_info2.mid_tenths_pct);
@@ -1269,6 +1337,8 @@ thr_nsup(void *arg)
 
 				linear_histogram_dump(ns->evict_hist);
 				linear_histogram_save_info(ns->evict_hist);
+				linear_histogram_dump(ns->evict_coarse_hist);
+				linear_histogram_save_info(ns->evict_coarse_hist);
 
 				// Save the eviction depth in the device header(s) so it can be
 				// used to speed up cold start.
@@ -1301,6 +1371,8 @@ thr_nsup(void *arg)
 
 				linear_histogram_dump(ns->set_obj_size_hists[set_id]);
 				linear_histogram_save_info(ns->set_obj_size_hists[set_id]);
+				linear_histogram_dump(ns->set_ttl_hists[set_id]);
+				linear_histogram_save_info(ns->set_ttl_hists[set_id]);
 			}
 
 			update_stats(ns, linear_histogram_get_total(ns->ttl_hist) + n_0_void_time_records, n_0_void_time_records,

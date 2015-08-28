@@ -180,6 +180,9 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	sprintf(hist_name, "%s evict histogram", name);
 	ns->evict_hist = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
 
+	sprintf(hist_name, "%s evict rough histogram", name);
+	ns->evict_coarse_hist = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
+
 	sprintf(hist_name, "%s ttl histogram", name);
 	ns->ttl_hist = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
 
@@ -259,6 +262,7 @@ as_namespace_configure_sets(as_namespace *ns)
 			}
 
 			// Rewrite configurable metadata - config values may have changed.
+			p_set->disable_eviction = ns->sets_cfg_array[i].disable_eviction;
 			p_set->enable_xdr = ns->sets_cfg_array[i].enable_xdr;
 		}
 		else if (result != CF_VMAPX_OK) {
@@ -694,6 +698,14 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 		cf_dyn_buf_append_uint32(db, cf_atomic32_get(p_set->enable_xdr));
 	}
 	cf_dyn_buf_append_char(db, ':');
+	cf_dyn_buf_append_string(db, "set-disable-eviction=");
+	if (IS_SET_EVICTION_DISABLED(p_set)) {
+		cf_dyn_buf_append_string(db, "true");
+	}
+	else {
+		cf_dyn_buf_append_string(db, "false");
+	}
+	cf_dyn_buf_append_char(db, ':');
 	cf_dyn_buf_append_string(db, "set-delete=");
 	if (IS_SET_DELETED(p_set)) {
 		cf_dyn_buf_append_string(db, "true");
@@ -794,6 +806,10 @@ as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,
 			cf_dyn_buf_append_string(db, "evict=");
 			linear_histogram_get_info(ns->evict_hist, db);
 			cf_dyn_buf_append_char(db, ';');
+		} else if (strcmp(hist_name, "evictc") == 0) {
+			cf_dyn_buf_append_string(db, "evictc=");
+			linear_histogram_get_info(ns->evict_coarse_hist, db);
+			cf_dyn_buf_append_char(db, ';');
 		} else if (strcmp(hist_name, "objsz") == 0) {
 			if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
 				cf_dyn_buf_append_string(db, "objsz=");
@@ -808,7 +824,15 @@ as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,
 	} else {
 		uint16_t set_id = as_namespace_get_set_id(ns, set_name);
 		if (set_id != INVALID_SET_ID) {
-			if (strcmp(hist_name, "objsz") == 0) {
+			if (strcmp(hist_name, "ttl") == 0) {
+				if (ns->set_ttl_hists[set_id]) {
+					cf_dyn_buf_append_string(db, "ttl=");
+					linear_histogram_get_info(ns->set_ttl_hists[set_id], db);
+					cf_dyn_buf_append_char(db, ';');
+				} else {
+					cf_dyn_buf_append_string(db, "hist-unavailable");
+				}
+			} else if (strcmp(hist_name, "objsz") == 0) {
 				if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
 					if (ns->set_obj_size_hists[set_id]) {
 						cf_dyn_buf_append_string(db, "objsz=");
