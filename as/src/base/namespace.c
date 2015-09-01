@@ -684,7 +684,7 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, "n_objects=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->num_elements));
 	cf_dyn_buf_append_char(db, ':');
-	cf_dyn_buf_append_string(db, "n_bytes_memory=");
+	cf_dyn_buf_append_string(db, "n-bytes-memory=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->n_bytes_memory));
 	cf_dyn_buf_append_char(db, ':');
 	cf_dyn_buf_append_string(db, "set-enable-xdr=");
@@ -701,7 +701,7 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 		cf_dyn_buf_append_uint32(db, cf_atomic32_get(p_set->enable_xdr));
 	}
 	cf_dyn_buf_append_char(db, ':');
-	cf_dyn_buf_append_string(db, "set-disable-eviction=");
+	cf_dyn_buf_append_string(db, "disable-eviction=");
 	if (IS_SET_EVICTION_DISABLED(p_set)) {
 		cf_dyn_buf_append_string(db, "true");
 	}
