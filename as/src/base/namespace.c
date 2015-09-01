@@ -155,7 +155,6 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->storage_post_write_queue = 256; // number of wblocks per device used as post-write cache
 	ns->storage_read_block_size = 64 * 1024; // size in bytes of read buffers to use with KV store devices
 	// [Note - current FusionIO maximum read buffer size is 1MB - 512B.]
-	ns->storage_write_smoothing_period = 0; // seconds of write data to use for smoothing (default 0 = off)
 	ns->storage_write_threads = 1;
 
 	// SINDEX

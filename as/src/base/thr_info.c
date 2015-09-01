@@ -2298,7 +2298,6 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 		info_append_uint64("", "defrag-startup-minimum", ns->storage_defrag_startup_minimum, db);
 		info_append_uint64("", "flush-max-ms", ns->storage_flush_max_us / 1000, db);
 		info_append_uint64("", "fsync-max-sec", ns->storage_fsync_max_us / 1000000, db);
-		info_append_uint64("", "write-smoothing-period", ns->storage_write_smoothing_period, db);
 		info_append_uint64("", "max-write-cache", ns->storage_max_write_cache, db);
 		info_append_uint64("", "min-avail-pct", ns->storage_min_avail_pct, db);
 		info_append_uint64("", "post-write-queue", (uint64_t)ns->storage_post_write_queue, db);
@@ -3619,16 +3618,6 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			else {
 				goto Error;
 			}
-		}
-		else if (0 == as_info_parameter_get(params, "write-smoothing-period", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val)) {
-				goto Error;
-			}
-			if ( ns->storage_write_smoothing_period < 0 || (ns->storage_defrag_startup_minimum > 0 && ns->storage_defrag_startup_minimum < 5) || ns->storage_defrag_startup_minimum > 1000)
-				goto Error;
-			cf_info(AS_INFO, "Changing value of write-smoothing-period of ns %s from %d to %d ", ns->name, ns->storage_write_smoothing_period, val);
-			ns->storage_write_smoothing_period = val;
-
 		}
 		else if (0 == as_info_parameter_get(params, "max-write-cache", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val)) {

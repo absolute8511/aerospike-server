@@ -994,7 +994,6 @@ struct as_namespace_s {
 	uint64_t	storage_flush_max_us;
 	uint64_t	storage_fsync_max_us;
 	uint32_t	storage_min_avail_pct;
-	uint32_t	storage_write_smoothing_period;
 
 	// For data-not-in-memory, optionally cache swbs after writing to device.
 	cf_atomic32 storage_post_write_queue; // number of swbs/device held after writing to device
@@ -1020,7 +1019,6 @@ struct as_namespace_s {
 	int			storage_last_avail_pct; // most recently calculated available percent
 	int			storage_max_write_q; // storage_max_write_cache is converted to this
 	uint32_t	saved_defrag_sleep; // restore after defrag at startup is done
-	uint32_t	saved_write_smoothing_period; // restore after defrag at startup is done
 	uint32_t	defrag_lwm_size; // storage_defrag_lwm_pct % of storage_write_block_size
 
 	/* very interesting counters */
