@@ -59,6 +59,10 @@
 /* GLOBALS */
 as_aerospike g_ldt_aerospike; // Only instantiation is enough
 
+/* Forward Declare */
+static void ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec);
+static void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord);
+
 /* INIT */
 int
 ldt_init(void)
@@ -116,7 +120,8 @@ ldt_crec_find_by_digest(ldt_record *lrecord, cf_digest *keyd)
 	for (int i = 0; i < lrecord->max_chunks; i++) {
 		ldt_slot_chunk *lchunk = &lrecord->chunk[i];
 		for (int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
-			if (lchunk->slots[j].inuse && !memcmp(&lchunk->slots[j].rd.keyd, keyd, 20)) {
+			if (lchunk->slots[j].inuse && 
+				(0 == cf_digest_compare(&lchunk->slots[j].rd.keyd, keyd))) {
 				return &lchunk->slots[j];
 			}
 		}
@@ -290,11 +295,9 @@ Out:
  *      ldt_aerospike_crec_open
  *      ldt_aerospike_crec_create
  */
-void ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec, cf_digest *keyd);
-void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord);
 
 void
-ldt_slot_init(ldt_slot *lslotp, ldt_record *lrecord, cf_digest *keyd)
+ldt_slot_init(ldt_slot *lslotp, ldt_record *lrecord)
 {
 	// It is just a stub fill the proper values in
 	udf_record *c_urecord   = &lslotp->c_urecord;
@@ -308,7 +311,7 @@ ldt_slot_init(ldt_slot *lslotp, ldt_record *lrecord, cf_digest *keyd)
 	lslotp->r_ref.skip_lock = true;
 	lslotp->c_urec_p = as_rec_new(c_urecord, &udf_subrecord_hooks);
 
-	ldt_slot_setup(lslotp, lrecord->h_urec, keyd);
+	ldt_slot_setup(lslotp, lrecord->h_urec);
 	//ldt_slot_print(lslotp);
 }
 
@@ -328,7 +331,8 @@ void ldt_chunk_destroy(ldt_record *lrecord, ldt_slot_chunk *lchunk)
  * Remove the slot entry, but decrement the count only if the destroy() op
  * was successful.
  */
-void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord)
+static void
+ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord)
 {
 	if (lslotp->c_urec_p) {
 		udf_record_destroy(lslotp->c_urec_p);
@@ -340,6 +344,31 @@ void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord)
 		cf_warning(AS_LDT, "ldt_slot_destroy: Internal Error [Attempt to free invalid slot] ... Skipped");
 	}
 }
+
+void
+ldt_slot_set_digest(ldt_slot *lslotp, cf_digest *keyd)
+{
+	as_transaction * c_tr      = &lslotp->tr;
+	c_tr->keyd                 = *keyd;
+	udf_record *c_urecord      = (udf_record *)as_rec_source(lslotp->c_urec_p);
+	c_urecord->keyd            = *keyd;
+
+	// There are 4 place digest is
+	// 1. tr->keyd
+	// 2. r_ref->r->key
+	// 3. rd->keyd
+	// 4. urecord->keyd
+	//
+	// First three are always equal. At the start tr->keyd is setup which then
+	// sets or gets r_ref / rd as normal work goes ...
+	//
+	// urecord->keyd is the digest which gets exposed to lua world. In this
+	// version bits are always set to zero.
+	cf_detail(AS_LDT, "LDT_VERSION Resetting @ create LDT version %p", *(uint64_t *)&c_urecord->keyd);
+	as_ldt_subdigest_resetversion(&c_urecord->keyd);
+
+}
+
 
 /*
  * Internal Function: Which sets up ldt chunk array element.
@@ -359,8 +388,8 @@ void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord)
  *      ldt_aerospike_crec_open
  *      ldt_aerospike_crec_create
  */
-void
-ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec, cf_digest *keyd)
+static void
+ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec)
 {
 	udf_record     * h_urecord = (udf_record *)as_rec_source(h_urec);
 	as_transaction * h_tr      = h_urecord->tr;
@@ -394,23 +423,6 @@ ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec, cf_digest *keyd)
 
 	// Parent reservation cannot go away as long as Chunck needs reservation.
 	memcpy(&c_tr->rsv, &h_tr->rsv, sizeof(as_partition_reservation));
-	c_tr->keyd                 = *keyd;
-	udf_record *c_urecord      = (udf_record *)as_rec_source(lslotp->c_urec_p);
-	c_urecord->keyd            = *keyd;
-
-	// There are 4 place digest is
-	// 1. tr->keyd
-	// 2. r_ref->r->key
-	// 3. rd->keyd
-	// 4. urecord->keyd
-	//
-	// First three are always equal. At the start tr->keyd is setup which then
-	// sets or gets r_ref / rd as normal work goes ...
-	//
-	// urecord->keyd is the digest which gets exposed to lua world. In this
-	// version bits are always set to zero.
-	cf_detail(AS_LDT, "LDT_VERSION Resetting @ create LDT version %p", *(uint64_t *)&c_urecord->keyd);
-	as_ldt_subdigest_resetversion(&c_urecord->keyd);
 }
 
 /*
@@ -451,7 +463,8 @@ ldt_crec_open(ldt_record *lrecord, cf_digest *keyd, ldt_slot **lslotp)
 	if (!*lslotp) {
 		return -2;
 	}
-	ldt_slot_init(*lslotp, lrecord, keyd);
+	ldt_slot_init(*lslotp, lrecord);
+	ldt_slot_set_digest(*lslotp, keyd);
 
 	// 3. Open Record
 	int rv = udf_record_open((udf_record *)as_rec_source((*lslotp)->c_urec_p));
@@ -490,52 +503,41 @@ ldt_crec_create(ldt_record *lrecord)
 	udf_record *h_urecord = (udf_record *) as_rec_source(lrecord->h_urec);
 	cf_digest keyd        = h_urecord->r_ref->r->key;
 	as_namespace *ns      = h_urecord->tr->rsv.ns;
-	cf_detail(AS_LDT, "ldt_aerospike_crec_create %"PRIx64"", *(uint64_t *)&keyd);
-	as_ldt_digest_randomizer(&keyd);
-	as_ldt_subdigest_setversion(&keyd, lrecord->version);
+	int retry_cnt         = 0;
+	ldt_slot *lslotp      = ldt_crec_find_freeslot(lrecord, "ldt_crec_create");
 
-	// 1. Search in opened record
-	ldt_slot *lslotp = ldt_crec_find_by_digest(lrecord, &keyd);
-	if (lslotp) {
-		cf_info(AS_LDT, "ldt_aerospike_crec_create : Found already open");
-		goto Out; 
-	} 
-
-	// Setup Chunk
-	lslotp     = ldt_crec_find_freeslot(lrecord, "ldt_crec_create");
 	if (!lslotp) {
-		return NULL;
+		cf_crash(AS_LDT, "Allocation error !!!");
 	}
-	int retry_cnt = 0;
-retry:
-	ldt_slot_init(lslotp, lrecord, &keyd);
+	ldt_slot_init(lslotp, lrecord);
 
-	// Create Record
-	int rv = as_aerospike_rec_create(lrecord->as, lslotp->c_urec_p);
-	if (rv < 0) {
-		// Free the slot for reuse
-		ldt_slot_destroy(lslotp, lrecord);
-		cf_warning(AS_LDT, "ldt_crec_create: LDT Sub-Record Create Error [rv=%d]... Fail", rv);
-		return NULL;
-	} else if (rv == 1) {
-		if (retry_cnt > LDT_SUBRECORD_RANDOMIZER_MAX_RETRIES) {
-			// hit total number of retry
-			ldt_slot_destroy(lslotp, lrecord);
-			cf_warning(AS_LDT, "ldt_crec_create: LDT Sub-Record Create Error [Cannot find unique digest]... Fail", rv);
-			return NULL;
-		}
-		// re-randomize and retry
+	while (retry_cnt++ < LDT_SUBRECORD_RANDOMIZER_MAX_RETRIES) {
+
 		as_ldt_digest_randomizer(&keyd);
 		as_ldt_subdigest_setversion(&keyd, lrecord->version);
+		ldt_slot_set_digest(lslotp, &keyd);
+
+		int rv = as_aerospike_rec_create(lrecord->as, lslotp->c_urec_p);
+		
+		// rv == 0 if successful
+		// rv == 1 if record is already found retry
+		// other wise failure
+		if (rv == 0) {
+			cf_detail_digest(AS_LDT, &keyd, "Crec Create:Ptr(%p) Digest: version %ld", lslotp->c_urec_p, lrecord->version);
+			as_val_reserve(lslotp->c_urec_p);
+			return lslotp->c_urec_p;
+		}
+
+		if (rv != 1) {
+			cf_warning(AS_LDT, "ldt_crec_create: LDT Sub-Record Create Error [rv=%d]... Fail", rv);
+			break;
+		}
 		cf_atomic64_incr(&ns->lstats.ldt_randomizer_retry);
-		retry_cnt++;
-		goto retry;
 	}
 
-Out:
-	cf_detail_digest(AS_LDT, &(lslotp->c_urecord.keyd), "Crec Create:Ptr(%p) Digest: version %ld", lslotp->c_urec_p, lrecord->version);
-	as_val_reserve(lslotp->c_urec_p);
-	return lslotp->c_urec_p;
+	ldt_slot_destroy(lslotp, lrecord);
+	cf_warning_digest(AS_LDT, &keyd, "ldt_aerospike_crec_create : Create failed after %d retries", retry_cnt);
+	return NULL;
 }
 
 bool
