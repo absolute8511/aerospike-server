@@ -59,6 +59,10 @@
 /* GLOBALS */
 as_aerospike g_ldt_aerospike; // Only instantiation is enough
 
+/* Forward Declare */
+static void ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec);
+static void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord);
+
 /* INIT */
 int
 ldt_init(void)
@@ -291,8 +295,6 @@ Out:
  *      ldt_aerospike_crec_open
  *      ldt_aerospike_crec_create
  */
-void ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec);
-void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord);
 
 void
 ldt_slot_init(ldt_slot *lslotp, ldt_record *lrecord)
@@ -329,7 +331,8 @@ void ldt_chunk_destroy(ldt_record *lrecord, ldt_slot_chunk *lchunk)
  * Remove the slot entry, but decrement the count only if the destroy() op
  * was successful.
  */
-void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord)
+static void
+ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord)
 {
 	if (lslotp->c_urec_p) {
 		udf_record_destroy(lslotp->c_urec_p);
@@ -385,7 +388,7 @@ ldt_slot_set_digest(ldt_slot *lslotp, cf_digest *keyd)
  *      ldt_aerospike_crec_open
  *      ldt_aerospike_crec_create
  */
-void
+static void
 ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec)
 {
 	udf_record     * h_urecord = (udf_record *)as_rec_source(h_urec);

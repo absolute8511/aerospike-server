@@ -547,7 +547,7 @@ as_ldt_subdigest_setversion(cf_digest *dig, uint64_t version)
 void
 as_ldt_subdigest_resetversion(cf_digest *dig)
 {
-	// overwrite the last 5 bytes
+	// overwrite the last 6 bytes
 	for (int i = 0; i < LDT_VERSION_SZ; i++) {
 		dig->digest[DIGEST_VERSION_START_POS + i] = 0;
 	}
@@ -658,12 +658,11 @@ as_ldt_digest_randomizer(cf_digest *dig)
 	// same subRecord at the same time (clock skew possible) at the same increment
 	// counter (this could happen over time) 
 	// Reasonably ok unique digest bits
-	uint32_t digest_randomizer_seed = cf_atomic32_incr(&randomizer_int);
+	uint32_t digest_rand = cf_atomic32_incr(&randomizer_int);
 
 	// 3 bytes make there could be 10^8 digest generated in a microsecond
 	// window to have collision
-	// NB: [7] is overwritten by absolute clock below.
-	memcpy(&dig->digest[DIGEST_SCRAMBLE_BYTE1], &digest_randomizer_seed, 4);
+	memcpy(&dig->digest[DIGEST_SCRAMBLE_BYTE1], &digest_rand, 3);
 
 	// 6 bytes system clock in microsecond ... make it good for 10^16 microseconds
 	// = 317 years
