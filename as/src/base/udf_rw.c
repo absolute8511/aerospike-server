@@ -1523,36 +1523,7 @@ as_val_tobuf(const as_val *v, uint8_t *buf, uint32_t *size)
 				as_buffer_destroy(&asbuf);
 				break;
 			}
-			// TODO: Resolve. Can we actually MAKE a value (the bin name) for
-			// an LDT value?  Users should never see a real LDT value.
-			case AS_LDT:
-			{
-				as_buffer asbuf;
-				as_buffer_init(&asbuf);
 
-				as_serializer s;
-				as_msgpack_init(&s);
-
-				as_string as_str;
-				as_string_init( &as_str, "INT LDT BIN NAME", false );
-
-				int res = as_serializer_serialize(&s, (as_val*) &as_str, &asbuf);
-
-				if (res != 0) {
-					cf_warning(AS_UDF, "LDT serialization failure (%d)", res);
-					as_buffer_destroy(&asbuf);
-					break;
-				}
-				*size = asbuf.size;
-				if (buf) {
-					memcpy(buf, asbuf.data, asbuf.size);
-				}
-				// not needed as it is stack allocated
-				// as_serializer_destroy(&s);
-				as_buffer_destroy(&asbuf);
-				break;
-
-			}
 			default:
 			{
 				cf_debug(AS_UDF, "SUCCESS: VAL TYPE UNDEFINED %d\n",
