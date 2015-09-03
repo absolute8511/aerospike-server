@@ -165,7 +165,6 @@ typedef struct drv_ssd_s
 	int				file_id;
 
 	uint32_t		open_flag;
-	bool			use_signature;
 	bool			data_in_memory;
 	bool			started_fresh;		// relevant only for warm restart
 

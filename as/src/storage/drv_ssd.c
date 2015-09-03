@@ -95,7 +95,7 @@ extern bool as_cold_start_evict_if_needed(as_namespace* ns);
 #define SSD_DEFAULT_INFO_LENGTH		(128)
 
 #define SSD_BLOCK_MAGIC		0x037AF200
-#define SIGNATURE_OFFSET	offsetof(struct drv_ssd_block_s, keyd)
+#define LENGTH_BASE			offsetof(struct drv_ssd_block_s, keyd)
 
 #define DEFRAG_STARTUP_RESERVE	4
 #define DEFRAG_RUNTIME_RESERVE	4
@@ -116,9 +116,9 @@ typedef struct {
 // Per-record metadata on device.
 //
 typedef struct drv_ssd_block_s {
-	cf_signature	sig;			// digest of this entire block, 64 bits
+	cf_signature	sig;			// deprecated
 	uint32_t		magic;
-	uint32_t		length;			// total under signature - starts after this field - pointer + 16
+	uint32_t		length;			// total after this field - this struct's pointer + 16
 	cf_digest		keyd;
 	as_generation	generation;
 	cf_clock		void_time;
@@ -492,7 +492,7 @@ static bool
 is_valid_record(const drv_ssd_block* block, const char* ns_name)
 {
 	uint8_t* block_head = (uint8_t*)block;
-	uint64_t size = (uint64_t)(block->length + SIGNATURE_OFFSET);
+	uint64_t size = (uint64_t)(block->length + LENGTH_BASE);
 	drv_ssd_bin* ssd_bin_end = (drv_ssd_bin*)(block_head + size - sizeof(drv_ssd_bin));
 	drv_ssd_bin* ssd_bin = (drv_ssd_bin*)(block->data + block->bins_offset);
 	uint32_t n_bins = block->n_bins;
@@ -736,25 +736,12 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 		// Note - if block->length is sane, we don't need to round up to a
 		// multiple of RBLOCK_SIZE, but let's do it anyway just to be safe.
 		size_t next_wblock_offset = wblock_offset +
-				BYTES_TO_RBLOCK_BYTES(block->length + SIGNATURE_OFFSET);
+				BYTES_TO_RBLOCK_BYTES(block->length + LENGTH_BASE);
 
 		if (next_wblock_offset > ssd->write_block_size) {
 			cf_warning(AS_DRV_SSD, "error: block extends over read size: foff %"PRIu64" boff %"PRIu64" blen %"PRIu64,
 				file_offset, wblock_offset, (uint64_t)block->length);
 			break;
-		}
-
-		if (ssd->use_signature && block->sig) {
-			cf_signature sig;
-
-			cf_signature_compute(((uint8_t*)block) + SIGNATURE_OFFSET,
-					block->length, &sig);
-
-			if (sig != block->sig) {
-				wblock_offset += RBLOCK_SIZE;
-				ssd->record_add_sigfail_counter++;
-				continue;
-			}
 		}
 
 		// Found a good record, move it if it's current.
@@ -1634,9 +1621,9 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 		}
 	}
 
-	block->length = write_size - SIGNATURE_OFFSET;
+	block->sig = 0; // deprecated
+	block->length = write_size - LENGTH_BASE;
 	block->magic = SSD_BLOCK_MAGIC;
-	block->sig = 0;
 	block->keyd = rd->keyd;
 	block->generation = r->generation;
 	block->void_time = r->void_time;
@@ -1644,14 +1631,6 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 	block->n_bins = write_nbins;
 	block->vinfo_offset = 0; // deprecated
 	block->vinfo_length = 0; // deprecated
-
-	if (ssd->use_signature) {
-		cf_signature_compute(((uint8_t*)block) + SIGNATURE_OFFSET,
-				block->length, &block->sig);
-	}
-	else {
-		block->sig = 0;
-	}
 
 	r->storage_key.ssd.file_id = ssd->file_id;
 	r->storage_key.ssd.rblock_id = BYTES_TO_RBLOCKS(WBLOCK_ID_TO_BYTES(ssd, swb->wblock_id) + swb_pos);
@@ -1950,26 +1929,12 @@ as_storage_analyze_wblock(as_namespace* ns, int device_index,
 		// Note - if block->length is sane, we don't need to round up to a
 		// multiple of RBLOCK_SIZE, but let's do it anyway just to be safe.
 		uint32_t next_offset = offset +
-				BYTES_TO_RBLOCK_BYTES(p_block->length + SIGNATURE_OFFSET);
+				BYTES_TO_RBLOCK_BYTES(p_block->length + LENGTH_BASE);
 
 		if (next_offset > ssd->write_block_size) {
 			cf_warning(AS_DRV_SSD, "analyze wblock ERROR: record overflows wblock");
 			cf_free(read_buf);
 			return -1;
-		}
-
-		// Check signature.
-		if (ssd->use_signature && p_block->sig) {
-			cf_signature sig;
-
-			cf_signature_compute(((uint8_t*)p_block) + SIGNATURE_OFFSET,
-					p_block->length, &sig);
-
-			if (sig != p_block->sig) {
-				// Look for next block with magic.
-				offset += RBLOCK_SIZE;
-				continue;
-			}
 		}
 
 		uint64_t rblock_id = BYTES_TO_RBLOCKS(file_offset + offset);
@@ -3010,7 +2975,7 @@ ssd_load_device_sweep(drv_ssds *ssds, drv_ssd *ssd)
 			// Note - if block->length is sane, we don't need to round up to a
 			// multiple of RBLOCK_SIZE, but let's do it anyway just to be safe.
 			size_t next_block_offset = block_offset +
-					BYTES_TO_RBLOCK_BYTES(block->length + SIGNATURE_OFFSET);
+					BYTES_TO_RBLOCK_BYTES(block->length + LENGTH_BASE);
 
 			// Sanity-check for 1M block overruns.
 			// TODO - check write_block_size boundaries!
@@ -3020,22 +2985,6 @@ ssd_load_device_sweep(drv_ssds *ssds, drv_ssd *ssd)
 
 				error_count++;
 				goto NextBlock;
-			}
-
-			// Check signature.
-			if (ssd->use_signature && block->sig) {
-				cf_signature sig;
-
-				cf_signature_compute(((uint8_t*)block) + SIGNATURE_OFFSET,
-						block->length, &sig);
-
-				if (sig != block->sig) {
-					block_offset += RBLOCK_SIZE;
-					ssd->record_add_sigfail_counter++;
-
-					// Check the next rblock, looking for magic.
-					continue;
-				}
 			}
 
 			// Found a record - try to add it to the index.
@@ -3804,7 +3753,6 @@ as_storage_namespace_init_ssd(as_namespace *ns, cf_queue *complete_q,
 
 		ssd->running = true;
 
-		ssd->use_signature = ns->storage_signature;
 		ssd->data_in_memory = ns->storage_data_in_memory;
 		ssd->write_block_size = ns->storage_write_block_size;
 
