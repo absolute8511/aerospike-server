@@ -983,7 +983,6 @@ struct as_namespace_s {
 	uint32_t	storage_write_block_size;
 	uint32_t	storage_num_write_blocks;
 	bool		storage_data_in_memory;    // true if the DRAM copy is always kept
-	bool    	storage_signature;
 	bool		storage_cold_start_empty;
 	bool		storage_disable_odirect;
 	bool		storage_enable_osync;
