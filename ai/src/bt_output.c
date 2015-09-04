@@ -304,7 +304,7 @@ int dump_btree(char *tbl_name, char *filename)
 	fprintf(fp, "Table: %s columns\n", rt->name);
 	for (int j = 0; j < rt->col_count; j++) {
 		fprintf(fp, "\t%s | %s\n", rt->col[j].name,
-                as_sindex_ktype_str((as_sindex_ktype) rt->col[j].type));
+				as_sindex_ktype_str((as_sindex_ktype) rt->col[j].type));
 	}
 	MATCH_INDICES(tmatch);
 	bt *btr = getBtr(tmatch);

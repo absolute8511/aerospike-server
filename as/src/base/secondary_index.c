@@ -719,14 +719,14 @@ char const *
 as_sindex_ktype_str(as_sindex_ktype type)
 {
 	switch(type) {
-    case AS_SINDEX_KTYPE_LONG:		return "INT SIGNED";
-    case AS_SINDEX_KTYPE_FLOAT:		return "FLOAT";
-    case AS_SINDEX_KTYPE_DIGEST:	return "TEXT";
-    default:
-        {
+	case AS_SINDEX_KTYPE_LONG:		return "INT SIGNED";
+	case AS_SINDEX_KTYPE_FLOAT:		return "FLOAT";
+	case AS_SINDEX_KTYPE_DIGEST:	return "TEXT";
+	default:
+		{
 			cf_warning(AS_SINDEX, "UNKNOWN KEY TYPE %d. VERY BAD STATE", type);
-            return "??????";
-        }
+			return "??????";
+		}
 	}
 }
 
