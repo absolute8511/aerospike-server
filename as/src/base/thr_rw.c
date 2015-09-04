@@ -1982,10 +1982,6 @@ write_complete(write_request *wr, as_transaction *tr)
 	if (wr->response_db.buf) {
 		ops_complete(tr, &wr->response_db);
 
-		if (tr->proto_fd_h) {
-			cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
-		}
-
 		MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
 
 		return;
@@ -2001,8 +1997,6 @@ write_complete(write_request *wr, as_transaction *tr)
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
 		}
-
-		cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
 
 		tr->proto_fd_h = 0;
 	}

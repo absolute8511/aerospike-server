@@ -2556,7 +2556,6 @@ info_command_config_get(char *name, char *params, cf_dyn_buf *db)
 	cf_hist_track_get_settings(g_config.rt_hist, db);
 	cf_hist_track_get_settings(g_config.wt_hist, db);
 	cf_hist_track_get_settings(g_config.px_hist, db);
-	cf_hist_track_get_settings(g_config.wt_reply_hist, db);
 	cf_hist_track_get_settings(g_config.ut_hist, db);
 	cf_hist_track_get_settings(g_config.q_hist, db);
 	cf_hist_track_get_settings(g_config.q_rcnt_hist, db);
@@ -4009,9 +4008,6 @@ info_command_hist_track(char *name, char *params, cf_dyn_buf *db)
 		else if (0 == strcmp(value_str, "proxy")) {
 			hist_p = g_config.px_hist;
 		}
-		else if (0 == strcmp(value_str, "writes_reply")) {
-			hist_p = g_config.wt_reply_hist;
-		}
 		else if (0 == strcmp(value_str, "udf")) {
 			hist_p = g_config.ut_hist;
 		}
@@ -4033,7 +4029,6 @@ info_command_hist_track(char *name, char *params, cf_dyn_buf *db)
 			cf_hist_track_stop(g_config.rt_hist);
 			cf_hist_track_stop(g_config.wt_hist);
 			cf_hist_track_stop(g_config.px_hist);
-			cf_hist_track_stop(g_config.wt_reply_hist);
 			cf_hist_track_stop(g_config.ut_hist);
 			cf_hist_track_stop(g_config.q_rcnt_hist);
 			cf_hist_track_stop(g_config.q_hist);
@@ -4099,7 +4094,6 @@ info_command_hist_track(char *name, char *params, cf_dyn_buf *db)
 				cf_hist_track_start(g_config.px_hist, back_sec, slice_sec, thresholds) &&
 				cf_hist_track_start(g_config.q_hist, back_sec, slice_sec, thresholds) &&
 				cf_hist_track_start(g_config.q_rcnt_hist, back_sec, slice_sec, thresholds) &&
-				cf_hist_track_start(g_config.wt_reply_hist, back_sec, slice_sec, thresholds) &&
 				cf_hist_track_start(g_config.ut_hist, back_sec, slice_sec, thresholds)) {
 
 				cf_dyn_buf_append_string(db, "ok");
@@ -4139,7 +4133,6 @@ info_command_hist_track(char *name, char *params, cf_dyn_buf *db)
 		cf_hist_track_get_info(g_config.rt_hist, back_sec, duration_sec, slice_sec, throughput_only, CF_HIST_TRACK_FMT_PACKED, db);
 		cf_hist_track_get_info(g_config.wt_hist, back_sec, duration_sec, slice_sec, throughput_only, CF_HIST_TRACK_FMT_PACKED, db);
 		cf_hist_track_get_info(g_config.px_hist, back_sec, duration_sec, slice_sec, throughput_only, CF_HIST_TRACK_FMT_PACKED, db);
-		cf_hist_track_get_info(g_config.wt_reply_hist, back_sec, duration_sec, slice_sec, throughput_only, CF_HIST_TRACK_FMT_PACKED, db);
 		cf_hist_track_get_info(g_config.ut_hist, back_sec, duration_sec, slice_sec, throughput_only, CF_HIST_TRACK_FMT_PACKED, db);
 		cf_hist_track_get_info(g_config.q_hist, back_sec, duration_sec, slice_sec, throughput_only, CF_HIST_TRACK_FMT_PACKED, db);
 	}
@@ -4922,8 +4915,6 @@ info_debug_ticker_fn(void *unused)
 				cf_hist_track_dump(g_config.wt_hist);
 			if (g_config.px_hist)
 				cf_hist_track_dump(g_config.px_hist);
-			if (g_config.wt_reply_hist)
-				cf_hist_track_dump(g_config.wt_reply_hist);
 			if (g_config.ut_hist)
 				cf_hist_track_dump(g_config.ut_hist);
 			if (g_config.q_hist)
