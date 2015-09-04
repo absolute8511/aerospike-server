@@ -478,7 +478,6 @@ typedef struct as_config_s {
 
 	histogram *			write_storage_close_hist; // histogram of time spent around record_storage close on a write path
 	histogram *			write_sindex_hist; // secondary index latency histogram
-	histogram *			defrag_storage_close_hist; // histogram of time spent around record_storage close on a defrag path
 	histogram *			prole_fabric_send_hist; // histogram of time spent for prole fabric getting queued
 
 #ifdef HISTOGRAM_OBJECT_LATENCY

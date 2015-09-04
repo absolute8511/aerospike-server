@@ -3445,7 +3445,6 @@ cfg_create_all_histograms()
 	create_and_check_hist(&c->info_fulfill_hist, "info_fulfill", HIST_MILLISECONDS);
 	create_and_check_hist(&c->write_storage_close_hist, "write_storage_close", HIST_MILLISECONDS);
 	create_and_check_hist(&c->write_sindex_hist, "write_sindex", HIST_MILLISECONDS);
-	create_and_check_hist(&c->defrag_storage_close_hist, "defrag_storage_close", HIST_MILLISECONDS);
 	create_and_check_hist(&c->prole_fabric_send_hist, "prole_fabric_send", HIST_MILLISECONDS);
 
 	create_and_check_hist(&c->ldt_multiop_prole_hist, "ldt_multiop_prole", HIST_MILLISECONDS);
