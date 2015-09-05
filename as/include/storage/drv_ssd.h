@@ -86,6 +86,7 @@ typedef struct {
 //
 typedef struct {
 	cf_atomic32			rc;
+	cf_atomic32			n_writers;	// number of concurrent writers
 	bool				skip_post_write_q;
 	struct drv_ssd_s	*ssd;
 	uint32_t			wblock_id;
@@ -144,7 +145,6 @@ typedef struct drv_ssd_s
 
 	pthread_mutex_t	write_lock;			// lock protects writes to current swb
 	ssd_write_buf	*current_swb;		// swb currently being filled by writes
-	cf_atomic32		n_writers;			// number of concurrent writers to current swb
 
 	pthread_mutex_t	defrag_lock;		// lock protects writes to defrag swb
 	ssd_write_buf	*defrag_swb;		// swb currently being filled by defrag

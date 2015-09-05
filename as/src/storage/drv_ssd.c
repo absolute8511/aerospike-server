@@ -367,6 +367,7 @@ swb_get(drv_ssd *ssd)
 		}
 
 		swb->rc = 0;
+		swb->n_writers = 0;
 		swb->skip_post_write_q = false;
 		swb->ssd = ssd;
 		swb->wblock_id = STORAGE_INVALID_WBLOCK;
@@ -1306,6 +1307,11 @@ as_storage_record_get_key_ssd(as_storage_rd *rd)
 void
 ssd_flush_swb(drv_ssd *ssd, ssd_write_buf *swb)
 {
+	// Wait for all writers to finish.
+	while (cf_atomic32_get(swb->n_writers) != 0) {
+		;
+	}
+
 	int fd = ssd_fd_get(ssd);
 	off_t write_offset = (off_t)WBLOCK_ID_TO_BYTES(ssd, swb->wblock_id);
 
@@ -1588,11 +1594,6 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 			memset(&swb->buf[swb->pos], 0, ssd->write_block_size - swb->pos);
 		}
 
-		// Wait for all writers to finish.
-		while (cf_atomic32_get(ssd->n_writers) != 0) {
-			;
-		}
-
 		// Enqueue the buffer, to be flushed to device.
 		cf_queue_push(ssd->swb_write_q, &swb);
 		cf_atomic_int_incr(&ssd->n_wblock_writes);
@@ -1613,7 +1614,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 	uint32_t swb_pos = swb->pos;
 
 	swb->pos += write_size;
-	cf_atomic32_incr(&ssd->n_writers);
+	cf_atomic32_incr(&swb->n_writers);
 
 	pthread_mutex_unlock(&ssd->write_lock);
 	// May now write this record concurrently with others in this swb.
@@ -1639,7 +1640,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 	if (0 == rd->bins) {
 		// TODO - just crash?
 		cf_warning(AS_DRV_SSD, "write bins: no bins array");
-		cf_atomic32_decr(&ssd->n_writers);
+		cf_atomic32_decr(&swb->n_writers);
 		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
@@ -1690,7 +1691,7 @@ ssd_write_bins(as_record *r, as_storage_rd *rd)
 	cf_atomic32_add(&ssd->alloc_table->wblock_state[swb->wblock_id].inuse_sz, (int32_t)write_size);
 
 	// We are finished writing to the buffer.
-	cf_atomic32_decr(&ssd->n_writers);
+	cf_atomic32_decr(&swb->n_writers);
 
 	return 0;
 }
@@ -2156,13 +2157,6 @@ ssd_flush_current_swb(drv_ssd *ssd, uint64_t *p_prev_n_writes,
 		// Clean the end of the buffer before flushing.
 		if (ssd->write_block_size != swb->pos) {
 			memset(&swb->buf[swb->pos], 0, ssd->write_block_size - swb->pos);
-		}
-
-		// Wait for all writers to finish. (Arguably we should bail out instead,
-		// since current writers indicate we might soon flush this buffer, but
-		// let's opt for certainty.)
-		while (cf_atomic32_get(ssd->n_writers) != 0) {
-			;
 		}
 
 		// Flush it.
