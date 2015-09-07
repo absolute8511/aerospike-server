@@ -2578,6 +2578,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 	int  context_len = sizeof(context);
 	int val;
 	char bool_val[2][6] = {"false", "true"};
+	bool print_command = true;
 
 	if (0 != as_info_parameter_get(params, "context", context, &context_len))
 		goto Error;
@@ -3781,6 +3782,10 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			}
 		}
 		else if (0 == as_info_parameter_get(params, "lastshiptime", context, &context_len)) {
+			// Dont print this command in logs as this happens every few seconds
+			// Ideally, this should not be done via config-set. 
+			print_command = false;
+
 			uint64_t val[DC_MAX_NUM];
 			char * tmp_val;
 			char *  delim = {","};
@@ -3820,6 +3825,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			xdr_broadcast_lastshipinfo(val);
 		}
 		else if (0 == as_info_parameter_get(params, "failednodeprocessingdone", context, &context_len)) {
+			print_command = false;
 			cf_node nodeid = atoll(context);
 			xdr_handle_failednodeprocessingdone(nodeid);
 		}
@@ -3877,7 +3883,9 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 	else
 		goto Error;
 
-	cf_info(AS_INFO, "config-set command completed: params %s",params);
+	if (print_command) {
+		cf_info(AS_INFO, "config-set command completed: params %s",params);
+	}
 	cf_dyn_buf_append_string(db, "ok");
 	return(0);
 
