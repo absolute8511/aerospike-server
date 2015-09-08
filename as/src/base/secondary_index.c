@@ -4175,100 +4175,6 @@ Error:
 	return AS_SINDEX_ERR_PARAM;
 }
 
-
-
-
-// System Metadata Integration : System Metadata Integration
-// System Metadata Integration : System Metadata Integration
-
-/*
- *                +------------------+
- *  client -->    |  Secondary Index |
- *                +------------------+
- *                     /|\
- *                      | 4 accept
- *                  +----------+   2
- *                  |          |<-------   +------------------+ 1 request
- *                  | SMD      | 3 merge   |  Secondary Index | <------------|
- *                  |          |<------->  |                  | 5 response   | CLIENT
- *                  |          | 4 accept  |                  | ------------>|
- *                  |          |-------->  +------------------+
- *                  +----------+
- *                     |   4 accept
- *                    \|/
- *                +------------------+
- *  client -->    |  Secondary Index |
- *                +------------------+
- *
- *
- *  System Metadta module sits in the middle of multiple secondary index
- *  module on multiple nodes. The changes which eventually are made to the
- *  secondary index are always triggerred from SMD. Here is the flow.
- *
- *  Step1: Client send (could possibly be secondary index thread) triggers
- *         create / delete / update related to secondary index metadata.
- *
- *  Step2: The request passed through secondary index module (may be few
- *         node specific info is added on the way) to the SMD.
- *
- *  Step3: SMD send out the request to the paxos master.
- *
- *  Step4: Paxos master request the relevant metadata info from all the
- *         nodes in the cluster once it has all the data... [SMD always
- *         stores copy of the data, it is stored when the first time
- *         create happens]..it call secondary index merge callback
- *         function. The function is responsible for resolving the winning
- *         version ...
- *
- *  Step5: Once winning version is decided for all the registered module
- *         the changes are sent to all the node.
- *
- *  Step6: At each node accept_fn is called for each module. Which triggers
- *         the call to the secondary index create/delete/update functions
- *         which would be used to in-memory operation and make it available
- *         for the system.
- *
- *  There are two types of operations which look at the secondary index
- *  operations.
- *
- *  a) Normal operation .. they all look a the in-memory structure and
- *     data which is in sindex and ai_btree layer.
- *
- *  b) Other part which do DDL operation like which work through the SMD
- *     layer. Multiple operation happening from the multiple nodes which
- *     come through this layer. The synchronization is responsible of
- *     SMD layer. The part sindex / ai_btree code is responsible is to
- *     make sure when the call from the SMD comes there is proper sync
- *     between this and operation in section a
- *
- *  Set of function implemented below are merge function and accept function.
- */
-
-int
-as_sindex_smd_create()
-{
-	// Init's the smd interface.
-	//
-	// as_smd_module_create("SINDEX", as_sindex_smd_merge_cb, NULL, as_sindex_smd_accept_cb, NULL);
-	//
-	// Expectation: This would read stuff up from the JSON file which SMD
-	//              maintance and make sure the requested data is loaded
-	//              and the accept_fn is called. All the real logic is
-	//              inside accept_fn function.
-	return 0;
-}
-
-int
-as_sindex_smd_merge_cb(char *module, as_smd_item_list_t **item_list_out,
-						as_smd_item_list_t **item_lists_in, size_t num_lists,
-						void *udata)
-{
-	// Applies merge and decides who wins. This is algorithm which should
-	// be independent of who is running is .. any node which becomes paxos
-	// master can execute it and get the same result.
-	return 0;
-}
-
 extern int as_info_parse_params_to_sindex_imd(char *, as_sindex_metadata *, cf_dyn_buf *, bool, bool*);
 
 /*
@@ -4346,6 +4252,72 @@ END:
 	SINDEX_GUNLOCK();
     return ret;
 }
+
+// SMD CALLBACKS **********************************************************************************
+/*
+ *                +------------------+
+ *  client -->    |  Secondary Index |
+ *                +------------------+
+ *                     /|\
+ *                      | 4 accept
+ *                  +----------+   2
+ *                  |          |<-------   +------------------+ 1 request
+ *                  | SMD      | 3 merge   |  Secondary Index | <------------|
+ *                  |          |<------->  |                  | 5 response   | CLIENT
+ *                  |          | 4 accept  |                  | ------------>|
+ *                  |          |-------->  +------------------+
+ *                  +----------+
+ *                     |   4 accept
+ *                    \|/
+ *                +------------------+
+ *  client -->    |  Secondary Index |
+ *                +------------------+
+ *
+ *
+ *  System Metadta module sits in the middle of multiple secondary index
+ *  module on multiple nodes. The changes which eventually are made to the
+ *  secondary index are always triggerred from SMD. Here is the flow.
+ *
+ *  Step1: Client send (could possibly be secondary index thread) triggers
+ *         create / delete / update related to secondary index metadata.
+ *
+ *  Step2: The request passed through secondary index module (may be few
+ *         node specific info is added on the way) to the SMD.
+ *
+ *  Step3: SMD send out the request to the paxos master.
+ *
+ *  Step4: Paxos master request the relevant metadata info from all the
+ *         nodes in the cluster once it has all the data... [SMD always
+ *         stores copy of the data, it is stored when the first time
+ *         create happens]..it call secondary index merge callback
+ *         function. The function is responsible for resolving the winning
+ *         version ...
+ *
+ *  Step5: Once winning version is decided for all the registered module
+ *         the changes are sent to all the node.
+ *
+ *  Step6: At each node accept_fn is called for each module. Which triggers
+ *         the call to the secondary index create/delete/update functions
+ *         which would be used to in-memory operation and make it available
+ *         for the system.
+ *
+ *  There are two types of operations which look at the secondary index
+ *  operations.
+ *
+ *  a) Normal operation .. they all look a the in-memory structure and
+ *     data which is in sindex and ai_btree layer.
+ *
+ *  b) Other part which do DDL operation like which work through the SMD
+ *     layer. Multiple operation happening from the multiple nodes which
+ *     come through this layer. The synchronization is responsible of
+ *     SMD layer. The part sindex / ai_btree code is responsible is to
+ *     make sure when the call from the SMD comes there is proper sync
+ *     between this and operation in section a
+ *
+ */
+
+// Global flag to signal that all secondary index SMD is restored.
+bool g_sindex_smd_restored = false;
 
 /*
  * Description: This cb function is called by paxos master, before doing the
@@ -4463,9 +4435,6 @@ as_sindex_cfg_var_hash_reduce_fn(void *key, void *data, void *udata)
 
 	return 0;
 }
-
-// Global flag to signal that all secondary index SMD is restored.
-bool g_sindex_smd_restored = false;
 
 /*
  * This function is called when the SMD has resolved the correct state of
@@ -4644,6 +4613,7 @@ as_sindex_smd_accept_cb(char *module, as_smd_item_list_t *items, void *udata, ui
 	return(0);
 }
 
+// BINID has sindex *******************************************************************************
 // Set the binid'th bit of the bin_has_sindex array.
 // It is always called under SINDEX GWLOCK.
 void
@@ -4695,7 +4665,9 @@ as_sindex_binid_has_sindex(as_namespace *ns, int binid)
 	uint32_t temp  = ns->binid_has_sindex[index];
 	return (temp & (1 << (binid % 32))) ? true : false;
 }
+// ************************************************************************************************
 
+// SINDEX BIN PATH ********************************************************************************
 as_sindex_status
 as_sindex_add_mapkey_in_path(as_sindex_metadata * imd, char * path_str, int start, int end)
 {
@@ -5015,6 +4987,9 @@ END:
 	}
 	return NULL;
 }
+// ************************************************************************************************
+
+// **** SINDEX TICKER *****************************************************************************
 
 // Sindex ticker start
 void
@@ -5080,3 +5055,4 @@ as_sindex_ticker_done(as_namespace * ns, as_sindex * si, uint64_t start_time)
 				ns->name, si_name, si_memory, cf_getms() - start_time);
 
 }
+// ************************************************************************************************

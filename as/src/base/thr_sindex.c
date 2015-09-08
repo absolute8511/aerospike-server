@@ -788,9 +788,14 @@ sbld_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	if (job->si) {
 		SINDEX_GRLOCK();
-		AS_SINDEX_RESERVE(job->si);
-		SINDEX_GUNLOCK();
-		as_sindex_put_rd(job->si, &rd);
+		if (as_sindex_isactive(job->si)) {
+			AS_SINDEX_RESERVE(job->si);
+			SINDEX_GUNLOCK();
+			as_sindex_put_rd(job->si, &rd);
+		}
+		else {
+			SINDEX_GUNLOCK();
+		}
 	}
 	else {
 		as_sindex_putall_rd(ns, &rd);

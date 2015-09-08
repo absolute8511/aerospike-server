@@ -693,8 +693,6 @@ extern bool g_sindex_smd_restored;
 extern int  as_sindex_smd_can_accept_cb(char* module, as_smd_item_t *item, void *udata);
 extern int  as_sindex_smd_accept_cb(char *module, as_smd_item_list_t *items, void *udata, 
 						uint32_t accept_opt);
-extern int  as_sindex_smd_merge_cb(char *module, as_smd_item_list_t **item_list_out, 
-						as_smd_item_list_t **item_lists_in, size_t num_lists, void *udata);
 // **************************************************************************************************
 
 /*
