@@ -88,7 +88,6 @@ const xdr_cfg_opt XDR_OPTS[] = {
 		{ "xdr-batch-retry-sleep",			XDR_CASE_XDR_BATCH_RETRY_SLEEP },
 		{ "xdr-delete-shipping-enabled",	XDR_CASE_XDR_DELETE_SHIPPING_ENABLED },
 		{ "xdr-forward-with-gencheck",		XDR_CASE_XDR_FORWARD_WITH_GENCHECK },
-		{ "xdr-conflict-digestdump",		XDR_CASE_XDR_CONFLICT_DIGESTDUMP },
 		{ "xdr-hotkey-maxskip",				XDR_CASE_XDR_HOTKEY_MAXSKIP },
 		{ "xdr-nsup-deletes-enabled",		XDR_CASE_XDR_NSUP_DELETES_ENABLED },
 		{ "xdr-shipping-enabled",			XDR_CASE_XDR_SHIPPING_ENABLED },
@@ -169,7 +168,6 @@ void xdr_config_defaults(xdr_config *c)
 	c->xdr_batch_num_retry = 0;
 	c->xdr_batch_retry_sleep = 0;
 	c->xdr_fwd_with_gencheck = false;
-	c->xdr_conflict_digestdump_file = NULL;
 	c->xdr_info_request_timeout_ms = 500;
 	c->xdr_compression_threshold = 0; //0 = Disabled compressed shipping, > 0 minimum size of packet for compression
 	c->xdr_pidfile = NULL;
