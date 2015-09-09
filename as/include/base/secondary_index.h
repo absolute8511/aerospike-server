@@ -508,11 +508,6 @@ extern int  as_sindex_sbins_from_rd(as_storage_rd *rd, uint16_t from_bin, uint16
 			as_sindex_bin sbins[], as_sindex_op op);
 extern int  as_sindex_sbins_from_bin(as_namespace *ns, const char *set, as_bin *b, 
 			as_sindex_bin * start_sbin, as_sindex_op op);
-extern int  as_sindex_diff_sbins_from_buf(as_namespace * ns, const char * set, as_bin * b, 
-			byte * buf, uint32_t buf_sz, as_particle_type type, as_sindex_bin * start_sbin);
-extern int  as_sindex_sbins_from_buf(as_namespace *ns, const char *set, as_bin *b, 
-			as_sindex_bin * start_sbin, byte * buf, uint32_t buf_sz, as_particle_type type, 
-			as_sindex_op op);
 extern int  as_sindex_update_by_sbin(as_namespace *ns, const char *set, as_sindex_bin *start_sbin, 
 			int num_sbins, cf_digest * pkey);
 // **************************************************************************************************

@@ -3415,7 +3415,6 @@ cfg_create_all_histograms()
 	create_and_check_hist_track(&c->ut_hist, "udf", HIST_MILLISECONDS);
 	create_and_check_hist_track(&c->wt_hist, "writes_master", HIST_MILLISECONDS);
 	create_and_check_hist_track(&c->px_hist, "proxy", HIST_MILLISECONDS);
-	create_and_check_hist_track(&c->wt_reply_hist, "writes_reply", HIST_MILLISECONDS);
 
 	create_and_check_hist(&c->rt_cleanup_hist, "reads_cleanup", HIST_MILLISECONDS);
 	create_and_check_hist(&c->rt_net_hist, "reads_net", HIST_MILLISECONDS);
