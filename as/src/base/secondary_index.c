@@ -710,11 +710,11 @@ char const *
 as_sindex_ktype_str(as_sindex_ktype type)
 {
 	switch (type) {
-	case AS_SINDEX_KTYPE_LONG:      return "INT SIGNED";
-	case AS_SINDEX_KTYPE_DIGEST:    return "TEXT";
+	case AS_SINDEX_KTYPE_LONG:      return "NUMERIC";
+	case AS_SINDEX_KTYPE_DIGEST:    return "STRING";
 	default:
-        cf_warning(AS_SINDEX, "UNSUPPORTED KEY TYPE %d", type);
-        return "??????";
+		cf_warning(AS_SINDEX, "UNSUPPORTED KEY TYPE %d", type);
+		return "??????";
 	}
 }
 
