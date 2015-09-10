@@ -185,7 +185,8 @@ typedef enum {
 	AS_PARTICLE_TYPE_LIST = 20,
 	AS_PARTICLE_TYPE_HIDDEN_LIST = 21,
 	AS_PARTICLE_TYPE_HIDDEN_MAP = 22, // hidden map/list - can only be manipulated by system UDF
-	AS_PARTICLE_TYPE_MAX = 23
+	AS_PARTICLE_TYPE_MAX = 23,
+	AS_PARTICLE_TYPE_BAD = AS_PARTICLE_TYPE_MAX
 } as_particle_type;
 
 /* as_particle

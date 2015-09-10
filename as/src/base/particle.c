@@ -76,7 +76,7 @@ safe_particle_type(uint8_t type)
 	// Note - AS_PARTICLE_TYPE_NULL is considered bad here.
 	default:
 		cf_warning(AS_PARTICLE, "encountered bad particle type %u", type);
-		return -1;
+		return AS_PARTICLE_TYPE_BAD;
 	}
 }
 
@@ -1462,7 +1462,7 @@ as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op)
 	uint8_t operation = op->op;
 	as_particle_type op_type = safe_particle_type(op->particle_type);
 
-	if (op_type < 0) {
+	if (op_type == AS_PARTICLE_TYPE_BAD) {
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
@@ -1509,7 +1509,7 @@ as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
 	uint8_t operation = op->op;
 	as_particle_type op_type = safe_particle_type(op->particle_type);
 
-	if (op_type < 0) {
+	if (op_type == AS_PARTICLE_TYPE_BAD) {
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
@@ -1639,7 +1639,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, co
 	uint8_t operation = op->op;
 	as_particle_type op_type = safe_particle_type(op->particle_type);
 
-	if (op_type < 0) {
+	if (op_type == AS_PARTICLE_TYPE_BAD) {
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
@@ -1759,7 +1759,7 @@ as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op)
 
 	as_particle_type type = safe_particle_type(op->particle_type);
 
-	if (type < 0) {
+	if (type == AS_PARTICLE_TYPE_BAD) {
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
@@ -1808,7 +1808,7 @@ as_bin_particle_stack_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_
 
 	as_particle_type type = safe_particle_type(op->particle_type);
 
-	if (type < 0) {
+	if (type == AS_PARTICLE_TYPE_BAD) {
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
@@ -1854,13 +1854,14 @@ as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled)
 	const uint32_t *p32 = (const uint32_t *)pickled;
 	uint32_t new_value_size = cf_swap_from_be32(*p32++);
 	const uint8_t *new_value = (const uint8_t *)p32;
-	int32_t new_mem_size = g_particle_size_from_wire_table[new_type](new_value, new_value_size);
 
 	*p_pickled = (uint8_t *)new_value + new_value_size;
 
-	if (new_type < 0) {
-		return (int)new_type;
+	if (new_type == AS_PARTICLE_TYPE_BAD) {
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
+
+	int32_t new_mem_size = g_particle_size_from_wire_table[new_type](new_value, new_value_size);
 
 	if (new_mem_size < 0) {
 		// Leave existing particle intact.
@@ -1917,13 +1918,14 @@ as_bin_particle_stack_from_pickled(as_bin *b, uint8_t *stack, uint8_t **p_pickle
 	const uint32_t *p32 = (const uint32_t *)pickled;
 	uint32_t value_size = cf_swap_from_be32(*p32++);
 	const uint8_t *value = (const uint8_t *)p32;
-	int32_t mem_size = g_particle_size_from_wire_table[type](value, value_size);
 
 	*p_pickled = (uint8_t *)value + value_size;
 
-	if (type < 0) {
-		return (int)type;
+	if (type == AS_PARTICLE_TYPE_BAD) {
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
+
+	int32_t mem_size = g_particle_size_from_wire_table[type](value, value_size);
 
 	if (mem_size < 0) {
 		// Leave existing particle intact.
@@ -1959,12 +1961,16 @@ as_bin_particle_compare_from_pickled(const as_bin *b, uint8_t **p_pickled)
 	}
 
 	const uint8_t *pickled = (const uint8_t *)*p_pickled;
-	as_particle_type type = (as_particle_type)*pickled++;
+	as_particle_type type = safe_particle_type(*pickled++);
 	const uint32_t *p32 = (const uint32_t *)pickled;
 	uint32_t value_size = cf_swap_from_be32(*p32++);
 	const uint8_t *value = (const uint8_t *)p32;
 
 	*p_pickled = (uint8_t *)value + value_size;
+
+	if (type == AS_PARTICLE_TYPE_BAD) {
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+	}
 
 	return g_particle_compare_from_wire_table[as_bin_get_particle_type(b)](b->particle, type, value, value_size);
 }
@@ -2211,8 +2217,8 @@ as_bin_particle_cast_from_flat(as_bin *b, uint8_t *flat, uint32_t flat_size)
 
 	as_particle_type type = safe_particle_type(*flat);
 
-	if (type < 0) {
-		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+	if (type == AS_PARTICLE_TYPE_BAD) {
+		return -1;
 	}
 
 	// Cast the new particle into the bin.
@@ -2236,8 +2242,8 @@ as_bin_particle_replace_from_flat(as_bin *b, const uint8_t *flat, uint32_t flat_
 	uint8_t old_type = as_bin_get_particle_type(b);
 	as_particle_type new_type = safe_particle_type(*flat);
 
-	if (new_type < 0) {
-		return (int)new_type;
+	if (new_type == AS_PARTICLE_TYPE_BAD) {
+		return -1;
 	}
 
 	// Just destroy the old particle, if any - we're replacing it.
