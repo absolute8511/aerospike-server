@@ -539,6 +539,7 @@ extern as_sindex_status     as_sindex_extract_bin_path(as_sindex_metadata * imd,
 int                         as_sindex_create_check_params(as_namespace* ns, as_sindex_metadata* imd);
 bool                        as_sindex_delete_checker(as_namespace *ns, as_sindex_metadata *imd);
 as_particle_type            as_sindex_pktype(as_sindex_metadata * imd);
+extern const char         * as_sindex_ktype_str(as_sindex_ktype type);
 // **************************************************************************************************
 
 /*
