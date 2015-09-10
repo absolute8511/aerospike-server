@@ -106,6 +106,7 @@ int cf_str_atoi_u32(char *s, unsigned int *value)
 	if (*s != 0) {
 		return(-1); // reached a non-num before EOL
 	}
+	*value = i;
 	return(0);
 }
 
