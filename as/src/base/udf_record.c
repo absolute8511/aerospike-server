@@ -105,9 +105,7 @@ udf_storage_record_open(udf_record *urecord)
 	}
 
 	rd->bins = as_bin_get_all(r, rd, urecord->stack_bins);
-	if (tr->rsv.ns->storage_data_in_memory) {
-		urecord->starting_memory_bytes = as_storage_record_get_n_bytes_memory(rd);
-	}
+	urecord->starting_memory_bytes = as_storage_record_get_n_bytes_memory(rd);
 
 	as_storage_record_get_key(rd);
 

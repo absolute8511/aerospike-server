@@ -417,11 +417,6 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 			}
 			break;
 		}
-		// @LDT : Possibly include AS_LDT in this list.  We need the LDT
-		// bins to be updated by LDT lua calls, and that path takes us thru here.
-		// However, we ALSO need to be able to set the particle type for the
-		// bins -- so that requires extra processing here to take the LDT flags
-		// and set the appropriate bin flags in the particle data.
 		case AS_MAP:
 		case AS_LIST: {
 			as_buffer buf;

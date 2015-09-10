@@ -142,8 +142,6 @@ typedef struct pickle_info_s {
 
 extern bool pickle_all(as_storage_rd *rd, pickle_info *pickle);
 
-extern void account_memory(as_transaction *tr, as_storage_rd *rd, uint64_t start_bytes);
-
 extern int rw_udf_replicate(udf_record *urecord);
 
 extern int

@@ -224,10 +224,10 @@ bool as_index_has_set(as_index *index) {
 
 static inline
 int as_index_set_set(as_index *index, as_namespace *ns, const char *set_name,
-		bool check_threshold) {
+		bool fail_if_deleted) {
 	uint16_t set_id;
 	int rv = as_namespace_get_create_set(ns, set_name, &set_id,
-			check_threshold);
+			fail_if_deleted);
 
 	if (rv != 0) {
 		return rv;

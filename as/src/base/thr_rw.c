@@ -1982,10 +1982,6 @@ write_complete(write_request *wr, as_transaction *tr)
 	if (wr->response_db.buf) {
 		ops_complete(tr, &wr->response_db);
 
-		if (tr->proto_fd_h) {
-			cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
-		}
-
 		MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
 
 		return;
@@ -2001,8 +1997,6 @@ write_complete(write_request *wr, as_transaction *tr)
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
 		}
-
-		cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
 
 		tr->proto_fd_h = 0;
 	}
@@ -2458,7 +2452,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		goto Out;
 	}
 
-	if (rv != 1 && rd.ns->storage_data_in_memory) {
+	if (rv != 1) {
 		memory_bytes = as_storage_record_get_n_bytes_memory(&rd);
 	}
 
@@ -2476,15 +2470,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 	r->generation = generation;
 	r->void_time = void_time;
 
-	if (rd.ns->storage_data_in_memory) {
-		uint64_t end_memory_bytes = as_storage_record_get_n_bytes_memory(&rd);
-
-		int64_t delta_bytes = end_memory_bytes - memory_bytes;
-		if (delta_bytes) {
-			cf_atomic_int_add(&rsv->ns->n_bytes_memory, delta_bytes);
-			cf_atomic_int_add(&rsv->p->n_bytes_memory, delta_bytes);
-		}
-	}
+	as_storage_record_adjust_mem_stats(&rd, memory_bytes);
 
 	uint64_t version_to_set = 0;
     bool     set_version    = false;
@@ -2994,15 +2980,13 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 		}
 
 		if (ns->storage_data_in_memory) {
-			rd.n_bins = as_bin_get_n_bins(r, &rd);
-			rd.bins = as_bin_get_all(r, &rd, 0);
-			cf_atomic_int_sub(&tr->rsv.p->n_bytes_memory,
-					as_storage_record_get_n_bytes_memory(&rd));
-
 			// Remove record from secondary index. In case data is not in memory
 			// then we won't have record in that case secondary index entry is
 			// cleaned up by background sindex defrag thread.
 			if (as_sindex_ns_has_sindex(ns)) {
+				rd.n_bins = as_bin_get_n_bins(r, &rd);
+				rd.bins = as_bin_get_all(r, &rd, NULL);
+
 				int sindex_ret = AS_SINDEX_OK;
 				const char* set_name = as_index_get_set_name(r, ns);
 
@@ -3189,18 +3173,6 @@ pickle_all(as_storage_rd *rd, pickle_info *pickle)
 	}
 
 	return true;
-}
-
-void
-account_memory(as_transaction *tr, as_storage_rd *rd, uint64_t start_bytes)
-{
-	uint64_t end_bytes = as_storage_record_get_n_bytes_memory(rd);
-	int64_t delta_bytes = (int64_t)end_bytes - (int64_t)start_bytes;
-
-	if (delta_bytes) {
-		cf_atomic_int_add(&tr->rsv.ns->n_bytes_memory, delta_bytes);
-		cf_atomic_int_add(&tr->rsv.p->n_bytes_memory, delta_bytes);
-	}
 }
 
 
@@ -4156,7 +4128,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 	destroy_stack_bins(cleanup_bins, n_cleanup_bins);
 
-	account_memory(tr, rd, memory_bytes);
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
@@ -4335,7 +4307,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		as_index_set_flags(r, AS_INDEX_FLAG_KEY_STORED);
 	}
 
-	account_memory(tr, rd, memory_bytes);
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
@@ -4704,7 +4676,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
 			return -1;
 		}
-		else if (rv_set == AS_NAMESPACE_SET_THRESHOLD_EXCEEDED) {
+		else if (rv_set == -2) {
 			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_FORBIDDEN);
 			return -1;
 		}

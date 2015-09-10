@@ -180,6 +180,8 @@ extern int as_storage_histogram_clear_all(); // clears all SSD histograms
 
 // Called within as_storage_rd usage cycle.
 extern uint64_t as_storage_record_get_n_bytes_memory(as_storage_rd *rd);
+extern void as_storage_record_adjust_mem_stats(as_storage_rd *rd, uint64_t start_bytes);
+extern void as_storage_record_drop_from_mem_stats(as_storage_rd *rd);
 extern bool as_storage_record_get_key(as_storage_rd *rd);
 extern size_t as_storage_record_rec_props_size(as_storage_rd *rd);
 extern void as_storage_record_set_rec_props(as_storage_rd *rd, uint8_t* rec_props_data);

@@ -155,7 +155,6 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->storage_post_write_queue = 256; // number of wblocks per device used as post-write cache
 	ns->storage_read_block_size = 64 * 1024; // size in bytes of read buffers to use with KV store devices
 	// [Note - current FusionIO maximum read buffer size is 1MB - 512B.]
-	ns->storage_write_smoothing_period = 0; // seconds of write data to use for smoothing (default 0 = off)
 	ns->storage_write_threads = 1;
 
 	// SINDEX
@@ -179,6 +178,9 @@ as_namespace_create(char *name, uint16_t replication_factor)
 
 	sprintf(hist_name, "%s evict histogram", name);
 	ns->evict_hist = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
+
+	sprintf(hist_name, "%s evict coarse histogram", name);
+	ns->evict_coarse_hist = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
 
 	sprintf(hist_name, "%s ttl histogram", name);
 	ns->ttl_hist = linear_histogram_create(hist_name, 0, 0, EVICTION_HIST_NUM_BUCKETS);
@@ -259,8 +261,7 @@ as_namespace_configure_sets(as_namespace *ns)
 			}
 
 			// Rewrite configurable metadata - config values may have changed.
-			p_set->stop_write_count = ns->sets_cfg_array[i].stop_write_count;
-			p_set->evict_hwm_count = ns->sets_cfg_array[i].evict_hwm_count;
+			p_set->disable_eviction = ns->sets_cfg_array[i].disable_eviction;
 			p_set->enable_xdr = ns->sets_cfg_array[i].enable_xdr;
 		}
 		else if (result != CF_VMAPX_OK) {
@@ -468,20 +469,6 @@ as_namespace_bless(as_namespace *ns)
 	}
 }
 
-int as_namespace_check_set_limits(as_set *p_set, as_namespace *ns) {
-	// Check limits on the num_elements in a set.
-	uint64_t stop_write_count = cf_atomic64_get(p_set->stop_write_count);
-	uint64_t num_elements = cf_atomic64_get(p_set->num_elements);
-
-	// If the number of objects crossed the stop_write_count or the set
-	// is to deleted, return error.
-	if ((stop_write_count && (num_elements >= stop_write_count)) || IS_SET_DELETED(p_set)) {
-		return AS_NAMESPACE_SET_THRESHOLD_EXCEEDED;
-	}
-
-	return 0;
-}
-
 const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id)
 {
 	// Note that set_id is 1-based, but cf_vmap index is 0-based.
@@ -563,7 +550,7 @@ uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name)
 	return INVALID_SET_ID;
 }
 
-int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool check_threshold)
+int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool fail_if_deleted)
 {
 	if (! set_name) {
 		// Should be impossible.
@@ -625,10 +612,9 @@ int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t
 			return -1;
 		}
 
-		// If check is requested, don't exceed set's limits.
-		if (check_threshold &&
-				as_namespace_check_set_limits(p_set, ns) == AS_NAMESPACE_SET_THRESHOLD_EXCEEDED) {
-			return AS_NAMESPACE_SET_THRESHOLD_EXCEEDED;
+		// If requested, fail if emptying set.
+		if (fail_if_deleted && IS_SET_DELETED(p_set)) {
+			return -2;
 		}
 
 		// The set passed all tests - need to increment its num_elements.
@@ -697,11 +683,8 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, "n_objects=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->num_elements));
 	cf_dyn_buf_append_char(db, ':');
-	cf_dyn_buf_append_string(db, "set-stop-write-count=");
-	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->stop_write_count));
-	cf_dyn_buf_append_char(db, ':');
-	cf_dyn_buf_append_string(db, "set-evict-hwm-count=");
-	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->evict_hwm_count));
+	cf_dyn_buf_append_string(db, "n-bytes-memory=");
+	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->n_bytes_memory));
 	cf_dyn_buf_append_char(db, ':');
 	cf_dyn_buf_append_string(db, "set-enable-xdr=");
 	if (cf_atomic32_get(p_set->enable_xdr) == AS_SET_ENABLE_XDR_TRUE) {
@@ -715,6 +698,14 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 	}
 	else {
 		cf_dyn_buf_append_uint32(db, cf_atomic32_get(p_set->enable_xdr));
+	}
+	cf_dyn_buf_append_char(db, ':');
+	cf_dyn_buf_append_string(db, "disable-eviction=");
+	if (IS_SET_EVICTION_DISABLED(p_set)) {
+		cf_dyn_buf_append_string(db, "true");
+	}
+	else {
+		cf_dyn_buf_append_string(db, "false");
 	}
 	cf_dyn_buf_append_char(db, ':');
 	cf_dyn_buf_append_string(db, "set-delete=");
@@ -749,6 +740,26 @@ void as_namespace_get_set_info(as_namespace *ns, const char *set_name, cf_dyn_bu
 			cf_dyn_buf_append_char(db, ':');
 			append_set_props(p_set, db);
 		}
+	}
+}
+
+void
+as_namespace_adjust_set_memory(as_namespace *ns, uint16_t set_id,
+		int64_t delta_bytes)
+{
+	if (set_id == INVALID_SET_ID) {
+		return;
+	}
+
+	as_set *p_set;
+
+	if (cf_vmapx_get_by_index(ns->p_sets_vmap, set_id - 1, (void**)&p_set) != CF_VMAPX_OK) {
+		cf_warning(AS_NAMESPACE, "set_id %u - failed to get as_set from vmap", set_id);
+		return;
+	}
+
+	if (cf_atomic64_add(&p_set->n_bytes_memory, delta_bytes) < 0) {
+		cf_warning(AS_NAMESPACE, "set_id %u - n_bytes_memory went negative!", set_id);
 	}
 }
 
@@ -817,6 +828,10 @@ as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,
 			cf_dyn_buf_append_string(db, "evict=");
 			linear_histogram_get_info(ns->evict_hist, db);
 			cf_dyn_buf_append_char(db, ';');
+		} else if (strcmp(hist_name, "evictc") == 0) {
+			cf_dyn_buf_append_string(db, "evictc=");
+			linear_histogram_get_info(ns->evict_coarse_hist, db);
+			cf_dyn_buf_append_char(db, ';');
 		} else if (strcmp(hist_name, "objsz") == 0) {
 			if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
 				cf_dyn_buf_append_string(db, "objsz=");
@@ -839,13 +854,17 @@ as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,
 				} else {
 					cf_dyn_buf_append_string(db, "hist-unavailable");
 				}
-			} else if (strcmp(hist_name, "evict") == 0) {
-				if (ns->set_evict_hists[set_id]) {
-					cf_dyn_buf_append_string(db, "evict=");
-					linear_histogram_get_info(ns->set_evict_hists[set_id], db);
-					cf_dyn_buf_append_char(db, ';');
+			} else if (strcmp(hist_name, "objsz") == 0) {
+				if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
+					if (ns->set_obj_size_hists[set_id]) {
+						cf_dyn_buf_append_string(db, "objsz=");
+						linear_histogram_get_info(ns->set_obj_size_hists[set_id], db);
+						cf_dyn_buf_append_char(db, ';');
+					} else {
+						cf_dyn_buf_append_string(db, "hist-unavailable");
+					}
 				} else {
-					cf_dyn_buf_append_string(db, "hist-unavailable");
+					cf_dyn_buf_append_string(db, "hist-not-applicable");
 				}
 			} else {
 				cf_dyn_buf_append_string(db, "error-unknown-hist-name");

@@ -529,8 +529,6 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_DEVICE_MAX_WRITE_CACHE,
 	CASE_NAMESPACE_STORAGE_DEVICE_MIN_AVAIL_PCT,
 	CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE,
-	CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE,
-	CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD,
 	CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS,
 	// Deprecated:
 	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_MAX_BLOCKS,
@@ -538,6 +536,8 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_DEVICE_LOAD_AT_STARTUP,
 	CASE_NAMESPACE_STORAGE_DEVICE_PERSIST,
 	CASE_NAMESPACE_STORAGE_DEVICE_READONLY,
+	CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE,
+	CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD,
 
 	// Namespace storage-engine kv options:
 	CASE_NAMESPACE_STORAGE_KV_DEVICE,
@@ -548,11 +548,12 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_KV_COND_WRITE,
 
 	// Namespace set options:
+	CASE_NAMESPACE_SET_DISABLE_EVICTION,
 	CASE_NAMESPACE_SET_ENABLE_XDR,
-	CASE_NAMESPACE_SET_EVICT_HWM_COUNT,
-	CASE_NAMESPACE_SET_STOP_WRITE_COUNT,
 	// Deprecated:
+	CASE_NAMESPACE_SET_EVICT_HWM_COUNT,
 	CASE_NAMESPACE_SET_EVICT_HWM_PCT,
+	CASE_NAMESPACE_SET_STOP_WRITE_COUNT,
 	CASE_NAMESPACE_SET_STOP_WRITE_PCT,
 
 	// Namespace set set-enable-xdr options (value tokens):
@@ -916,14 +917,14 @@ const cfg_opt NAMESPACE_STORAGE_DEVICE_OPTS[] = {
 		{ "max-write-cache",				CASE_NAMESPACE_STORAGE_DEVICE_MAX_WRITE_CACHE },
 		{ "min-avail-pct",					CASE_NAMESPACE_STORAGE_DEVICE_MIN_AVAIL_PCT },
 		{ "post-write-queue",				CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE },
-		{ "signature",						CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE },
-		{ "write-smoothing-period",			CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD },
 		{ "write-threads",					CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS },
 		{ "defrag-max-blocks",				CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_MAX_BLOCKS },
 		{ "defrag-period",					CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_PERIOD },
 		{ "load-at-startup",				CASE_NAMESPACE_STORAGE_DEVICE_LOAD_AT_STARTUP },
 		{ "persist",						CASE_NAMESPACE_STORAGE_DEVICE_PERSIST },
 		{ "readonly",						CASE_NAMESPACE_STORAGE_DEVICE_READONLY },
+		{ "signature",						CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE },
+		{ "write-smoothing-period",			CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -938,10 +939,11 @@ const cfg_opt NAMESPACE_STORAGE_KV_OPTS[] = {
 };
 
 const cfg_opt NAMESPACE_SET_OPTS[] = {
+		{ "set-disable-eviction",			CASE_NAMESPACE_SET_DISABLE_EVICTION },
 		{ "set-enable-xdr",					CASE_NAMESPACE_SET_ENABLE_XDR },
 		{ "set-evict-hwm-count",			CASE_NAMESPACE_SET_EVICT_HWM_COUNT },
-		{ "set-stop-write-count",			CASE_NAMESPACE_SET_STOP_WRITE_COUNT },
 		{ "set-evict-hwm-pct",				CASE_NAMESPACE_SET_EVICT_HWM_PCT },
+		{ "set-stop-write-count",			CASE_NAMESPACE_SET_STOP_WRITE_COUNT },
 		{ "set-stop-write-pct",				CASE_NAMESPACE_SET_STOP_WRITE_PCT },
 		{ "}",								CASE_CONTEXT_END }
 };
@@ -2697,12 +2699,6 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE:
 				ns->storage_post_write_queue = cfg_u32(&line, 0, 2 * 1024);
 				break;
-			case CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE:
-				ns->storage_signature = cfg_bool(&line);
-				break;
-			case CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD:
-				ns->storage_write_smoothing_period = cfg_u32(&line, 0, 1000);
-				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS:
 				ns->storage_write_threads = cfg_u32_no_checks(&line);
 				break;
@@ -2711,6 +2707,8 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_STORAGE_DEVICE_LOAD_AT_STARTUP:
 			case CASE_NAMESPACE_STORAGE_DEVICE_PERSIST:
 			case CASE_NAMESPACE_STORAGE_DEVICE_READONLY:
+			case CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE:
+			case CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD:
 				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_CONTEXT_END:
@@ -2761,6 +2759,9 @@ as_config_init(const char *config_file)
 		//
 		case NAMESPACE_SET:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_SET_OPTS, NUM_NAMESPACE_SET_OPTS)) {
+			case CASE_NAMESPACE_SET_DISABLE_EVICTION:
+				DISABLE_SET_EVICTION(p_set, cfg_bool(&line));
+				break;
 			case CASE_NAMESPACE_SET_ENABLE_XDR:
 				switch(cfg_find_tok(line.val_tok_1, NAMESPACE_SET_ENABLE_XDR_OPTS, NUM_NAMESPACE_SET_ENABLE_XDR_OPTS)) {
 				case CASE_NAMESPACE_SET_ENABLE_XDR_USE_DEFAULT:
@@ -2779,12 +2780,8 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case CASE_NAMESPACE_SET_EVICT_HWM_COUNT:
-				p_set->evict_hwm_count = cfg_u64_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_SET_STOP_WRITE_COUNT:
-				p_set->stop_write_count = cfg_u64_no_checks(&line);
-				break;
 			case CASE_NAMESPACE_SET_EVICT_HWM_PCT:
+			case CASE_NAMESPACE_SET_STOP_WRITE_COUNT:
 			case CASE_NAMESPACE_SET_STOP_WRITE_PCT:
 				cfg_deprecated_name_tok(&line);
 				break;
@@ -3418,7 +3415,6 @@ cfg_create_all_histograms()
 	create_and_check_hist_track(&c->ut_hist, "udf", HIST_MILLISECONDS);
 	create_and_check_hist_track(&c->wt_hist, "writes_master", HIST_MILLISECONDS);
 	create_and_check_hist_track(&c->px_hist, "proxy", HIST_MILLISECONDS);
-	create_and_check_hist_track(&c->wt_reply_hist, "writes_reply", HIST_MILLISECONDS);
 
 	create_and_check_hist(&c->rt_cleanup_hist, "reads_cleanup", HIST_MILLISECONDS);
 	create_and_check_hist(&c->rt_net_hist, "reads_net", HIST_MILLISECONDS);

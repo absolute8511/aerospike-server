@@ -190,11 +190,7 @@ as_record_destroy(as_record *r, as_namespace *ns)
 		rd.n_bins = as_bin_get_n_bins(r, &rd);
 		rd.bins = as_bin_get_all(r, &rd, 0);
 
-		uint64_t memory_bytes = as_storage_record_get_n_bytes_memory(&rd);
-		cf_atomic_int_sub(&ns->n_bytes_memory, memory_bytes);
-
-		cf_debug(AS_RECORD, " record destroy: %s subtracting: memory %"PRIu64,
-				ns->name, memory_bytes);
+		as_storage_record_drop_from_mem_stats(&rd);
 
 		as_record_clean_bins(&rd);
 		if (! ns->single_bin) {
@@ -647,10 +643,7 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 
 	rd->bins = as_bin_get_all(r, rd, stack_bins);
 
-	uint64_t memory_bytes = 0;
-	if (rd->ns->storage_data_in_memory) {
-		memory_bytes = as_storage_record_get_n_bytes_memory(rd);
-	}
+	uint64_t memory_bytes = as_storage_record_get_n_bytes_memory(rd);
 
 	uint32_t stack_particles_sz = 0;
 	if (! rd->ns->storage_data_in_memory) {
@@ -701,14 +694,8 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 		*delete_record = true;
 	}
 
-	if (rd->ns->storage_data_in_memory) {
-		uint64_t end_memory_bytes = as_storage_record_get_n_bytes_memory(rd);
-		int64_t delta_bytes = end_memory_bytes - memory_bytes;
-		if (delta_bytes) {
-			cf_atomic_int_add(&rsv->ns->n_bytes_memory, delta_bytes);
-			cf_atomic_int_add(&rsv->p->n_bytes_memory, delta_bytes);
-		}
-	}
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
+
 	rd->write_to_device = true;
 
 	// write record to device
