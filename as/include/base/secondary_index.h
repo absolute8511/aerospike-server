@@ -553,8 +553,8 @@ as_particle_type            as_sindex_pktype(as_sindex_metadata * imd);
  */
 // **************************************************************************************************
 extern int  as_sindex_list_str(as_namespace *ns, cf_dyn_buf *db);
-extern int  as_sindex_describe_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db);
-extern int  as_sindex_stats_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db);
+extern int  as_sindex_stats_str(as_namespace *ns, char * iname, cf_dyn_buf *db);
+extern int  as_sindex_repair(as_namespace *ns, char * iname);
 extern int  as_sindex_set_config(as_namespace *ns, as_sindex_metadata *imd, char *params);
 extern void as_sindex_gconfig_default(struct as_config_s *c);
 extern int  as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn_buf* db,
@@ -571,7 +571,7 @@ void        as_sindex_ticker_done(as_namespace * ns, as_sindex * si, uint64_t st
  * HISTOGRAMS
  */
 // **************************************************************************************************
-extern int as_sindex_histogram_enable(as_namespace *ns, as_sindex_metadata *imd, bool enable);
+extern int as_sindex_histogram_enable(as_namespace *ns, char * iname, bool enable);
 extern int as_sindex_histogram_dumpall(as_namespace *ns);
 #define SINDEX_HIST_INSERT_DATA_POINT(si, type, start_time_ns)                          \
 do {                                                                                    \
@@ -727,11 +727,5 @@ extern int                  as_index_keys_ll_reduce_fn(cf_ll_element *ele, void 
 extern void                 as_index_keys_ll_destroy_fn(cf_ll_element *ele);
 // **************************************************************************************************
 
-/*
- * TO REMOVE
- */
-// **************************************************************************************************
-extern int  as_sindex_repair(as_namespace *ns, as_sindex_metadata *imd);
-// **************************************************************************************************
 
 

@@ -1723,13 +1723,13 @@ as_sindex_query(as_sindex *si, as_sindex_range *srange, as_sindex_qctx *qctx)
 // Currently we only populate the sindex again. This does not clean the uncleanable 
 // garbage accumulated in the secondary index tree.
 int
-as_sindex_repair(as_namespace *ns, as_sindex_metadata *imd)
+as_sindex_repair(as_namespace *ns, char * iname)
 {
-	as_sindex *si = as_sindex_lookup_by_iname(ns, imd->iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
+	as_sindex *si = as_sindex_lookup_by_iname(ns, iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
 	if (si) {
 		if (si->desync_cnt == 0) {
 			cf_warning(AS_SINDEX, "SINDEX REPAIR : index %s is found in sync with primary."
-						" No need to repair index", imd->iname);
+						" No need to repair index", iname);
 			AS_SINDEX_RELEASE(si);
 			return AS_SINDEX_OK;
 		}
@@ -1743,21 +1743,20 @@ as_sindex_repair(as_namespace *ns, as_sindex_metadata *imd)
 		return AS_SINDEX_OK;
 	}
 	else {
-		cf_warning(AS_SINDEX, "SINDEX REPAIR : index %s not found", imd->iname);
+		cf_warning(AS_SINDEX, "SINDEX REPAIR : index %s not found", iname);
 	}
 	return AS_SINDEX_ERR_NOTFOUND;
 }
 
 int
-as_sindex_stats_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db)
+as_sindex_stats_str(as_namespace *ns, char * iname, cf_dyn_buf *db)
 {
-	if (!ns)
-		return AS_SINDEX_ERR_PARAM;
+	as_sindex *si = as_sindex_lookup_by_iname(ns, iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
 
-	as_sindex *si = as_sindex_lookup_by_iname(ns, imd->iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
-
-	if (!si)
+	if (!si) {
+		cf_warning(AS_SINDEX, "SINDEX STAT : sindex %s not found", iname);
 		return AS_SINDEX_ERR_NOTFOUND;
+	}
 
 	// A good thing to cache the stats first.
 	int      ns_objects  = ns->n_objects;
@@ -3989,13 +3988,11 @@ as_sindex_histogram_dumpall(as_namespace *ns)
 }
 
 int
-as_sindex_histogram_enable(as_namespace *ns, as_sindex_metadata *imd, bool enable)
+as_sindex_histogram_enable(as_namespace *ns, char * iname, bool enable)
 {
-	if (!ns)
-		return AS_SINDEX_ERR_PARAM;
-
-	as_sindex *si = as_sindex_lookup_by_iname(ns, imd->iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
+	as_sindex *si = as_sindex_lookup_by_iname(ns, iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
 	if (!si) {
+		cf_warning(AS_SINDEX, "SINDEX HISTOGRAM : sindex %s not found", iname);	
 		return AS_SINDEX_ERR_NOTFOUND;
 	}
 

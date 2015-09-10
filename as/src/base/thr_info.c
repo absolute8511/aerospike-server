@@ -6144,20 +6144,13 @@ info_get_tree_sindexes(char *name, char *subtree, cf_dyn_buf *db)
 		as_sindex_list_str(ns, db);
 	}
 	else {
-		as_sindex_metadata imd;
-		memset(&imd, 0, sizeof(imd));
-		imd.ns_name = cf_strdup(ns->name);
-		imd.iname   = cf_strdup(index_name);
-
-		int resp = as_sindex_stats_str(ns, &imd, db);
+		int resp = as_sindex_stats_str(ns, index_name, db);
 		if (resp) {
 			cf_dyn_buf_append_string(db, "Invalid Stats");
 			INFO_COMMAND_SINDEX_FAILCODE(
 					as_sindex_err_to_clienterr(resp, __FILE__, __LINE__),
 					as_sindex_err_str(resp));
 		}
-		if (imd.ns_name) cf_free(imd.ns_name);
-		if (imd.iname) cf_free(imd.iname);
 	}
 	return(0);
 }
@@ -6617,7 +6610,7 @@ ERR:
 }
 
 int
-as_info_parse_ns_iname_to_imd(char* params, as_sindex_metadata *imd, cf_dyn_buf* db, char * sindex_cmd)
+as_info_parse_ns_iname(char* params, as_namespace ** ns, char ** iname, cf_dyn_buf* db, char * sindex_cmd)
 {
 	char ns_str[AS_ID_NAMESPACE_SZ];
 	int ns_len = sizeof(ns_str);
@@ -6636,6 +6629,14 @@ as_info_parse_ns_iname_to_imd(char* params, as_sindex_metadata *imd, cf_dyn_buf*
 			INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
 				"Namespace Not Specified");		
 		}
+		return -1;
+	}
+	
+	*ns = as_namespace_get_byname(ns_str);
+	if (!*ns) {
+		cf_warning(AS_INFO, "%s : namespace %s not found", sindex_cmd, ns_str);
+		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
+				"Namespace Not Found");
 		return -1;
 	}
 
@@ -6660,44 +6661,33 @@ as_info_parse_ns_iname_to_imd(char* params, as_sindex_metadata *imd, cf_dyn_buf*
 	cf_info(AS_SINDEX, "%s : received request on index %s - namespace %s", 
 			sindex_cmd, index_name_str, ns_str);
 
-	memset(imd, 0, sizeof(imd));
-	imd->ns_name = cf_strdup(ns_str);
-	imd->iname   = cf_strdup(index_name_str);
+	*iname = cf_strdup(index_name_str);
+
 	return 0;
 }
 
 int info_command_sindex_repair(char *name, char *params, cf_dyn_buf *db) {
 	
-	as_sindex_metadata imd;
-	if (as_info_parse_ns_iname_to_imd(params, &imd, db, "SINDEX REPAIR")) {
+	as_namespace *ns = NULL;
+	char * iname = NULL;
+	if (as_info_parse_ns_iname(params, &ns, &iname, db, "SINDEX REPAIR")) {
 		return 0;
 	}
 	
-	as_namespace * ns = as_namespace_get_byname(imd.ns_name);
-	if (!ns) {
-		cf_warning(AS_INFO, "SINDEX REPAIR : namespace %s not found", imd.ns_name);
-		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
-				"Namespace Not Found");
-		return 0;
-	}
-
-	int resp = as_sindex_repair(ns, &imd);
+	int resp = as_sindex_repair(ns, iname);
 	if (resp) {
 		cf_dyn_buf_append_string(db, "Sindex repair failed");
 		INFO_COMMAND_SINDEX_FAILCODE(as_sindex_err_to_clienterr(resp, __FILE__, __LINE__),
 			as_sindex_err_str(resp));
 		cf_warning(AS_INFO, "SINDEX REPAIR : for index %s - ns %s failed with error %d", 
-			imd.iname, imd.ns_name, resp);
+			iname, ns->name, resp);
 	}
 	else {
 		cf_dyn_buf_append_string(db, "Ok");
 	}
 
-	if (imd.ns_name) {
-		cf_free(imd.ns_name);
-	}
-	if (imd.iname) {
-		cf_free(imd.iname);
+	if (iname) {
+		cf_free(iname);
 	}
 	return(0);
 }
@@ -6761,34 +6751,25 @@ int info_command_query_kill(char *name, char *params, cf_dyn_buf *db) {
 
 }
 int info_command_sindex_stat(char *name, char *params, cf_dyn_buf *db) {
-	as_sindex_metadata imd;
-	if (as_info_parse_ns_iname_to_imd(params, &imd, db, "SINDEX STAT")) {
+	as_namespace  *ns = NULL;
+	char * iname = NULL;
+
+	if (as_info_parse_ns_iname(params, &ns, &iname, db, "SINDEX STAT")) {
 		return 0;
 	}
 	
-	as_namespace * ns = as_namespace_get_byname(imd.ns_name);
-	if (!ns) {
-		cf_warning(AS_INFO, "SINDEX STAT : namespace %s not found", imd.ns_name);
-		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
-				"Namespace Not Found");
-		return 0;
-	}
-
-	int resp = as_sindex_stats_str(ns, &imd, db);
+	int resp = as_sindex_stats_str(ns, iname, db);
 	if (resp)  {
 		cf_dyn_buf_append_string(db, "Sindex stat failed");
 		INFO_COMMAND_SINDEX_FAILCODE(
 				as_sindex_err_to_clienterr(resp, __FILE__, __LINE__),
 				as_sindex_err_str(resp));
 		cf_warning(AS_INFO, "SINDEX STAT : for index %s - ns %s failed with error %d", 
-			imd.iname, imd.ns_name, resp);
+			iname, ns->name, resp);
 	}
 
-	if (imd.ns_name) {
-		cf_free(imd.ns_name);
-	}
-	if (imd.iname) {
-		cf_free(imd.iname);
+	if (iname) {
+		cf_free(iname);
 	}
 	return(0);
 }
@@ -6797,16 +6778,9 @@ int info_command_sindex_stat(char *name, char *params, cf_dyn_buf *db) {
 // sindex-histogram:ns=test_D;indexname=indname;enable=true/false
 int info_command_sindex_histogram(char *name, char *params, cf_dyn_buf *db)
 {
-	as_sindex_metadata imd;
-	if (as_info_parse_ns_iname_to_imd(params, &imd, db, "SINDEX HISTOGRAM")) {
-		return 0;
-	}
-	
-	as_namespace * ns = as_namespace_get_byname(imd.ns_name);
-	if (!ns) {
-		cf_warning(AS_INFO, "SINDEX HISTOGRAM : namespace %s not found", imd.ns_name);
-		INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
-				"Namespace Not Found");
+	as_namespace * ns = NULL;
+	char * iname = NULL;
+	if (as_info_parse_ns_iname(params, &ns, &iname, db, "SINDEX HISTOGRAM")) {
 		return 0;
 	}
 
@@ -6816,7 +6790,7 @@ int info_command_sindex_histogram(char *name, char *params, cf_dyn_buf *db)
 	if (as_info_parameter_get(params, "enable", op, &op_len)) {
 		cf_info(AS_INFO, "SINDEX HISTOGRAM : invalid OP");
 		cf_dyn_buf_append_string(db, "Invalid Op");
-		return 0;
+		goto END;
 	}
 
 	bool enable = false;
@@ -6829,28 +6803,26 @@ int info_command_sindex_histogram(char *name, char *params, cf_dyn_buf *db)
 	else {
 		cf_info(AS_INFO, "SINDEX HISTOGRAM : invalid OP");
 		cf_dyn_buf_append_string(db, "Invalid Op");	
-		return 0;
+		goto END;
 	}
 
-	int resp = as_sindex_histogram_enable(ns, &imd, enable);
+	int resp = as_sindex_histogram_enable(ns, iname, enable);
 	if (resp) {
 		cf_dyn_buf_append_string(db, "Sindex histogram failed");
 		INFO_COMMAND_SINDEX_FAILCODE(
 				as_sindex_err_to_clienterr(resp, __FILE__, __LINE__),
 				as_sindex_err_str(resp));
 		cf_warning(AS_INFO, "SINDEX HISTOGRAM : for index %s - ns %s failed with error %d", 
-			imd.iname, imd.ns_name, resp);
+			iname, ns->name, resp);
 	} else {
 		cf_dyn_buf_append_string(db, "Ok");
 		cf_info(AS_INFO, "SINDEX HISTOGRAM : for index %s - ns %s histogram is set as %s", 
-			imd.iname, imd.ns_name, op);
+			iname, ns->name, op);
 	}
 
-	if (imd.ns_name) {
-		cf_free(imd.ns_name);
-	}
-	if (imd.iname) {
-		cf_free(imd.iname);
+END:
+	if (iname) {
+		cf_free(iname);
 	}
 	return(0);
 }
