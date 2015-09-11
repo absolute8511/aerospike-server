@@ -2881,9 +2881,8 @@ as_sindex_add_diff_asval_to_default_sindex(as_val * old_val, as_val *new_val, as
 					}
 					if (as_sindex_add_integer_to_sbin(sbin, new_int) == AS_SINDEX_OK) {
 						*found += 1;
-					}
-			 
-
+					} 
+				}
 			}
 			return AS_SINDEX_OK;
 		}
