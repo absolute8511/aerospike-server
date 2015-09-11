@@ -4992,8 +4992,6 @@ info_debug_ticker_fn(void *unused)
 					histogram_dump(g_config.write_storage_close_hist);
 				if (g_config.write_sindex_hist)
 					histogram_dump(g_config.write_sindex_hist);
-				if (g_config.defrag_storage_close_hist)
-					histogram_dump(g_config.defrag_storage_close_hist);
 				if (g_config.prole_fabric_send_hist)
 					histogram_dump(g_config.prole_fabric_send_hist);
 			}
@@ -6195,7 +6193,6 @@ clear_microbenchmark_histograms()
 	histogram_clear(g_config.info_fulfill_hist);
 	histogram_clear(g_config.write_storage_close_hist);
 	histogram_clear(g_config.write_sindex_hist);
-	histogram_clear(g_config.defrag_storage_close_hist);
 	histogram_clear(g_config.prole_fabric_send_hist);
 }
 

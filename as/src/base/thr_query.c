@@ -2147,11 +2147,8 @@ query_run_setup(as_query_transaction *qtr)
 	// We'll need to preserve some values on the stack for tracing
 	// becuase the qtr is gone before the done event.
 	uint64_t nodeid = g_config.self_node;
-	uint64_t trid = qtr->trid;
-	size_t nrecs = 0;
 #endif
 
-	ASD_QUERY_INIT(nodeid, qtr->trid);
 	QUERY_HIST_INSERT_DATA_POINT(query_query_q_wait_hist, qtr->start_time);
 	cf_atomic64_set(&qtr->n_result_records, 0);
 	qtr->track               = false;
@@ -2187,6 +2184,9 @@ query_run_setup(as_query_transaction *qtr)
 	qtr_set_running(qtr);
 	cf_atomic64_incr(&g_config.query_short_reqs);
 	cf_atomic32_incr(&g_query_short_running);
+
+	ASD_QUERY_INIT(nodeid, qtr->trid);
+
 	return AS_QUERY_OK;
 }
 
@@ -2401,7 +2401,8 @@ query_generator(as_query_transaction *qtr)
 {
 #if defined(USE_SYSTEMTAP)
     uint64_t nodeid = g_config.self_node;
-    uint64_t trid = tr? tr->trid : 0;
+    uint64_t trid = qtr->trid;
+    size_t nrecs = 0;
 #endif
 
 	// Query can get requeue for many different reason. Check if it is 

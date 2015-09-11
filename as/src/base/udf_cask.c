@@ -513,6 +513,8 @@ int udf_cask_info_put(char *name, char * params, cf_dyn_buf * out) {
 		return(-1);
 	}
 
+	cf_info(AS_UDF, "UDF module '%s' (%s/%s) registered", filename, g_config.mod_lua.user_path, filename);
+
 	// free the metadata
 	cf_free(udf_obj_str);
 	udf_obj_str = 0;
@@ -560,6 +562,8 @@ int udf_cask_info_remove(char *name, char * params, cf_dyn_buf * out) {
 	//    cf_dyn_buf_append_int(out, resp);
 
 	cf_dyn_buf_append_string(out, "ok");
+
+	cf_info(AS_UDF, "UDF module '%s' (%s) removed", filename, file_path);
 
 	return 0;
 }

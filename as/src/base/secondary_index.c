@@ -712,6 +712,23 @@ as_sindex_pktype(as_sindex_metadata * imd)
 	return AS_SINDEX_ERR_UNKNOWN_KEYTYPE;
 }
 
+/*
+ * Function as_sindex_key_str
+ *     Returns a static string representing the key type
+ *
+ */
+char const *
+as_sindex_ktype_str(as_sindex_ktype type)
+{
+	switch (type) {
+	case AS_SINDEX_KTYPE_LONG:      return "NUMERIC";
+	case AS_SINDEX_KTYPE_DIGEST:    return "STRING";
+	default:
+		cf_warning(AS_SINDEX, "UNSUPPORTED KEY TYPE %d", type);
+		return "??????";
+	}
+}
+
 as_sindex_key_type
 as_sindex_key_type_from_pktype(as_particle_type t)
 {
@@ -1995,7 +2012,7 @@ as_sindex_list_str(as_namespace *ns, cf_dyn_buf *db)
 				if (i) cf_dyn_buf_append_string(db, ",");
 				cf_dyn_buf_append_buf(db, (uint8_t *)si.imd->bnames[i], strlen(si.imd->bnames[i]));
 				cf_dyn_buf_append_string(db, ":type=");
-				cf_dyn_buf_append_string(db, Col_type_defs[as_sindex_pktype(si.imd)]);
+				cf_dyn_buf_append_string(db, as_sindex_ktype_str(si.imd->btype[0]));
 				cf_dyn_buf_append_string(db, ":indextype=");
 				cf_dyn_buf_append_string(db, as_sindex_type_defs[si.imd->itype]);
 
