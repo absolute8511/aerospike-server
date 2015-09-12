@@ -1615,39 +1615,34 @@ as_sindex_destroy(as_namespace *ns, as_sindex_metadata *imd)
 int
 as_sindex_putall_rd(as_namespace *ns, as_storage_rd *rd)
 {
+	as_sindex * sindex_arr[AS_SINDEX_MAX];
+	SINDEX_GRLOCK();
+	int ret = AS_SINDEX_OK;
 	int count = 0;
 
 	for (int i = 0; i < AS_SINDEX_MAX; i++) {
 		as_sindex *si = &ns->sindex[i];
-		if (!as_sindex_put_rd(si, rd)) {
-			count++;
+		if (!as_sindex_isactive(si)) {
+			continue;
 		}
+		AS_SINDEX_RESERVE(si);
+		sindex_arr[count++] = si;
 		if (count == ns->sindex_cnt) {
 			break;
 		}
 	}
-	return AS_SINDEX_OK;
+	SINDEX_GUNLOCK();
+	for (int i = 0; i < count; i++) {
+		as_sindex *si = sindex_arr[i];
+		as_sindex_put_rd(si, rd);
+	}
+	
+	return ret;
 }
 
 int
 as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 {
-	if (!si) {
-		cf_warning(AS_SINDEX, "SI is null in as_sindex_put_rd");
-		return AS_SINDEX_ERR;
-	}
-
-	// Proceed only if sindex is active
-	SINDEX_GRLOCK();
-	if (as_sindex_isactive(si)) {
-		AS_SINDEX_RESERVE(si);
-	}
-	else {
-		SINDEX_GUNLOCK();
-		return AS_SINDEX_ERR;
-	}
-	SINDEX_GUNLOCK();
-	
 	as_sindex_metadata *imd = si->imd;
 	// Validate Set name. Other function do this check while
 	// performing searching for simatch.
@@ -1659,12 +1654,13 @@ as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 	SINDEX_RLOCK(&imd->slock);
 	if (!as_sindex__setname_match(imd, setname)) {
 		SINDEX_UNLOCK(&imd->slock);
-		return AS_SINDEX_OK;
+		goto Cleanup;
 	}
 	SINDEX_UNLOCK(&imd->slock);
 
 	// collect sbins
 	SINDEX_BINS_SETUP(sbins, 1);
+	SINDEX_GRLOCK();
 
 	int sbins_populated = 0;
 	for (int i = 0; i < imd->num_bins; i++) {
@@ -1681,18 +1677,18 @@ as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 		}
 	}
 
+	SINDEX_GUNLOCK();
 	if (sbins_populated == 1) {
 		as_sindex_update_by_sbin(rd->ns, setname, sbins, sbins_populated, &rd->keyd);	
 		as_sindex_sbin_freeall(sbins, sbins_populated);
-	}
-	else if (!sbins_populated){
-		// no sbin were create 
-		AS_SINDEX_RELEASE(si);
+		return AS_SINDEX_OK;
 	}
 	else {
 		cf_warning(AS_SINDEX, "Number of sbins found for 1 sindex is not 1. It is %d", sbins_populated);
 	}
 
+Cleanup:
+	AS_SINDEX_RELEASE(si);
 	return AS_SINDEX_OK;
 }
 
