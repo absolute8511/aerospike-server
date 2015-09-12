@@ -1466,6 +1466,17 @@ as_val_tobuf(const as_val *v, uint8_t *buf, uint32_t *size)
 				*size = 0;
 				break;
 			}
+			case AS_BOOLEAN:
+			{
+				*size = 8;
+				if (buf) {
+					as_boolean * b = as_boolean_fromval(v);
+					int64_t bi = as_boolean_tobool(b) == true ? 1 : 0;
+					int64_t ri = __cpu_to_be64(bi);
+					memcpy(buf, &ri, *size);
+				}
+				break;
+			}
 			case AS_INTEGER:
 			{
 				*size = 8;
@@ -1492,6 +1503,16 @@ as_val_tobuf(const as_val *v, uint8_t *buf, uint32_t *size)
 				*size = as_string_len(s);
 				if (buf) {
 					char * rs = (char *) as_string_tostring(s);
+					memcpy(buf, rs, *size);
+				}
+				break;
+			}
+			case AS_BYTES:
+			{
+				as_bytes * b = as_bytes_fromval(v);
+				*size = as_bytes_size(b);
+				if (buf) {
+					uint8_t * rs = as_bytes_get(b);
 					memcpy(buf, rs, *size);
 				}
 				break;
