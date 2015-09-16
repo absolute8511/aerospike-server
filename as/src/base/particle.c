@@ -2035,13 +2035,13 @@ as_bin_particle_to_pickled(const as_bin *b, uint8_t *pickled)
 
 	*pickled++ = type;
 
-	uint32_t *p32 = (uint32_t *)pickled;
+	uint32_t *p_size = (uint32_t *)pickled;
+	uint8_t *value = (uint8_t *)(p_size + 1);
+	uint32_t size = g_particle_to_wire_table[type](b->particle, value);
 
-	*p32++ = cf_swap_to_be32(g_particle_wire_size_table[type](b->particle));
+	*p_size = cf_swap_to_be32(size);
 
-	uint8_t *value = (uint8_t *)p32;
-
-	return 1 + 4 + g_particle_to_wire_table[type](b->particle, value);
+	return 1 + 4 + size;
 }
 
 //
