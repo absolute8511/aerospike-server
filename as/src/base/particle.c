@@ -1436,7 +1436,8 @@ uint32_t
 as_bin_particle_size(as_bin *b)
 {
 	if (! as_bin_inuse(b)) {
-		cf_warning(AS_PARTICLE, "sizing unused bin");
+		// Single-bin will get here.
+		// TODO - clean up code paths so this doesn't happen?
 		return 0;
 	}
 
