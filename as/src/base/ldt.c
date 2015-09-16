@@ -1674,7 +1674,7 @@ as_ldt_leaf_scan(as_storage_rd *rd)
 }
 
 as_list * 
-as_bin_get_llist(as_namespace *ns, as_index_tree *sub_tree, as_val *ctrl_list, uint64_t ldt_version) 
+as_bin_get_llist(as_namespace *ns, as_storage_rd *rd, as_index_tree *sub_tree, as_val *ctrl_list, uint64_t ldt_version) 
 {
 	as_map *propMap = as_list_get_map((as_list *)ctrl_list, 0);
 	if (!propMap) {
@@ -1727,7 +1727,7 @@ as_bin_get_llist(as_namespace *ns, as_index_tree *sub_tree, as_val *ctrl_list, u
 		sub_r_ref.skip_lock = true;
 		int rv = as_record_get(sub_tree, &keyd, &sub_r_ref, ns);
 		if (rv) {
-			cf_warning(AS_LDT, "LDT stucture invalid");
+			cf_warning_digest(AS_LDT, &rd->keyd, " LDT stucture invalid %ld", ldt_version);
 			as_val_destroy(rl);
 			return NULL;
 		}
@@ -1799,7 +1799,7 @@ as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_
 		cf_debug(AS_LDT, "Bin %s is LDT Bin", as_bin_get_name_from_id(ns, binp->id));	
 		uint64_t ldt_version;
 		if (!as_ldt_parent_storage_get_version(rd, &ldt_version, true, __FILE__, __LINE__)) {
-			result_list = as_bin_get_llist(ns, sub_tree, (as_val *)ctrl_list, ldt_version); 
+			result_list = as_bin_get_llist(ns, rd, sub_tree, (as_val *)ctrl_list, ldt_version); 
 		} 
 	} else {
 		cf_debug(AS_LDT, "Bin %s is _NOT_ LDT Bin", as_bin_get_name_from_id(rd->ns, binp->id));	
