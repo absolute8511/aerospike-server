@@ -419,6 +419,7 @@ process_transaction(as_transaction *tr)
 					cf_atomic64_incr(&g_config.query_reqs);
 					if (! as_security_check_data_op(tr, &msgp->msg, ns,
 							is_udf(msgp) ? PERM_UDF_QUERY : PERM_QUERY)) {
+						as_transaction_error(tr, tr->result_code);
 						goto Cleanup;
 					}
 					// Responsibility of query layer to free the msgp.
@@ -437,6 +438,7 @@ process_transaction(as_transaction *tr)
 					// care of it inside as_scan.
 					if (! as_security_check_data_op(tr, &msgp->msg, ns,
 							is_udf(msgp) ? PERM_UDF_SCAN : PERM_SCAN)) {
+						as_transaction_error(tr, tr->result_code);
 						goto Cleanup;
 					}
 					free_msgp = false;
@@ -449,6 +451,7 @@ process_transaction(as_transaction *tr)
 			} else if (rv == -3) {
 				// Has digest array, is batch - msgp gets freed through cleanup.
 				if (! as_security_check_data_op(tr, &msgp->msg, ns, PERM_READ)) {
+					as_transaction_error(tr, tr->result_code);
 					goto Cleanup;
 				}
 				rv = as_batch_direct_queue_task(tr);
@@ -524,6 +527,7 @@ process_transaction(as_transaction *tr)
 				free_msgp = false;
 			}
 			else if (tr->proto_fd_h && ! as_security_check_data_op(tr, &msgp->msg, ns, PERM_WRITE)) {
+				as_transaction_error(tr, tr->result_code);
 				goto Cleanup;
 			}
 
@@ -555,6 +559,7 @@ process_transaction(as_transaction *tr)
 		else {  // <><><> READ Transaction <><><>
 
 			if (tr->proto_fd_h && ! as_security_check_data_op(tr, &msgp->msg, ns, PERM_READ)) {
+				as_transaction_error(tr, tr->result_code);
 				goto Cleanup;
 			}
 
