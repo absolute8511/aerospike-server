@@ -1683,9 +1683,6 @@ as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 		as_sindex_sbin_freeall(sbins, sbins_populated);
 		return AS_SINDEX_OK;
 	}
-	else {
-		cf_warning(AS_SINDEX, "Number of sbins found for 1 sindex is not 1. It is %d", sbins_populated);
-	}
 
 Cleanup:
 	AS_SINDEX_RELEASE(si);
