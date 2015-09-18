@@ -2044,7 +2044,7 @@ as_config_init(const char *config_file)
 				if (config_val < c->sindex_data_memory_used) {
 					cf_warning(AS_CFG, "sindex-data-max-memory must"
 							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(&c->sindex_data_memory_used), line_num);
+							cf_atomic_int_get(c->sindex_data_memory_used), line_num);
 				}
 				else {
 					c->sindex_data_max_memory = config_val; // this is in addition to namespace memory
@@ -2079,7 +2079,7 @@ as_config_init(const char *config_file)
 				if (config_val < c->udf_runtime_gmemory_used) {
 					cf_crash_nostack(AS_CFG, "udf-runtime-max-gmemory must"
 							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(&c->udf_runtime_gmemory_used), line_num);
+							cf_atomic_int_get(c->udf_runtime_gmemory_used), line_num);
 				}
 				c->udf_runtime_max_gmemory = config_val;
 				break;
@@ -2841,7 +2841,7 @@ as_config_init(const char *config_file)
 				if (config_val < ns->sindex_data_memory_used) {
 					cf_warning(AS_CFG, "sindex-data-max-memory must"
 							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(&ns->sindex_data_max_memory), line_num);
+							cf_atomic_int_get(ns->sindex_data_max_memory), line_num);
 				}
 				else {
 					ns->sindex_data_max_memory = config_val; // this is in addition to namespace memory
