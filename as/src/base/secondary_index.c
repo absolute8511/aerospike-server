@@ -737,10 +737,10 @@ as_sindex_ktype_from_string(char const * type_str)
 		return AS_SINDEX_KTYPE_NONE;
 	}
 	else if (strncasecmp(type_str, "string", 6) == 0) {
-			return AS_SINDEX_KTYPE_DIGEST;
+		return AS_SINDEX_KTYPE_DIGEST;
 	}
 	else if (strncasecmp(type_str, "numeric", 7) == 0) {
-			return AS_SINDEX_KTYPE_LONG;
+		return AS_SINDEX_KTYPE_LONG;
 	}
 	else {
 		cf_warning(AS_SINDEX, "UNRECOGNIZED KEY TYPE %s", type_str);
