@@ -6417,11 +6417,9 @@ as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn
 			cf_vector_destroy(str_v);
 			return AS_SINDEX_ERR_PARAM;
 		}
-		else if (strncasecmp(type_str, "string", 6) == 0) {
-			imd->btype[i] = AS_SINDEX_KTYPE_DIGEST;
-		} else if (strncasecmp(type_str, "numeric", 7) == 0) {
-			imd->btype[i] = AS_SINDEX_KTYPE_LONG;
-		} else {
+
+		as_sindex_ktype ktype = as_sindex_ktype_from_string(type_str);
+		if (ktype == AS_SINDEX_KTYPE_NONE) {
 			cf_warning(AS_INFO, "Failed to create secondary index : invalid bin type %s "
 					"for sindex creation %s", type_str, indexname_str);
 			INFO_COMMAND_SINDEX_FAILCODE(AS_PROTO_RESULT_FAIL_PARAMETER,
@@ -6429,6 +6427,8 @@ as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn
 			cf_vector_destroy(str_v);
 			return AS_SINDEX_ERR_PARAM;
 		}
+
+		imd->btype[i] = ktype;
 		bincount++;
 	}
 
