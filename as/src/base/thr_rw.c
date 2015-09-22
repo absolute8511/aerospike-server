@@ -417,7 +417,7 @@ void as_rw_set_stat_counters(bool is_read, int rv, as_transaction *tr) {
 }
 
 int
-rw_msg_setup_infobits(msg *m, as_transaction *tr, bool has_udf, bool is_subrec)
+rw_msg_setup_infobits(msg *m, as_transaction *tr, bool has_udf, bool is_ldt_sub, bool is_ldt_parent)
 {
 	uint32_t info = 0;
 	if (tr->msgp && (tr->msgp->msg.info1 & AS_MSG_INFO1_XDR))
@@ -430,17 +430,19 @@ rw_msg_setup_infobits(msg *m, as_transaction *tr, bool has_udf, bool is_subrec)
 
 	if (tr->rsv.ns->ldt_enabled) {
 		// Nothing is set means it is normal record
-		if (is_subrec) {
+		if (is_ldt_sub) {
 			cf_detail(AS_RW,
 					"MULTI_OP : Set Up Replication Message for the LDT Subrecord %"PRIx64"",
 					*(uint64_t*)&tr->keyd);
 			info |= RW_INFO_LDT_SUBREC;
 		}
 		else {
-			cf_detail(AS_RW,
-					"MULTI_OP : Set Up Replication Message for the LDT Record %"PRIx64"",
-					*(uint64_t*)&tr->keyd);
-			info |= RW_INFO_LDT_REC;
+			if (is_ldt_parent) {
+				cf_detail(AS_RW,
+						"MULTI_OP : Set Up Replication Message for the LDT Record %"PRIx64"",
+						*(uint64_t*)&tr->keyd);
+				info |= RW_INFO_LDT_PARENTREC;
+			}
 			info |= RW_INFO_LDT;
 		}
 	}
@@ -491,17 +493,23 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 	msg_set_uint32(m, RW_FIELD_NS_ID, tr->rsv.ns->id);
 	msg_set_uint32(m, RW_FIELD_OP, op);
 
+	bool is_ldt_sub;
+	bool is_ldt_parent;
+
+	as_ldt_get_property(p_pickled_rec_props, &is_ldt_parent, &is_ldt_sub);
+
+
 	if (op == RW_OP_WRITE) {
 
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
 		msg_set_uint32(m, RW_FIELD_VOID_TIME, tr->void_time);
 
-		rw_msg_setup_infobits(m, tr, has_udf, is_subrec);
+		rw_msg_setup_infobits(m, tr, has_udf, is_ldt_sub, is_ldt_parent);
 
 		// Send this along with parent packet as well. This is required
 		// in case the LDT parent replication is done without MULTI_OP.
 		// Example touch of the some other bin in the LDT parent
-		if (!is_subrec) {
+		if (!is_ldt_sub) {
 			rw_msg_setup_ldt_fields(m, tr, keyd);
 		}
 
@@ -521,8 +529,6 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 			msg_set_buf(m, RW_FIELD_AS_MSG, (void *) tr->msgp,
 					as_proto_size_get(&tr->msgp->proto), MSG_SET_COPY);
 			msg_set_unset(m, RW_FIELD_RECORD);
-
-			rw_msg_setup_infobits(m, tr, has_udf, is_subrec);
 		}
 	} else if (op == RW_OP_DUP) {
 		msg_set_uint32(m, RW_FIELD_OP, RW_OP_DUP);
@@ -1440,7 +1446,7 @@ void rw_msg_get_ldt_dupinfo(as_record_merge_component *c, msg *m) {
 			cf_warning(AS_RW, "Subrec Component Not Expected for migrate");
 		}
 
-		if (info & RW_INFO_LDT_REC) {
+		if (info & RW_INFO_LDT_PARENTREC) {
 			c->flag |= AS_COMPONENT_FLAG_LDT_REC;
 		}
 
@@ -2113,7 +2119,7 @@ rw_dup_prole(cf_node node, msg *m)
 	if (rsv.ns->ldt_enabled && as_ldt_record_is_parent(r)) {
 		// NB: We search only on main tree in the code here because
 		// duplicate resolution request is always for the LDT_REC.
-		info |= RW_INFO_LDT_REC;
+		info |= RW_INFO_LDT_PARENTREC;
 		info |= RW_INFO_LDT_DUMMY;
 		// If LDT record make it run on the winner node
 		cf_detail(AS_RW, "LDT_DUP: Duplicate Record IS LDT return LDT_DUMMY");
@@ -2297,7 +2303,7 @@ as_ldt_check_and_get_prole_version(cf_digest *keyd, as_partition_reservation *rs
 			ldt_prole_info *linfo, uint32_t info, as_storage_rd *rd, bool is_create, char *fname, int lineno)
 {
 	if (rsv->ns->ldt_enabled) {
-		bool is_ldt_parent = (info & RW_INFO_LDT_REC);
+		bool is_ldt_parent = (info & RW_INFO_LDT_PARENTREC);
 
 		if (is_ldt_parent) {
 			if (linfo->replication_partition_version_match) {
@@ -2405,7 +2411,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 					*(uint64_t *)keyd);
 			tree = rsv->sub_tree;
 			is_subrec = true;
-		} else if (info & RW_INFO_LDT_REC) {
+		} else if (info & RW_INFO_LDT_PARENTREC) {
 			is_ldt_parent = true;
 		}
 	}
@@ -2480,6 +2486,9 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 			version_to_set = linfo->ldt_prole_version;
 			set_version    = true;
 		} else if (!linfo->replication_partition_version_match) {
+			// TODO: Cannot come here without source version set if the 
+			// partition versin does not match. Check upfront should not
+			// allow parent record to be written. Fix the code organization
 			version_to_set = linfo->ldt_source_version;
 			set_version    = true;
 		}
