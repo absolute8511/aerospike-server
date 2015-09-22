@@ -5610,29 +5610,31 @@ info_msg_fn(cf_node node, msg *m, void *udata)
 // This dynamic function reduces the info_node_info hash and builds up the string of services
 //
 
+// Boolean flag to control printing a semicolon between service entries.
+static bool printed_a_service = false;
 
 int
 info_get_services_reduce_fn(void *key, void *data, void *udata)
 {
-
 	cf_dyn_buf *db = (cf_dyn_buf *) udata;
 	info_node_info *infop = (info_node_info *) data;
 
 	if (infop->service_addr) {
+		if (printed_a_service) {
+			cf_dyn_buf_append_char(db, ';');
+		}
 		cf_dyn_buf_append_string(db, infop->service_addr);
-		cf_dyn_buf_append_char(db, ';');
+		printed_a_service = true;
 	}
+
 	return(0);
 }
-
-
 
 int
 info_get_services(char *name, cf_dyn_buf *db)
 {
+	printed_a_service = false;
 	shash_reduce(g_info_node_info_hash, info_get_services_reduce_fn, (void *) db);
-
-	cf_dyn_buf_chomp(db);
 
 	return(0);
 }
@@ -5640,10 +5642,8 @@ info_get_services(char *name, cf_dyn_buf *db)
 int
 info_get_services_alumni(char *name, cf_dyn_buf *db)
 {
-
+	printed_a_service = false;
 	shash_reduce(g_info_node_info_history_hash, info_get_services_reduce_fn, (void *) db);
-
-	cf_dyn_buf_chomp(db);
 
 	return(0);
 }
@@ -5664,6 +5664,7 @@ info_services_alumni_reset(char *name, cf_dyn_buf *db)
 {
 	shash_reduce_delete(g_info_node_info_history_hash, history_purge_reduce_fn, g_info_node_info_hash);
 	cf_info(AS_INFO, "Alumni list reset.");
+	cf_dyn_buf_append_string(db, "ok");
 
 	return(0);
 }
@@ -7016,7 +7017,7 @@ as_info_init()
 	                                                                  // to listen on multiple interfaces (typically not advised).
 	as_info_set_dynamic("services",info_get_services, true);          // List of addresses of neighbor cluster nodes to advertise for Application to connect.
 	as_info_set_dynamic("services-alumni",info_get_services_alumni, true); // All neighbor addresses (services) this server has ever know about.
-	as_info_set_dynamic("services-alumni-reset",info_services_alumni_reset, true); // Reset the services alumni to equal services
+	as_info_set_dynamic("services-alumni-reset",info_services_alumni_reset, false); // Reset the services alumni to equal services
 	as_info_set_dynamic("sets", info_get_sets, false);                // Returns set statistics for all or a particular set.
 	as_info_set_dynamic("statistics", info_get_stats, true);          // Returns system health and usage stats for this server.
 
