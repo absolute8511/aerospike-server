@@ -185,7 +185,8 @@ typedef enum {
 	AS_PARTICLE_TYPE_LIST = 20,
 	AS_PARTICLE_TYPE_HIDDEN_LIST = 21,
 	AS_PARTICLE_TYPE_HIDDEN_MAP = 22, // hidden map/list - can only be manipulated by system UDF
-	AS_PARTICLE_TYPE_MAX = 23
+	AS_PARTICLE_TYPE_MAX = 23,
+	AS_PARTICLE_TYPE_BAD = AS_PARTICLE_TYPE_MAX
 } as_particle_type;
 
 /* as_particle
@@ -206,7 +207,7 @@ typedef struct as_particle_s {
 #define AS_BIN_STATE_INUSE_FLOAT	4
 
 typedef struct as_particle_iparticle_s {
-	uint8_t		version: 4;		// can only be used in multi bin
+	uint8_t		version: 4;		// now unused - and can't be used in single-bin config
 	uint8_t		state: 4;		// see AS_BIN_STATE_...
 	uint8_t		data[];
 } __attribute__ ((__packed__)) as_particle_iparticle;
@@ -271,8 +272,6 @@ extern int as_bin_particle_replace_from_flat(as_bin *b, const uint8_t *flat, uin
 extern uint32_t as_bin_particle_flat_size(as_bin *b);
 extern uint32_t as_bin_particle_to_flat(const as_bin *b, uint8_t *flat);
 
-
-#define BIN_VERSION_MAX 15 // the largest number we can place in the version
 
 /* as_bin
  * A bin container - null name means unused */
@@ -443,21 +442,6 @@ as_bin_get_particle_type(const as_bin *b) {
 	}
 }
 
-static inline uint8_t
-as_bin_get_version(const as_bin *b, bool single_bin) {
-	return (single_bin ? 0 : ((as_particle_iparticle *)b)->version);
-}
-
-static inline void
-as_bin_set_version(as_bin *b, uint8_t version, bool single_bin) {
-	if (! single_bin) {
-		((as_particle_iparticle *)b)->version = version;
-	}
-}
-
-/* AS_INITIAL_BINS_PER_RECORD
- * How many bin slots to preallocate when we instantiate a new record */
-#define AS_INITIAL_BINS_PER_RECORD 1
 
 /* Bin function declarations */
 extern int16_t as_bin_get_id(as_namespace *ns, const char *name);
@@ -471,6 +455,7 @@ extern void as_bin_get_all_p(as_storage_rd *rd, as_bin **bin_ptrs);
 extern as_bin *as_bin_create(as_storage_rd *rd, const char *name);
 extern as_bin *as_bin_create_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
 extern as_bin *as_bin_get(as_storage_rd *rd, const char *name);
+extern as_bin *as_bin_get_by_id(as_storage_rd *rd, uint32_t id);
 extern as_bin *as_bin_get_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
 extern as_bin *as_bin_get_or_create(as_storage_rd *rd, const char *name);
 extern as_bin *as_bin_get_or_create_from_buf(as_storage_rd *rd, byte *name, size_t namesz, bool create_only, bool replace_only, int *p_result);
@@ -494,43 +479,11 @@ struct as_partition_vinfo_s {
 	uint8_t vtp[AS_PARTITION_MAX_VERSION];      // vtp is the version string of the partition with the cluster's split-reforms
 };
 
-
-#define AS_PARTITION_VINFOSET_SIZE 32
-
-typedef struct as_partition_vinfoset_s {
-	uint				sz;
-	as_partition_vinfo 	vinfo_a[AS_PARTITION_VINFOSET_SIZE];
-} as_partition_vinfoset;
-
-typedef uint32_t as_partition_vinfo_mask;
-
-// vinfo related calls
-#define AS_PARTITION_VINFOSET_PICKLE_MAX ( 4 + ( AS_PARTITION_VINFOSET_SIZE * ( sizeof(as_partition_vinfo) + 1 ) ) )
-
-extern int as_partition_vinfoset_mask_pickle( as_partition_vinfoset *vinfoset, as_partition_vinfo_mask mask, uint8_t *buf, size_t *sz_r);
-extern int as_partition_vinfoset_mask_pickle_getsz( as_partition_vinfo_mask mask, size_t *sz_r);
-extern int as_partition_vinfoset_pickle( as_partition_vinfoset *vinfoset, uint8_t *buf, size_t *sz_r);
-extern as_partition_vinfo_mask as_partition_vinfoset_mask_unpickle( as_partition *p, uint8_t *buf, size_t buf_sz);
-extern int as_partition_vinfoset_unpickle( as_partition_vinfoset *vinfoset, uint8_t *buf, size_t buf_sz, char *msg);
-extern bool as_partition_vinfo_contains(as_partition_vinfo *v1, as_partition_vinfo *v2);
-extern bool as_partition_vinfoset_contains_vinfoset(as_partition_vinfoset *vs1, as_partition_vinfo_mask mask1, as_partition_vinfoset *vs2, as_partition_vinfo_mask mask2, bool debug );
-extern bool as_partition_vinfoset_superset_vinfoset(as_partition_vinfoset *vs1, as_partition_vinfo_mask mask1, as_partition_vinfoset *vs2);
-extern void as_partition_vinfo_dump(as_partition_vinfo *vinfo, char *msg);
-extern void as_partition_vinfoset_dump(as_partition_vinfoset *vinfoset, char *msg);
-extern void as_partition_vinfoset_mask_dump(as_partition_vinfoset *vinfoset, as_partition_vinfo_mask mask, char *msg);
-
 static inline bool
 as_partition_vinfo_same(as_partition_vinfo *v1, as_partition_vinfo *v2) {
 	if (v1->iid != v2->iid)		return (false);
 	if ( 0 != memcmp( v1->vtp, v2->vtp, AS_PARTITION_MAX_VERSION ) ) return (false);
 	return (true);
-}
-
-static inline bool
-as_partition_vinfo_different(as_partition_vinfo *v1, as_partition_vinfo *v2) {
-	if (v1->iid != v2->iid)	return (true);
-	if ( 0 != memcmp( v1->vtp, v2->vtp, AS_PARTITION_MAX_VERSION ) ) return (true);
-	return (false);
 }
 
 
@@ -555,8 +508,6 @@ extern int as_record_pickle(as_record *r, as_storage_rd *rd, uint8_t **buf_r, si
 extern int as_record_pickle_a_delete(byte **buf_r, size_t *len_r);
 extern uint32_t as_record_buf_get_stack_particles_sz(uint8_t *buf);
 extern int as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t bufsz, uint8_t **stack_particles, bool has_sindex);
-extern int as_record_unpickle_merge(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t bufsz, uint8_t **stack_particles, bool *record_written);
-extern int as_record_unused_version_get(as_storage_rd *rd);
 extern void as_record_apply_properties(as_record *r, as_namespace *ns, const as_rec_props *p_rec_props);
 extern void as_record_clear_properties(as_record *r, as_namespace *ns);
 extern void as_record_set_properties(as_storage_rd *rd, const as_rec_props *rec_props);
@@ -602,7 +553,6 @@ extern int as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m)
 		|| COMPONENT_IS_LDT_SUB((c))
 
 typedef struct {
-	as_partition_vinfoset   vinfoset; // entire description of versions
 	uint8_t					*record_buf;
 	size_t					record_buf_sz;
 	uint32_t				generation;
@@ -616,24 +566,12 @@ typedef struct {
 	uint64_t                version;
 } as_record_merge_component;
 
-extern int as_record_merge(as_partition_reservation *rsv, cf_digest *keyd,
-		uint16_t n_components, as_record_merge_component *components);
-
-
 extern int as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 		uint16_t n_components, as_record_merge_component *components, int *winner_idx);
 
 // this function can be called with only one component, the one to replace the record
 extern int as_record_replace(as_partition_reservation *rsv, cf_digest *keyd,
 		uint16_t n_components, as_record_merge_component *components);
-
-
-// vinfo routines
-
-// get the mask, used for the in-memory representation
-extern as_partition_vinfo_mask as_record_vinfo_mask_get(as_partition *p, as_partition_vinfo *vinfo);
-extern as_partition_vinfo_mask as_record_vinfoset_mask_get( as_partition *p, as_partition_vinfoset *vinfoset, as_partition_vinfo_mask mask);
-extern bool as_record_vinfoset_mask_validate(as_partition_vinfoset *vinfoset, as_partition_vinfo_mask mask);
 
 // a simpler call that gives seconds in the right epoch
 #define as_record_void_time_get() cf_clepoch_seconds()
@@ -714,15 +652,11 @@ struct as_partition_s {
 	cf_node qnode; 	// point to the node which serves the query at the moment
 	as_partition_vinfo primary_version_info; // the version of the primary partition in the cluster
 	as_partition_vinfo version_info;         // the version of my partition here and now
-	pthread_mutex_t vinfoset_lock;
-	as_partition_vinfoset vinfoset;
 
 	cf_node old_sl[AS_CLUSTER_SZ];
 
 	uint64_t cluster_key;
 
-	// the number of bytes in the tree below
-	cf_atomic_int n_bytes_memory; // memory bytes
 	// the maximum void time of all records in the tree below
 	cf_atomic_int max_void_time;
 
@@ -878,6 +812,9 @@ void as_partition_map_dump();
 #define AS_SINDEX_BINMAX	4
 #define AS_SINDEX_MAX		256
 
+#define MIN_PARTITIONS_PER_INDEX 1
+#define MAX_PARTITIONS_PER_INDEX 256
+
 // as_sindex structure which hangs from the ns.
 #define AS_SINDEX_INACTIVE			1 // On init, pre-loading
 #define AS_SINDEX_ACTIVE			2 // On creation and afterwards
@@ -1003,7 +940,6 @@ struct as_namespace_s {
 	uint16_t					replication_factor;
 	uint16_t					cfg_replication_factor;
 	conflict_resolution_policy	conflict_resolution_policy;
-	bool						allow_versions;	// allow consistancy errors to create duplicate versions
 	bool						single_bin;		// restrict the namespace to objects with exactly one bin
 	bool						data_in_index;	// with single-bin, allows warm restart for data-in-memory (with storage-engine device)
 	bool 						disallow_null_setname;
@@ -1048,7 +984,6 @@ struct as_namespace_s {
 	uint32_t	storage_write_block_size;
 	uint32_t	storage_num_write_blocks;
 	bool		storage_data_in_memory;    // true if the DRAM copy is always kept
-	bool    	storage_signature;
 	bool		storage_cold_start_empty;
 	bool		storage_disable_odirect;
 	bool		storage_enable_osync;
@@ -1059,7 +994,6 @@ struct as_namespace_s {
 	uint64_t	storage_flush_max_us;
 	uint64_t	storage_fsync_max_us;
 	uint32_t	storage_min_avail_pct;
-	uint32_t	storage_write_smoothing_period;
 
 	// For data-not-in-memory, optionally cache swbs after writing to device.
 	cf_atomic32 storage_post_write_queue; // number of swbs/device held after writing to device
@@ -1067,9 +1001,6 @@ struct as_namespace_s {
 	cf_atomic32 n_reads_from_cache;
 	cf_atomic32 n_reads_from_device;
 	float cache_read_pct;
-
-	int demo_read_multiplier;
-	int demo_write_multiplier;
 
 	void *storage_private;
 
@@ -1088,7 +1019,6 @@ struct as_namespace_s {
 	int			storage_last_avail_pct; // most recently calculated available percent
 	int			storage_max_write_q; // storage_max_write_cache is converted to this
 	uint32_t	saved_defrag_sleep; // restore after defrag at startup is done
-	uint32_t	saved_write_smoothing_period; // restore after defrag at startup is done
 	uint32_t	defrag_lwm_size; // storage_defrag_lwm_pct % of storage_write_block_size
 
 	/* very interesting counters */
@@ -1100,7 +1030,6 @@ struct as_namespace_s {
 	cf_atomic_int	n_expired_objects;
 	cf_atomic_int	n_evicted_objects;
 	cf_atomic_int	n_deleted_set_objects;
-	cf_atomic_int	n_evicted_set_objects;
 
 	// the maximum void time of all records in the namespace
 	cf_atomic_int max_void_time;
@@ -1149,18 +1078,17 @@ struct as_namespace_s {
 	cf_atomic32		cold_start_threshold_void_time;
 	uint32_t		cold_start_max_void_time;
 
-	// Histogram of all master object storage sizes. (Meaningful for drive-backed namespaces only.)
+	// Histograms of master object storage sizes. (Meaningful for drive-backed
+	// namespaces only.)
 	linear_histogram 	*obj_size_hist;
+	linear_histogram 	*set_obj_size_hists[AS_SET_MAX_COUNT + 1];
 	cf_atomic32			obj_size_hist_max;
 
 	// Histograms used for general eviction and expiration.
 	linear_histogram 	*evict_hist;
+	linear_histogram 	*evict_coarse_hist;
 	linear_histogram 	*ttl_hist;
-
-	// Histograms used for set eviction.
-	// (If AS_SET_MAX_COUNT ever gets too big, malloc based on vmap count.)
-	linear_histogram 	*set_evict_hists[AS_SET_MAX_COUNT + 1];
-	linear_histogram 	*set_ttl_hists[AS_SET_MAX_COUNT + 1];
+	linear_histogram 	*set_ttl_hists[AS_SET_MAX_COUNT + 1]; // only for info
 
 	as_partition partitions[AS_PARTITIONS];
 
@@ -1169,19 +1097,14 @@ struct as_namespace_s {
 
 #define AS_SET_NAME_MAX_SIZE	64		// includes space for null-terminator
 
-#define AS_SINDEX_PROP_KEY_SIZE ( AS_SET_NAME_MAX_SIZE + 20) // setname_binid_typeid
 #define INVALID_SET_ID 0
-#define AS_NAMESPACE_SET_THRESHOLD_EXCEEDED -2
 
-// Set state bit-field:
-//#define AS_SET_STOP_WRITES	0x00000001	// not using this so far
-#define AS_SET_EVICT_RECORDS	0x00000002	// may soon be deprecated
-#define AS_SET_DELETE 			0x00000004	// Delete this set
+#define IS_SET_DELETED(p_set)	(cf_atomic32_get(p_set->deleted) == 1)
+#define SET_DELETED_ON(p_set)	(cf_atomic32_set(&p_set->deleted, 1))
+#define SET_DELETED_OFF(p_set)	(cf_atomic32_set(&p_set->deleted, 0))
 
-#define IS_SET_DELETED(p_set)	(cf_atomic32_get(p_set->state) & AS_SET_DELETE)
-
-#define SET_DELETED_ON(p_set)	(cf_atomic32_set(&p_set->state, cf_atomic32_get(p_set->state) |  AS_SET_DELETE))
-#define SET_DELETED_OFF(p_set)	(cf_atomic32_set(&p_set->state, cf_atomic32_get(p_set->state) &  ~AS_SET_DELETE))
+#define IS_SET_EVICTION_DISABLED(p_set)		(cf_atomic32_get(p_set->disable_eviction) == 1)
+#define DISABLE_SET_EVICTION(p_set, on_off)	(cf_atomic32_set(&p_set->disable_eviction, on_off ? 1 : 0))
 
 typedef enum {
 	AS_SET_ENABLE_XDR_DEFAULT = 0,
@@ -1192,11 +1115,12 @@ typedef enum {
 struct as_set_s {
 	char			name[AS_SET_NAME_MAX_SIZE];
 	cf_atomic64		num_elements;
-	cf_atomic64		stop_write_count;	// Stop writes in the set after this count is reached.
-	cf_atomic32		unused;				// Stub variable to be reclaimed for future needs.
-	cf_atomic64		evict_hwm_count;	// Evict records from set after this count is reached.
-	cf_atomic32     enable_xdr;			// White or black-list a set-name for XDR replication for true/false of this set-level flag.
-	cf_atomic32		state;				// Current state of the set.
+	cf_atomic64		n_bytes_memory;		// for data-in-memory only - sets's total record data size
+	cf_atomic64		unused1;
+	cf_atomic32		unused2;
+	cf_atomic32		deleted;			// empty a set (triggered via info command only)
+	cf_atomic32		disable_eviction;	// don't evict anything in this set (note - expiration still works)
+	cf_atomic32		enable_xdr;			// white-list (AS_SET_ENABLE_XDR_TRUE) or black-list (AS_SET_ENABLE_XDR_FALSE) a set for XDR replication
 };
 
 // These bin functions must be below definition of struct as_namespace_s:
@@ -1255,6 +1179,7 @@ extern const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id);
 extern uint16_t as_namespace_get_set_id(as_namespace *ns, const char *set_name);
 extern uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name);
 extern void as_namespace_get_set_info(as_namespace *ns, const char *set_name, cf_dyn_buf *db);
+extern void as_namespace_adjust_set_memory(as_namespace *ns, uint16_t set_id, int64_t delta_bytes);
 extern void as_namespace_release_set_id(as_namespace *ns, uint16_t set_id);
 extern void as_namespace_get_bins_info(as_namespace *ns, cf_dyn_buf *db, bool show_ns);
 extern void as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *hist_name,

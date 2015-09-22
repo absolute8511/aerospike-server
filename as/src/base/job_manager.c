@@ -106,10 +106,10 @@ typedef struct queue_task_s {
 	void*							task;
 } queue_task;
 
-static uint32_t create_threads(as_priority_thread_pool* pool, uint32_t count);
-static void shutdown_threads(as_priority_thread_pool* pool, uint32_t count);
-static void* run(void* udata);
-static int compare_cb(void* buf, void* task);
+uint32_t create_threads(as_priority_thread_pool* pool, uint32_t count);
+void shutdown_threads(as_priority_thread_pool* pool, uint32_t count);
+void* run_pool_thread(void* udata);
+int compare_cb(void* buf, void* task);
 
 //----------------------------------------------------------
 // as_priority_thread_pool public API.
@@ -199,7 +199,7 @@ as_priority_thread_pool_change_task_priority(as_priority_thread_pool* pool,
 // as_priority_thread_pool utilities.
 //
 
-static uint32_t
+uint32_t
 create_threads(as_priority_thread_pool* pool, uint32_t count)
 {
 	pthread_attr_t attrs;
@@ -211,7 +211,7 @@ create_threads(as_priority_thread_pool* pool, uint32_t count)
 	pthread_t thread;
 
 	for (uint32_t i = 0; i < count; i++) {
-		if (pthread_create(&thread, &attrs, run, pool) == 0) {
+		if (pthread_create(&thread, &attrs, run_pool_thread, pool) == 0) {
 			n_threads_created++;
 		}
 	}
@@ -219,7 +219,7 @@ create_threads(as_priority_thread_pool* pool, uint32_t count)
 	return n_threads_created;
 }
 
-static void
+void
 shutdown_threads(as_priority_thread_pool* pool, uint32_t count)
 {
 	// Send terminator tasks to kill 'count' threads.
@@ -238,8 +238,8 @@ shutdown_threads(as_priority_thread_pool* pool, uint32_t count)
 	}
 }
 
-static void*
-run(void* udata)
+void*
+run_pool_thread(void* udata)
 {
 	as_priority_thread_pool* pool = (as_priority_thread_pool*)udata;
 	queue_task qtask;
@@ -264,7 +264,7 @@ run(void* udata)
 	return NULL;
 }
 
-static int
+int
 compare_cb(void* buf, void* task)
 {
 	return ((queue_task*)buf)->task == task ? -1 : 0;
@@ -315,6 +315,7 @@ as_job_slice(void* task)
 	as_partition_reservation rsv;
 
 	if ((pid = as_job_partition_reserve(_job, pid, &rsv)) == AS_PARTITIONS) {
+		_job->next_pid = AS_PARTITIONS;
 		as_job_active_release(_job);
 		return;
 	}

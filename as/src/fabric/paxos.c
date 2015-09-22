@@ -1368,7 +1368,6 @@ as_paxos_transaction_vote(as_paxos_transaction *s, cf_node n, as_paxos_transacti
 
 	/* Record the vote, counting the number of living nodes, c, and the
 	 * number of votes, v, as we go */
-	int j = 0;
 	for (int i = 0; i < g_config.paxos_max_cluster_size; i++) {
 		if (0 == p->succession[i])
 			continue;
@@ -1378,7 +1377,6 @@ as_paxos_transaction_vote(as_paxos_transaction *s, cf_node n, as_paxos_transacti
 
 		if (n == p->succession[i]) {
 			s->votes[i] = true;
-			j = i;
 		}
 
 		if (s->votes[i])
@@ -2418,14 +2416,12 @@ as_paxos_process_retransmit_check()
 			{
 				static int delay = 0;
 				sbuf[0] = '\0';
-				bool nodes_missing = false;
 				for (int i = 0; i < g_config.paxos_max_cluster_size; i++) {
 					if ((cf_node)0 == missing_nodes[i]) {
 						break;
 					}
 
 					snprintf(sbuf + strlen(sbuf), 18, "%"PRIx64",", missing_nodes[i]);
-					nodes_missing = true;
 				}
 
 				if (p->cluster_size > 1) {
@@ -2459,14 +2455,12 @@ as_paxos_process_retransmit_check()
 				static int delay = 0;
 				static cf_node principal = 0;
 				sbuf[0] = '\0';
-				bool nodes_missing = false;
 				for (int i = 0; i < g_config.paxos_max_cluster_size; i++) {
 					if ((cf_node)0 == missing_nodes[i]) {
 						break;
 					}
 
 					snprintf(sbuf + strlen(sbuf), 18, "%"PRIx64",", missing_nodes[i]);
-					nodes_missing = true;
 				}
 
 				if ((p->cluster_size > 1) && are_nodes_not_dunned) {

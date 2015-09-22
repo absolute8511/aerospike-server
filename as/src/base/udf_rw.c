@@ -79,7 +79,6 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 			  const char *key, int  vtype,  void *val, size_t vlen)
 {
 	uint8_t *   v           = NULL;
-	int64_t     unswapped_int = 0;
 	uint8_t     *sp_p = *sp_pp;
 
 	uint32_t tsz = val ? as_particle_size_from_mem((as_particle_type)vtype, (uint8_t *)val, (uint32_t)vlen) : 0;
@@ -103,17 +102,24 @@ make_send_bin(as_namespace *ns, as_bin *bin, uint8_t **sp_pp, uint32_t sp_sz,
 		case AS_PARTICLE_TYPE_INTEGER:
 		{
 			if (vlen != 8) {
-				cf_crash(AS_UDF, "unexpected int %d", vlen);
+				cf_crash(AS_UDF, "unexpected int size %d", vlen);
 			}
-            unswapped_int = * (int64_t *) val;
-			v = (uint8_t *) &unswapped_int;
+			v = (uint8_t *) val;
+			break;
+		}
+		case AS_PARTICLE_TYPE_FLOAT:
+		{
+			if (vlen != 8) {
+				cf_crash(AS_UDF, "unexpected double size %d", vlen);
+			}
+			v = (uint8_t *) val;
 			break;
 		}
 		case AS_PARTICLE_TYPE_BLOB:
 		case AS_PARTICLE_TYPE_STRING:
 		case AS_PARTICLE_TYPE_LIST:
 		case AS_PARTICLE_TYPE_MAP:
-			v = val;
+			v = (uint8_t *) val;
 			break;
 		default:
 		{
@@ -451,6 +457,13 @@ send_result(as_result * res, udf_call * call, void *udata)
 					send_success(call, AS_PARTICLE_TYPE_INTEGER, &ri, 8);
 					break;
 				}
+				case AS_DOUBLE:
+				{
+					as_double * x = as_double_fromval(v);
+					double rx = as_double_get(x);
+					send_success(call, AS_PARTICLE_TYPE_FLOAT, &rx, 8);
+					break;
+				}
 				case AS_STRING:
 				{
 					// this looks bad but it just pulls the pointer
@@ -507,11 +520,19 @@ send_result(as_result * res, udf_call * call, void *udata)
 			send_success(call, AS_PARTICLE_TYPE_NULL, NULL, 0);
 		}
 	} else { // Else -- NOT success
-		as_string * s   = as_string_fromval(v);
-		char *      rs  = (char *) as_string_tostring(s);
+		if (as_val_type(v) == AS_STRING) {
+			as_string * s   = as_string_fromval(v);
+			char *      rs  = (char *) as_string_tostring(s);
 
-		cf_debug(AS_UDF, "FAILURE when calling %s %s %s", call->filename, call->function, rs);
-		send_udf_failure(call, AS_PARTICLE_TYPE_STRING, rs, as_string_len(s));
+			cf_debug(AS_UDF, "FAILURE when calling %s %s %s", call->filename, call->function, rs);
+			send_udf_failure(call, AS_PARTICLE_TYPE_STRING, rs, as_string_len(s));
+		} else {
+			char lua_err_str[1024];
+			size_t len = (size_t)sprintf(lua_err_str, "%s:0: in function %s() - error() argument type not handled", call->filename, call->function);
+
+			cf_debug(AS_UDF, "FAILURE when calling %s %s", call->filename, call->function);
+			send_udf_failure(call, AS_PARTICLE_TYPE_STRING, lua_err_str, len);
+		}
 	}
 }
 
@@ -690,9 +711,7 @@ udf_rw_write_post_processing(as_transaction *tr, as_storage_rd *rd,
 	tr->generation = rd->r->generation;
 	tr->void_time = rd->r->void_time;
 
-	if (tr->rsv.ns->storage_data_in_memory) {
-		account_memory(tr, rd, memory_bytes);
-	}
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 }
 
 /* Internal Function: Does the post processing for the UDF record after the
@@ -1194,7 +1213,16 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		urecord.flag   |= UDF_RECORD_FLAG_OPEN;
 		urecord.flag   |= UDF_RECORD_FLAG_PREEXISTS;
 		cf_detail(AS_UDF, "Open %p %x %"PRIx64"", &urecord, urecord.flag, *(uint64_t *)&tr->keyd);
-		udf_storage_record_open(&urecord);
+		rec_rv = udf_storage_record_open(&urecord);
+
+		if (rec_rv == -1) {
+			udf_record_close(&urecord);
+			call->transaction->result_code = AS_PROTO_RESULT_FAIL_BIN_NAME; // overloaded... add bin_count error?
+			send_response(call, "FAILURE", AS_PARTICLE_TYPE_NULL, NULL, 0);
+			ldt_record_destroy(lrec);
+			as_rec_destroy(lrec);
+			return 0;
+		}
 
 		as_msg *m = &tr->msgp->msg;
 
@@ -1438,6 +1466,17 @@ as_val_tobuf(const as_val *v, uint8_t *buf, uint32_t *size)
 				*size = 0;
 				break;
 			}
+			case AS_BOOLEAN:
+			{
+				*size = 8;
+				if (buf) {
+					as_boolean * b = as_boolean_fromval(v);
+					int64_t bi = as_boolean_tobool(b) == true ? 1 : 0;
+					int64_t ri = __cpu_to_be64(bi);
+					memcpy(buf, &ri, *size);
+				}
+				break;
+			}
 			case AS_INTEGER:
 			{
 				*size = 8;
@@ -1448,12 +1487,32 @@ as_val_tobuf(const as_val *v, uint8_t *buf, uint32_t *size)
 				}
 				break;
 			}
+			case AS_DOUBLE:
+			{
+				*size = 8;
+				if (buf) {
+					double x = as_double_get(as_double_fromval(v));
+					uint64_t ri = __cpu_to_be64(*(uint64_t*)&x);
+					memcpy(buf, &ri, *size);
+				}
+				break;
+			}
 			case AS_STRING:
 			{
 				as_string * s = as_string_fromval(v);
 				*size = as_string_len(s);
 				if (buf) {
 					char * rs = (char *) as_string_tostring(s);
+					memcpy(buf, rs, *size);
+				}
+				break;
+			}
+			case AS_BYTES:
+			{
+				as_bytes * b = as_bytes_fromval(v);
+				*size = as_bytes_size(b);
+				if (buf) {
+					uint8_t * rs = as_bytes_get(b);
 					memcpy(buf, rs, *size);
 				}
 				break;
@@ -1483,36 +1542,7 @@ as_val_tobuf(const as_val *v, uint8_t *buf, uint32_t *size)
 				as_buffer_destroy(&asbuf);
 				break;
 			}
-			// TODO: Resolve. Can we actually MAKE a value (the bin name) for
-			// an LDT value?  Users should never see a real LDT value.
-			case AS_LDT:
-			{
-				as_buffer asbuf;
-				as_buffer_init(&asbuf);
 
-				as_serializer s;
-				as_msgpack_init(&s);
-
-				as_string as_str;
-				as_string_init( &as_str, "INT LDT BIN NAME", false );
-
-				int res = as_serializer_serialize(&s, (as_val*) &as_str, &asbuf);
-
-				if (res != 0) {
-					cf_warning(AS_UDF, "LDT serialization failure (%d)", res);
-					as_buffer_destroy(&asbuf);
-					break;
-				}
-				*size = asbuf.size;
-				if (buf) {
-					memcpy(buf, asbuf.data, asbuf.size);
-				}
-				// not needed as it is stack allocated
-				// as_serializer_destroy(&s);
-				as_buffer_destroy(&asbuf);
-				break;
-
-			}
 			default:
 			{
 				cf_debug(AS_UDF, "SUCCESS: VAL TYPE UNDEFINED %d\n",
@@ -1558,6 +1588,13 @@ as_val_frombin(as_bin *bb)
 			int64_t     i = 0;
 			as_bin_particle_to_mem(bb, (uint8_t *) &i);
 			value = (as_val *) as_integer_new(i);
+			break;
+		}
+		case AS_PARTICLE_TYPE_FLOAT:
+		{
+			double x = 0;
+			as_bin_particle_to_mem(bb, (uint8_t *) &x);
+			value = (as_val *) as_double_new(x);
 			break;
 		}
 		case AS_PARTICLE_TYPE_STRING:
@@ -1629,6 +1666,9 @@ to_particle_type(int from_as_type)
 		case AS_BOOLEAN:
 		case AS_INTEGER:
 			return AS_PARTICLE_TYPE_INTEGER;
+			break;
+		case AS_DOUBLE:
+			return AS_PARTICLE_TYPE_FLOAT;
 			break;
 		case AS_STRING:
 			return AS_PARTICLE_TYPE_STRING;

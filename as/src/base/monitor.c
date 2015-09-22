@@ -193,7 +193,7 @@ as_mon_killjob(const char *module, uint64_t id, cf_dyn_buf *db)
 		else {
 			cf_dyn_buf_append_string(db, "ERROR:");
 			cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
-			cf_dyn_buf_append_string(db, ":transaction not found");
+			cf_dyn_buf_append_string(db, ":job not active");
 		}
 	}
 	else {
@@ -245,7 +245,7 @@ as_mon_set_priority(const char *module, uint64_t id, uint32_t priority, cf_dyn_b
 		else {
 			cf_dyn_buf_append_string(db, "ERROR:");
 			cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
-			cf_dyn_buf_append_string(db, ":transaction not found");
+			cf_dyn_buf_append_string(db, ":job not active");
 		}
 	}
 	else {
@@ -474,7 +474,7 @@ as_mon_get_jobstat(const char *module, uint64_t id, cf_dyn_buf *db)
 	else {
 		cf_dyn_buf_append_string(db, "ERROR:");
 		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
-		cf_dyn_buf_append_string(db, ":transaction not found");
+		cf_dyn_buf_append_string(db, ":job not found");
 	}
 	return retval;
 }

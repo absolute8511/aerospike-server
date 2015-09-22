@@ -51,7 +51,7 @@
 #define RW_FIELD_NS_ID          3
 #define RW_FIELD_GENERATION     4
 #define RW_FIELD_DIGEST         5
-#define RW_FIELD_VINFOSET       6
+#define RW_FIELD_VINFOSET       6   // now used only by LDT
 #define RW_FIELD_AS_MSG         7   // +request+ as_msg (used in RW phase)
 #define RW_FIELD_CLUSTER_KEY    8
 #define RW_FIELD_RECORD         9   // +PICKLE+ record format (used in 'dup' phase)
@@ -141,8 +141,6 @@ typedef struct pickle_info_s {
 } pickle_info;
 
 extern bool pickle_all(as_storage_rd *rd, pickle_info *pickle);
-
-extern void account_memory(as_transaction *tr, as_storage_rd *rd, uint64_t start_bytes);
 
 extern int rw_udf_replicate(udf_record *urecord);
 

@@ -676,6 +676,37 @@ as_storage_record_get_n_bytes_memory(as_storage_rd *rd)
 	return n_bytes_memory;
 }
 
+void
+as_storage_record_adjust_mem_stats(as_storage_rd *rd, uint64_t start_bytes)
+{
+	if (! rd->ns->storage_data_in_memory) {
+		return;
+	}
+
+	uint64_t end_bytes = as_storage_record_get_n_bytes_memory(rd);
+	int64_t delta_bytes = (int64_t)end_bytes - (int64_t)start_bytes;
+
+	if (delta_bytes != 0) {
+		cf_atomic_int_add(&rd->ns->n_bytes_memory, delta_bytes);
+		as_namespace_adjust_set_memory(rd->ns, as_index_get_set_id(rd->r),
+				delta_bytes);
+	}
+}
+
+void
+as_storage_record_drop_from_mem_stats(as_storage_rd *rd)
+{
+	if (! rd->ns->storage_data_in_memory) {
+		return;
+	}
+
+	uint64_t drop_bytes = as_storage_record_get_n_bytes_memory(rd);
+
+	cf_atomic_int_sub(&rd->ns->n_bytes_memory, drop_bytes);
+	as_namespace_adjust_set_memory(rd->ns, as_index_get_set_id(rd->r),
+			-(int64_t)drop_bytes);
+}
+
 bool
 as_storage_record_get_key(as_storage_rd *rd)
 {

@@ -31,6 +31,7 @@
 #include "base/monitor.h"
 #include "base/proto.h"
 #include "base/system_metadata.h"
+#include "base/transaction.h"
 
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_digest.h"
@@ -155,67 +156,6 @@ typedef enum {
 } as_sindex_type;
 // **************************************************************************************************
 
-/*
- * SBINS STRUCTURES
- */
-typedef struct sbin_value_pool_s{
-	uint32_t used_sz;
-	uint8_t  *value;
-} sbin_value_pool;
-
-#define AS_SINDEX_VALUESZ_ON_STACK 16 * 1000
-#define SINDEX_BINS_SETUP(skey_bin, size)                      \
-	sbin_value_pool value_pool;                                    \
-	value_pool.value   = alloca(AS_SINDEX_VALUESZ_ON_STACK);       \
-	value_pool.used_sz = 0;                    \
-	as_sindex_bin skey_bin[(size)];                            \
-	for (int id = 0; id < (size); id++) {         \
-			skey_bin[id].simatch = -1;         \
-			skey_bin[id].stack_buf = &value_pool; \
-	}
-
-/*
- * Used as structure to call into secondary indexes sindex_* interface
- * TODO: as_sindex_bin is not appropriate name for this structure.
- * maybe as_sindex_transaction 
- */
-typedef struct as_sindex_bin_s {
-	union {                       // we use this if we need to store only one value inside sbin.
-		int64_t       int_val;    // accessing this is much faster than accessing any other value
-		cf_digest     str_val;    // value on the stack.
-	} value;
-	uint64_t          num_values; 
-	void            * values;     // If there are more than 1 value in the sbin, we use this to
-	as_particle_type  type;       // point to them. the type of data which is going to get indexed
-	as_sindex_op      op;         // (STRING or INTEGER). Should we delete or insert this values
-	bool              to_free;    // from/into the secondary index tree. If the values are malloced.
-	int               simatch;    // simatch of the si this bin is pointing to.
-	sbin_value_pool * stack_buf;
-	uint32_t          heap_capacity;
-} as_sindex_bin;
-
-// TODO: Reorganise this structure.
-// No need of union.
-typedef struct as_sindex_bin_data_s {
-	uint32_t          id;
-	as_particle_type  type; // this type is citrusleaf type
-	// Union is to support sindex for other datatypes in future.
-	// Currently sindex is supported for only int64 and string.
-	union {
-		int64_t  i64;
-	} u;
-	cf_digest         digest;
-} as_sindex_bin_data;
-
-// Caution: Using this will waste 12 bytes per long type skey 
-typedef struct as_sindex_key_s {
-	union {
-		cf_digest str_key;
-		uint64_t  int_key;
-	} key;
-} as_sindex_key;
-// **************************************************************************************************
-
 /* 
  * Configuration parameter and control variable for secondary indexes
  */
@@ -336,7 +276,7 @@ typedef struct as_sindex_metadata_s {
 	struct as_sindex_s  * si;
 	as_sindex_pmetadata * pimd;
 	unsigned char         dtype;   // Aerospike Index type
-	int                   binid[AS_SINDEX_BINMAX]; // Redundant info to aid search
+	uint32_t              binid[AS_SINDEX_BINMAX]; // Redundant info to aid search
 	byte                  mfd_slot; // slot on the persistent file
 
 	// Index Static Data (part persisted)
@@ -378,6 +318,69 @@ typedef struct as_sindex_s {
 
 // Opaque type definition.
 struct as_config_s;
+
+// **************************************************************************************************
+/*
+ * SBINS STRUCTURES
+ */
+typedef struct sbin_value_pool_s{
+	uint32_t used_sz;
+	uint8_t  *value;
+} sbin_value_pool;
+
+#define AS_SINDEX_VALUESZ_ON_STACK 16 * 1000
+#define SINDEX_BINS_SETUP(skey_bin, size)                      \
+	sbin_value_pool value_pool;                                    \
+	value_pool.value   = alloca(AS_SINDEX_VALUESZ_ON_STACK);       \
+	value_pool.used_sz = 0;                    \
+	as_sindex_bin skey_bin[(size)];                            \
+	for (int id = 0; id < (size); id++) {         \
+			skey_bin[id].si = NULL;         \
+			skey_bin[id].stack_buf = &value_pool; \
+	}
+
+/*
+ * Used as structure to call into secondary indexes sindex_* interface
+ * TODO: as_sindex_bin is not appropriate name for this structure.
+ * maybe as_sindex_transaction 
+ */
+typedef struct as_sindex_bin_s {
+	union {                       // we use this if we need to store only one value inside sbin.
+		int64_t       int_val;    // accessing this is much faster than accessing any other value
+		cf_digest     str_val;    // value on the stack.
+	} value;
+	uint64_t          num_values; 
+	void            * values;     // If there are more than 1 value in the sbin, we use this to
+	as_particle_type  type;       // point to them. the type of data which is going to get indexed
+	as_sindex_op      op;         // (STRING or INTEGER). Should we delete or insert this values
+	bool              to_free;    // from/into the secondary index tree. If the values are malloced.
+	as_sindex       * si;         // simatch of the si this bin is pointing to.
+	sbin_value_pool * stack_buf;
+	uint32_t          heap_capacity;
+} as_sindex_bin;
+
+// TODO: Reorganise this structure.
+// No need of union.
+typedef struct as_sindex_bin_data_s {
+	uint32_t          id;
+	as_particle_type  type; // this type is citrusleaf type
+	// Union is to support sindex for other datatypes in future.
+	// Currently sindex is supported for only int64 and string.
+	union {
+		int64_t  i64;
+	} u;
+	cf_digest         digest;
+} as_sindex_bin_data;
+
+// Caution: Using this will waste 12 bytes per long type skey 
+typedef struct as_sindex_key_s {
+	union {
+		cf_digest str_key;
+		uint64_t  int_key;
+	} key;
+} as_sindex_key;
+// **************************************************************************************************
+
 
 // **************************************************************************************************
 
@@ -507,11 +510,6 @@ extern int  as_sindex_sbins_from_rd(as_storage_rd *rd, uint16_t from_bin, uint16
 			as_sindex_bin sbins[], as_sindex_op op);
 extern int  as_sindex_sbins_from_bin(as_namespace *ns, const char *set, as_bin *b, 
 			as_sindex_bin * start_sbin, as_sindex_op op);
-extern int  as_sindex_diff_sbins_from_buf(as_namespace * ns, const char * set, as_bin * b, 
-			byte * buf, uint32_t buf_sz, as_particle_type type, as_sindex_bin * start_sbin);
-extern int  as_sindex_sbins_from_buf(as_namespace *ns, const char *set, as_bin *b, 
-			as_sindex_bin * start_sbin, byte * buf, uint32_t buf_sz, as_particle_type type, 
-			as_sindex_op op);
 extern int  as_sindex_update_by_sbin(as_namespace *ns, const char *set, as_sindex_bin *start_sbin, 
 			int num_sbins, cf_digest * pkey);
 // **************************************************************************************************
@@ -543,6 +541,8 @@ extern as_sindex_status     as_sindex_extract_bin_path(as_sindex_metadata * imd,
 int                         as_sindex_create_check_params(as_namespace* ns, as_sindex_metadata* imd);
 bool                        as_sindex_delete_checker(as_namespace *ns, as_sindex_metadata *imd);
 as_particle_type            as_sindex_pktype(as_sindex_metadata * imd);
+extern const char         * as_sindex_ktype_str(as_sindex_ktype type);
+extern as_sindex_ktype      as_sindex_ktype_from_string(const char * type_str);
 // **************************************************************************************************
 
 /*
@@ -550,8 +550,8 @@ as_particle_type            as_sindex_pktype(as_sindex_metadata * imd);
  */
 // **************************************************************************************************
 extern int  as_sindex_list_str(as_namespace *ns, cf_dyn_buf *db);
-extern int  as_sindex_describe_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db);
-extern int  as_sindex_stats_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db);
+extern int  as_sindex_stats_str(as_namespace *ns, char * iname, cf_dyn_buf *db);
+extern int  as_sindex_repair(as_namespace *ns, char * iname);
 extern int  as_sindex_set_config(as_namespace *ns, as_sindex_metadata *imd, char *params);
 extern void as_sindex_gconfig_default(struct as_config_s *c);
 extern int  as_info_parse_params_to_sindex_imd(char* params, as_sindex_metadata *imd, cf_dyn_buf* db,
@@ -568,7 +568,7 @@ void        as_sindex_ticker_done(as_namespace * ns, as_sindex * si, uint64_t st
  * HISTOGRAMS
  */
 // **************************************************************************************************
-extern int as_sindex_histogram_enable(as_namespace *ns, as_sindex_metadata *imd, bool enable);
+extern int as_sindex_histogram_enable(as_namespace *ns, char * iname, bool enable);
 extern int as_sindex_histogram_dumpall(as_namespace *ns);
 #define SINDEX_HIST_INSERT_DATA_POINT(si, type, start_time_ns)                          \
 do {                                                                                    \
@@ -690,8 +690,6 @@ extern bool g_sindex_smd_restored;
 extern int  as_sindex_smd_can_accept_cb(char* module, as_smd_item_t *item, void *udata);
 extern int  as_sindex_smd_accept_cb(char *module, as_smd_item_list_t *items, void *udata, 
 						uint32_t accept_opt);
-extern int  as_sindex_smd_merge_cb(char *module, as_smd_item_list_t **item_list_out, 
-						as_smd_item_list_t **item_lists_in, size_t num_lists, void *udata);
 // **************************************************************************************************
 
 /*
@@ -709,6 +707,7 @@ extern int  as_sindex_smd_merge_cb(char *module, as_smd_item_list_t **item_list_
  */
 // **************************************************************************************************
 extern void                 as_query_init();
+extern int                  as_query(as_transaction *tr);
 extern int                  as_query_reinit(int set_size, int *actual_size);
 extern int                  as_query_worker_reinit(int set_size, int *actual_size);
 extern int                  as_query_stat(char *name, cf_dyn_buf *db);
@@ -725,11 +724,5 @@ extern int                  as_index_keys_ll_reduce_fn(cf_ll_element *ele, void 
 extern void                 as_index_keys_ll_destroy_fn(cf_ll_element *ele);
 // **************************************************************************************************
 
-/*
- * TO REMOVE
- */
-// **************************************************************************************************
-extern int  as_sindex_repair(as_namespace *ns, as_sindex_metadata *imd);
-// **************************************************************************************************
 
 

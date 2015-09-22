@@ -122,6 +122,7 @@ struct as_file_handle_s;
 #define AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT     212
 #define AS_PROTO_RESULT_FAIL_QUERY_CBERROR     213
 #define AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR   214
+#define AS_PROTO_RESULT_FAIL_QUERY_DUPLICATE   215
 
 
 /* SYNOPSIS
@@ -290,7 +291,7 @@ typedef struct as_msg_op_s {
 	uint32_t op_sz;
 	uint8_t  op;
 	uint8_t  particle_type;
-	uint8_t  version;
+	uint8_t  version; // now unused
 	uint8_t  name_sz;
 	uint8_t	 name[]; // UTF-8
 	// there's also a value here but you can't have two variable size arrays
@@ -564,3 +565,4 @@ int as_netio_send(as_netio *io, void *q, bool);
 #define AS_NETIO_OK        0
 #define AS_NETIO_CONTINUE  1
 #define AS_NETIO_ERR       2 
+#define AS_NETIO_IO_ERR    3 

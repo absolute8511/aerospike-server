@@ -1447,8 +1447,8 @@ fabric_worker_fn(void *argv)
 
 					// read the notification byte out
 					byte note_byte;
-					int  rv;
-					rv = read(note_fd, &note_byte, sizeof(note_byte));
+
+					read(note_fd, &note_byte, sizeof(note_byte));
 
 					// Got some kind of notification - check my queue
 					worker_queue_element wqe;
@@ -1904,9 +1904,6 @@ fabric_status_ticker_fn(void *i_hate_gcc)
 	return(0);
 }
 
-// static pthread_t fabric_status_ticker_th;
-
-static cf_atomic32 init_global = 0;
 
 static int as_fabric_transact_init(void);
 
@@ -1915,11 +1912,6 @@ as_fabric_init()
 {
 	if (SHASH_OK != shash_create(&g_fb_hash, ptr_hash_fn, sizeof(void *), sizeof(int), 1000, SHASH_CR_MT_BIGLOCK))
 		cf_crash(AS_FABRIC, "Failed to allocate FB hash");
-
-	// Make sure I'm only called once
-	if (1 != cf_atomic32_incr(&init_global)) {
-		return(0);
-	}
 
 	fabric_args *fa = cf_malloc(sizeof(fabric_args));
 	memset(fa, 0, sizeof(fabric_args));

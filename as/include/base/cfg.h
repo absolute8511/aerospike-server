@@ -103,19 +103,18 @@ typedef struct as_config_s {
 	uint32_t			query_threads;
 	uint32_t			query_worker_threads;
 	uint32_t			query_priority;
-	uint64_t			query_sleep_ns;
+	uint64_t			query_sleep_us;
 	uint32_t			query_bsize;
-	bool				query_job_tracking;
 	bool				query_in_transaction_thr;
 	uint64_t			query_buf_size;
 	uint32_t			query_threshold;
-	uint32_t			query_rec_count_bound;
+	uint64_t			query_rec_count_bound;
 	bool				query_req_in_query_thread;
 	uint32_t			query_req_max_inflight;
 	uint32_t			query_bufpool_size;
 	uint32_t			query_short_q_max_size;
 	uint32_t			query_long_q_max_size;
-	uint64_t			query_untracked_time_ns;
+	uint64_t			query_untracked_time_ms;
 
 	int					n_transaction_queues;
 	int					n_transaction_threads_per_queue;
@@ -322,9 +321,8 @@ typedef struct as_config_s {
 	cf_atomic64			query_fail;
 	cf_atomic64			query_short_queue_full;
 	cf_atomic64			query_long_queue_full;
-	cf_atomic64			query_short_running;
-	cf_atomic64			query_long_running;
-	cf_atomic64			query_tracked;
+	cf_atomic64			query_short_reqs;
+	cf_atomic64			query_long_reqs;
 	cf_atomic64			query_false_positives;
 	bool				query_enable_histogram;
 
@@ -443,7 +441,6 @@ typedef struct as_config_s {
 	cf_hist_track *		ut_hist; // histogram that tracks udf performance
 	cf_hist_track *		wt_hist; // histogram that tracks write performance
 	cf_hist_track *		px_hist; // histogram that tracks proxy performance
-	cf_hist_track *		wt_reply_hist; // write histogram from start to reply to client
 	cf_hist_track *		q_hist;  // histogram that tracks query performance
 	cf_hist_track *		q_rcnt_hist;  // histogram that tracks query row count
 
@@ -481,7 +478,6 @@ typedef struct as_config_s {
 
 	histogram *			write_storage_close_hist; // histogram of time spent around record_storage close on a write path
 	histogram *			write_sindex_hist; // secondary index latency histogram
-	histogram *			defrag_storage_close_hist; // histogram of time spent around record_storage close on a defrag path
 	histogram *			prole_fabric_send_hist; // histogram of time spent for prole fabric getting queued
 
 #ifdef HISTOGRAM_OBJECT_LATENCY
@@ -588,7 +584,6 @@ typedef struct as_config_s {
 	cf_atomic_int		stat_expired_objects;
 	cf_atomic_int		stat_evicted_objects;
 	cf_atomic_int		stat_deleted_set_objects;
-	cf_atomic_int		stat_evicted_set_objects;
 	cf_atomic_int		stat_evicted_objects_time;
 	cf_atomic_int		stat_zero_bin_records;
 	cf_atomic_int		stat_nsup_deletes_not_shipped;
@@ -603,7 +598,6 @@ typedef struct as_config_s {
 
 	cf_atomic_int		err_replica_null_node;
 	cf_atomic_int		err_replica_non_null_node;
-	cf_atomic_int		err_sync_copy_null_node;
 	cf_atomic_int		err_sync_copy_null_master;
 
 	cf_atomic_int		err_storage_queue_full;

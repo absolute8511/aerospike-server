@@ -540,6 +540,7 @@ typedef struct sbld_job_s {
 	as_sindex*		si;
 	uint64_t		si_desync_cnt;
 
+	char*			si_name;
 	cf_atomic64		n_reduced;
 } sbld_job;
 
@@ -683,6 +684,7 @@ sbld_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
 
 	job->si = si;
 	job->si_desync_cnt = si ? si->desync_cnt : 0;
+	job->si_name = si ? cf_strdup(si->imd->iname) : NULL;
 	job->n_reduced = 0;
 
 	return job;
@@ -718,6 +720,11 @@ sbld_job_finish(as_job* _job)
 void
 sbld_job_destroy(as_job* _job)
 {
+	sbld_job* job = (sbld_job*)_job;
+
+	if (job->si_name) {
+		cf_free(job->si_name);
+	}
 }
 
 void
@@ -725,12 +732,12 @@ sbld_job_info(as_job* _job, as_mon_jobstat* stat)
 {
 	sbld_job* job = (sbld_job*)_job;
 
-	if (job->si) {
+	if (job->si_name) {
 		strcpy(stat->job_type, "sindex-build");
 
 		char *extra = stat->jdata + strlen(stat->jdata);
 
-		sprintf(extra, ":sindex-name=%s", job->si->imd->iname);
+		sprintf(extra, ":sindex-name=%s", job->si_name);
 	}
 	else {
 		strcpy(stat->job_type, "sindex-build-all");
@@ -781,9 +788,14 @@ sbld_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	if (job->si) {
 		SINDEX_GRLOCK();
-		AS_SINDEX_RESERVE(job->si);
-		SINDEX_GUNLOCK();
-		as_sindex_put_rd(job->si, &rd);
+		if(as_sindex_isactive(job->si)) {
+			AS_SINDEX_RESERVE(job->si);
+			SINDEX_GUNLOCK();
+			as_sindex_put_rd(job->si, &rd);
+		}
+		else {
+			SINDEX_GUNLOCK();
+		}
 	}
 	else {
 		as_sindex_putall_rd(ns, &rd);

@@ -304,9 +304,9 @@ typedef enum {
 	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD,
 	CASE_SERVICE_QUERY_PRE_RESERVE_QNODES,
 	CASE_SERVICE_QUERY_PRIORITY,
-	CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS,
+	CASE_SERVICE_QUERY_PRIORITY_SLEEP_US,
 	CASE_SERVICE_QUERY_THRESHOLD,
-	CASE_SERVICE_QUERY_UNTRACKED_TIME,
+	CASE_SERVICE_QUERY_UNTRACKED_TIME_MS,
 	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET,
 	CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION,
 	CASE_SERVICE_RUN_AS_DAEMON,
@@ -461,7 +461,6 @@ typedef enum {
 	CASE_NAMESPACE_ALLOW_NONXDR_WRITES,
 	CASE_NAMESPACE_ALLOW_XDR_WRITES,
 	// Normally hidden:
-	CASE_NAMESPACE_ALLOW_VERSIONS,
 	CASE_NAMESPACE_COLD_START_EVICT_TTL,
 	CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY,
 	CASE_NAMESPACE_DATA_IN_INDEX,
@@ -482,6 +481,7 @@ typedef enum {
 	CASE_NAMESPACE_STOP_WRITES_PCT,
 	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE,
 	// Deprecated:
+	CASE_NAMESPACE_ALLOW_VERSIONS,
 	CASE_NAMESPACE_DEMO_READ_MULTIPLIER,
 	CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER,
 	CASE_NAMESPACE_HIGH_WATER_PCT,
@@ -529,8 +529,6 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_DEVICE_MAX_WRITE_CACHE,
 	CASE_NAMESPACE_STORAGE_DEVICE_MIN_AVAIL_PCT,
 	CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE,
-	CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE,
-	CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD,
 	CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS,
 	// Deprecated:
 	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_MAX_BLOCKS,
@@ -538,6 +536,8 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_DEVICE_LOAD_AT_STARTUP,
 	CASE_NAMESPACE_STORAGE_DEVICE_PERSIST,
 	CASE_NAMESPACE_STORAGE_DEVICE_READONLY,
+	CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE,
+	CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD,
 
 	// Namespace storage-engine kv options:
 	CASE_NAMESPACE_STORAGE_KV_DEVICE,
@@ -548,11 +548,12 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_KV_COND_WRITE,
 
 	// Namespace set options:
+	CASE_NAMESPACE_SET_DISABLE_EVICTION,
 	CASE_NAMESPACE_SET_ENABLE_XDR,
-	CASE_NAMESPACE_SET_EVICT_HWM_COUNT,
-	CASE_NAMESPACE_SET_STOP_WRITE_COUNT,
 	// Deprecated:
+	CASE_NAMESPACE_SET_EVICT_HWM_COUNT,
 	CASE_NAMESPACE_SET_EVICT_HWM_PCT,
+	CASE_NAMESPACE_SET_STOP_WRITE_COUNT,
 	CASE_NAMESPACE_SET_STOP_WRITE_PCT,
 
 	// Namespace set set-enable-xdr options (value tokens):
@@ -686,9 +687,9 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "query-in-transaction-thread",	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD },
 		{ "query-pre-reserve-qnodes", 		CASE_SERVICE_QUERY_PRE_RESERVE_QNODES },
 		{ "query-priority", 				CASE_SERVICE_QUERY_PRIORITY },
-		{ "query-priority-sleep-ms", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS },
+		{ "query-priority-sleep-us", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_US },
 		{ "query-threshold", 				CASE_SERVICE_QUERY_THRESHOLD },
-		{ "query-untracked-time",			CASE_SERVICE_QUERY_UNTRACKED_TIME },
+		{ "query-untracked-time-ms",		CASE_SERVICE_QUERY_UNTRACKED_TIME_MS },
 		{ "replication-fire-and-forget",	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET },
 		{ "respond-client-on-master-completion", CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION },
 		{ "run-as-daemon",					CASE_SERVICE_RUN_AS_DAEMON },
@@ -844,8 +845,7 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "xdr-remote-datacenter",			CASE_NAMESPACE_XDR_REMOTE_DATACENTER },
 		{ "ns-forward-xdr-writes",			CASE_NAMESPACE_FORWARD_XDR_WRITES },
 		{ "allow-nonxdr-writes",			CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
-		{ "allow-xdr-writes",				CASE_NAMESPACE_ALLOW_NONXDR_WRITES },
-		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
+		{ "allow-xdr-writes",				CASE_NAMESPACE_ALLOW_XDR_WRITES },
 		{ "cold-start-evict-ttl",			CASE_NAMESPACE_COLD_START_EVICT_TTL },
 		{ "conflict-resolution-policy",		CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY },
 		{ "data-in-index",					CASE_NAMESPACE_DATA_IN_INDEX },
@@ -865,6 +865,7 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "single-bin",						CASE_NAMESPACE_SINGLE_BIN },
 		{ "stop-writes-pct",				CASE_NAMESPACE_STOP_WRITES_PCT },
 		{ "write-commit-level-override",	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE },
+		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
 		{ "demo-read-multiplier",			CASE_NAMESPACE_DEMO_READ_MULTIPLIER },
 		{ "demo-write-multiplier",			CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER },
 		{ "high-water-pct",					CASE_NAMESPACE_HIGH_WATER_PCT },
@@ -916,14 +917,14 @@ const cfg_opt NAMESPACE_STORAGE_DEVICE_OPTS[] = {
 		{ "max-write-cache",				CASE_NAMESPACE_STORAGE_DEVICE_MAX_WRITE_CACHE },
 		{ "min-avail-pct",					CASE_NAMESPACE_STORAGE_DEVICE_MIN_AVAIL_PCT },
 		{ "post-write-queue",				CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE },
-		{ "signature",						CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE },
-		{ "write-smoothing-period",			CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD },
 		{ "write-threads",					CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS },
 		{ "defrag-max-blocks",				CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_MAX_BLOCKS },
 		{ "defrag-period",					CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_PERIOD },
 		{ "load-at-startup",				CASE_NAMESPACE_STORAGE_DEVICE_LOAD_AT_STARTUP },
 		{ "persist",						CASE_NAMESPACE_STORAGE_DEVICE_PERSIST },
 		{ "readonly",						CASE_NAMESPACE_STORAGE_DEVICE_READONLY },
+		{ "signature",						CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE },
+		{ "write-smoothing-period",			CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -938,10 +939,11 @@ const cfg_opt NAMESPACE_STORAGE_KV_OPTS[] = {
 };
 
 const cfg_opt NAMESPACE_SET_OPTS[] = {
+		{ "set-disable-eviction",			CASE_NAMESPACE_SET_DISABLE_EVICTION },
 		{ "set-enable-xdr",					CASE_NAMESPACE_SET_ENABLE_XDR },
 		{ "set-evict-hwm-count",			CASE_NAMESPACE_SET_EVICT_HWM_COUNT },
-		{ "set-stop-write-count",			CASE_NAMESPACE_SET_STOP_WRITE_COUNT },
 		{ "set-evict-hwm-pct",				CASE_NAMESPACE_SET_EVICT_HWM_PCT },
+		{ "set-stop-write-count",			CASE_NAMESPACE_SET_STOP_WRITE_COUNT },
 		{ "set-stop-write-pct",				CASE_NAMESPACE_SET_STOP_WRITE_PCT },
 		{ "}",								CASE_CONTEXT_END }
 };
@@ -2007,14 +2009,14 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_QUERY_PRIORITY:
 				c->query_priority = cfg_int_no_checks(&line);
 				break;
-			case CASE_SERVICE_QUERY_PRIORITY_SLEEP_MS:
-				c->query_sleep_ns = cfg_u64_no_checks(&line) * 1000000;
+			case CASE_SERVICE_QUERY_PRIORITY_SLEEP_US:
+				c->query_sleep_us = cfg_u64_no_checks(&line);
 				break;
 			case CASE_SERVICE_QUERY_THRESHOLD:
 				c->query_threshold = cfg_int_no_checks(&line);
 				break;
-			case CASE_SERVICE_QUERY_UNTRACKED_TIME:
-				c->query_untracked_time_ns = cfg_u64_no_checks(&line) * 1000000;
+			case CASE_SERVICE_QUERY_UNTRACKED_TIME_MS:
+				c->query_untracked_time_ms = cfg_u64_no_checks(&line);
 				break;
 			case CASE_SERVICE_REPLICATION_FIRE_AND_FORGET:
 				c->replication_fire_and_forget = cfg_bool(&line);
@@ -2042,7 +2044,7 @@ as_config_init(const char *config_file)
 				if (config_val < c->sindex_data_memory_used) {
 					cf_warning(AS_CFG, "sindex-data-max-memory must"
 							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(&c->sindex_data_memory_used), line_num);
+							cf_atomic_int_get(c->sindex_data_memory_used), line_num);
 				}
 				else {
 					c->sindex_data_max_memory = config_val; // this is in addition to namespace memory
@@ -2077,7 +2079,7 @@ as_config_init(const char *config_file)
 				if (config_val < c->udf_runtime_gmemory_used) {
 					cf_crash_nostack(AS_CFG, "udf-runtime-max-gmemory must"
 							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(&c->udf_runtime_gmemory_used), line_num);
+							cf_atomic_int_get(c->udf_runtime_gmemory_used), line_num);
 				}
 				c->udf_runtime_max_gmemory = config_val;
 				break;
@@ -2496,9 +2498,6 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_XDR_REMOTE_DATACENTER:
 				// The server isn't interested in this, but the XDR module is!
 				break;
-			case CASE_NAMESPACE_ALLOW_VERSIONS:
-				ns->allow_versions = cfg_bool(&line);
-				break;
 			case CASE_NAMESPACE_COLD_START_EVICT_TTL:
 				ns->cold_start_evict_ttl = cfg_u32_no_checks(&line);
 				break;
@@ -2604,39 +2603,22 @@ as_config_init(const char *config_file)
 					break;
 				}
 				break;
+			case CASE_NAMESPACE_ALLOW_VERSIONS:
 			case CASE_NAMESPACE_DEMO_READ_MULTIPLIER:
-				ns->demo_read_multiplier = cfg_int_no_checks(&line);
-				break;
 			case CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER:
-				ns->demo_write_multiplier = cfg_int_no_checks(&line);
-				break;
 			case CASE_NAMESPACE_HIGH_WATER_PCT:
 			case CASE_NAMESPACE_LOW_WATER_PCT:
 				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_CONTEXT_END:
-				if (ns->allow_versions && ns->single_bin) {
-					cf_crash_nostack(AS_CFG, "ns %s single-bin and allow-versions can't both be true", ns->name);
-				}
 				if (ns->data_in_index && ! (ns->single_bin && ns->storage_data_in_memory && ns->storage_type == AS_STORAGE_ENGINE_SSD)) {
 					cf_crash_nostack(AS_CFG, "ns %s data-in-index can't be true unless storage-engine is device and both single-bin and data-in-memory are true", ns->name);
 				}
-				if (ns->storage_data_in_memory) {
-					// Post write queue should not be used for in-memory cases.
-					// This will override the default or if the user sets it by
-					// mistake for in-memory namespace. We cannot distinguish
-					// the two cases. So, No warning if the user sets it.
-					ns->storage_post_write_queue = 0;
-				}
-				if (ns->ldt_enabled) {
-					if (ns->single_bin) {
-						cf_crash_nostack(AS_CFG, "ns %s single-bin and ldt-enabled can't both be true", ns->name);
-					}
-					if (ns->allow_versions) {
-						cf_crash_nostack(AS_CFG, "ns %s allow-versions and ldt-enabled can't both be true", ns->name);
-					}
+				if (ns->ldt_enabled && ns->single_bin) {
+					cf_crash_nostack(AS_CFG, "ns %s ldt-enabled and single-bin can't both be true", ns->name);
 				}
 				if (ns->storage_data_in_memory) {
+					ns->storage_post_write_queue = 0; // override default (or configuration mistake)
 					c->n_namespaces_in_memory++;
 				}
 				else {
@@ -2717,12 +2699,6 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE:
 				ns->storage_post_write_queue = cfg_u32(&line, 0, 2 * 1024);
 				break;
-			case CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE:
-				ns->storage_signature = cfg_bool(&line);
-				break;
-			case CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD:
-				ns->storage_write_smoothing_period = cfg_u32(&line, 0, 1000);
-				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS:
 				ns->storage_write_threads = cfg_u32_no_checks(&line);
 				break;
@@ -2731,6 +2707,8 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_STORAGE_DEVICE_LOAD_AT_STARTUP:
 			case CASE_NAMESPACE_STORAGE_DEVICE_PERSIST:
 			case CASE_NAMESPACE_STORAGE_DEVICE_READONLY:
+			case CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE:
+			case CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD:
 				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_CONTEXT_END:
@@ -2781,6 +2759,9 @@ as_config_init(const char *config_file)
 		//
 		case NAMESPACE_SET:
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_SET_OPTS, NUM_NAMESPACE_SET_OPTS)) {
+			case CASE_NAMESPACE_SET_DISABLE_EVICTION:
+				DISABLE_SET_EVICTION(p_set, cfg_bool(&line));
+				break;
 			case CASE_NAMESPACE_SET_ENABLE_XDR:
 				switch(cfg_find_tok(line.val_tok_1, NAMESPACE_SET_ENABLE_XDR_OPTS, NUM_NAMESPACE_SET_ENABLE_XDR_OPTS)) {
 				case CASE_NAMESPACE_SET_ENABLE_XDR_USE_DEFAULT:
@@ -2799,12 +2780,8 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case CASE_NAMESPACE_SET_EVICT_HWM_COUNT:
-				p_set->evict_hwm_count = cfg_u64_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_SET_STOP_WRITE_COUNT:
-				p_set->stop_write_count = cfg_u64_no_checks(&line);
-				break;
 			case CASE_NAMESPACE_SET_EVICT_HWM_PCT:
+			case CASE_NAMESPACE_SET_STOP_WRITE_COUNT:
 			case CASE_NAMESPACE_SET_STOP_WRITE_PCT:
 				cfg_deprecated_name_tok(&line);
 				break;
@@ -2864,7 +2841,7 @@ as_config_init(const char *config_file)
 				if (config_val < ns->sindex_data_memory_used) {
 					cf_warning(AS_CFG, "sindex-data-max-memory must"
 							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(&ns->sindex_data_max_memory), line_num);
+							cf_atomic_int_get(ns->sindex_data_max_memory), line_num);
 				}
 				else {
 					ns->sindex_data_max_memory = config_val; // this is in addition to namespace memory
@@ -2872,7 +2849,7 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_SINDEX_NUM_PARTITIONS:
 				// FIXME - minimum should be 1, but currently crashes.
-				ns->sindex_num_partitions = cfg_u32(&line, 2, 128);
+				ns->sindex_num_partitions = cfg_u32(&line, MIN_PARTITIONS_PER_INDEX, MAX_PARTITIONS_PER_INDEX);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);
@@ -3438,7 +3415,6 @@ cfg_create_all_histograms()
 	create_and_check_hist_track(&c->ut_hist, "udf", HIST_MILLISECONDS);
 	create_and_check_hist_track(&c->wt_hist, "writes_master", HIST_MILLISECONDS);
 	create_and_check_hist_track(&c->px_hist, "proxy", HIST_MILLISECONDS);
-	create_and_check_hist_track(&c->wt_reply_hist, "writes_reply", HIST_MILLISECONDS);
 
 	create_and_check_hist(&c->rt_cleanup_hist, "reads_cleanup", HIST_MILLISECONDS);
 	create_and_check_hist(&c->rt_net_hist, "reads_net", HIST_MILLISECONDS);
@@ -3469,7 +3445,6 @@ cfg_create_all_histograms()
 	create_and_check_hist(&c->info_fulfill_hist, "info_fulfill", HIST_MILLISECONDS);
 	create_and_check_hist(&c->write_storage_close_hist, "write_storage_close", HIST_MILLISECONDS);
 	create_and_check_hist(&c->write_sindex_hist, "write_sindex", HIST_MILLISECONDS);
-	create_and_check_hist(&c->defrag_storage_close_hist, "defrag_storage_close", HIST_MILLISECONDS);
 	create_and_check_hist(&c->prole_fabric_send_hist, "prole_fabric_send", HIST_MILLISECONDS);
 
 	create_and_check_hist(&c->ldt_multiop_prole_hist, "ldt_multiop_prole", HIST_MILLISECONDS);
@@ -3553,10 +3528,10 @@ void
 cfg_use_hardware_values(as_config* c)
 {
 	// Use this array if interface name is configured in config file.
-	char *config_interface_names[] = { 0, 0 };
+	const char *config_interface_names[] = { 0, 0 };
 
 	if (c->self_node == 0) {
-		char **interface_names = NULL;
+		const char **interface_names = NULL;
 		if (c->network_interface_name) {
 			// Use network interface name provided in the configuration.
 			config_interface_names[0] = c->network_interface_name;

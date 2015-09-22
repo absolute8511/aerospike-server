@@ -567,7 +567,7 @@ int ai_create_index(char *iname, char *tname, char *cname, int col_type, int num
 		return -1;
 	}
 
-	if ((2 > num_partitions) || (MAX_PARTITIONS_PER_INDEX < num_partitions)) {
+	if ((MIN_PARTITIONS_PER_INDEX > num_partitions) || (MAX_PARTITIONS_PER_INDEX < num_partitions)) {
 		// Unacceptible number of partitions.
 		return -1;
 	}
@@ -576,7 +576,7 @@ int ai_create_index(char *iname, char *tname, char *cname, int col_type, int num
 	uchar cnstr = CONSTRAINT_NONE;
 	int rv = newIndex(iname, tmatch, ic, cnstr, col_type, num_partitions);
 
-	if (num_partitions) {
+	if (num_partitions > MIN_PARTITIONS_PER_INDEX) {
 		if (0 > ic->cmatch) {
 			cf_crash(AS_SINDEX, "ic->cmatch (%d) is less than 0", ic->cmatch);
 		}

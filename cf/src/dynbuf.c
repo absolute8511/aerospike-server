@@ -211,9 +211,8 @@ cf_buf_builder_reserve_internal(cf_buf_builder **bb_r, size_t sz)
 	size_t new_sz = cf_dyn_buf_get_newsize(bb->alloc_sz, bb->used_sz, sz);
 	if (new_sz > bb->alloc_sz) {
 		if (bb->alloc_sz - bb->used_sz < MAX_BACKOFF) {
-			cf_buf_builder	*_t = cf_realloc(bb, new_sz);
-			if (!_t)	return(-1);
-			bb = _t;
+			bb = cf_realloc(bb, new_sz);
+			if (!bb)	return(-1);
 		}
 		else {
 			// Only possible if buffer was reset. Avoids potential expensive
@@ -221,7 +220,8 @@ cf_buf_builder_reserve_internal(cf_buf_builder **bb_r, size_t sz)
 			cf_buf_builder	*_t = cf_malloc(new_sz);
 			if (!_t)	return(-1);
 			memcpy(_t->buf, bb->buf, bb->used_sz);
-			cf_free(bb->buf);
+			_t->used_sz = bb->used_sz;
+			cf_free(bb);
 			bb = _t;
 		}
 		bb->alloc_sz = new_sz - sizeof(cf_buf_builder);

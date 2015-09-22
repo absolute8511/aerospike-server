@@ -96,7 +96,6 @@ msg_template rw_mt[] =
 // #define DEBUG_MSG 1
 // #define TRACK_WR 1
 // #define EXTRA_CHECKS 1
-static cf_atomic32 init_counter = 0;
 static cf_atomic32 g_rw_tid = 0;
 static rchash *g_write_hash = 0;
 static pthread_t g_rw_retransmit_th;
@@ -1575,20 +1574,8 @@ finish_rw_process_dup_ack(write_request *wr)
 		// take the different components for passing to merge
 		uint8_t *buf = 0;
 		size_t buf_sz = 0;
-		if (0 != msg_get_buf(m, RW_FIELD_VINFOSET, &buf, &buf_sz,
-					MSG_GET_DIRECT)) {
-			cf_info(AS_RW,
-					"finish_rw_process_dup_ack: received dup-response with no vinfoset, illegal, %"PRIx64"",
-					wr->keyd);
-			continue;
-		}
 
-		if (0 != as_partition_vinfoset_unpickle(
-					&components[comp_sz].vinfoset, buf, buf_sz, "RW")) {
-			cf_warning(AS_RW,
-					"finish_rw_process_dup_ack: receive ununpickleable vinfoset, skipping response");
-			continue;
-		}
+		// Note - older versions expect RW_FIELD_VINFOSET field here.
 
 		uint32_t generation = 0;
 		if (0 != msg_get_uint32(m, RW_FIELD_GENERATION, &generation)) {
@@ -1644,13 +1631,8 @@ finish_rw_process_dup_ack(write_request *wr)
 	wr->shipped_op = false;
 	int winner_idx = -1;
 	if (comp_sz > 0) {
-		if (wr->rsv.ns->allow_versions) {
-			rv = as_record_merge(&wr->rsv, &wr->keyd, comp_sz,
-					components);
-		} else {
-			rv = as_record_flatten(&wr->rsv, &wr->keyd, comp_sz,
-					components, &winner_idx);
-		}
+		rv = as_record_flatten(&wr->rsv, &wr->keyd, comp_sz, components,
+				&winner_idx);
 	}
 
 	// Free up the dup messages
@@ -1663,32 +1645,27 @@ finish_rw_process_dup_ack(write_request *wr)
 
 	// In case remote node wins after resolution and has bin call returns
 	if (rv == -2) {
-		if (wr->rsv.ns->allow_versions) {
-			cf_warning(AS_LDT, "Dummy LDT shows up when allow_version is true ..."
-					" namespace has ... Unexpected ... abort merge.. keeping local ");
-		} else {
-			if (winner_idx < 0) {
-				cf_warning(AS_LDT, "Unexpected winner @ index %d.. resorting to 0", winner_idx);
-				winner_idx = 0;
-			}
-			cf_detail_digest(AS_RW, &wr->keyd,
-					"SHIPPED_OP %s Shipping %s op to %"PRIx64"",
-					wr->proxy_msg ? "NONORIG" : "ORIG",
-					wr->is_read ? "Read" : "Write",
-					wr->dest_nodes[winner_idx]);
-			as_ldt_shipop(wr, wr->dest_nodes[winner_idx]);
-			// Assume OK for now with respect to stats
-			as_rw_set_stat_counters(true, 0, 0);
-			return false;
+		if (winner_idx < 0) {
+			cf_warning(AS_LDT, "Unexpected winner @ index %d.. resorting to 0", winner_idx);
+			winner_idx = 0;
 		}
-	} else {
 		cf_detail_digest(AS_RW, &wr->keyd,
-				"SHIPPED_OP %s=WINNER locally apply %s op after "
-				"flatten @ %"PRIx64"",
+				"SHIPPED_OP %s Shipping %s op to %"PRIx64"",
 				wr->proxy_msg ? "NONORIG" : "ORIG",
 				wr->is_read ? "Read" : "Write",
-				g_config.self_node);
+				wr->dest_nodes[winner_idx]);
+		as_ldt_shipop(wr, wr->dest_nodes[winner_idx]);
+		// Assume OK for now with respect to stats
+		as_rw_set_stat_counters(true, 0, 0);
+		return false;
 	}
+
+	cf_detail_digest(AS_RW, &wr->keyd,
+			"SHIPPED_OP %s=WINNER locally apply %s op after "
+			"flatten @ %"PRIx64"",
+			wr->proxy_msg ? "NONORIG" : "ORIG",
+			wr->is_read ? "Read" : "Write",
+			g_config.self_node);
 
 	// move to next phase after duplicate merge
 	wr->dest_sz = 0;
@@ -2005,10 +1982,6 @@ write_complete(write_request *wr, as_transaction *tr)
 	if (wr->response_db.buf) {
 		ops_complete(tr, &wr->response_db);
 
-		if (tr->proto_fd_h) {
-			cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
-		}
-
 		MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
 
 		return;
@@ -2024,8 +1997,6 @@ write_complete(write_request *wr, as_transaction *tr)
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
 		}
-
-		cf_hist_track_insert_data_point(g_config.wt_reply_hist, tr->start_time);
 
 		tr->proto_fd_h = 0;
 	}
@@ -2198,17 +2169,9 @@ rw_dup_prole(cf_node node, msg *m)
 	/* Indicate it is a duplicate resolution / migration  write */
 	msg_set_uint32(m, RW_FIELD_INFO, info);
 
-	uint8_t vinfo_buf[AS_PARTITION_VINFOSET_PICKLE_MAX];
-	size_t vinfo_buf_len = sizeof(vinfo_buf);
-	if (0 != as_partition_vinfoset_mask_pickle(&rsv.p->vinfoset,
-			as_index_vinfo_mask_get(r, rsv.ns->allow_versions),
-			vinfo_buf, &vinfo_buf_len)) {
-		cf_info(AS_RW, "pickle: could not do vinfo mask");
-		msg_set_unset(m, RW_FIELD_VINFOSET);
-		cf_atomic_int_incr(&g_config.rw_err_dup_internal);
-		goto Out3;
-	}
-	msg_set_buf(m, RW_FIELD_VINFOSET, vinfo_buf, vinfo_buf_len, MSG_SET_COPY);
+	// Note - older versions expect RW_FIELD_VINFOSET, so must send it for now.
+	static const uint8_t VINFO_BUF_0[] = { 0, 0, 0, 0 };
+	msg_set_buf(m, RW_FIELD_VINFOSET, VINFO_BUF_0, 4, MSG_SET_COPY);
 
 	msg_set_uint32(m, RW_FIELD_GENERATION, r->generation);
 	msg_set_uint32(m, RW_FIELD_VOID_TIME, r->void_time);
@@ -2489,7 +2452,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		goto Out;
 	}
 
-	if (rv != 1 && rd.ns->storage_data_in_memory) {
+	if (rv != 1) {
 		memory_bytes = as_storage_record_get_n_bytes_memory(&rd);
 	}
 
@@ -2507,15 +2470,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 	r->generation = generation;
 	r->void_time = void_time;
 
-	if (rd.ns->storage_data_in_memory) {
-		uint64_t end_memory_bytes = as_storage_record_get_n_bytes_memory(&rd);
-
-		int64_t delta_bytes = end_memory_bytes - memory_bytes;
-		if (delta_bytes) {
-			cf_atomic_int_add(&rsv->ns->n_bytes_memory, delta_bytes);
-			cf_atomic_int_add(&rsv->p->n_bytes_memory, delta_bytes);
-		}
-	}
+	as_storage_record_adjust_mem_stats(&rd, memory_bytes);
 
 	uint64_t version_to_set = 0;
     bool     set_version    = false;
@@ -3025,31 +2980,29 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 		}
 
 		if (ns->storage_data_in_memory) {
-			rd.n_bins = as_bin_get_n_bins(r, &rd);
-			rd.bins = as_bin_get_all(r, &rd, 0);
-			cf_atomic_int_sub(&tr->rsv.p->n_bytes_memory,
-					as_storage_record_get_n_bytes_memory(&rd));
-
 			// Remove record from secondary index. In case data is not in memory
 			// then we won't have record in that case secondary index entry is
 			// cleaned up by background sindex defrag thread.
 			if (as_sindex_ns_has_sindex(ns)) {
+				rd.n_bins = as_bin_get_n_bins(r, &rd);
+				rd.bins = as_bin_get_all(r, &rd, NULL);
+
 				int sindex_ret = AS_SINDEX_OK;
 				const char* set_name = as_index_get_set_name(r, ns);
 
 				SINDEX_GRLOCK();
 				SINDEX_BINS_SETUP(sbins, ns->sindex_cnt);
-				int sindex_found = 0;
+				int sbins_populated = 0;
 				for (int i = 0; i < rd.n_bins; i++) {
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, &rd.bins[i], &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+					sbins_populated += as_sindex_sbins_from_bin(ns, set_name, &rd.bins[i], &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 				}
 				SINDEX_GUNLOCK();
 
 				cf_debug(AS_SINDEX,
 						"Delete @ %s %d digest %ld", __FILE__, __LINE__, *(uint64_t *)&rd.keyd);
-				if (sindex_found) {
-					sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sindex_found, &rd.keyd);
-					as_sindex_sbin_freeall(sbins, sindex_found);
+				if (sbins_populated) {
+					sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sbins_populated, &rd.keyd);
+					as_sindex_sbin_freeall(sbins, sbins_populated);
 				}
 				if (sindex_ret != AS_SINDEX_OK)
 					cf_debug(AS_SINDEX,
@@ -3220,18 +3173,6 @@ pickle_all(as_storage_rd *rd, pickle_info *pickle)
 	}
 
 	return true;
-}
-
-void
-account_memory(as_transaction *tr, as_storage_rd *rd, uint64_t start_bytes)
-{
-	uint64_t end_bytes = as_storage_record_get_n_bytes_memory(rd);
-	int64_t delta_bytes = (int64_t)end_bytes - (int64_t)start_bytes;
-
-	if (delta_bytes) {
-		cf_atomic_int_add(&tr->rsv.ns->n_bytes_memory, delta_bytes);
-		cf_atomic_int_add(&tr->rsv.p->n_bytes_memory, delta_bytes);
-	}
 }
 
 
@@ -3592,9 +3533,7 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 		cf_digest *keyd, as_bin* old_bins, uint32_t n_old_bins,
 		as_bin* new_bins, uint32_t n_new_bins)
 {
-	int sindex_ret = AS_SINDEX_OK;
-	int sindex_found = 0;
-
+	int sbins_populated = 0;
 	bool not_just_created[n_new_bins];
 
 	for (uint32_t i_new = 0; i_new < n_new_bins; i_new++) {
@@ -3633,8 +3572,8 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 					// TODO - might want a "diff" method that takes two bins and
 					// detects the (rare) case when a particle was rewritten
 					// with the exact old value.
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
-					sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+					sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
+					sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b_new, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 				}
 
 				found = true;
@@ -3652,7 +3591,7 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 		}
 
 		if (! found) {
-			sindex_found += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sindex_found], AS_SINDEX_OP_DELETE);
+			sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b_old, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 		}
 	}
 
@@ -3664,16 +3603,16 @@ write_local_sindex_update(as_namespace *ns, const char *set_name,
 			continue;
 		}
 
-		sindex_found += as_sindex_sbins_from_bin(ns, set_name, &new_bins[i_new], &sbins[sindex_found], AS_SINDEX_OP_INSERT);
+		sbins_populated += as_sindex_sbins_from_bin(ns, set_name, &new_bins[i_new], &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 	}
 
 	SINDEX_GUNLOCK();
 
-	if (sindex_found) {
+	if (sbins_populated) {
 		uint64_t start_ns = g_config.microbenchmarks ? cf_getns() : 0;
 
-		sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sindex_found, keyd);
-		as_sindex_sbin_freeall(sbins, sindex_found);
+		as_sindex_update_by_sbin(ns, set_name, sbins, sbins_populated, keyd);
+		as_sindex_sbin_freeall(sbins, sbins_populated);
 
 		if (start_ns != 0) {
 			histogram_insert_data_point(g_config.write_sindex_hist, start_ns);
@@ -4189,7 +4128,7 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 	destroy_stack_bins(cleanup_bins, n_cleanup_bins);
 
-	account_memory(tr, rd, memory_bytes);
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
@@ -4368,7 +4307,7 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 		as_index_set_flags(r, AS_INDEX_FLAG_KEY_STORED);
 	}
 
-	account_memory(tr, rd, memory_bytes);
+	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 	*is_delete = ! as_bin_inuse_has(rd);
 
 	return 0;
@@ -4737,7 +4676,7 @@ write_local(as_transaction *tr, write_local_generation *wlg,
 			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
 			return -1;
 		}
-		else if (rv_set == AS_NAMESPACE_SET_THRESHOLD_EXCEEDED) {
+		else if (rv_set == -2) {
 			write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_FORBIDDEN);
 			return -1;
 		}
@@ -5850,10 +5789,6 @@ as_write_inprogress()
 void
 as_write_init()
 {
-	if (1 != cf_atomic32_incr(&init_counter)) {
-		return;
-	}
-
 	rchash_create(&g_write_hash, write_digest_hash, write_request_destructor,
 			sizeof(global_keyd), 32 * 1024, RCHASH_CR_MT_MANYLOCK);
 
