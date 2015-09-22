@@ -82,7 +82,7 @@
 #define RW_INFO_MIGRATION      0x0002
 #define RW_INFO_NSUP_DELETE	   0x0004
 #define RW_INFO_LDT_DUMMY      0x0008 // Indicating dummy (no data)
-#define RW_INFO_LDT_REC        0x0010 // Indicating LDT REC
+#define RW_INFO_LDT_PARENTREC  0x0010 // Indicating LDT PARENT REC
 #define RW_INFO_LDT_SUBREC     0x0020 // Indicating LDT SUB
 #define RW_INFO_LDT_ESR        0x0040 // Indicating LDT ESR
 #define RW_INFO_SINDEX_TOUCHED 0x0080 // Indicating the SINDEX was touched
