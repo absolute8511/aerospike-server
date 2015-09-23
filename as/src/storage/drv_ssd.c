@@ -2624,6 +2624,10 @@ as_storage_write_header(drv_ssd *ssd, ssd_device_header *header, size_t size)
 }
 
 
+//==========================================================
+// Cold start utilities.
+//
+
 // Add a record just read from drive to the index, if all is well.
 // Return values:
 //  0 - success, record added or updated

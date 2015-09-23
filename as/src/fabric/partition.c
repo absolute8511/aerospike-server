@@ -3755,6 +3755,7 @@ as_partition_balance()
 					if (cf_contains64(dupl_nodes, n_dupl, self) && (my_index_in_hvlist < p->p_repl_factor)) {
 						cf_debug(AS_PARTITION, "{%s:%d} Partition will reject writes during merge", ns->name, j);
 						p->reject_writes = true;
+						ns_pending_migrate_tx_later++;
 					}
 
 					bool is_primary_version = (memcmp(&p->version_info, &p->primary_version_info, sizeof(as_partition_vinfo)) == 0);

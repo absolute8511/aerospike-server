@@ -524,6 +524,11 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 				as_rec_props_clear(p_pickled_rec_props);
 			}
 		} else { // deletes come here
+			if ((tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) == 0) {
+				uint32_t info = 0;
+				msg_get_uint32(m, RW_FIELD_INFO, &info);
+				cf_crash(AS_RW, "sending delete but DELETE msg flag not set - info 0x%x", info);
+			}
 			cf_detail_digest(AS_RW, keyd, "Send delete to replica ");
 			msg_set_buf(m, RW_FIELD_AS_MSG, (void *) tr->msgp,
 					as_proto_size_get(&tr->msgp->proto), MSG_SET_COPY);
