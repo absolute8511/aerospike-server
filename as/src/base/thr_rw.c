@@ -493,27 +493,26 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 	msg_set_uint32(m, RW_FIELD_NS_ID, tr->rsv.ns->id);
 	msg_set_uint32(m, RW_FIELD_OP, op);
 
-	bool is_ldt_sub;
-	bool is_ldt_parent;
-
-	as_ldt_get_property(p_pickled_rec_props, &is_ldt_parent, &is_ldt_sub);
-
-
 	if (op == RW_OP_WRITE) {
 
 		msg_set_uint32(m, RW_FIELD_GENERATION, tr->generation);
 		msg_set_uint32(m, RW_FIELD_VOID_TIME, tr->void_time);
 
-		rw_msg_setup_infobits(m, tr, has_udf, is_ldt_sub, is_ldt_parent);
-
 		// Send this along with parent packet as well. This is required
 		// in case the LDT parent replication is done without MULTI_OP.
 		// Example touch of the some other bin in the LDT parent
-		if (!is_ldt_sub) {
+		if (!is_subrec) {
 			rw_msg_setup_ldt_fields(m, tr, keyd);
 		}
 
 		if (*p_pickled_buf) {
+
+			// Use info in property map for writes
+			bool is_ldt_sub;
+			bool is_ldt_parent;
+			as_ldt_get_property(p_pickled_rec_props, &is_ldt_parent, &is_ldt_sub);
+			rw_msg_setup_infobits(m, tr, has_udf, is_ldt_sub, is_ldt_parent);
+
 			msg_set_unset(m, RW_FIELD_AS_MSG);
 			msg_set_buf(m, RW_FIELD_RECORD, (void *) *p_pickled_buf, pickled_sz,
 					MSG_SET_HANDOFF_MALLOC);
@@ -529,6 +528,8 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 			msg_set_buf(m, RW_FIELD_AS_MSG, (void *) tr->msgp,
 					as_proto_size_get(&tr->msgp->proto), MSG_SET_COPY);
 			msg_set_unset(m, RW_FIELD_RECORD);
+
+			rw_msg_setup_infobits(m, tr, has_udf, is_subrec, false);
 		}
 	} else if (op == RW_OP_DUP) {
 		msg_set_uint32(m, RW_FIELD_OP, RW_OP_DUP);
