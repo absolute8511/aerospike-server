@@ -1010,8 +1010,8 @@ as_paxos_set_recovery_policy(paxos_recovery_policy_enum policy)
 }
 
 /* as_paxos_partition_sync_states_all
- * Returns true if the specified node is in the succession and alive
- * Sets the partition sync state to be true */
+ * Returns true if all nodes currently in the cluster (i.e., where "alive" is true)
+ * have already sent in a PARTITION_SYNC_REQUEST message. */
 bool
 as_paxos_partition_sync_states_all()
 {
