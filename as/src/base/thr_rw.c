@@ -5140,7 +5140,7 @@ write_process_op(as_transaction *tr, cl_msg *msgp, cf_node node, as_generation g
 }
 
 int
-write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_respond)
+write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_respond, ldt_prole_info *linfo)
 {
 	uint32_t result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 	bool local_reserve = false;
@@ -5240,14 +5240,15 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_r
 
 	as_namespace *ns = rsvp->ns;
 
-	ldt_prole_info linfo;
-
-	if ((info & RW_INFO_LDT) && as_rw_get_ldt_info(&linfo, m, rsvp)) {
-		cf_warning(AS_LDT, "Could not find ldt info at prole");
-		return AS_PROTO_RESULT_FAIL_UNKNOWN;
+	if (info & RW_INFO_LDT) {
+		memset(linfo, 1, sizeof(ldt_prole_info));
+		if  (as_rw_get_ldt_info(linfo, m, rsvp)) {
+			cf_warning(AS_LDT, "Could not find ldt info at prole");
+			return AS_PROTO_RESULT_FAIL_UNKNOWN;
+		}
 	}
 
-	if (as_ldt_check_and_get_prole_version(keyd, rsvp, &linfo, info, NULL, false, __FILE__, __LINE__)) {
+	if (as_ldt_check_and_get_prole_version(keyd, rsvp, linfo, info, NULL, false, __FILE__, __LINE__)) {
 		// If parent cannot be due to incoming migration it is ok
 		// continue and allow subrecords to be replicated
 		result_code = AS_PROTO_RESULT_OK;
@@ -5255,7 +5256,7 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_r
 	}
 
 	// Set the version in subrec digest if need be.
-	as_ldt_set_prole_subrec_version(keyd, rsvp, &linfo, info);
+	as_ldt_set_prole_subrec_version(keyd, rsvp, linfo, info);
 
 	if (info & RW_INFO_UDF_WRITE) {
 		cf_atomic_int_incr(&g_config.udf_replica_writes);
@@ -5296,7 +5297,7 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_r
 		result_code = write_process_op(&tr, msgp, node, generation);
 	} else {
 		rv = write_local_pickled(keyd, rsvp, pickled_buf, pickled_sz,
-				&rec_props, generation, void_time, node, info, &linfo);
+				&rec_props, generation, void_time, node, info, linfo);
 		if (rv == 0) {
 			result_code = AS_PROTO_RESULT_OK;
 		} else {
@@ -6242,6 +6243,8 @@ rw_multi_process(cf_node node, msg *m)
 				rsv.pid, rsv.state  );
 		goto Out;
 	}
+	ldt_prole_info linfo;
+	memset(&linfo, 1, sizeof(ldt_prole_info));
 
 	int offset = 0;
 	int count = 0;
@@ -6284,7 +6287,7 @@ rw_multi_process(cf_node node, msg *m)
 			cf_detail(AS_RW, "MULTI_OP: Received Sindex multi op");
 		} else {
 			cf_detail(AS_RW, "MULTI_OP: Received LDT multi op");
-			ret = write_process_new(node, op_msg, &rsv, false);
+			ret = write_process_new(node, op_msg, &rsv, false, &linfo);
 		}
 		if (ret) {
 			ret = -3;
