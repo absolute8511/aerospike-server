@@ -854,6 +854,11 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 			cf_detail(AS_RW,
 					"write_delete_local for digest returns %d, %d digest %"PRIx64"",
 					rv, tr->result_code, *(uint64_t*)&tr->keyd);
+
+			// Temporary debugging clause...
+			if ((tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) == 0) {
+				cf_warning(AS_RW, "write_delete_local() completed with AS_MSG_INFO2_DELETE not set");
+			}
 		} else {
 			// If the XDR is enabled and if the user configured to stop the writes if there is no XDR
 			// and if the xdr digestpipe is not opened fail the writes with appropriate return value
@@ -899,6 +904,11 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						as_rw_set_stat_counters(true, rv, tr);
 						*delete = true;
 						return 0;
+					} else {
+						// Temporary debugging clause...
+						if (! wr->pickled_buf) {
+							cf_warning(AS_RW, "udf write completed with no pickled buffer (%d)", op);
+						}
 					}
 				} else {
 					wr->has_udf = false;
@@ -913,6 +923,11 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 							&wr->pickled_sz, &wr->pickled_rec_props,
 							&wr->response_db);
 					WR_TRACK_INFO(wr, "internal_rw_start: write local done ");
+
+					// Temporary debugging clause...
+					if (rv == 0 && ! wr->pickled_buf) {
+						cf_warning(AS_RW, "write_local() completed with no pickled buffer");
+					}
 				}
 				if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
 					cf_detail(AS_RW,
@@ -3310,12 +3325,12 @@ int write_local_preprocessing(as_transaction *tr, write_local_generation *wlg,
 	if (tr->rsv.reject_writes) {
 		cf_debug(AS_RW, "{%s:%d} write_local: partition rejects writes - writes will flow from master. digest %"PRIx64"",
 				ns->name, tr->rsv.pid, *(uint64_t*)&tr->keyd);
-		return 0;
+		return -1;
 	}
 	else if (AS_PARTITION_STATE_DESYNC == tr->rsv.state) {
 		cf_debug(AS_RW, "{%s:%d} write_local: partition is desync - writes will flow from master. digest %"PRIx64"",
 				ns->name, tr->rsv.pid, *(uint64_t*)&tr->keyd);
-		return 0;
+		return -1;
 	}
 
 	*is_done = false;
