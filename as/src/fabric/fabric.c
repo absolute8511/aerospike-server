@@ -778,15 +778,16 @@ fabric_connect(fabric_args *fa, fabric_node_element *fne)
 		char *hbaddr_to_use = g_config.hb_addr;
 		// Checking the first byte is enough as '0' cannot be a valid IP address other than 0.0.0.0
 		if (*hbaddr_to_use == '0') {
-			cf_debug(AS_HB, "Sending %s as nodes IP to return heartbeat", g_config.node_ip);
+			cf_debug(AS_FABRIC, "Using address \"any\" for listening for heartbeats and a real IP address for receiving heartbeats");
 			hbaddr_to_use = g_config.node_ip;
 		}
-
-		// If the user specified an interface-address, we should send that address
-		// to the remote machine to send back heartbeats.
+		// If the user specified an interface-address, however, we should instead
+		// send that address to the remote machine to send back heartbeats to us.
 		if (g_config.hb_tx_addr) {
-			hbaddr_to_use = g_config.hb_tx_addr;	
+			cf_debug(AS_FABRIC, "Using \"interface-address\" for receiving heartbeats");
+			hbaddr_to_use = g_config.hb_tx_addr;
 		}
+		cf_debug(AS_FABRIC, "Sending %s as the IP address for receiving heartbeats", hbaddr_to_use);
 		
 		if (1 != inet_pton(AF_INET, hbaddr_to_use, &self))
 			cf_warning(AS_HB, "unable to call inet_pton: %s", cf_strerror(errno));
