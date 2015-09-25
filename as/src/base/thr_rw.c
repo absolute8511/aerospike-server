@@ -906,8 +906,8 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						return 0;
 					} else {
 						// Temporary debugging clause...
-						if ((tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) == 0 && ! wr->pickled_buf) {
-							cf_warning(AS_RW, "udf write completed with AS_MSG_INFO2_DELETE not set and no pickled buffer (%d)", op);
+						if ((tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) == 0 && ! wr->pickled_buf && ! UDF_OP_IS_LDT(op)) {
+							cf_warning(AS_RW, "non-LDT UDF write completed with AS_MSG_INFO2_DELETE not set and no pickled buffer (%d) rv=%d", op, rv);
 						}
 					}
 				} else {
