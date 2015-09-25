@@ -83,7 +83,7 @@ case "$1" in
 		set_shmall
 		set_shmmax
 		create_piddir
-		[ -n $LD_PRELOAD ] && export LD_PRELOAD
+		[ -n "$LD_PRELOAD" ] && export LD_PRELOAD
 		log_daemon_msg "${1^}ing aerospike"
 		$1
 		case $? in
@@ -119,8 +119,7 @@ case "$1" in
 		status_of_proc -p $PIDFILE $ASDN aerospike
 		;;
 	restart)
-	        start-stop-daemon --status --name $ASDN --pidfile $PIDFILE --exec $ASD
-		[ $? -eq 0 ] && $0 stop
+		[ -n "`pgrep $ASDN`" ] && $0 stop
 		$0 start
 		;;
 	*)
