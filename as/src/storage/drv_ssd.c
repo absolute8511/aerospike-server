@@ -2709,12 +2709,6 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		cf_warning_digest(AS_DRV_SSD, &block->keyd, "record-add found generation 0 - changed to 1 ");
 	}
 
-	// Set 0 void-time to default, if there is one.
-	if (block->void_time == 0 && ns->default_ttl != 0) {
-		cf_debug(AS_DRV_SSD, "record-add changing 0 void-time to default");
-		block->void_time = as_record_void_time_get() + ns->default_ttl;
-	}
-
 	as_index* r = r_ref.r;
 
 	if (rv == 0) {
@@ -2723,7 +2717,8 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		// if generations are equal.
 		if (block->generation < r->generation ||
 				(block->generation == r->generation &&
-						block->void_time <= r->void_time)) {
+						(r->void_time == 0 || (block->void_time != 0 &&
+								block->void_time <= r->void_time)))) {
 			cf_detail(AS_DRV_SSD, "record-add skipping generation %u <= existing %u",
 					block->generation, r->generation);
 
@@ -2738,9 +2733,9 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 	r->void_time = block->void_time;
 	r->generation = block->generation;
 
-	// No expiry for ldt_sub based on the TTL. LDT sub are expired based on the 
-	// parent record expiry. 
-	if (r->void_time != 0 && !is_ldt_sub) {
+	// Skip records that have expired. Note - LDT subrecords are expired via
+	// their parent record.
+	if (r->void_time != 0 && ! is_ldt_sub) {
 		// The threshold may be ~ now, or it may be in the future if eviction
 		// has been happening.
 		uint32_t threshold_void_time =
