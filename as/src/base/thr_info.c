@@ -102,8 +102,6 @@ typedef int (*as_info_get_tree_fn) (char *name, char *subtree, cf_dyn_buf *db);
 typedef int (*as_info_get_value_fn) (char *name, cf_dyn_buf *db);
 typedef int (*as_info_command_fn) (char *name, char *parameters, cf_dyn_buf *db);
 
-void as_query_set_job_tracking(bool);
-
 // Sets a static value - set to 0 to remove a previous value.
 int as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool def);
 int as_info_set(const char *name, const char *value, bool def);

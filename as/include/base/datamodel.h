@@ -758,7 +758,6 @@ extern int as_partition_reserve_migrate_timeout(as_namespace *ns, as_partition_i
 
 // reserve_read - *consumes* the ns reservation if success
 extern int as_partition_reserve_read(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv, cf_node *node, uint64_t *cluster_key);
-extern int as_partition_reserve_replica_list(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv);
 
 // moves the reservation -
 extern void as_partition_reservation_move(as_partition_reservation *dst, as_partition_reservation *src);
