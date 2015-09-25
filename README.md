@@ -33,7 +33,7 @@ OpenSSL 0.9.8b or later is required for cryptographic hash functions
 * The CentOS 6/7 OpenSSL packages to install are:  `openssl`,
 `openssl-devel`, `openssl-static`.
 
-* The Debian 6/7 and Ubuntu 10/12/14 OpenSSL packages to install are:
+* The Debian 6/7/8 and Ubuntu 10/12/14 OpenSSL packages to install are:
 `openssl` and `libssl-dev`.
 
 #### Lua 5.1
@@ -50,7 +50,7 @@ by the build environment.  In that case:
 	* The CentOS 6/7 Lua packages to install are:  `lua`,
 `lua-devel`, and `lua-static`.
 
-	* The Debian 6/7 and Ubuntu 10/12/14 Lua packages to install are:
+	* The Debian 6/7/8 and Ubuntu 10/12/14 Lua packages to install are:
 `lua5.1` and `liblua5.1-dev`.
 
 	* Build by passing the `USE_LUAJIT=0` option to `make`.
