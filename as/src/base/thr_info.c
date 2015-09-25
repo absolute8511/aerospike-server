@@ -3340,7 +3340,8 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			as_set * p_set = as_namespace_init_set(ns, context);
 			cf_debug(AS_INFO, "set name is %s\n", p_set->name);
 			context_len = sizeof(context);
-			if (0 == as_info_parameter_get(params, "set-enable-xdr", context, &context_len)) {
+			if (0 == as_info_parameter_get(params, "set-enable-xdr", context, &context_len) ||
+					0 == as_info_parameter_get(params, "enable-xdr", context, &context_len)) {
 				// TODO - make sure context is null-terminated.
 				if ((strncmp(context, "true", 4) == 0) || (strncmp(context, "yes", 3) == 0)) {
 					cf_info(AS_INFO, "Changing value of set-enable-xdr of ns %s set %s to %s", ns->name, p_set->name, context);
@@ -3358,7 +3359,8 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 					goto Error;
 				}
 			}
-			else if (0 == as_info_parameter_get(params, "set-disable-eviction", context, &context_len)) {
+			else if (0 == as_info_parameter_get(params, "set-disable-eviction", context, &context_len) ||
+					0 == as_info_parameter_get(params, "disable-eviction", context, &context_len)) {
 				if ((strncmp(context, "true", 4) == 0) || (strncmp(context, "yes", 3) == 0)) {
 					cf_info(AS_INFO, "Changing value of set-disable-eviction of ns %s set %s to %s", ns->name, p_set->name, context);
 					DISABLE_SET_EVICTION(p_set, true);
@@ -3371,7 +3373,8 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 					goto Error;
 				}
 			}
-			else if (0 == as_info_parameter_get(params, "set-delete", context, &context_len)) {
+			else if (0 == as_info_parameter_get(params, "set-delete", context, &context_len) ||
+					0 == as_info_parameter_get(params, "delete", context, &context_len)) {
 				if ((strncmp(context, "true", 4) == 0) || (strncmp(context, "yes", 3) == 0)) {
 					cf_info(AS_INFO, "Changing value of set-delete of ns %s set %s to %s", ns->name, p_set->name, context);
 					SET_DELETED_ON(p_set);
