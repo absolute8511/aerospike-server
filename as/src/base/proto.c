@@ -46,13 +46,13 @@
 #include "fault.h"
 #include "jem.h"
 
+#include "base/as_stap.h"
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "base/udf_rw.h"
 #include "storage/storage.h"
-
 
 void
 as_proto_swap(as_proto *p)
@@ -635,7 +635,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 			as_msg_op *op = (as_msg_op *)buf;
 
 			op->op = AS_MSG_OP_READ;
-			op->version = as_bin_inuse(p_bin) ? as_bin_get_version(p_bin, rd->ns->single_bin) : 0;
+			op->version = 0;
 			op->name_sz = as_bin_memcpy_name(rd->ns, op->name, p_bin);
 			op->op_sz = 4 + op->name_sz;
 
@@ -658,7 +658,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 			as_msg_op *op = (as_msg_op *)buf;
 
 			op->op = AS_MSG_OP_READ;
-			op->version = as_bin_inuse(&rd->bins[i]) ? as_bin_get_version(&rd->bins[i], rd->ns->single_bin) : 0;
+			op->version = 0;
 			op->name_sz = as_bin_memcpy_name(rd->ns, op->name, &rd->bins[i]);
 			op->op_sz = 4 + op->name_sz;
 
@@ -1151,11 +1151,14 @@ static pthread_t      g_netio_th;
 static pthread_t      g_netio_slow_th;
 static cf_queue     * g_netio_queue      = 0;
 static cf_queue     * g_netio_slow_queue = 0;
-void                * as_query__netio_th(void *q_to_wait_on);
 
 int
-as_query__send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offset, bool blocking)
+as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offset, bool blocking)
 {
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	uint32_t len  = bb_r->used_sz;
 	uint8_t *buf  = bb_r->buf;
 
@@ -1168,20 +1171,23 @@ as_query__send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offs
     memcpy(bb_r->buf, &proto, 8); 
 
 	uint32_t pos = *offset;
+
+	ASD_QUERY_SENDPACKET_STARTING(nodeid, pos, len);
+
 	int rv;
 	int retry = 0;
 	cf_detail(AS_PROTO," Start At %p %d %d", buf, pos, len);
 	while (pos < len) {
-		rv = send(fd_h->fd, buf + pos, len - pos, MSG_NOSIGNAL );
+		rv = send(fd_h->fd, buf + pos, len - pos, MSG_NOSIGNAL);
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
-				cf_warning(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
-				shutdown(fd_h->fd, SHUT_RDWR);
-				return AS_NETIO_ERR;
+				cf_debug(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
+				return AS_NETIO_IO_ERR;
 			}
 			if (!blocking && (retry > AS_NETIO_MAX_IO_RETRY)) {
 				*offset = pos;
 				cf_detail(AS_PROTO," End At %p %d %d", buf, pos, len);
+				ASD_QUERY_SENDPACKET_CONTINUE(nodeid, pos);
 				return AS_NETIO_CONTINUE;
 			}
 			retry++;
@@ -1192,6 +1198,7 @@ as_query__send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offs
 			pos += rv;
 		}
 	}
+	ASD_QUERY_SENDPACKET_FINISHED(nodeid);
 	return AS_NETIO_OK;
 }
 
@@ -1206,10 +1213,7 @@ as_netio_th(void *q_to_wait_on) {
 		if (io.slow) {
 			usleep(g_config.proto_slow_netio_sleep_ms * 1000);
 		}
-		if (as_netio_send(&io, g_netio_slow_queue, false) != AS_NETIO_CONTINUE) {
-			AS_RELEASE_FILE_HANDLE(io.fd_h);
-			cf_buf_builder_free(io.bb_r);
-		};
+		as_netio_send(&io, g_netio_slow_queue, false);
 	}
 }
 
@@ -1234,13 +1238,34 @@ as_netio_init()
  * the queues it up to be picked by the asynchronous queueing
  * thread
  *
- * Caller is responsible for freeing up stuff in in the io structure
+ * vtable:
  *
- * qtr related stuff will be taken care of when callback is called.
- * Callback is called upfront to be able check for timeout
+ * start_cb: Callback to the module before the real IO is started.
+ *           it returns the status 
+ *           AS_NETIO_OK: Everythin ok go ahead with IO
+ *           AS_NETIO_ERR: If there was issue like abort/err/timeout etc.
  *
- * In case of success or failure module specific callback is called
- * returns nothing
+ * finish_cb: Callback to the module with the status code of the IO call
+ *            AS_NETIO_OK: Everything went fine
+ *            AS_NETIO_CONTINUE: The IO was requeued. Generally is noop in finish_cb
+ *            AS_NETIO_ERR: IO erred out due to some issue.
+ *
+ *            The function should do the needful like release ref to user
+ *            data etc.
+ *
+ * Return Code:
+ * AS_NETIO_OK: Everything is fine normal code flow. Both the start_cb
+ *              finish were called
+ *
+ * AS_NETIO_ERR: Something failed either in calling module start_cb or 
+ *               while doing network IO. finish_cb is called.
+ *              
+ * Consumption:
+ *     this function consumes qtr reference. It calls finish_cb which releases
+ *     ref to qtr
+ *     In case of AS_NETIO_CONTINUE: This function also consumes bb_r and ref for 
+ *     fd_h. The background thread is responsible for freeing up bb_r and release
+ *     ref to fd_h.
  */
 int
 as_netio_send(as_netio *io, void *q_to_use, bool blocking)
@@ -1250,13 +1275,13 @@ as_netio_send(as_netio *io, void *q_to_use, bool blocking)
 	int ret = io->start_cb(io, io->seq);
 
 	if (ret == AS_NETIO_OK) {
-		ret     = io->finish_cb(io, as_query__send_packet(io->fd_h, io->bb_r, &io->offset, blocking));
+		ret     = io->finish_cb(io, as_netio_send_packet(io->fd_h, io->bb_r, &io->offset, blocking));
 	} 
 	else {
 		ret     = io->finish_cb(io, ret);
 	}
     // If needs requeue then requeue it
-	switch(ret) {
+	switch (ret) {
 		case AS_NETIO_CONTINUE:
 			if (!q) {
 				cf_queue_push(g_netio_queue, io);

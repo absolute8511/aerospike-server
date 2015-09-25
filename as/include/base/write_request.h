@@ -94,7 +94,6 @@ typedef struct write_request_s {
 	// they might or might not have.
 	uint8_t            * pickled_buf;
 	size_t               pickled_sz;
-	uint32_t             pickled_void_time;
 	as_rec_props         pickled_rec_props;
 
 	// Store ops' responses here.
@@ -118,7 +117,6 @@ typedef struct write_request_s {
 	ureq_data            udata;
 	bool                 shipped_op;
 	bool                 shipped_op_initiator;
-	uint8_t              ldt_rectype_bits;
 	bool                 has_udf;
 
 	as_partition_reservation rsv;

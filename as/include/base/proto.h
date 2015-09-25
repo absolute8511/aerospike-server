@@ -122,6 +122,7 @@ struct as_file_handle_s;
 #define AS_PROTO_RESULT_FAIL_QUERY_TIMEOUT     212
 #define AS_PROTO_RESULT_FAIL_QUERY_CBERROR     213
 #define AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR   214
+#define AS_PROTO_RESULT_FAIL_QUERY_DUPLICATE   215
 
 
 /* SYNOPSIS
@@ -290,7 +291,7 @@ typedef struct as_msg_op_s {
 	uint32_t op_sz;
 	uint8_t  op;
 	uint8_t  particle_type;
-	uint8_t  version;
+	uint8_t  version; // now unused
 	uint8_t  name_sz;
 	uint8_t	 name[]; // UTF-8
 	// there's also a value here but you can't have two variable size arrays
@@ -373,7 +374,7 @@ typedef struct cl_msg_s {
 
 #define AS_MSG_INFO1_READ				(1 << 0) // contains a read operation
 #define AS_MSG_INFO1_GET_ALL			(1 << 1) // get all bins, period
-#define AS_MSG_INFO1_GET_ALL_NODATA		(1 << 2) // get all bins WITHOUT data (currently unimplemented)
+// (Note:  Bit 2 is unused.)
 #define AS_MSG_INFO1_BATCH				(1 << 3) // new batch protocol
 #define AS_MSG_INFO1_XDR				(1 << 4) // operation is being performed by XDR
 #define AS_MSG_INFO1_GET_NOBINDATA		(1 << 5) // Do not get information about bins and its data
@@ -384,7 +385,7 @@ typedef struct cl_msg_s {
 #define AS_MSG_INFO2_DELETE				(1 << 1) // delete record
 #define AS_MSG_INFO2_GENERATION			(1 << 2) // pay attention to the generation
 #define AS_MSG_INFO2_GENERATION_GT		(1 << 3) // apply write if new generation >= old, good for restore
-#define AS_MSG_INFO2_GENERATION_DUP		(1 << 4) // if a generation collision, create a duplicate
+// (Note:  Bit 4 is unused.)
 #define AS_MSG_INFO2_CREATE_ONLY		(1 << 5) // write record only if it doesn't exist
 #define AS_MSG_INFO2_BIN_CREATE_ONLY	(1 << 6) // write bin only if it doesn't exist
 #define AS_MSG_INFO2_RESPOND_ALL_OPS	(1 << 7) // all bin ops (read, write, or modify) require a response, in request order
@@ -564,3 +565,4 @@ int as_netio_send(as_netio *io, void *q, bool);
 #define AS_NETIO_OK        0
 #define AS_NETIO_CONTINUE  1
 #define AS_NETIO_ERR       2 
+#define AS_NETIO_IO_ERR    3 

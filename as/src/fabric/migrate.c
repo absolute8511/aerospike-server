@@ -168,7 +168,6 @@
 // #define DEBUG_MSG 1
 // #define EXTRA_CHECKS 1
 // #define USE_NETWORK_POLICY
-// #define USE_MARK_SWEEP 1
 
 // Template for migrate messages
 #define MIG_FIELD_OP 0
@@ -180,7 +179,7 @@
 #define MIG_FIELD_GENERATION 6
 #define MIG_FIELD_RECORD 7
 #define MIG_FIELD_CLUSTER_KEY 8
-#define MIG_FIELD_VINFOSET 9    	// sent with INSERT
+#define MIG_FIELD_VINFOSET 9 // deprecated
 #define MIG_FIELD_VOID_TIME 10
 #define MIG_FIELD_TYPE 11
 #define MIG_FIELD_REC_PROPS 12
@@ -247,8 +246,6 @@ typedef struct pickled_record_s {
 	byte 					*record_buf;   // pickled!
 	size_t					record_len;
 	as_rec_props            rec_props;
-	size_t                  vinfo_buf_len;
-	uint8_t                 vinfo_buf[AS_PARTITION_VINFOSET_PICKLE_MAX ];
 	cf_digest				pkey;
 	cf_digest				ekey;
 	uint64_t                version;
@@ -403,7 +400,6 @@ typedef struct migrate_recv_control_t {
 	cf_node source_node;
 	as_migrate_type mig_type;
 	as_partition_mig_rx_state rxstate;
-	as_partition_vinfoset    vinfoset;
 	uint64_t                 incoming_ldt_version;
 	as_partition_id          pid;
 } migrate_recv_control;
@@ -981,134 +977,6 @@ migrate_send_reliable(migration *mig, msg *m)
 
 }
 
-//
-// Mark and sweep
-// In order to "migrate deletes", if the migrate is a replace-migrate,
-// mark all the elements currently in the tree, and sweep when the migrate is
-// done and remove any elements that no longer exist.
-//
-// This is done on the RX side.
-
-void
-migrate_delete( migrate_recv_control *mc, cf_digest *keyd )
-{
-	// This is necessary to get the size of the record before deleting
-	as_index_ref r_ref;
-	r_ref.skip_lock = false;
-	int rv = as_record_get(mc->rsv.tree, keyd, &r_ref, mc->rsv.ns);
-	if (rv == 0) {
-		as_record *r = r_ref.r;
-		as_namespace *ns = mc->rsv.ns;
-
-		// bookkeeping: life is smaller
-		if (ns->storage_data_in_memory) {
-			as_storage_rd rd;
-			rd.ns = mc->rsv.ns;
-			rd.n_bins = as_bin_get_n_bins(r, &rd);
-			rd.bins = as_bin_get_all(r, &rd, 0);
-
-			cf_atomic_int_sub(&mc->rsv.p->n_bytes_memory, as_storage_record_get_n_bytes_memory(&rd));
-		}
-
-		// remove from the tree
-		as_index_delete(mc->rsv.tree, keyd);
-
-		// release the record, which will call the record destructor
-		as_record_done(&r_ref, mc->rsv.ns);
-
-		cf_detail(AS_MIGRATE, " migrate rx deleted key: %"PRIx64, *(uint64_t *)keyd);
-
-	}
-	else {
-		cf_info(AS_MIGRATE, " migrate rx COULD NOT delete key: %"PRIx64, *(uint64_t *)keyd);
-	}
-}
-
-//
-// MARK what was there first
-//
-
-void
-migrate_mark_reduce_fn(as_index *r, void *udata)
-{
-	if (r == 0)	return;
-
-	r->migrate_mark = 1;
-	return;
-
-}
-
-
-void
-migrate_mark( migrate_recv_control *mc )
-{
-	as_index_reduce_sync( mc->rsv.tree, migrate_mark_reduce_fn, 0);
-}
-
-//
-//
-
-typedef struct {
-	int alloc_sz;
-	int n_keys;
-	cf_digest keyd[];
-} migrate_sweep_keys;
-
-
-
-void
-migrate_sweep_reduce_fn(as_index *r, void *udata)
-{
-	if (r == 0)	return;
-
-	migrate_sweep_keys **sweep_keys_p = (migrate_sweep_keys **)udata;
-	migrate_sweep_keys *sweep_keys = *sweep_keys_p;
-
-	if (r->migrate_mark == 1) {
-
-		if (sweep_keys == 0) {
-			*sweep_keys_p = (migrate_sweep_keys *) cf_malloc(sizeof(migrate_sweep_keys) + (1000 * sizeof(cf_digest)));
-			sweep_keys = *sweep_keys_p;
-			sweep_keys->alloc_sz = 1000;
-			sweep_keys->n_keys = 0;
-		}
-		if (sweep_keys->alloc_sz == sweep_keys->n_keys) {
-			sweep_keys->alloc_sz += 1000;
-			*sweep_keys_p = cf_realloc(sweep_keys, sizeof(migrate_sweep_keys) + (sweep_keys->alloc_sz * sizeof(cf_digest) ) );
-			sweep_keys = *sweep_keys_p;
-		}
-
-//		cf_debug(AS_MIGRATE, " migrate: sweep: found migrate mark 1 %"PRIx64,*(uint64_t *) key );
-
-		memcpy( &sweep_keys->keyd[ sweep_keys->n_keys ], &r->key, sizeof(cf_digest));
-		sweep_keys->n_keys ++;
-
-	}
-}
-
-
-
-
-void
-migrate_sweep( migrate_recv_control *mc )
-{
-	migrate_sweep_keys *sweep_keys = 0;
-
-	// reduce to find list of elements that need deleting
-	as_index_reduce_sync( mc->rsv.tree, migrate_sweep_reduce_fn, &sweep_keys );
-
-	if (sweep_keys) {
-		cf_info(AS_MIGRATE, " migrate_rx: sweep detected %d keys to delete", sweep_keys->n_keys);
-		for (int i = 0 ; i < sweep_keys->n_keys; i++) {
-//			cf_debug(AS_MIGRATE, " migrate: sweep: delete %"PRIx64,*(uint64_t *) &sweep_keys->keyd[i] );
-			migrate_delete(mc, &sweep_keys->keyd[i]);
-		}
-		cf_free(sweep_keys);
-	}
-}
-
-
-
 
 #ifdef USE_NETWORK_POLICY
 
@@ -1346,27 +1214,6 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 					cf_debug(AS_MIGRATE, "received key with no ttl, setting to 0 as a default ");
 				}
 
-				// Deal with incomplete vinfo
-				as_partition_vinfoset vinfoset;
-
-				/* extract the vinfoset */
-				uint8_t *vinfo_buf = 0;
-				size_t vinfo_buf_len = 0;
-				if (0 != msg_get_buf(m, MIG_FIELD_VINFOSET, &vinfo_buf, &vinfo_buf_len, MSG_GET_DIRECT)) {
-					cf_debug(AS_MIGRATE, "migrate: no vinfoset");
-					memset(&vinfoset, 0, sizeof(vinfoset));
-					// migrate_recv_control_release(mc);
-					// goto Done;
-				}
-				else if (0 != as_partition_vinfoset_unpickle( &vinfoset, vinfo_buf, vinfo_buf_len, "MIG")) {
-					cf_info(AS_MIGRATE, "migrate: could not unpickle vinfoset");
-					memset(&vinfoset, 0, sizeof(vinfoset));
-					// migrate_recv_control_release(mc);
-					// goto Done;
-				}
-
-//				as_partition_vinfoset_dump(vinfoset, "migrate INSERT");
-
 				void *value = NULL;
 				as_rec_props rec_props;
 				as_rec_props_clear(&rec_props);
@@ -1375,7 +1222,6 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				msg_get_buf(m, MIG_FIELD_REC_PROPS, &rec_props.p_data, (size_t*)&rec_props.size, MSG_GET_DIRECT);
 
 				as_record_merge_component c;
-				c.vinfoset      = vinfoset;  // kind of sucks. We should have copied directly into here
 				c.record_buf    = value;
 				c.record_buf_sz = value_sz;
 				c.generation    = generation;
@@ -1401,23 +1247,13 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 					}
 				}
 				else {
-					if (mc->rsv.ns->allow_versions) {
-						// cf_info(AS_MIGRATE, "migrate rx: merge insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
-						if (0 != as_record_merge(&mc->rsv, key, 1, &c)) {
-							cf_warning(AS_MIGRATE, "migrate: record migrate failed %"PRIx64, *(uint64_t *)key);
-							migrate_recv_control_release(mc);
-							goto Done;
-						}
-					}
-					else {
-						// cf_info(AS_MIGRATE, "migrate rx: flatten insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
-						int rv = as_record_flatten(&mc->rsv, key, 1, &c, &winner_idx);
-						if (rv) {
-							if (rv != -3) {
-								// -3 is not a failure. It is get_create failure inside as_record_flatten which is 
-								// possible in case of race.
-								cf_warning_digest(AS_MIGRATE, key, "migrate: record flatten failed %d", rv);
-							}
+					// cf_info(AS_MIGRATE, "migrate rx: flatten insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
+					int rv = as_record_flatten(&mc->rsv, key, 1, &c, &winner_idx);
+					if (rv) {
+						if (rv != -3) {
+							// -3 is not a failure. It is get_create failure inside as_record_flatten which is
+							// possible in case of race.
+							cf_warning_digest(AS_MIGRATE, key, "migrate: record flatten failed %d", rv);
 							migrate_recv_control_release(mc);
 							goto Done;
 						}
@@ -1569,13 +1405,6 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 			cf_atomic_int_incr(&g_config.migrx_tree_count);
 			ns = 0; // ns lock subsumed into the migrate reservation
 
-#ifdef USE_MARK_SWEEP
-			if (mc->mig_type == AS_MIGRATE_TYPE_OVERWRITE) {
-				migrate_mark( mc );
-			}
-#endif
-
-
 			if ((mc->rsv.p == 0) || (mc->rsv.ns == 0) ) {
 				cf_warning(AS_MIGRATE, "migrate recv start: receiving bad reservation: p %p ns %p", mc->rsv.p, mc->rsv.ns);
 				mc->rsv.p = 0;
@@ -1726,12 +1555,6 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 
 					// Record the time of the first DONE received.
 					mc->done_recv_ms = cf_getms();
-
-#ifdef USE_MARK_SWEEP
-					if (mc->mig_type == AS_MIGRATE_TYPE_OVERWRITE) {
-						migrate_sweep(mc);
-					}
-#endif
 
 					if (cf_atomic_int_get(g_config.migrate_progress_recv)) {
 						cf_atomic_int_decr(&g_config.migrate_progress_recv);
@@ -1890,17 +1713,6 @@ migrate_tree_reduce(as_index_ref *r_ref, void *udata)
 	pr->record_buf = NULL;
 
 	as_index *r = r_ref->r;
-
-	pr->vinfo_buf_len = sizeof(pr->vinfo_buf);
-	if (0 != as_partition_vinfoset_mask_pickle(&mig->rsv.p->vinfoset, as_index_vinfo_mask_get(r, mig->rsv.ns->allow_versions), pr->vinfo_buf, &pr->vinfo_buf_len)) {
-		// this only happens if the record we have is too small. Do the best we can: send a null pickled value
-		pr->vinfo_buf_len = 4;
-		pr->vinfo_buf[0] = pr->vinfo_buf[1] = pr->vinfo_buf[2] = pr->vinfo_buf[3] = 0;
-		cf_warning(AS_MIGRATE, "migrate: could not pickle vinfoset, internal error");
-	}
-	if (pr->vinfo_buf[1] || pr->vinfo_buf[2] || pr->vinfo_buf[3]) {
-		cf_info(AS_MIGRATE, "migrate-reduce-vinfo very flawed! len %d : %02x %02x %02x", pr->vinfo_buf_len, pr->vinfo_buf[1], pr->vinfo_buf[2] , pr->vinfo_buf[3]);
-	}
 
 	as_storage_rd rd;
 	if (0 != as_storage_record_open(mig->rsv.ns, r, &rd, &r->key)) {
@@ -2110,7 +1922,7 @@ as_migrate_tree(migration *mig, as_index_tree *tree, bool is_subrecord)
 			msg_set_uint32(m, MIG_FIELD_GENERATION, pr->generation);
 			msg_set_uint32(m, MIG_FIELD_VOID_TIME,  pr->void_time);
 			msg_set_buf   (m, MIG_FIELD_NAMESPACE,  (byte *) mig->rsv.ns->name, strlen(mig->rsv.ns->name), MSG_SET_COPY);
-			msg_set_buf   (m, MIG_FIELD_VINFOSET,   pr->vinfo_buf, pr->vinfo_buf_len, MSG_SET_COPY);
+			// Note - older versions handle missing MIG_FIELD_VINFOSET field.
 
 			if (pr->rec_props.p_data) {
 				msg_set_buf(m, MIG_FIELD_REC_PROPS, (void *)pr->rec_props.p_data, pr->rec_props.size, MSG_SET_HANDOFF_MALLOC);
@@ -2718,15 +2530,9 @@ as_migrate(cf_node *dst_node, uint dst_sz, as_namespace *ns, as_partition_id par
 	return(0);
 }
 
-static cf_atomic32 init_counter = 0;
-
 void
 as_migrate_init()
 {
-	if (1 != cf_atomic32_incr(&init_counter)) {
-		return;
-	}
-
 	// a queue of the migrations that have been requested.
 	g_migrate_q = cf_queue_priority_create(sizeof(void *), true);
 
@@ -2794,7 +2600,7 @@ as_migrate_is_incoming(cf_digest *subrec_digest, uint64_t version, as_partition_
 			}
 		}
 	}
-	cf_detail(AS_LDT, "No Incoming for pid:%d, No mig item", partition_id);
+	cf_detail_digest(AS_LDT, subrec_digest, "No Incoming for pid:%d, version:%ld No mig item", partition_id, version);
 	return false;
 }
 

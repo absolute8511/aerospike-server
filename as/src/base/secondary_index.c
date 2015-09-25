@@ -48,7 +48,7 @@
  *
  * BOOT INDEX 
  * 
- * as_sindex_boot_populateall --> If fast restart or data in memory and load at start up --> as_tscan_sindex_populateall
+ * as_sindex_boot_populateall --> If fast restart or data in memory and load at start up --> as_sbld_build_all
  *
  * SBIN creation
  *
@@ -56,17 +56,9 @@
  *
  * as_sindex_sbins_from_bin -->  as_sindex_sbins_from_bin_buf
  *
- * as_sindex_sbins_from_buf --> as_sindex_sbins_from_bin_buf
- *
  * as_sindex_sbins_from_bin_buf --> (For every macthing sindex) --> as_sindex_sbin_from_sindex
  * 
  * as_sindex_sbin_from_sindex --> (If bin value macthes with sindex defn) --> as_sindex_add_asval_to_itype_sindex
- *
- * as_sindex_diff_sbins_from_buf --> ( For every macthing sindex) --> as_sindex_diff_sbins_from_sindex
- *
- * as_sindex_diff_sbins_from_sindex --> (If bin and buf matches with sindex defn) --> as_sindex_add_diff_asval_to_itype_sindex
- *                                  |
- *                                  --> Else --> as_sindex_add_asval_to_itype_sindex
  *
  * SBIN updates
  * 
@@ -83,34 +75,43 @@
  * as_sindex_putall_rd --> For each sindex --> as_sindex_put_rd
  *
  */
- 
+
+#include "base/secondary_index.h"
+
+#include <errno.h>
+#include <limits.h>
+#include <string.h>
+
+#include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_clock.h"
 #include "aerospike/as_arraylist.h"
 #include "aerospike/as_arraylist_iterator.h"
 #include "aerospike/as_buffer.h"
 #include "aerospike/as_hashmap.h"
 #include "aerospike/as_hashmap_iterator.h"
-#include <aerospike/as_msgpack.h>
+#include "aerospike/as_msgpack.h"
 #include "aerospike/as_pair.h"
 #include "aerospike/as_serializer.h"
 #include "aerospike/as_val.h"
 
 #include "ai_btree.h"
 #include "ai_globals.h"
-
-#include "base/thr_scan.h"
-#include "base/secondary_index.h"
-#include "base/thr_sindex.h"
-#include "base/system_metadata.h"
-
 #include "bt_iterator.h"
 #include "cf_str.h"
-#include <errno.h>
-#include <limits.h>
-#include <string.h>
+#include "fault.h"
+
+#include "base/cfg.h"
+#include "base/datamodel.h"
+#include "base/index.h"
+#include "base/system_metadata.h"
+#include "base/thr_sindex.h"
+#include "base/udf_rw.h"
+
 
 #define SINDEX_CRASH(str, ...) \
 	cf_crash(AS_SINDEX, "SINDEX_ASSERT: "str, ##__VA_ARGS__);
 
+#define AS_SINDEX_PROP_KEY_SIZE (AS_SET_NAME_MAX_SIZE + 20) // setname_binid_typeid
 
 static cf_queue *g_q_index_keys_arr = NULL;
 
@@ -120,9 +121,7 @@ int  as_sindex__pre_op_assert(as_sindex *si, int op);
 int  as_sindex__post_op_assert(as_sindex *si, int op);
 void as_sindex__process_ret(as_sindex *si, int ret, as_sindex_op op, uint64_t starttime, int pos);
 void as_sindex__dup_meta(as_sindex_metadata *imd, as_sindex_metadata **qimd, bool refcounted);
-int  as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_val ** cdt_asval, 
-					byte * buf, uint32_t buf_sz, as_particle_type type, bool from_buf);
-void as_sindex_init_sbin(as_sindex_bin * sbin, as_sindex_op op, as_particle_type type, int simatch);
+int  as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_val ** cdt_asval);
 void                 as_sindex_set_binid_has_sindex(as_namespace *ns, int binid);
 void                 as_sindex_reset_binid_has_sindex(as_namespace *ns, int binid);
 bool                 as_sindex_binid_has_sindex(as_namespace *ns, int binid);
@@ -130,16 +129,16 @@ as_sindex_status     as_sindex_extract_bin_from_path(char * path_str, char *bin)
 // Translation from sindex error code to string
 const char *as_sindex_err_str(int op_code) {
 	switch(op_code) {
-		case AS_SINDEX_ERR_FOUND:               return "INDEX FOUND";           break;
-		case AS_SINDEX_ERR_NO_MEMORY:           return "NO MEMORY";             break;
-		case AS_SINDEX_ERR_UNKNOWN_KEYTYPE:     return "UNKNOWN KEYTYPE";       break;
-		case AS_SINDEX_ERR_BIN_NOTFOUND:        return "BIN NOT FOUND";         break;
-		case AS_SINDEX_ERR_NOTFOUND:            return "NO INDEX";              break;
-		case AS_SINDEX_ERR_PARAM:               return "ERR PARAM";             break;
-		case AS_SINDEX_ERR_TYPE_MISMATCH:       return "KEY TYPE MISMATCH";     break;
-		case AS_SINDEX_ERR:                     return "ERR GENERIC";           break;
-		case AS_SINDEX_OK:                      return "OK";                    break;
-		default:                                return "Unknown Code";          break;
+		case AS_SINDEX_ERR_FOUND:               return "INDEX FOUND";
+		case AS_SINDEX_ERR_NO_MEMORY:           return "NO MEMORY";
+		case AS_SINDEX_ERR_UNKNOWN_KEYTYPE:     return "UNKNOWN KEYTYPE";
+		case AS_SINDEX_ERR_BIN_NOTFOUND:        return "BIN NOT FOUND";
+		case AS_SINDEX_ERR_NOTFOUND:            return "NO INDEX";
+		case AS_SINDEX_ERR_PARAM:               return "ERR PARAM";
+		case AS_SINDEX_ERR_TYPE_MISMATCH:       return "KEY TYPE MISMATCH";
+		case AS_SINDEX_ERR:                     return "ERR GENERIC";
+		case AS_SINDEX_OK:                      return "OK";
+		default:                                return "Unknown Code";
 	}
 }
 
@@ -158,6 +157,18 @@ inline bool as_sindex_isactive(as_sindex *si)
 		ret = FALSE;
 	}
 	return ret;
+}
+
+void
+as_sindex_init_sbin(as_sindex_bin * sbin, as_sindex_op op, as_particle_type type, as_sindex * si)
+{
+	sbin->si              = si;
+	sbin->to_free         = false;
+	sbin->num_values      = 0;
+	sbin->op              = op;
+	sbin->heap_capacity   = 0;
+	sbin->type            = type;
+	sbin->values          = NULL;
 }
 
 /*
@@ -294,7 +305,6 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 	// If the list exist 
 	// 		match the path and type of incoming si to the existing sindexes in the list	
 	bool    to_delete                    = false;
-	int     simatch                      = -1;
 	cf_ll_element * ele                  = NULL;
 	sindex_set_binid_hash_ele * prop_ele = NULL;
 	if (simatch_ll) {
@@ -305,7 +315,6 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 			if (strcmp(si->imd->path_str, imd->path_str) == 0 && 
 				si->imd->btype[0] == imd->btype[0] && si->imd->itype == imd->itype) {
 				to_delete  = true;
-				simatch    = prop_ele->simatch;
 				break;
 			}
 			ele = ele->next;
@@ -703,6 +712,42 @@ as_sindex_pktype(as_sindex_metadata * imd)
 	return AS_SINDEX_ERR_UNKNOWN_KEYTYPE;
 }
 
+/*
+ * Function as_sindex_key_str
+ *     Returns a static string representing the key type
+ *
+ */
+char const *
+as_sindex_ktype_str(as_sindex_ktype type)
+{
+	switch (type) {
+	case AS_SINDEX_KTYPE_LONG:      return "NUMERIC";
+	case AS_SINDEX_KTYPE_DIGEST:    return "STRING";
+	default:
+		cf_warning(AS_SINDEX, "UNSUPPORTED KEY TYPE %d", type);
+		return "??????";
+	}
+}
+
+as_sindex_ktype
+as_sindex_ktype_from_string(char const * type_str)
+{
+	if (!type_str) {
+		cf_warning(AS_SINDEX, "missing secondary index key type");
+		return AS_SINDEX_KTYPE_NONE;
+	}
+	else if (strncasecmp(type_str, "string", 6) == 0) {
+		return AS_SINDEX_KTYPE_DIGEST;
+	}
+	else if (strncasecmp(type_str, "numeric", 7) == 0) {
+		return AS_SINDEX_KTYPE_LONG;
+	}
+	else {
+		cf_warning(AS_SINDEX, "UNRECOGNIZED KEY TYPE %s", type_str);
+		return AS_SINDEX_KTYPE_NONE;
+	}
+}
+
 as_sindex_key_type
 as_sindex_key_type_from_pktype(as_particle_type t)
 {
@@ -728,6 +773,7 @@ as_sindex_sktype_from_pktype(as_particle_type t)
 	}
 	return AS_SINDEX_KTYPE_NONE;
 }
+
 /*
  * Create duplicate copy of sindex metadata. New lock is created
  * used by index create by user at runtime or index creation at the boot time
@@ -886,7 +932,6 @@ as_sindex__op_by_sbin(as_namespace *ns, const char *set, int numbins, as_sindex_
 		return AS_SINDEX_OK;
 	}
 
-	int simatch                = -1;
 	as_sindex * si             = NULL;
 	as_sindex_bin * sbin   = NULL;
 	as_sindex_metadata * imd   = NULL;
@@ -896,12 +941,11 @@ as_sindex__op_by_sbin(as_namespace *ns, const char *set, int numbins, as_sindex_
 	for (int i=0; i<numbins; i++) {
 	// 		Reserve the SI.
 		sbin = &start_sbin[i];
-		simatch = sbin->simatch;
-		if (simatch == -1) {
-			cf_warning(AS_SINDEX, "simatch is coming as -1 while updating");
+		si = sbin->si;
+		if (!si) {
+			cf_warning(AS_SINDEX, "as_sindex_op_by_sbin : si is null in sbin");
 			return AS_SINDEX_ERR;
 		}
-		si = &ns->sindex[simatch];
 		imd =  si->imd;
 		op = sbin->op;
 	// 		Take the read lock on imd
@@ -965,7 +1009,6 @@ as_sindex__op_by_sbin(as_namespace *ns, const char *set, int numbins, as_sindex_
 	}
 	Cleanup:
 	SINDEX_UNLOCK(&imd->slock);
-	AS_SINDEX_RELEASE(si);
 	return retval;
 }
 
@@ -1015,9 +1058,9 @@ as_sindex__stats_clear(as_sindex *si) {
 void
 as_sindex_gconfig_default(as_config *c)
 {
+	c->sindex_builder_threads         = 4;
 	c->sindex_data_max_memory         = ULONG_MAX;
 	c->sindex_data_memory_used        = 0;
-	c->sindex_populator_scan_priority = 3;  // default priority = normal
 }
 void
 as_sindex__config_default(as_sindex *si)
@@ -1399,7 +1442,7 @@ as_sindex_create(as_namespace *ns, as_sindex_metadata *imd, bool user_create)
 		return AS_SINDEX_ERR;
 	}
 
-	imd->nprts  = NUM_SINDEX_PARTITIONS;
+	imd->nprts  = ns->sindex_num_partitions;
 	int id      = chosen_id;
 	si          = &ns->sindex[id];
 	as_sindex_metadata *qimd;
@@ -1588,42 +1631,35 @@ as_sindex_destroy(as_namespace *ns, as_sindex_metadata *imd)
 	}
 }
 
-/*
- * Client API to insert value into the index, pick value from passed in
- * record. Acquires the imd lock, caller should have reserved si.
- */
+// Takes a record and tries to populate it in every sindex present in the namespace.
 int
 as_sindex_putall_rd(as_namespace *ns, as_storage_rd *rd)
 {
-	as_sindex *sindex_arr[AS_SINDEX_MAX];
+	as_sindex * sindex_arr[AS_SINDEX_MAX];
 	SINDEX_GRLOCK();
 	int ret = AS_SINDEX_OK;
-	int cnt = 0;
+	int count = 0;
 
-	// Reserve it before pushing it into queue
 	for (int i = 0; i < AS_SINDEX_MAX; i++) {
 		as_sindex *si = &ns->sindex[i];
-		if (!as_sindex_isactive(si))  continue;
+		if (!as_sindex_isactive(si)) {
+			continue;
+		}
 		AS_SINDEX_RESERVE(si);
-		sindex_arr[cnt++] = si;
-		if (cnt == ns->sindex_cnt) {
+		sindex_arr[count++] = si;
+		if (count == ns->sindex_cnt) {
 			break;
 		}
 	}
 	SINDEX_GUNLOCK();
-
-	for (int i=0; i<cnt; i++) {
+	for (int i = 0; i < count; i++) {
 		as_sindex *si = sindex_arr[i];
 		as_sindex_put_rd(si, rd);
 	}
-	// Sindex release is done after sindex tree is updated
+	
 	return ret;
 }
 
-/*
- * Client API to insert value into the index, pick value from passed in
- * record. Acquires the imd lock, caller should have reserved si.
- */
 int
 as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 {
@@ -1643,16 +1679,16 @@ as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 	SINDEX_UNLOCK(&imd->slock);
 
 	// collect sbins
-	SINDEX_GRLOCK();
 	SINDEX_BINS_SETUP(sbins, 1);
+	SINDEX_GRLOCK();
 
-	int sindex_found = 0;
+	int sbins_populated = 0;
 	for (int i = 0; i < imd->num_bins; i++) {
 		as_bin *b = as_bin_get(rd, imd->bnames[i]);
 		as_val * cdt_val = NULL;
 		if (b) {
-			as_sindex_init_sbin(&sbins[sindex_found], AS_SINDEX_OP_INSERT, as_sindex_pktype(si->imd), si->simatch);
-			sindex_found += as_sindex_sbin_from_sindex(si, b, &sbins[sindex_found], &cdt_val, NULL, 0, 0, false);
+			as_sindex_init_sbin(&sbins[sbins_populated], AS_SINDEX_OP_INSERT, as_sindex_pktype(si->imd), si);
+			sbins_populated += as_sindex_sbin_from_sindex(si, b, &sbins[sbins_populated], &cdt_val);
 			// Only one sbin should be created here.
 		}
 		// FREE as_val
@@ -1660,11 +1696,11 @@ as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
 			as_val_destroy(cdt_val);
 		}
 	}
-	SINDEX_GUNLOCK();
 
-	if (sindex_found) {
-		as_sindex_update_by_sbin(rd->ns, setname, sbins, sindex_found, &rd->keyd);	
-		as_sindex_sbin_freeall(sbins, sindex_found);
+	SINDEX_GUNLOCK();
+	if (sbins_populated == 1) {
+		as_sindex_update_by_sbin(rd->ns, setname, sbins, sbins_populated, &rd->keyd);	
+		as_sindex_sbin_freeall(sbins, sbins_populated);
 		return AS_SINDEX_OK;
 	}
 
@@ -1706,38 +1742,44 @@ as_sindex_query(as_sindex *si, as_sindex_range *srange, as_sindex_qctx *qctx)
 	return ret;
 }
 
+// TODO : sindex repair should drop the index and repopulate it
+// Currently we only populate the sindex again. This does not clean the uncleanable 
+// garbage accumulated in the secondary index tree.
 int
-as_sindex_repair(as_namespace *ns, as_sindex_metadata *imd)
+as_sindex_repair(as_namespace *ns, char * iname)
 {
-	if (!ns)
-		return AS_SINDEX_ERR_PARAM;
-	as_sindex *si = as_sindex_lookup_by_iname(ns, imd->iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
+	as_sindex *si = as_sindex_lookup_by_iname(ns, iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
 	if (si) {
 		if (si->desync_cnt == 0) {
+			cf_warning(AS_SINDEX, "SINDEX REPAIR : index %s is found in sync with primary."
+						" No need to repair index", iname);
+			AS_SINDEX_RELEASE(si);
 			return AS_SINDEX_OK;
 		}
 		int rv = cf_queue_push(g_sindex_populate_q, &si);
 		if (CF_QUEUE_OK != rv) {
-			cf_warning(AS_SINDEX, "Failed to queue up for population... index=%s "
+			cf_warning(AS_SINDEX, "SINDEX REPAIR : Failed to queue up for population. index=%s "
 					"Internal Queue Error rv=%d, retry repair", si->imd->iname, rv);
 			AS_SINDEX_RELEASE(si);
 			return AS_SINDEX_ERR;
 		}
 		return AS_SINDEX_OK;
 	}
+	else {
+		cf_warning(AS_SINDEX, "SINDEX REPAIR : index %s not found", iname);
+	}
 	return AS_SINDEX_ERR_NOTFOUND;
 }
 
 int
-as_sindex_stats_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db)
+as_sindex_stats_str(as_namespace *ns, char * iname, cf_dyn_buf *db)
 {
-	if (!ns)
-		return AS_SINDEX_ERR_PARAM;
+	as_sindex *si = as_sindex_lookup_by_iname(ns, iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
 
-	as_sindex *si = as_sindex_lookup_by_iname(ns, imd->iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
-
-	if (!si)
+	if (!si) {
+		cf_warning(AS_SINDEX, "SINDEX STAT : sindex %s not found", iname);
 		return AS_SINDEX_ERR_NOTFOUND;
+	}
 
 	// A good thing to cache the stats first.
 	int      ns_objects  = ns->n_objects;
@@ -1852,70 +1894,6 @@ as_sindex_stats_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db)
 	return AS_SINDEX_OK;
 }
 
-// NB:  These are distinctly different from the column names in AA!
-static char *as_col_type_defs[] =
-  { "NONE",      "NUMERIC",   "NUMERIC",   "STRING", "FLOAT", "UNDEFINED",
-    "UNDEFINED", "UNDEFINED", "UNDEFINED", "UNDEFINED" };
-
-/*
- * Client API to describe index based passed in imd, populates passed info fully
- */
-int
-as_sindex_describe_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db)
-{
-	if (!ns)
-		return AS_SINDEX_ERR_PARAM;
-
-	as_sindex *si = as_sindex_lookup_by_iname(ns, imd->iname, AS_SINDEX_LOOKUP_FLAG_NORESERVE);
-	if ((si) && (si->imd)) {
-		SINDEX_RLOCK(&si->imd->slock)
-		as_sindex_metadata *imd = si->imd;
-		cf_dyn_buf_append_string(db, "indexname=");
-		cf_dyn_buf_append_string(db, imd->iname);
-		cf_dyn_buf_append_string(db, ";ns=");
-		cf_dyn_buf_append_string(db, ns->name);
-		cf_dyn_buf_append_string(db, ";set=");
-		cf_dyn_buf_append_string(db, imd->set == NULL ? "NULL" : imd->set);
-		cf_dyn_buf_append_string(db, ";numbins=");
-		cf_dyn_buf_append_uint64(db, imd->num_bins);
-		cf_dyn_buf_append_string(db, ";bins=");
-		for (int i = 0; i < imd->num_bins; i++) {
-			if (i) cf_dyn_buf_append_string(db, ",");
-			cf_dyn_buf_append_buf(db, (uint8_t *)imd->bnames[i], strlen(imd->bnames[i]));
-			cf_dyn_buf_append_string(db, ":");
-			// HACKY
-			cf_dyn_buf_append_string(db, as_col_type_defs[as_sindex_pktype(imd)]);
-		}
-
-		// Index State
-		if (si->state == AS_SINDEX_ACTIVE) {
-			if (si->flag & AS_SINDEX_FLAG_RACTIVE) {
-				cf_dyn_buf_append_string(db, ";state=RW");
-			}
-			else if (si->flag & AS_SINDEX_FLAG_WACTIVE) {
-				cf_dyn_buf_append_string(db, ";state=WO");
-			}
-			else {
-				cf_dyn_buf_append_string(db, ";state=A");
-			}
-		}
-		else if (si->state == AS_SINDEX_INACTIVE) {
-			cf_dyn_buf_append_string(db, ";state=I");
-		}
-		else {
-			cf_dyn_buf_append_string(db, ";state=D");
-		}
-		cf_dyn_buf_append_string(db, ";path_str=");
-		cf_dyn_buf_append_string(db, si->imd->path_str);
-		SINDEX_UNLOCK(&si->imd->slock)
-		AS_SINDEX_RELEASE(si);
-		return AS_SINDEX_OK;
-	} else {
-		return AS_SINDEX_ERR_NOTFOUND;
-	}
-	return AS_SINDEX_OK;
-}
-
 /*
  * Client API to start namespace scan to populate secondary index. The scan
  * is only performed in the namespace is warm start or if its data is not in
@@ -1927,16 +1905,13 @@ as_sindex_describe_str(as_namespace *ns, as_sindex_metadata *imd, cf_dyn_buf *db
 int
 as_sindex_boot_populateall()
 {
-	int ns_cnt            = 0;
-	int old_priority   = g_config.sindex_populator_scan_priority;
-	int old_g_priority = g_config.scan_priority;
-	int old_g_sleep    = g_config.scan_sleep;
+	// Initialize the secondary index builder. The thread pool is initialized
+	// with maximum threads to go full throttle, then down-sized to the
+	// configured number after the startup population job is done.
+	as_sbld_init();
 
-	// Go full throttle
-	g_config.scan_priority                  = UINT_MAX;
-	g_config.scan_sleep                     = 0;
-	g_config.sindex_populator_scan_priority = MAX_SCAN_THREADS; // use all of it
-	
+	int ns_cnt = 0;
+
 	// Trigger namespace scan to populate all secondary indexes
 	// mark all secondary index for a namespace as populated
 	for (int i = 0; i < g_config.namespaces; i++) {
@@ -1944,12 +1919,12 @@ as_sindex_boot_populateall()
 		if (!ns || (ns->sindex_cnt == 0)) {
 			continue;
 		}
-	
+
 		// If FAST START
 		// OR (Data not in memory AND load data at startup)
 		if (!ns->cold_start
 			|| (!ns->storage_data_in_memory)) {
-			as_tscan_sindex_populateall(ns);
+			as_sbld_build_all(ns);
 			cf_info(AS_SINDEX, "Queuing namespace %s for sindex population ", ns->name);
 		} else {
 			as_sindex_boot_populateall_done(ns);
@@ -1962,10 +1937,11 @@ as_sindex_boot_populateall()
 		cf_queue_pop(g_sindex_populateall_done_q, &ret, CF_QUEUE_FOREVER);
 		// TODO: Check for failure .. is generally fatal if it fails
 	}
-	g_config.scan_priority                  = old_g_priority;
-	g_config.scan_sleep                     = old_g_sleep;
-	g_config.sindex_populator_scan_priority = old_priority;
-	g_sindex_boot_done                      = true;
+
+	// Down-size builder thread pool to configured value.
+	as_sbld_resize_thread_pool(g_config.sindex_builder_threads);
+
+	g_sindex_boot_done = true;
 
 	// This above flag indicates that the basic sindex boot-up loader is done
 	// Go and destroy the sindex_cfg_var_hash here to prevent run-time
@@ -2049,7 +2025,7 @@ as_sindex_list_str(as_namespace *ns, cf_dyn_buf *db)
 				if (i) cf_dyn_buf_append_string(db, ",");
 				cf_dyn_buf_append_buf(db, (uint8_t *)si.imd->bnames[i], strlen(si.imd->bnames[i]));
 				cf_dyn_buf_append_string(db, ":type=");
-				cf_dyn_buf_append_string(db, Col_type_defs[as_sindex_pktype(si.imd)]);
+				cf_dyn_buf_append_string(db, as_sindex_ktype_str(si.imd->btype[0]));
 				cf_dyn_buf_append_string(db, ":indextype=");
 				cf_dyn_buf_append_string(db, as_sindex_type_defs[si.imd->itype]);
 
@@ -2098,6 +2074,9 @@ as_sindex_update_by_sbin(as_namespace *ns, const char *set, as_sindex_bin *start
 {
 	cf_debug(AS_SINDEX, "as_sindex_update_by_sbin");
 
+	// Need to address sbins which have OP as AS_SINDEX_OP_DELETE before the ones which have
+	// OP as AS_SINDEX_OP_INSERT. This is because same secondary index key can exist in sbins
+	// with different OPs
 	int sindex_ret = AS_SINDEX_OK;
 	for (int i=0; i<num_sbins; i++) {
 		if (start_sbin[i].op == AS_SINDEX_OP_DELETE) {
@@ -2207,8 +2186,6 @@ as_sindex_range_free(as_sindex_range **range)
 {
 	cf_debug(AS_SINDEX, "as_sindex_range_free");
 	as_sindex_range *sk = (*range);
-//	as_sindex_sbin_freeall(&sk->start, sk->num_binval);
-//	as_sindex_sbin_freeall(&sk->end, sk->num_binval);
 	cf_free(sk);
 	return AS_SINDEX_OK;
 }
@@ -2351,8 +2328,7 @@ as_sindex_range_from_msg(as_namespace *ns, as_msg *msgp, as_sindex_range *srange
 		strncpy(srange->bin_path, (char *)data, bin_path_len);
 		srange->bin_path[bin_path_len] = '\0';
 
-		char binname[BIN_NAME_MAX_SZ];
-		memset(binname, 0, BIN_NAME_MAX_SZ);
+		char binname[AS_ID_BIN_SZ];
 		if (as_sindex_extract_bin_from_path(srange->bin_path, binname) == AS_SINDEX_OK) {
 			int16_t id = as_bin_get_id(ns, binname);
 			if (id != -1) {
@@ -2475,19 +2451,6 @@ as_sindex_rangep_from_msg(as_namespace *ns, as_msg *msgp, as_sindex_range **sran
 		return ret;
 	}
 	return AS_SINDEX_OK;
-}
-
-
-void
-as_sindex_init_sbin(as_sindex_bin * sbin, as_sindex_op op, as_particle_type type, int simatch)
-{
-	sbin->simatch         = simatch;
-	sbin->to_free         = false;
-	sbin->num_values      = 0;
-	sbin->op              = op;
-	sbin->heap_capacity   = 0;
-	sbin->type            = type;
-	sbin->values          = NULL;
 }
 
 as_sindex_status
@@ -2889,7 +2852,7 @@ as_sindex_add_diff_asval_to_default_sindex(as_val * old_val, as_val *new_val, as
 	// Then compare the values and add it to the sbin accodingly.
 	// Else add them separately to different bins if possible.
 
-	int simatch = sbin->simatch;
+	as_sindex * si = sbin->si;
 	as_val_t expected_type = AS_UNDEF;
 	as_particle_type type = sbin->type;
 	if (type == AS_PARTICLE_TYPE_STRING) {
@@ -2899,7 +2862,8 @@ as_sindex_add_diff_asval_to_default_sindex(as_val * old_val, as_val *new_val, as
 		expected_type = AS_INTEGER;
 	}
 	else {
-		return AS_SINDEX_OK;
+		cf_debug(AS_SINDEX, "Invalid type in as_sindex_add_diff_asval_to_default_sindex -  %d", type);
+		return AS_SINDEX_ERR;
 	}
 
 	// If both old val and new val have the same expected type
@@ -2920,7 +2884,7 @@ as_sindex_add_diff_asval_to_default_sindex(as_val * old_val, as_val *new_val, as
 						sbin->op = AS_SINDEX_OP_DELETE;
 						if (as_sindex_add_string_to_sbin(sbin, old_str) == AS_SINDEX_OK) {
 							sbin++;
-							as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+							as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 							*found += 1;
 						}
 						if (as_sindex_add_string_to_sbin(sbin, new_str) == AS_SINDEX_OK) {
@@ -2942,29 +2906,28 @@ as_sindex_add_diff_asval_to_default_sindex(as_val * old_val, as_val *new_val, as
 					sbin->op = AS_SINDEX_OP_DELETE;
 					if (as_sindex_add_integer_to_sbin(sbin, old_int) == AS_SINDEX_OK) {
 						sbin++;
-						as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+						as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 						*found += 1;
 					}
 					if (as_sindex_add_integer_to_sbin(sbin, new_int) == AS_SINDEX_OK) {
 						*found += 1;
-					}
+					} 
 				}
-
 			}
 			return AS_SINDEX_OK;
 		}
 	}
 
 	// Else add them separately to different bins if possible.
-	as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, simatch);
+	as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, si);
 	if (as_sindex_add_keytype_from_asval[as_sindex_key_type_from_pktype(sbin->type)](old_val, sbin) == AS_SINDEX_OK) {
 		if (sbin->num_values) {
 			*found     += 1;
-			sbin        = sbin + *found;
+			sbin        = sbin + 1;
 		}
 	}
 
-	as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+	as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 	if (as_sindex_add_keytype_from_asval[as_sindex_key_type_from_pktype(sbin->type)](new_val, sbin) == AS_SINDEX_OK) {
 		if (sbin->num_values) {
 			*found += 1;	
@@ -3081,7 +3044,7 @@ as_sindex_add_diff_asval_to_list_sindex(as_val * old_val, as_val *new_val, as_si
 		cf_debug(AS_SINDEX, "Invalid data type %d", type);
 		return AS_SINDEX_ERR;
 	}
-	int simatch =  sbin->simatch;
+	as_sindex * si = sbin->si;
 	// If both old val and new val have the same expected type
 	if (old_val && new_val) {
 		if (old_val->type == AS_LIST && new_val->type == AS_LIST) {
@@ -3102,7 +3065,7 @@ as_sindex_add_diff_asval_to_list_sindex(as_val * old_val, as_val *new_val, as_si
 
 			//		Iterate through all the values in the old and check if it exist or not in the new hash
 			//		If it does not exist add it to the sbin with OP DELETE
-			as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+			as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 			old_sbin_hash.sbin      = sbin;
 			as_list_foreach(new_list, as_sindex_compare_list_hash, &old_sbin_hash);
 			if (sbin->num_values) {
@@ -3112,7 +3075,7 @@ as_sindex_add_diff_asval_to_list_sindex(as_val * old_val, as_val *new_val, as_si
 
 			//		Iterate through all the values in the old and check if it exist or not in the old hash 
 			//		If it does not exist add it to the sbin with OP INSERT
-			as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, simatch);
+			as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, si);
 			new_sbin_hash.sbin      = sbin;
 			as_list_foreach(old_list, as_sindex_compare_list_hash, &new_sbin_hash);
 			if (sbin->num_values) {
@@ -3126,15 +3089,15 @@ as_sindex_add_diff_asval_to_list_sindex(as_val * old_val, as_val *new_val, as_si
 	}
 
 	// Else add them separately to the sbins
-	as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, simatch);
+	as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, si);
 	if (as_sindex_add_asval_to_list_sindex(old_val, sbin) == AS_SINDEX_OK) {
 		if (sbin->num_values) {
 			*found     += 1;
-			sbin        = sbin + *found;
+			sbin        = sbin + 1;
 		}
 	}
 
-	as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+	as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 	if (as_sindex_add_asval_to_list_sindex(new_val, sbin) == AS_SINDEX_OK) {
 		if (sbin->num_values) {
 			*found += 1;	
@@ -3236,7 +3199,7 @@ as_sindex_add_diff_asval_to_mapkeys_sindex(as_val * old_val, as_val * new_val, a
 		cf_debug(AS_SINDEX, "Invalid data type %d", type);
 		return AS_SINDEX_ERR;
 	}
-	int simatch = sbin->simatch;
+	as_sindex * si = sbin->si;
 
 	// If both old val and new val have the same expected type
 	if (old_val && new_val) {
@@ -3258,7 +3221,7 @@ as_sindex_add_diff_asval_to_mapkeys_sindex(as_val * old_val, as_val * new_val, a
 	
 	//		Iterate through all the values in the old and check if it exist or not in the new hash
 	//		If it does not exist add it to the sbin with OP DELETE
-			as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+			as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 			old_sbin_hash.sbin = sbin;
 			as_map_foreach(new_map, as_sindex_compare_mapkeys_hash, &old_sbin_hash);
 			if (sbin->num_values) {
@@ -3268,7 +3231,7 @@ as_sindex_add_diff_asval_to_mapkeys_sindex(as_val * old_val, as_val * new_val, a
 
 	//		Iterate through all the values in the old and check if it exist or not in the old hash 
 	//		If it does not exist add it to the sbin with OP INSERT
-			as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, simatch);
+			as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, si);
 			new_sbin_hash.sbin = sbin;
 			as_map_foreach(old_map, as_sindex_compare_mapkeys_hash, &new_sbin_hash);
 			if (sbin->num_values) {
@@ -3286,8 +3249,8 @@ as_sindex_add_diff_asval_to_mapkeys_sindex(as_val * old_val, as_val * new_val, a
 	if (as_sindex_add_asval_to_mapkeys_sindex(old_val, sbin) == AS_SINDEX_OK) {
 		if (sbin->num_values) {
 			*found     += 1;
-			sbin        = sbin + *found;
-			as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+			sbin        = sbin + 1;
+			as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 		}
 	}
 
@@ -3393,7 +3356,7 @@ as_sindex_add_diff_asval_to_mapvalues_sindex(as_val * old_val, as_val * new_val,
 		cf_debug(AS_SINDEX, "Invalid data type %d", type);
 		return AS_SINDEX_ERR;
 	}
-	int simatch = sbin->simatch;
+	as_sindex * si = sbin->si;
 
 	// If both old val and new val have the same expected type
 	if (old_val && new_val) {
@@ -3415,7 +3378,7 @@ as_sindex_add_diff_asval_to_mapvalues_sindex(as_val * old_val, as_val * new_val,
 	
 	//		Iterate through all the values in the old and check if it exist or not in the new hash
 	//		If it does not exist add it to the sbin with OP DELETE
-			as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+			as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 			old_sbin_hash.sbin = sbin;
 			as_map_foreach(new_map, as_sindex_compare_mapvalues_hash, &old_sbin_hash);
 			if (sbin->num_values) {
@@ -3425,7 +3388,7 @@ as_sindex_add_diff_asval_to_mapvalues_sindex(as_val * old_val, as_val * new_val,
 
 	//		Iterate through all the values in the old and check if it exist or not in the old hash 
 	//		If it does not exist add it to the sbin with OP INSERT
-			as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, simatch);
+			as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, si);
 			new_sbin_hash.sbin = sbin;
 			as_map_foreach(old_map, as_sindex_compare_mapvalues_hash, &new_sbin_hash);
 			if (sbin->num_values) {
@@ -3439,15 +3402,15 @@ as_sindex_add_diff_asval_to_mapvalues_sindex(as_val * old_val, as_val * new_val,
 	}
 
 	// Else add them separately to the sbins
-	as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, simatch);
+	as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, type, si);
 	if (as_sindex_add_asval_to_mapvalues_sindex(old_val, sbin) == AS_SINDEX_OK) {
 		if (sbin->num_values) {
 			*found     += 1;
-			sbin        = sbin + *found;
+			sbin        = sbin + 1;
 		}
 	}
 
-	as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, simatch);
+	as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, type, si);
 	if (as_sindex_add_asval_to_mapvalues_sindex(new_val, sbin) == AS_SINDEX_OK) {
 		if (sbin->num_values) {
 			*found += 1;	
@@ -3466,42 +3429,19 @@ typedef as_sindex_status (*as_sindex_add_diff_asval_to_itype_sindex_fn)
 	as_sindex_add_diff_asval_to_mapvalues_sindex
 };
 
-as_val * as_val_frombuf(byte *buf, uint32_t sz)
-{
-	as_val * v = NULL;
-	as_buffer     asbuf;
-	as_buffer_init(&asbuf);
-	as_serializer s;
-	as_msgpack_init(&s);
-
-	asbuf.data = buf;
-	asbuf.capacity = sz;
-	asbuf.size = sz;
-
-	as_serializer_deserialize(&s, &asbuf, &v);
-	as_serializer_destroy(&s);
-	return v;
-}
-
 int
-as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_val ** cdt_asval, 
-					byte * buf, uint32_t buf_sz, as_particle_type type, bool from_buf)
+as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_val ** cdt_asval)
 {
 	as_sindex_metadata * imd    = si->imd;
 	as_particle_type imd_btype  = as_sindex_pktype(imd);
-	bool deserialized           = !(*cdt_asval) ? false : true;
 	as_val * cdt_val            = * cdt_asval;
 	uint32_t  valsz             = 0;
 	int sindex_found            = 0;
 	as_particle_type bin_type   = 0;
 	bool found = false;
-	if (from_buf) {
-		bin_type                = type;
-	}
-	else {
-		bin_type                = as_bin_get_particle_type(b);
-	}
-	
+
+	bin_type = as_bin_get_particle_type(b);
+
 	//		Prepare si
 	// 		If path_length == 0
 	if (imd->path_length == 0) {
@@ -3511,13 +3451,9 @@ as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_v
 			if (bin_type == AS_PARTICLE_TYPE_INTEGER) {
 				found = true;
 				uint64_t int_val = 0;
-				if (from_buf) {
-					int_val =  __be64_to_cpup((void*)buf);
-				}
-				else {
-					valsz = as_bin_particle_to_mem(b, (byte *)&sbin->value.int_val);
-					int_val    = sbin->value.int_val;
-				}
+
+				valsz = as_bin_particle_to_mem(b, (byte *)&sbin->value.int_val);
+				int_val = sbin->value.int_val;
 
 				if (as_sindex_add_integer_to_sbin(sbin, int_val) == AS_SINDEX_OK) {
 					if (sbin->num_values) {
@@ -3528,29 +3464,16 @@ as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_v
 			else if (bin_type == AS_PARTICLE_TYPE_STRING) {
 				found = true;
 				byte* bin_val;
-				bool valid_str = true;
 				cf_digest buf_dig;
-				if (from_buf) {
-					if ( buf_sz < 0 || buf_sz > AS_SINDEX_MAX_STRING_KSIZE) {
-						cf_warning( AS_SINDEX, "sindex key size out of bounds %d ", buf_sz);
-						valid_str = false;
-					}
-					else {
-						cf_digest_compute(buf, buf_sz, &buf_dig);
-					}
+				valsz = as_bin_particle_mem_size(b);
+
+				if (valsz < 0 || valsz > AS_SINDEX_MAX_STRING_KSIZE) {
+					cf_warning( AS_SINDEX, "sindex key size out of bounds %d ", valsz);
 				}
 				else {
-					valsz = as_bin_particle_mem_size(b);
-					if ( valsz < 0 || valsz > AS_SINDEX_MAX_STRING_KSIZE) {
-						cf_warning( AS_SINDEX, "sindex key size out of bounds %d ", valsz);
-						valid_str = false;
-					}
-					else {
-						valsz = as_bin_particle_ptr(b, &bin_val);
-						cf_digest_compute(bin_val, valsz, &buf_dig);
-					}
-				}
-				if (valid_str) {					
+					valsz = as_bin_particle_ptr(b, &bin_val);
+					cf_digest_compute(bin_val, valsz, &buf_dig);
+
 					if (as_sindex_add_digest_to_sbin(sbin, buf_dig) == AS_SINDEX_OK) {
 						if (sbin->num_values) {
 							sindex_found++;
@@ -3566,14 +3489,8 @@ as_sindex_sbin_from_sindex(as_sindex * si, as_bin *b, as_sindex_bin * sbin, as_v
 	//			Add the values to the sbin.
 	if (!found) {
 		if (bin_type == AS_PARTICLE_TYPE_MAP || bin_type == AS_PARTICLE_TYPE_LIST) {
-			if (! deserialized) {
-				if (from_buf) {
-					cdt_val =  as_val_frombuf(buf, buf_sz);
-				}
-				else {
-					cdt_val   = as_val_frombin(b);
-				}
-				deserialized = true;
+			if (! cdt_val) {
+				cdt_val = as_val_frombin(b);
 			}
 			as_val * res_val   = as_sindex_extract_val_from_path(imd, cdt_val);
 			if (!res_val) {
@@ -3592,9 +3509,10 @@ END:
 }
 
 // Returns the number of sindex found
+// TODO - deprecate and conflate body with as_sindex_sbins_from_bin() below.
 int
 as_sindex_sbins_from_bin_buf(as_namespace *ns, const char *set, as_bin *b, as_sindex_bin * start_sbin, 
-					byte * buf, uint32_t buf_sz, as_particle_type type, as_sindex_op op, bool from_buf)
+					as_sindex_op op)
 {
 	// Check the sindex bit array.
 	// If there is not sindex present on this bin return 0
@@ -3627,7 +3545,7 @@ as_sindex_sbins_from_bin_buf(as_namespace *ns, const char *set, as_bin *b, as_si
 		cf_warning(AS_SINDEX, "NULL Namespace Passed");
 		return sindex_found;
 	}
-	if (!from_buf && !as_bin_inuse(b)) {
+	if (!as_bin_inuse(b)) {
 		return sindex_found;
 	}
 
@@ -3662,9 +3580,9 @@ as_sindex_sbins_from_bin_buf(as_namespace *ns, const char *set, as_bin *b, as_si
 			continue;
 		}
 		AS_SINDEX_RESERVE(si);   
-		as_sindex_init_sbin(&start_sbin[sindex_found], op,  as_sindex_pktype(si->imd), simatch);
+		as_sindex_init_sbin(&start_sbin[sindex_found], op,  as_sindex_pktype(si->imd), si);
 		uint64_t s_time = cf_getns();
-		sbins_in_si          = as_sindex_sbin_from_sindex(si, b, &start_sbin[sindex_found], &cdt_val, buf, buf_sz, type, from_buf);
+		sbins_in_si          = as_sindex_sbin_from_sindex(si, b, &start_sbin[sindex_found], &cdt_val);
 		if (sbins_in_si > 0) {
 			sindex_found += sbins_in_si;
 			// AS_SINDEX_RELEASE will happen after sindex tree has been updated	
@@ -3687,244 +3605,7 @@ as_sindex_sbins_from_bin_buf(as_namespace *ns, const char *set, as_bin *b, as_si
 int
 as_sindex_sbins_from_bin(as_namespace *ns, const char *set, as_bin *b, as_sindex_bin * start_sbin, as_sindex_op op)
 {
-	return as_sindex_sbins_from_bin_buf(ns, set, b, start_sbin, NULL, 0, 0, op, false);
-}
-
-int
-as_sindex_sbins_from_buf(as_namespace *ns, const char *set, as_bin *b, as_sindex_bin * start_sbin, 
-					byte * buf, uint32_t buf_sz, as_particle_type type, as_sindex_op op)
-{
-	return as_sindex_sbins_from_bin_buf(ns, set, b, start_sbin, buf, buf_sz, type, op, true);
-}
-
-
-int
-as_sindex_diff_sbins_from_sindex(as_sindex * si, as_bin * b, byte * buf, uint32_t buf_sz, as_particle_type type, 
-		as_sindex_bin * sbin, as_val ** bin_val, as_val ** buf_val, bool * deserialized)
-{
-	as_sindex_metadata * imd       = si->imd;
-	as_particle_type   imd_btype = as_sindex_pktype(imd);
-	int sindex_found = 0;
-	bool found = false;
-	int simatch = si->simatch;
-	uint32_t valsz = 0;
-	as_particle_type bin_type = type;
-	if (imd->path_length == 0 ) {
-		// 			If itype == AS_SINDEX_ITYPE_DEFAULT and bin_type == STRING OR INTEGER
-		// 				Compare the basic value of both bin and msgop
-		//				If it changes add to a sbin.
-		if (imd->itype == AS_SINDEX_ITYPE_DEFAULT ) {
-			if (type == AS_PARTICLE_TYPE_INTEGER) {
-				found = true;
-				uint64_t buf_int = __be64_to_cpup((void*)buf);
-				uint64_t bin_int = 0;
-				valsz = as_bin_particle_to_mem(b, (byte *)&bin_int);
-				if (buf_int != bin_int) {
-					as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, imd_btype, simatch);
-					if (as_sindex_add_integer_to_sbin(sbin, bin_int) == AS_SINDEX_OK) {
-						if (sbin->num_values) {
-							sindex_found++;
-							sbin = sbin + sindex_found;
-						}
-					}
-
-					as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, imd_btype, simatch);
-					if (as_sindex_add_integer_to_sbin(sbin, buf_int) == AS_SINDEX_OK) {
-						if (sbin->num_values) {
-							sindex_found++;
-						}
-					}
-				}
-			}
-			else if (type == AS_PARTICLE_TYPE_STRING) {
-				found = true;
-				bool valid_binstr = true;
-				bool valid_bufstr = true;
-				byte* bin_str;
-				cf_digest bin_dig, buf_dig;
-				bool has_changed = true;
-				if ( buf_sz < 0 || buf_sz > AS_SINDEX_MAX_STRING_KSIZE) {
-					cf_warning( AS_SINDEX, "sindex key size out of bounds %d ", buf_sz);
-					valid_bufstr = false;
-				}
-				else {
-					cf_digest_compute(buf, buf_sz, &buf_dig);
-				}
-
-				valsz = as_bin_particle_mem_size(b);
-				if ( valsz < 0 || valsz > AS_SINDEX_MAX_STRING_KSIZE) {
-					cf_warning( AS_SINDEX, "sindex key size out of bounds %d ", valsz);
-					valid_binstr = false;
-				}
-				else {
-					valsz = as_bin_particle_ptr(b, &bin_str);
-					cf_digest_compute(bin_str, valsz, &bin_dig);
-				}
-
-				if (valid_bufstr && valid_binstr) {
-					has_changed = memcmp(&buf_dig, &bin_dig, sizeof(cf_digest)) ? true : false;
-				}
-
-				if (has_changed) {
-					if (valid_binstr) {
-						as_sindex_init_sbin(sbin, AS_SINDEX_OP_DELETE, imd_btype, simatch);
-						if (as_sindex_add_digest_to_sbin(sbin, bin_dig) == AS_SINDEX_OK) {
-							if (sbin->num_values) {
-								sindex_found++;
-								sbin = sbin + sindex_found;
-							}
-						}
-					}
-					if (valid_bufstr) {
-						as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, imd_btype, simatch);
-						if (as_sindex_add_digest_to_sbin(sbin, buf_dig) == AS_SINDEX_OK) {
-							if (sbin->num_values) {
-								sindex_found++;
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 		Else if path_length > 0 OR type == MAP or LIST 
-	// 			Deserialize the existing_bin and incoming_bin if have not deserialized it yet.
-	//			Extract as_val from path within the bin and buf
-	//			Compare the values in both vals and add them to the sbin.	
-	if (!found && (bin_type == AS_PARTICLE_TYPE_MAP || bin_type == AS_PARTICLE_TYPE_LIST)) {
-		if (!*deserialized) {
-			*buf_val      = as_val_frombuf(buf, buf_sz);
-			*bin_val      = as_val_frombin(b);
-			*deserialized = true;
-		}
-		as_val * path_binval   = as_sindex_extract_val_from_path(imd, *bin_val);
-		as_val * path_bufval   = as_sindex_extract_val_from_path(imd, *buf_val);	
-		int found = 0;
-		as_sindex_init_sbin(sbin, AS_SINDEX_OP_INSERT, imd_btype, simatch);			
-		if (path_binval || path_bufval) {
-			if (as_sindex_add_diff_asval_to_itype_sindex[imd->itype]
-					(path_binval, path_bufval, sbin, &found) == AS_SINDEX_OK) {
-				sindex_found += found;
-			}
-		}
-	}
-	return sindex_found;
-}
-
-
-int
-as_sindex_diff_sbins_from_buf(as_namespace * ns, const char * set, as_bin * b, byte * buf, uint32_t buf_sz,
-		as_particle_type type, as_sindex_bin * start_sbin)
-{
-	// Check if this bin has alteast one sindex over it.
-	// If buf is null return the sbins from the bin.
-	// If type of bins are not same, then get the sbins from both bins and msgop and send them back.
-	// Get the simatch_ll from set_binid_hash
-	// If simatch_ll is NULL return 0
-	// Iterate through simatch_ll
-	// 		If path_length == 0
-	// 			If itype == AS_SINDEX_ITYPE_DEFAULT and bin_type == STRING OR INTEGER
-	// 				Compare the basic value of both bin and msgop
-	//				If it changes add to a sbin.
-	//			If itype == AS_SINDEX_ITYPE_MAP or AS_SINDEX_ITYPE_INVMAP and type = MAP
-	//	 			Deserialize the existing_bin and incoming_bin if have not deserialized it yet.
-	//				Extract as_val from path within the bin and buf
-	//				Compare the values in both vals and add them to the sbin.
-	// 			If itype == AS_SINDEX_ITYPE_LIST and type = LIST
-	//	 			Deserialize the existing_bin and incoming_bin if have not deserialized it yet.
-	//				Extract as_val from path within the bin and buf
-	//				Compare the values in both vals and add them to the sbin.
-	// 		Else if path_length > 0 and type == MAP or LIST 
-	// 			Deserialize the existing_bin and incoming_bin if have not deserialized it yet.
-	//			Extract as_val from path within the bin and buf
-	//			Compare the values in both vals and add them to the sbin.
-	// Return the number of sbins found.
-
-	int sindex_found = 0;
-
-	// Do preliminary checks
-	if (!b) {
-		cf_warning(AS_SINDEX, "Null Bin Passed, No sbin created");
-		return sindex_found;
-	}
-	if (!ns) {
-		cf_warning(AS_SINDEX, "NULL Namespace Passed");
-		return sindex_found;
-	}
-	if (!as_bin_inuse(b)) {
-		return sindex_found;
-	}
-
-	// Check if this bin has alteast one sindex over it.
-	if (!as_sindex_binid_has_sindex(ns, b->id) ) {
-		 return sindex_found;
-	}
-
-	// If buf is null return the sbins from the bin.
-	if (!buf) {
-		sindex_found += as_sindex_sbins_from_bin(ns, set, b, start_sbin + sindex_found, AS_SINDEX_OP_DELETE);
-		return sindex_found;	
-	}
-
-	// If type of bins are not same, then both cannot have values in the same index.
-	// Get the sbins from both bins and buf and send them back.
-	if (type != as_bin_get_particle_type(b)) {
-		sindex_found += as_sindex_sbins_from_bin(ns, set, b, start_sbin + sindex_found, AS_SINDEX_OP_DELETE);
-		sindex_found += as_sindex_sbins_from_buf(ns, set, b, start_sbin + sindex_found, buf, buf_sz, type, AS_SINDEX_OP_INSERT);
-		return sindex_found;
-	}
-
-	// Get the simatch_ll from set_binid_hash
-	cf_ll * simatch_ll = NULL;
-	as_sindex__simatch_list_by_set_binid(ns, set, b->id, &simatch_ll);
-	// If simatch_ll is NULL return 0
-	if (!simatch_ll) {
-		return sindex_found;
-	}
-
-	// Iterate through simatch_ll
-	cf_ll_element             * ele    = cf_ll_get_head(simatch_ll);
-	sindex_set_binid_hash_ele * si_ele = NULL;
-	int                        simatch = -1;
-	as_sindex                 * si     = NULL;
-	as_val * buf_val                   = NULL;
-	as_val * bin_val                   = NULL;
-	bool                  deserialized = false;
-	as_sindex_bin             * sbin   = NULL;
-	int                    sbins_in_si = 0;
-	while (ele) {
-		si_ele        = (sindex_set_binid_hash_ele *) ele;
-		simatch       = si_ele->simatch;
-		si            = &ns->sindex[simatch];
-		sbin          = start_sbin + sindex_found;
-		if (!as_sindex_isactive(si)) {
-			ele = ele->next;
-			continue;
-		}
-		AS_SINDEX_RESERVE(si);
-		sbins_in_si  = as_sindex_diff_sbins_from_sindex(si, b, buf, buf_sz, type, sbin, &bin_val, &buf_val, &deserialized);
-		if (sbins_in_si > 0) {
-			sindex_found += sbins_in_si;
-			if (sbins_in_si > 1) {
-			// Two ops (INSERT AND DELETE)are going to happen on the same index. we need to reserve it twice.
-				AS_SINDEX_RESERVE(si);
-			}
-		}
-		else {
-			AS_SINDEX_RELEASE(si);
-		}
-		ele           = ele->next;
-	}
-	// FREE as_vals
-	if (buf_val) {
-		as_val_destroy(buf_val);
-	}
-	if (bin_val) {
-		as_val_destroy(bin_val);
-	}
-
-	return sindex_found;
+	return as_sindex_sbins_from_bin_buf(ns, set, b, start_sbin, op);
 }
 
 /*
@@ -3944,19 +3625,16 @@ as_sindex_sbins_from_rd(as_storage_rd *rd, uint16_t from_bin, uint16_t to_bin, a
 int
 as_sindex_sbin_free(as_sindex_bin *sbin)
 {
-	uint32_t datasz = 0;
 	if (sbin->to_free) {
-		if (sbin->type == AS_PARTICLE_TYPE_INTEGER) {
-			datasz = sizeof(uint64_t);
+		if (sbin->values) {
+			cf_free(sbin->values);
 		}
-		else  if (sbin->type == AS_PARTICLE_TYPE_STRING){
-			datasz = sizeof(cf_digest);
-		}
-		else {
-			cf_debug(AS_SINDEX, "sbin free got invalid dtaa type in sbin %d", sbin->type);
-			return AS_SINDEX_ERR;
-		}
-		cf_free(sbin->values);
+	}
+	if (sbin->si) {
+		AS_SINDEX_RELEASE(sbin->si);
+	}
+	else {
+		cf_warning(AS_SINDEX, "SBIN FREE : si should not be null in sbin");
 	}
     return AS_SINDEX_OK;
 }
@@ -3985,16 +3663,11 @@ as_sindex_partition_isqnode(as_namespace *ns, cf_digest *digest)
 
 	int pid       = as_partition_getid(*(digest));
 	p             = &ns->partitions[pid];
-
-	if (0 != pthread_mutex_lock(&p->lock))
-		cf_crash(AS_SINDEX, "couldn't acquire partition state lock: %s", cf_strerror(errno));
-
-	bool is_qnode = (p->qnode == g_config.self_node);
-
-	if (0 != pthread_mutex_unlock(&p->lock))
-		cf_crash(AS_SINDEX, "couldn't release partition state lock: %s", cf_strerror(errno));
-
-	return is_qnode;
+	// NB: This is lockless check could result is false positives. Query
+	// does the reservation before reading which would make sure these 
+	// are filtered out. Only possible case this could happen is when 
+	// qnode information is changing
+	return (p->qnode == g_config.self_node);
 }
 
 
@@ -4057,13 +3730,11 @@ as_sindex_histogram_dumpall(as_namespace *ns)
 }
 
 int
-as_sindex_histogram_enable(as_namespace *ns, as_sindex_metadata *imd, bool enable)
+as_sindex_histogram_enable(as_namespace *ns, char * iname, bool enable)
 {
-	if (!ns)
-		return AS_SINDEX_ERR_PARAM;
-
-	as_sindex *si = as_sindex_lookup_by_iname(ns, imd->iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
+	as_sindex *si = as_sindex_lookup_by_iname(ns, iname, AS_SINDEX_LOOKUP_FLAG_ISACTIVE);
 	if (!si) {
+		cf_warning(AS_SINDEX, "SINDEX HISTOGRAM : sindex %s not found", iname);	
 		return AS_SINDEX_ERR_NOTFOUND;
 	}
 
@@ -4243,100 +3914,6 @@ Error:
 	return AS_SINDEX_ERR_PARAM;
 }
 
-
-
-
-// System Metadata Integration : System Metadata Integration
-// System Metadata Integration : System Metadata Integration
-
-/*
- *                +------------------+
- *  client -->    |  Secondary Index |
- *                +------------------+
- *                     /|\
- *                      | 4 accept
- *                  +----------+   2
- *                  |          |<-------   +------------------+ 1 request
- *                  | SMD      | 3 merge   |  Secondary Index | <------------|
- *                  |          |<------->  |                  | 5 response   | CLIENT
- *                  |          | 4 accept  |                  | ------------>|
- *                  |          |-------->  +------------------+
- *                  +----------+
- *                     |   4 accept
- *                    \|/
- *                +------------------+
- *  client -->    |  Secondary Index |
- *                +------------------+
- *
- *
- *  System Metadta module sits in the middle of multiple secondary index
- *  module on multiple nodes. The changes which eventually are made to the
- *  secondary index are always triggerred from SMD. Here is the flow.
- *
- *  Step1: Client send (could possibly be secondary index thread) triggers
- *         create / delete / update related to secondary index metadata.
- *
- *  Step2: The request passed through secondary index module (may be few
- *         node specific info is added on the way) to the SMD.
- *
- *  Step3: SMD send out the request to the paxos master.
- *
- *  Step4: Paxos master request the relevant metadata info from all the
- *         nodes in the cluster once it has all the data... [SMD always
- *         stores copy of the data, it is stored when the first time
- *         create happens]..it call secondary index merge callback
- *         function. The function is responsible for resolving the winning
- *         version ...
- *
- *  Step5: Once winning version is decided for all the registered module
- *         the changes are sent to all the node.
- *
- *  Step6: At each node accept_fn is called for each module. Which triggers
- *         the call to the secondary index create/delete/update functions
- *         which would be used to in-memory operation and make it available
- *         for the system.
- *
- *  There are two types of operations which look at the secondary index
- *  operations.
- *
- *  a) Normal operation .. they all look a the in-memory structure and
- *     data which is in sindex and ai_btree layer.
- *
- *  b) Other part which do DDL operation like which work through the SMD
- *     layer. Multiple operation happening from the multiple nodes which
- *     come through this layer. The synchronization is responsible of
- *     SMD layer. The part sindex / ai_btree code is responsible is to
- *     make sure when the call from the SMD comes there is proper sync
- *     between this and operation in section a
- *
- *  Set of function implemented below are merge function and accept function.
- */
-
-int
-as_sindex_smd_create()
-{
-	// Init's the smd interface.
-	//
-	// as_smd_module_create("SINDEX", as_sindex_smd_merge_cb, NULL, as_sindex_smd_accept_cb, NULL);
-	//
-	// Expectation: This would read stuff up from the JSON file which SMD
-	//              maintance and make sure the requested data is loaded
-	//              and the accept_fn is called. All the real logic is
-	//              inside accept_fn function.
-	return 0;
-}
-
-int
-as_sindex_smd_merge_cb(char *module, as_smd_item_list_t **item_list_out,
-						as_smd_item_list_t **item_lists_in, size_t num_lists,
-						void *udata)
-{
-	// Applies merge and decides who wins. This is algorithm which should
-	// be independent of who is running is .. any node which becomes paxos
-	// master can execute it and get the same result.
-	return 0;
-}
-
 extern int as_info_parse_params_to_sindex_imd(char *, as_sindex_metadata *, cf_dyn_buf *, bool, bool*);
 
 /*
@@ -4414,6 +3991,72 @@ END:
 	SINDEX_GUNLOCK();
     return ret;
 }
+
+// SMD CALLBACKS **********************************************************************************
+/*
+ *                +------------------+
+ *  client -->    |  Secondary Index |
+ *                +------------------+
+ *                     /|\
+ *                      | 4 accept
+ *                  +----------+   2
+ *                  |          |<-------   +------------------+ 1 request
+ *                  | SMD      | 3 merge   |  Secondary Index | <------------|
+ *                  |          |<------->  |                  | 5 response   | CLIENT
+ *                  |          | 4 accept  |                  | ------------>|
+ *                  |          |-------->  +------------------+
+ *                  +----------+
+ *                     |   4 accept
+ *                    \|/
+ *                +------------------+
+ *  client -->    |  Secondary Index |
+ *                +------------------+
+ *
+ *
+ *  System Metadta module sits in the middle of multiple secondary index
+ *  module on multiple nodes. The changes which eventually are made to the
+ *  secondary index are always triggerred from SMD. Here is the flow.
+ *
+ *  Step1: Client send (could possibly be secondary index thread) triggers
+ *         create / delete / update related to secondary index metadata.
+ *
+ *  Step2: The request passed through secondary index module (may be few
+ *         node specific info is added on the way) to the SMD.
+ *
+ *  Step3: SMD send out the request to the paxos master.
+ *
+ *  Step4: Paxos master request the relevant metadata info from all the
+ *         nodes in the cluster once it has all the data... [SMD always
+ *         stores copy of the data, it is stored when the first time
+ *         create happens]..it call secondary index merge callback
+ *         function. The function is responsible for resolving the winning
+ *         version ...
+ *
+ *  Step5: Once winning version is decided for all the registered module
+ *         the changes are sent to all the node.
+ *
+ *  Step6: At each node accept_fn is called for each module. Which triggers
+ *         the call to the secondary index create/delete/update functions
+ *         which would be used to in-memory operation and make it available
+ *         for the system.
+ *
+ *  There are two types of operations which look at the secondary index
+ *  operations.
+ *
+ *  a) Normal operation .. they all look a the in-memory structure and
+ *     data which is in sindex and ai_btree layer.
+ *
+ *  b) Other part which do DDL operation like which work through the SMD
+ *     layer. Multiple operation happening from the multiple nodes which
+ *     come through this layer. The synchronization is responsible of
+ *     SMD layer. The part sindex / ai_btree code is responsible is to
+ *     make sure when the call from the SMD comes there is proper sync
+ *     between this and operation in section a
+ *
+ */
+
+// Global flag to signal that all secondary index SMD is restored.
+bool g_sindex_smd_restored = false;
 
 /*
  * Description: This cb function is called by paxos master, before doing the
@@ -4531,9 +4174,6 @@ as_sindex_cfg_var_hash_reduce_fn(void *key, void *data, void *udata)
 
 	return 0;
 }
-
-// Global flag to signal that all secondary index SMD is restored.
-bool g_sindex_smd_restored = false;
 
 /*
  * This function is called when the SMD has resolved the correct state of
@@ -4712,6 +4352,7 @@ as_sindex_smd_accept_cb(char *module, as_smd_item_list_t *items, void *udata, ui
 	return(0);
 }
 
+// BINID has sindex *******************************************************************************
 // Set the binid'th bit of the bin_has_sindex array.
 // It is always called under SINDEX GWLOCK.
 void
@@ -4763,7 +4404,9 @@ as_sindex_binid_has_sindex(as_namespace *ns, int binid)
 	uint32_t temp  = ns->binid_has_sindex[index];
 	return (temp & (1 << (binid % 32))) ? true : false;
 }
+// ************************************************************************************************
 
+// SINDEX BIN PATH ********************************************************************************
 as_sindex_status
 as_sindex_add_mapkey_in_path(as_sindex_metadata * imd, char * path_str, int start, int end)
 {
@@ -4967,8 +4610,8 @@ as_sindex_extract_bin_from_path(char * path_str, char *bin)
 	while (end < path_len && path_str[end] != '.' && path_str[end] != '[' && path_str[end] != ']') {
 		end++;
 	}
-	
-	if (end > 0 && end <= BIN_NAME_MAX_SZ) {
+
+	if (end > 0 && end < AS_ID_BIN_SZ) {
 		strncpy(bin, path_str, end);
 		bin[end] = '\0';
 	}
@@ -5083,6 +4726,9 @@ END:
 	}
 	return NULL;
 }
+// ************************************************************************************************
+
+// **** SINDEX TICKER *****************************************************************************
 
 // Sindex ticker start
 void
@@ -5148,3 +4794,4 @@ as_sindex_ticker_done(as_namespace * ns, as_sindex * si, uint64_t start_time)
 				ns->name, si_name, si_memory, cf_getms() - start_time);
 
 }
+// ************************************************************************************************

@@ -233,7 +233,8 @@ typedef struct as_transaction_s {
 	struct as_batch_shared* batch_shared;
 	uint32_t batch_index;
 
-	// RESPONSE RESPONSE RESPONSE
+	// TODO - another re-org of this structure...
+	uint32_t void_time;
 
 } as_transaction;
 

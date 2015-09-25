@@ -86,6 +86,8 @@ typedef struct {
 //
 typedef struct {
 	cf_atomic32			rc;
+	cf_atomic32			n_writers;	// number of concurrent writers
+	bool				skip_post_write_q;
 	struct drv_ssd_s	*ssd;
 	uint32_t			wblock_id;
 	uint32_t			pos;
@@ -139,11 +141,13 @@ typedef struct drv_ssd_s
 	char			*name;				// this device's name
 	char			*shadow_name;		// this device's shadow's name, if any
 
-	pthread_mutex_t	LOCK;
-
 	uint32_t		running;
+
+	pthread_mutex_t	write_lock;			// lock protects writes to current swb
 	ssd_write_buf	*current_swb;		// swb currently being filled by writes
-	cf_atomic32		n_writers;			// number of concurrent writers to current swb
+
+	pthread_mutex_t	defrag_lock;		// lock protects writes to defrag swb
+	ssd_write_buf	*defrag_swb;		// swb currently being filled by defrag
 
 	cf_queue		*fd_q;				// queue of open fds
 	cf_queue		*shadow_fd_q;		// queue of open fds on shadow, if any
@@ -156,8 +160,9 @@ typedef struct drv_ssd_s
 	cf_queue		*swb_free_q;		// pointers to swbs free and waiting
 	cf_queue		*post_write_q;		// pointers to swbs that have been written but are cached
 
-	cf_atomic_int	defrag_wblock_counter; // total number of wblocks added to the defrag_wblock_q
-	cf_atomic_int	ssd_write_buf_counter; // total number of swbs added to the swb_write_q
+	cf_atomic_int	n_defrag_wblock_reads;	// total number of wblocks added to the defrag_wblock_q
+	cf_atomic_int	n_defrag_wblock_writes;	// total number of swbs added to the swb_write_q by defrag
+	cf_atomic_int	n_wblock_writes;		// total number of swbs added to the swb_write_q by writes
 
 	cf_atomic32		defrag_sweep;		// defrag sweep flag
 
@@ -165,7 +170,6 @@ typedef struct drv_ssd_s
 	int				file_id;
 
 	uint32_t		open_flag;
-	bool			use_signature;
 	bool			data_in_memory;
 	bool			started_fresh;		// relevant only for warm restart
 

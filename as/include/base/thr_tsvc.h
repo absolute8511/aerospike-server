@@ -31,6 +31,35 @@
 
 #include "base/transaction.h"
 
+// Per-Transaction Consistency Guarantees:
+//   The client-request consistency guarantee level is respected
+//   unless the corresponding server's namespace override is enabled.
+
+// Extract the read consistency level from an as_msg.
+// [Note:  Not a strict check:  Both bits == 0 means the default, anything else means the alternative.]
+#define PROTO_CONSISTENCY_LEVEL(asmsg)									\
+	((!(asmsg.info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B0)				\
+	  && !(asmsg.info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B1))			\
+	 ? AS_POLICY_CONSISTENCY_LEVEL_ONE : AS_POLICY_CONSISTENCY_LEVEL_ALL)
+
+// Extract the write commit level from an as_msg.
+// [Note:  Not a strict check:  Both bits == 0 means the default, anything else means the alternative.]
+#define PROTO_COMMIT_LEVEL(asmsg)										\
+	((!(asmsg.info3 & AS_MSG_INFO3_COMMIT_LEVEL_B0)						\
+	  && !(asmsg.info3 & AS_MSG_INFO3_COMMIT_LEVEL_B1))					\
+	 ? AS_POLICY_COMMIT_LEVEL_ALL : AS_POLICY_COMMIT_LEVEL_MASTER)
+
+// Determine the read consistency level for this transaction based upon the server's namespace and client policy settings.
+#define TRANSACTION_CONSISTENCY_LEVEL(tr)								\
+	(tr->rsv.ns->read_consistency_level_override						\
+	 ? tr->rsv.ns->read_consistency_level : PROTO_CONSISTENCY_LEVEL(tr->msgp->msg))
+
+// Determine the write commit level for this transaction based upon the server's namespace and client policy settings.
+#define TRANSACTION_COMMIT_LEVEL(tr)									\
+	(tr->rsv.ns->write_commit_level_override							\
+	 ? tr->rsv.ns->write_commit_level : PROTO_COMMIT_LEVEL(tr->msgp->msg))
+
+
 // A rather heavyweight way to get a record generation during the initial
 // phase of a write request. Does a tree lookup.
 extern int thr_tsvc_get_generation(as_transaction *tr, uint32_t *generation);

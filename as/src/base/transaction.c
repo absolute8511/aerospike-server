@@ -38,13 +38,13 @@
 
 #include "fault.h"
 
+#include "base/as_stap.h"
 #include "base/batch.h"
 #include "base/datamodel.h"
 #include "base/proto.h"
+#include "base/scan.h"
 #include "base/security.h"
-#include "base/thr_scan.h"
 #include "base/udf_rw.h"
-
 
 /* as_transaction_prepare
  * Prepare a transaction that has just been received from the wire.
@@ -104,6 +104,8 @@ as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
 
 	tr->batch_shared              = 0;
 	tr->batch_index               = 0;
+
+	tr->void_time                 = 0;
 }
 
 /*
@@ -122,6 +124,10 @@ as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
 int as_transaction_prepare(as_transaction *tr) {
 	cl_msg *msgp = tr->msgp;
 	as_msg *m = &msgp->msg;
+
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
 
 //	cf_assert(tr, AS_PROTO, CF_CRITICAL, "invalid transaction");
 
@@ -172,6 +178,11 @@ int as_transaction_prepare(as_transaction *tr) {
 		memcpy(&trid_nbo, tridfp->data, sizeof(trid_nbo));
 		tr->trid = __be64_to_cpu(trid_nbo);
 	}
+
+
+	// It's tempting to move this to the final return, but queries
+	// actually escape in the if clause below ...
+	ASD_TRANS_PREPARE(nodeid, (uint64_t) msgp, tr->trid);
 
 	// Sent digest? Use!
 	as_msg_field *dfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_DIGEST_RIPE);
@@ -340,6 +351,7 @@ as_transaction_create( as_transaction *tr, tr_create_data *  trc_data)
 	UREQ_DATA_INIT(&tr->udata);
 	tr->batch_shared = 0;
 	tr->batch_index = 0;
+	tr->void_time = 0;
 	return 0;
 }
 
@@ -357,6 +369,13 @@ as_transaction_error(as_transaction* tr, uint32_t error_code)
 			tr->proto_fd_h = 0;
 			MICROBENCHMARK_HIST_INSERT_P(error_hist);
 			cf_atomic_int_incr(&g_config.err_tsvc_requests);
+			if (error_code == AS_PROTO_RESULT_FAIL_TIMEOUT) {
+				cf_atomic_int_incr(&g_config.err_tsvc_requests_timeout);
+			}
+		}
+	} else if (tr->udata.req_udata) {
+		if (udf_rw_needcomplete(tr)) {
+			udf_rw_complete(tr, error_code, __FILE__,__LINE__);
 		}
 	}
 }

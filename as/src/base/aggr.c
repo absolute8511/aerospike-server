@@ -45,7 +45,8 @@
 
 #include "base/datamodel.h"
 #include "base/proto.h"
-#include "base/thr_scan.h"
+#include "base/scan.h"
+#include "base/secondary_index.h"
 #include "base/transaction.h"
 #include "base/udf_memtracker.h"
 #include "base/udf_record.h"
@@ -118,7 +119,10 @@ as_aggr_reserve_qnode(as_namespace * ns, query_record * qrecord, as_partition_id
 		return as_query_reserve_qnode(ns, qrecord->caller, pid, qrecord->rsv);
 	}
 	else if (agg_type == AS_AGGR_SCAN) {
-		if (0 != as_partition_reserve_qnode(ns, pid, qrecord->rsv)) {
+		// NB: This is a short term fix. Before entire re-org shows. This is based
+		// on fact that we know only possibly way to get here with scan is with 
+		// write reservation. Just do the same instead of qnode
+		if (0 != as_partition_reserve_write(ns, pid, qrecord->rsv, NULL, NULL)) {
 			qrecord->rsv   = NULL;
 			return NULL;
 		}
@@ -207,7 +211,7 @@ extern const as_rec_hooks udf_record_hooks;
 #define AS_AGGR_OK AS_QUERY_OK
 
 int 
-as_aggr__process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_result * ap_res)
+as_aggr_process(as_aggr_call * ap_call, cf_ll * ap_recl, void * udata, as_result * ap_res)
 {
 	// input stream
 	int ret           = AS_AGGR_OK;

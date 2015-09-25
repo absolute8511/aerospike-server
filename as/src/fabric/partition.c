@@ -441,7 +441,6 @@ as_partition_reinit(as_partition *p, as_namespace *ns, int pid)
 	p->waiting_for_master = false;
 	memset(&p->primary_version_info, 0, sizeof(p->primary_version_info));
 	memset(&p->version_info, 0, sizeof(p->version_info));
-	memset(&p->vinfoset, 0, sizeof(p->vinfoset));
 	memset(p->old_sl, 0, sizeof(p->old_sl));
 	p->p_repl_factor = ns->replication_factor;
 	p->current_outgoing_ldt_version = 0;
@@ -449,7 +448,6 @@ as_partition_reinit(as_partition *p, as_namespace *ns, int pid)
 	p->cluster_key = 0;
 
 	as_index_tree *t = p->vp;
-	cf_atomic_int_set(&p->n_bytes_memory, 0);
 
 	// First initialization is the only time there's a null tree pointer.
 	if (! p->vp && ! ns->cold_start) {
@@ -523,7 +521,6 @@ void set_partition_desync_lockfree(as_partition *p, as_partition_vinfo *vinfo, a
 	cf_debug(AS_PARTITION, "{%s:%d}set_partition_desync_lockfree: OLD SUBRECORD TREE %p  ref count %d", ns->name, pid, t, cf_rc_count(sub_t));
 	as_index_tree_release(sub_t, ns);
 
-	cf_atomic_int_set(&p->n_bytes_memory, 0);
 	clear_partition_version_in_storage(ns, pid, flush);
 	memset(vinfo, 0, sizeof(as_partition_vinfo));
 	// Currently both tree have same property
@@ -571,7 +568,6 @@ void set_partition_absent_lockfree(as_partition *p, as_partition_vinfo *vinfo, a
 		return;
 	// as_partition_reinit(p, ns);
 	as_index_tree *t = p->vp;
-	cf_atomic_int_set(&p->n_bytes_memory, 0);
 	p->vp = as_index_tree_create(ns->arena, (as_index_value_destructor)&as_record_destroy, ns, ns->tree_roots ? &ns->tree_roots[pid] : NULL);
 	cf_debug(AS_PARTITION, "{%s:%d} TREE %p ", ns->name, pid, p->vp);
 	// A Change:  Set the State BEFORE the tree release, just in case that
@@ -701,8 +697,6 @@ as_partition_init(as_partition *p, as_namespace *ns, int pid)
 
 	if (0 != pthread_mutex_init(&p->lock, 0))
 		cf_crash(AS_PARTITION, "couldn't initialize partition state lock: %s", cf_strerror(errno));
-	if (0 != pthread_mutex_init(&p->vinfoset_lock, 0))
-		cf_crash(AS_PARTITION, "couldn't initialize partition vinfo set lock: %s", cf_strerror(errno));
 
 	p->vp = (as_index_tree *) NULL;
 	p->sub_vp = (as_index_tree *) NULL;
@@ -809,58 +803,9 @@ int find_in_replica_list(as_partition *p, cf_node self) {
 	return (my_index);
 }
 
-
-static cf_atomic32 random_replica_counter = 0;
-
-cf_node get_random_replica(as_partition *p) {
-	cf_assert(p, AS_PARTITION, CF_CRITICAL, "invalid partition");
-	cf_node n;
-	int i;
-
-//	cf_debug(AS_PARTITION, "Get Random Replica for Partition Pid(%u) Pkey(%lu)\n",
-//			p->partition_id, p->cluster_key);
-//	cf_debug(AS_PARTITION, "Target(%lu) origin(%lu) Replica(%lu)\n",
-//			p->target, p->origin, p->replica );
-
-	for (i = 0; i < g_config.paxos_max_cluster_size; i++) {
-		if (0 == p->replica[i])
-			break;
-	}
-
-	/* If no nodes were found, return zero; otherwise, pick a random
-	 * member of the replica set, excluding yourself */
-	if (0 == i)
-		n = 0;
-	else if (1 == i) {
-		n = p->replica[0];
-	}
-	else {
-		int infinite_guard = 0;
-retry:
-		n = p->replica[(cf_atomic32_incr(&random_replica_counter) % i)];
-		if (g_config.self_node == n) {
-			if (infinite_guard++ > g_config.paxos_max_cluster_size) {
-				return(p->replica[0]);
-			}
-			goto retry;
-		}
-	}
-	cf_debug(AS_PARTITION, "[EXIT]:: Replica Returns(%016lx) \n", n );
-	return n;
-}
-
 static
-cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_read)
+void as_partition_health_check(as_namespace *ns, size_t pid, as_partition *p, int my_index)
 {
-	cf_assert(ns, AS_PARTITION, CF_CRITICAL, "invalid namespace");
-	cf_assert((pid < AS_PARTITIONS), AS_PARTITION, CF_CRITICAL, "invalid partition id");
-	cf_assert(p, AS_PARTITION, CF_CRITICAL, "invalid partition");
-
-	cf_node n = (cf_node)0;
-	cf_node self = g_config.self_node;
-	// find location of node in replica list, returns -1 if node is not found
-	int my_index = find_in_replica_list(p, self);
-
 	as_partition_vinfo *pvinfo = &ns->partitions[pid].version_info;
 	bool is_sync 	= (p->state == AS_PARTITION_STATE_SYNC);
 	bool is_desync 	= (p->state == AS_PARTITION_STATE_DESYNC);
@@ -870,63 +815,99 @@ cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_re
 	bool is_primary = memcmp(pvinfo, &p->primary_version_info, sizeof(as_partition_vinfo)) == 0;
 	bool migrating_to_master = (p->target != 0);
 
-	// State consistency checks
-	if ( migrating_to_master ) {
-		if (p->target != p->replica[0])
+	// State consistency checks.
+	// TODO: Ideally convert debugs below to warnings if we are confident.
+	if (migrating_to_master) {
+		if (p->target != p->replica[0]) {
 			cf_debug(AS_PARTITION, "{%s:%d} Partition state error on write reservation. Target of migration not master node", ns->name, pid);
-		if (!((is_zombie && is_primary) || (is_replica && is_sync && is_primary)))
+		}
+
+		if (! ((is_zombie && is_primary) || (is_replica && is_sync && is_primary))) {
 			cf_debug(AS_PARTITION, "{%s:%d} Partition state error on write reservation. Illegal state in node migrating to master", ns->name, pid);
+		}
 	}
-	if ( ((is_replica && is_desync) || (is_replica && is_sync && !is_primary)) &&
-			(p->origin != p->replica[0]))
+
+	if (((is_replica && is_desync) || (is_replica && is_sync && ! is_primary)) && p->origin != p->replica[0]) {
 		cf_debug(AS_PARTITION, "{%s:%d} Partition state error on write reservation. origin does not match master", ns->name, pid);
-	else if (is_replica && is_sync && is_primary && !migrating_to_master && p->origin && (p->origin != p->replica[0]))
+	}
+	else if (is_replica && is_sync && is_primary && ! migrating_to_master && p->origin && p->origin != p->replica[0]) {
 		cf_debug(AS_PARTITION, "{%s:%d} Partition state error on write reservation. replica sync node's origin does not match master", ns->name, pid);
-	else if (is_master && is_desync && (p->origin == (cf_node)0))
+	}
+	else if (is_master && is_desync && p->origin == (cf_node)0) {
 		cf_debug(AS_PARTITION, "{%s:%d} Partition state error on write reservation. Origin node is NULL for non-sync master", ns->name, pid);
+	}
 
 	for (int i = 0; i < p->p_repl_factor; i++) {
-		if (p->replica[i] == (cf_node) 0 && as_partition_balance_is_init_resolved()) {
+		if (p->replica[i] == (cf_node)0 && as_partition_balance_is_init_resolved()) {
 			cf_debug(AS_PARTITION, "{%s:%d} Detected state error. Replica list contains null node at position %d", ns->name, pid, i);
 			cf_atomic_int_incr(&g_config.err_replica_null_node);
 		}
 	}
+
 	for (int i = p->p_repl_factor; i < g_config.paxos_max_cluster_size; i++) {
-		if (p->replica[i] != (cf_node) 0) {
+		if (p->replica[i] != (cf_node)0) {
 			cf_debug(AS_PARTITION, "{%s:%d} Detected state error. Replica list contains non null node %"PRIx64" at position %d", ns->name, pid, p->replica[i], i);
 			cf_atomic_int_incr(&g_config.err_replica_non_null_node);
 		}
 	}
+}
 
-	/* Find a sync copy of this partition:
-	 *
-	 * Read/Write: Return this node if
-	 * 		node is master and sync
-	 * 		node is migrating to master
-	 * Read/Write: Return origin node if
-	 * 		node is master and desync
-	 * Read: Return this node if
-	 *		node is replica and has no origin set
-	 * Read: Return random replica node for all other cases
-	 * Write: Return master node for all other cases
-	 *
-	 */
-	if ( (is_master && is_sync) || migrating_to_master)
+static cf_atomic32 g_partition_check_counter = 0;
+
+// Find best node to handle read/write. Called within partition lock.
+static
+cf_node find_sync_copy(as_namespace *ns, size_t pid, as_partition *p, bool is_read)
+{
+	cf_assert(ns, AS_PARTITION, CF_CRITICAL, "invalid namespace");
+	cf_assert((pid < AS_PARTITIONS), AS_PARTITION, CF_CRITICAL, "invalid partition id");
+	cf_assert(p, AS_PARTITION, CF_CRITICAL, "invalid partition");
+
+	cf_node n = (cf_node)0;
+	cf_node self = g_config.self_node;
+	// Find location of self in replica list, returns -1 if not found.
+	int my_index = find_in_replica_list(p, self);
+
+	// Do health check occasionally (expensive to do for every read/write).
+	if ((cf_atomic32_incr(&g_partition_check_counter) & 0x0FFF) == 0) {
+		as_partition_health_check(ns, pid, p, my_index);
+	}
+
+	// Find an appropriate copy of this partition.
+	//
+	// Return this node if:
+	//		- node is (eventual) master and sync
+	//		- node is migrating to master (i.e. is acting master)
+	// Return origin node if:
+	//		- node is (eventual) master and desync
+	// Return this node if:
+	//		- it's a read, node is replica, and has no origin
+	// Otherwise, return (eventual) master.
+
+	bool is_sync	= (p->state == AS_PARTITION_STATE_SYNC);
+	bool is_desync	= (p->state == AS_PARTITION_STATE_DESYNC);
+	bool is_master	= (0 == my_index);
+	bool is_replica	= (0 < my_index) && (my_index < p->p_repl_factor);
+	bool migrating_to_master = (p->target != 0);
+
+	if ((is_master && is_sync) || migrating_to_master) {
 		n = self;
-	else if (is_master && is_desync)
+	} 
+	else if (is_master && is_desync) {
 		n = p->origin;
-	else if (is_read && is_replica)
-		n = (p->origin == (cf_node)0) ? self : p->replica[0];
-	else
-		n = is_read ? get_random_replica(p) : p->replica[0];
+	}
+	else if (is_read && is_replica && p->origin == (cf_node)0) {
+		n = self;
+	}
+	else {
+		n = p->replica[0];
+	}
 
 	if (n == 0 && as_partition_balance_is_init_resolved()) {
-		cf_debug(AS_PARTITION, "{%s:%d} Returning null node, could not find sync copy of this partition my_index %d, master %"PRIx64" replica %"PRIx64"", ns->name, pid, my_index, p->replica[0], p->replica[1]);
-		cf_atomic_int_incr(&g_config.err_sync_copy_null_node);
-		n = p->replica[0];
-		if (n == 0)
-			cf_atomic_int_incr(&g_config.err_sync_copy_null_master);
+		cf_debug(AS_PARTITION, "{%s:%d} Returning null node, could not find sync copy of this partition my_index %d, master %"PRIx64" replica %"PRIx64" origin %"PRIx64"", 
+					ns->name, pid, my_index, p->replica[0], p->replica[1], p->origin);
+		cf_atomic_int_incr(&g_config.err_sync_copy_null_master);
 	}
+
 	return n;
 }
 
@@ -1300,7 +1281,7 @@ as_partition_prereserve_qnodes(as_namespace * ns, bool is_partition_qnode[], as_
 			// Theoretically, any partition which is qnode whould either belong to sync or 
 			// zombie state. Its better to know if some other state is becoming qnode.
 			if (AS_PARTITION_STATE_SYNC != p->state && AS_PARTITION_STATE_ZOMBIE != p->state) {
-				cf_warning(AS_PARTITION, "Not expected - Partition is qnode and partition %d is in %d state", i, p->state);
+				cf_debug(AS_PARTITION, "Not expected - Partition is qnode and partition %d is in %d state", i, p->state);
 			}
 			cf_atomic_int_incr(&g_config.dup_tree_count);
 		}
@@ -1884,8 +1865,6 @@ as_partition_getinfo_str(cf_dyn_buf *db)
 			cf_dyn_buf_append_uint64_x(db, p->pending_migrate_tx);   // Pending outgoing Migrates
 			cf_dyn_buf_append_char(db, ':');
 			cf_dyn_buf_append_uint64_x(db, p->pending_migrate_rx);   // Pending incoming migrates
-			cf_dyn_buf_append_char(db, ':');
-			cf_dyn_buf_append_uint64(db, (uint64_t) p->n_bytes_memory);    // Size
 			cf_dyn_buf_append_char(db, ':');
 			cf_dyn_buf_append_uint64(db, (uint64_t) p->vp->elements);      // Records
 			cf_dyn_buf_append_char(db, ':');
@@ -2815,7 +2794,6 @@ bool as_partition_valid_cluster_topology( as_paxos *paxos_p ) {
 	// list and dump it to the log, in group order.
 	cc_group_t remember_group_id = 0;
 	cc_group_t group_id = 0;
-	cc_node_t node_id;
 	cluster_config_t cc; // structure to hold state of the group
 	cc_cluster_config_defaults( &cc );
 
@@ -2832,7 +2810,6 @@ bool as_partition_valid_cluster_topology( as_paxos *paxos_p ) {
 	for (int i = 0; i < cluster_size; i++) {
 		if (succession[i] == (cf_node)0)  continue;
 		// Build up our cluster state -- so we can measure cluster health
-		node_id = cc_compute_node_id( succession[i] );
 		group_id = cc_compute_group_id( succession[i] );
 		cc_add_fullnode_group_entry( &cc, succession[i] );
 		if( remember_group_id == 0 ) {
@@ -3778,6 +3755,7 @@ as_partition_balance()
 					if (cf_contains64(dupl_nodes, n_dupl, self) && (my_index_in_hvlist < p->p_repl_factor)) {
 						cf_debug(AS_PARTITION, "{%s:%d} Partition will reject writes during merge", ns->name, j);
 						p->reject_writes = true;
+						ns_pending_migrate_tx_later++;
 					}
 
 					bool is_primary_version = (memcmp(&p->version_info, &p->primary_version_info, sizeof(as_partition_vinfo)) == 0);

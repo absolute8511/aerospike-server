@@ -88,7 +88,6 @@ const xdr_cfg_opt XDR_OPTS[] = {
 		{ "xdr-batch-retry-sleep",			XDR_CASE_XDR_BATCH_RETRY_SLEEP },
 		{ "xdr-delete-shipping-enabled",	XDR_CASE_XDR_DELETE_SHIPPING_ENABLED },
 		{ "xdr-forward-with-gencheck",		XDR_CASE_XDR_FORWARD_WITH_GENCHECK },
-		{ "xdr-conflict-digestdump",		XDR_CASE_XDR_CONFLICT_DIGESTDUMP },
 		{ "xdr-hotkey-maxskip",				XDR_CASE_XDR_HOTKEY_MAXSKIP },
 		{ "xdr-nsup-deletes-enabled",		XDR_CASE_XDR_NSUP_DELETES_ENABLED },
 		{ "xdr-shipping-enabled",			XDR_CASE_XDR_SHIPPING_ENABLED },
@@ -156,7 +155,7 @@ void xdr_config_defaults(xdr_config *c)
 	c->xdr_stop_writes_noxdr = false;	//If the normal writes should be stopped if there is no xdr
 	c->xdr_internal_shipping_delay = 0; //Default sleep between shipping each batch is 0 second
 	c->xdr_read_mode = XDR_MODE_BATCH_GET;
-	c->xdr_flag = 0;
+	c->xdr_conf_change_flag = 0;
 	c->xdr_new_cfg.xdr_write_batch_size = c->xdr_write_batch_size;
 	c->xdr_new_cfg.xdr_max_recs_inflight = c->xdr_max_recs_inflight;
 	c->xdr_new_cfg.xdr_read_batch_size = c->xdr_read_batch_size;
@@ -169,11 +168,9 @@ void xdr_config_defaults(xdr_config *c)
 	c->xdr_batch_num_retry = 0;
 	c->xdr_batch_retry_sleep = 0;
 	c->xdr_fwd_with_gencheck = false;
-	c->xdr_conflict_digestdump_file = NULL;
 	c->xdr_info_request_timeout_ms = 500;
 	c->xdr_compression_threshold = 0; //0 = Disabled compressed shipping, > 0 minimum size of packet for compression
 	c->xdr_pidfile = NULL;
 	c->xdr_read_threads = 1; // keep it 1 for backward compatibility as default mode is batch now
-	c->xdr_new_cfg.xdr_read_threads = c->xdr_read_threads;
 	c->xdr_do_version_check = false;
 }

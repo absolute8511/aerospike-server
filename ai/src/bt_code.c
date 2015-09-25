@@ -398,6 +398,8 @@ static void __setDR(bt *btr, bt_n *x, int i, uint32 dr) {
     if      (!odr && dr) x->ndirty++;
     else if (odr && !dr) x->ndirty--;
     if ((x->dirty > 0) && !x->ndirty) release_dirty_stream(btr, x);
+#else
+    (void) odr;	// silence compiler warnings
 #endif
 }
 static bt_n *setDR(bt *btr, bt_n *x, int i, uint32 dr, bt_n *p, int pi) {

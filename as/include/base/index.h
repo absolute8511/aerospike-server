@@ -55,12 +55,10 @@ typedef struct as_index_s {
 	cf_arenax_handle parent_h;
 
 	// offset: 36
-	// Color and migrate mark are accessed outside the main transaction thread.
-	// So, don't use the free bits here unless you know what you're doing...
+	// Don't use the free bits here for record info - this is accessed outside
+	// the record lock.
 	uint32_t color: 1; // one bit
-	uint32_t unused_but_unsafe_1: 15;
-	uint32_t migrate_mark: 1;
-	uint32_t unused_but_unsafe_2: 15;
+	uint32_t unused_but_unsafe: 31;
 
 	// Everything below here is used under the record lock.
 
@@ -106,9 +104,6 @@ typedef struct as_index_s {
 
 	// final size: 64
 
-	// Variable part, currently used only for vinfo.
-	uint8_t data[];
-
 } __attribute__ ((__packed__)) as_index;
 
 
@@ -116,8 +111,12 @@ typedef struct as_index_s {
 // Accessor functions for bits in as_index.
 //
 
-// Size in bytes of as_index including variable part, if any.
-extern int as_index_size_get(as_namespace *ns);
+// Size in bytes of as_index, currently the same for all namespaces.
+static inline
+uint32_t as_index_size_get(as_namespace *ns)
+{
+	return (uint32_t)sizeof(as_index);
+}
 
 // Clear the record portion of as_index - excluding variable part, for speed.
 // Note - relies on current layout and size of as_index!
@@ -132,56 +131,22 @@ void as_index_clear_record_info(as_index *index) {
 
 
 //------------------------------------------------
-// Vinfo.
-//
-
-// Will return 0 if struct has no vinfo mask.
-static inline
-as_partition_vinfo_mask as_index_vinfo_mask_get(as_index *index, bool allow_versions) {
-	if (allow_versions) {
-		return *(as_partition_vinfo_mask*)&index->data[0];
-	}
-	return 0;
-}
-
-static inline
-int as_index_vinfo_mask_union(as_index *index, as_partition_vinfo_mask m, bool allow_versions) {
-	if (allow_versions) {
-		*(as_partition_vinfo_mask*)&index->data[0] |= m;
-		return 0;
-	}
-	return -1;
-}
-
-static inline
-int as_index_vinfo_mask_set(as_index *index, as_partition_vinfo_mask m, bool allow_versions) {
-	if (allow_versions) {
-		*(as_partition_vinfo_mask*)&index->data[0] = m;
-		return 0;
-	}
-	return -1;
-}
-
-
-//------------------------------------------------
 // Flex bits - flags.
 //
 
 typedef struct as_index_flag_bits_s {
-	uint8_t flag_bits: 6;
-	uint8_t do_not_use: 2; // These are used in single-bin mode.
+	uint8_t flag_bits: 4;
+	uint8_t do_not_use: 4; // These are used in single-bin mode.
 } as_index_flag_bits;
 
 typedef enum {
 	AS_INDEX_FLAG_SPECIAL_BINS	= 0x01, // first user of this is LDT (to denote sub-records)
 	AS_INDEX_FLAG_CHILD_REC		= 0x02, // child record of a regular record (LDT)
 	AS_INDEX_FLAG_CHILD_ESR		= 0x04, // special child existence sub-record (ESR)
-	AS_INDEX_FLAG_UNUSED_0x08	= 0x08,
-	AS_INDEX_FLAG_UNUSED_0x10	= 0x10,
-	AS_INDEX_FLAG_KEY_STORED	= 0x20, // for data-in-memory, dim points to as_rec_space
+	AS_INDEX_FLAG_KEY_STORED	= 0x08, // for data-in-memory, dim points to as_rec_space
 
 	// Combinations:
-	AS_INDEX_ALL_FLAGS			= 0x3F
+	AS_INDEX_ALL_FLAGS			= 0x0F
 } as_index_flag;
 
 static inline
@@ -259,10 +224,10 @@ bool as_index_has_set(as_index *index) {
 
 static inline
 int as_index_set_set(as_index *index, as_namespace *ns, const char *set_name,
-		bool check_threshold) {
+		bool fail_if_deleted) {
 	uint16_t set_id;
 	int rv = as_namespace_get_create_set(ns, set_name, &set_id,
-			check_threshold);
+			fail_if_deleted);
 
 	if (rv != 0) {
 		return rv;

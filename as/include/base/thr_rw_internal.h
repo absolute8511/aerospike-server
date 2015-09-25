@@ -51,7 +51,7 @@
 #define RW_FIELD_NS_ID          3
 #define RW_FIELD_GENERATION     4
 #define RW_FIELD_DIGEST         5
-#define RW_FIELD_VINFOSET       6
+#define RW_FIELD_VINFOSET       6   // now used only by LDT
 #define RW_FIELD_AS_MSG         7   // +request+ as_msg (used in RW phase)
 #define RW_FIELD_CLUSTER_KEY    8
 #define RW_FIELD_RECORD         9   // +PICKLE+ record format (used in 'dup' phase)
@@ -82,7 +82,7 @@
 #define RW_INFO_MIGRATION      0x0002
 #define RW_INFO_NSUP_DELETE	   0x0004
 #define RW_INFO_LDT_DUMMY      0x0008 // Indicating dummy (no data)
-#define RW_INFO_LDT_REC        0x0010 // Indicating LDT REC
+#define RW_INFO_LDT_PARENTREC  0x0010 // Indicating LDT PARENT REC
 #define RW_INFO_LDT_SUBREC     0x0020 // Indicating LDT SUB
 #define RW_INFO_LDT_ESR        0x0040 // Indicating LDT ESR
 #define RW_INFO_SINDEX_TOUCHED 0x0080 // Indicating the SINDEX was touched
@@ -109,6 +109,7 @@ typedef struct write_local_generation {
 typedef struct ldt_prole_info_s {
 	bool        replication_partition_version_match;
 	uint64_t    ldt_source_version;
+	bool        ldt_source_version_set;
 	uint64_t    ldt_prole_version;
 	bool        ldt_prole_version_set;
 } ldt_prole_info;
@@ -133,7 +134,6 @@ extern bool get_msg_key(as_msg* m, as_storage_rd* rd);
 extern void update_metadata_in_index(as_transaction *tr, bool increment_generation, as_index *r);
 
 typedef struct pickle_info_s {
-	uint32_t	void_time;
 	uint8_t*	rec_props_data;
 	uint32_t	rec_props_size;
 	uint8_t*	buf;
@@ -141,8 +141,6 @@ typedef struct pickle_info_s {
 } pickle_info;
 
 extern bool pickle_all(as_storage_rd *rd, pickle_info *pickle);
-
-extern void account_memory(as_transaction *tr, as_storage_rd *rd, uint64_t start_bytes);
 
 extern int rw_udf_replicate(udf_record *urecord);
 
@@ -153,9 +151,8 @@ rw_msg_setup(
 	cf_digest *keyd,
 	uint8_t ** p_pickled_buf,
 	size_t pickled_sz,
-	uint32_t pickled_void_time,
 	as_rec_props * p_pickled_rec_props,
 	int op,
-	uint16_t ldt_rectype_bits,
-	bool has_udf
+	bool has_udf,
+	bool is_subrec
 	);

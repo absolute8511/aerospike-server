@@ -47,13 +47,13 @@
 #include "base/datamodel.h"
 #include "base/json_init.h"
 #include "base/monitor.h"
+#include "base/scan.h"
 #include "base/secondary_index.h"
 #include "base/security.h"
 #include "base/system_metadata.h"
 #include "base/thr_batch.h"
 #include "base/thr_info.h"
 #include "base/thr_proxy.h"
-#include "base/thr_scan.h"
 #include "base/thr_sindex.h"
 #include "base/thr_tsvc.h"
 #include "base/thr_write.h"
@@ -149,6 +149,7 @@ const char DEFAULT_CONFIG_FILE[] = "/etc/aerospike/aerospike.conf";
 // The mutex that the main function deadlocks on after starting the service.
 pthread_mutex_t g_NONSTOP;
 bool g_startup_complete = false;
+bool g_shutdown_started = false;
 
 
 //==========================================================
@@ -408,6 +409,9 @@ main(int argc, char **argv)
 	// defrag subsystem starts operating at the end of this call.
 	as_storage_init();
 
+	// Populate all secondary indexes. This may block for a long time.
+	as_sindex_boot_populateall();
+
 	cf_info(AS_AS, "initializing services...");
 
 	as_netio_init();
@@ -422,15 +426,11 @@ main(int argc, char **argv)
 	as_write_init();			// write service
 	as_query_init();			// query transaction handling
 	as_udf_init();				// apply user-defined functions
-	as_tscan_init();			// scan a namespace or set
+	as_scan_init();				// scan a namespace or set
 	as_batch_init();			// batch transaction handling
 	as_batch_direct_init();		// low priority transaction handling        
 	as_xdr_init();				// cross data-center replication
 	as_mon_init();				// monitor
-
-	// Trigger namespace scan to load index after scan module is initialized.
-	// This may block for a long time.
-	as_sindex_boot_populateall();
 
 	// Wait for enough available storage. We've been defragging all along, but
 	// here we wait until it's enough. This may block for a long time.
@@ -467,6 +467,7 @@ main(int argc, char **argv)
 	// stop the service (yes, these signals always occur in this thread) will
 	// unlock the mutex, allowing us to continue.
 
+	g_shutdown_started = true;
 	pthread_mutex_unlock(&g_NONSTOP);
 	pthread_mutex_destroy(&g_NONSTOP);
 

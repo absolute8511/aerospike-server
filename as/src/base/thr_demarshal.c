@@ -42,6 +42,7 @@
 #include "queue.h"
 #include "socket.h"
 
+#include "base/as_stap.h"
 #include "base/batch.h"
 #include "base/cfg.h"
 #include "base/packet_compression.h"
@@ -54,7 +55,6 @@
 #ifdef USE_JEM
 #include "base/datamodel.h"
 #endif
-
 
 #define EPOLL_SZ	1024
 // Workaround for platforms that don't have EPOLLRDHUP yet.
@@ -244,6 +244,10 @@ thr_demarshal(void *arg)
 	int nevents, i, n, epoll_fd;
 	cf_clock last_fd_print = 0;
 
+#if defined(USE_SYSTEMTAP)
+	uint64_t nodeid = g_config.self_node;
+#endif
+
 	// Early stage aborts; these will cause faults in process scope.
 	cf_assert(arg, AS_DEMARSHAL, CF_CRITICAL, "invalid argument");
 	s = &g_config.socket;
@@ -347,7 +351,7 @@ thr_demarshal(void *arg)
 				uint32_t conns_open = g_config.proto_connections_opened - g_config.proto_connections_closed;
 				if (conns_open > g_config.n_proto_fd_max) {
 					if ((last_fd_print + 5000L) < cf_getms()) { // no more than 5 secs
-						cf_info(AS_DEMARSHAL, "dropping incoming client connection: hit limit %d connections", conns_open);
+						cf_warning(AS_DEMARSHAL, "dropping incoming client connection: hit limit %d connections", conns_open);
 						last_fd_print = cf_getms();
 					}
 					shutdown(csocket, SHUT_RDWR);
@@ -704,6 +708,8 @@ thr_demarshal(void *arg)
 						cf_atomic_int_incr(&g_config.proto_transactions);
 						goto NextEvent;
 					}
+
+					ASD_TRANS_DEMARSHAL(nodeid, (uint64_t) tr.msgp);
 
 					// Fast path for batch requests.
 					if (tr.msgp->msg.info1 & AS_MSG_INFO1_BATCH) {
