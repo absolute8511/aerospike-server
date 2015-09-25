@@ -417,3 +417,60 @@ cf_buf_builder_reset(cf_buf_builder *bb)
 {
 	bb->used_sz = 0;
 }
+
+// TODO - We've only implemented a few cf_ll_buf methods for now. We'll add more
+// functionality if and when it's needed.
+
+int
+cf_ll_buf_grow(cf_ll_buf *llb, size_t sz)
+{
+	size_t buf_sz = sz > llb->head->buf_sz ? sz : llb->head->buf_sz;
+	cf_ll_buf_stage *new_tail = cf_malloc(sizeof(cf_ll_buf_stage) + buf_sz);
+
+	if (! new_tail) {
+		return -1;
+	}
+
+	new_tail->next = NULL;
+	new_tail->buf_sz = buf_sz;
+	new_tail->used_sz = 0;
+
+	llb->tail->next = new_tail;
+	llb->tail = new_tail;
+
+	return 0;
+}
+
+#define LLB_RESERVE(_n) \
+		if (_n > llb->tail->buf_sz - llb->tail->used_sz) { \
+			if (0 != cf_ll_buf_grow(llb, _n)) { \
+				return -1; \
+			} \
+		}
+
+int
+cf_ll_buf_reserve(cf_ll_buf *llb, size_t sz, uint8_t **from)
+{
+	LLB_RESERVE(sz);
+
+	if (from) {
+		*from = llb->tail->buf + llb->tail->used_sz;
+	}
+
+	llb->tail->used_sz += sz;
+
+	return 0;
+}
+
+void
+cf_ll_buf_free(cf_ll_buf *llb)
+{
+	cf_ll_buf_stage *cur = llb->head_is_stack ? llb->head->next : llb->head;
+
+	while (cur) {
+		cf_ll_buf_stage *temp = cur;
+
+		cur = cur->next;
+		cf_free(temp);
+	}
+}

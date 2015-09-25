@@ -1635,7 +1635,7 @@ as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
 }
 
 int
-as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op)
+as_bin_particle_stack_modify_from_client(as_bin *b, cf_ll_buf *particles_llb, const as_msg_op *op)
 {
 	uint8_t operation = op->op;
 	as_particle_type op_type = safe_particle_type(op->particle_type);
@@ -1670,7 +1670,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, co
 
 		// Instead of allocating, we use the stack buffer provided. (Note that
 		// embedded types like integer will overwrite this with the value.)
-		if (0 > cf_dyn_buf_reserve(particles_db, (size_t)mem_size, (uint8_t **)&b->particle)) {
+		if (0 > cf_ll_buf_reserve(particles_llb, (size_t)mem_size, (uint8_t **)&b->particle)) {
 			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 
@@ -1716,7 +1716,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, co
 		if (new_mem_size < 0) {
 			return (int)new_mem_size;
 		}
-		if (0 > cf_dyn_buf_reserve(particles_db, (size_t)new_mem_size, (uint8_t **)&b->particle)) {
+		if (0 > cf_ll_buf_reserve(particles_llb, (size_t)new_mem_size, (uint8_t **)&b->particle)) {
 			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 		memcpy(b->particle, old_particle, g_particle_size_table[existing_type](old_particle));
@@ -1732,7 +1732,7 @@ as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, co
 		if (new_mem_size < 0) {
 			return (int)new_mem_size;
 		}
-		if (0 > cf_dyn_buf_reserve(particles_db, (size_t)new_mem_size, (uint8_t **)&b->particle)) {
+		if (0 > cf_ll_buf_reserve(particles_llb, (size_t)new_mem_size, (uint8_t **)&b->particle)) {
 			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 		memcpy(b->particle, old_particle, g_particle_size_table[existing_type](old_particle));
@@ -1802,7 +1802,7 @@ as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op)
 }
 
 int
-as_bin_particle_stack_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op)
+as_bin_particle_stack_from_client(as_bin *b, cf_ll_buf *particles_llb, const as_msg_op *op)
 {
 	// We assume that if we're using stack particles, the old particle is either
 	// nonexistent or also a stack particle - either way, don't destroy.
@@ -1825,7 +1825,7 @@ as_bin_particle_stack_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_
 
 	// Instead of allocating, we use the stack buffer provided. (Note that
 	// embedded types like integer will overwrite this with the value.)
-	if (0 > cf_dyn_buf_reserve(particles_db, (size_t)mem_size, (uint8_t **)&b->particle)) {
+	if (0 > cf_ll_buf_reserve(particles_llb, (size_t)mem_size, (uint8_t **)&b->particle)) {
 		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
@@ -2064,7 +2064,7 @@ as_bin_cdt_alloc_modify_from_client(as_bin *b, as_msg_op *op, as_bin *result)
 }
 
 int
-as_bin_cdt_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, as_msg_op *op, as_bin *result)
+as_bin_cdt_stack_modify_from_client(as_bin *b, cf_ll_buf *particles_llb, as_msg_op *op, as_bin *result)
 {
 	// TODO
 	return -1;

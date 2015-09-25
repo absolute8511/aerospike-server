@@ -87,3 +87,30 @@ extern int cf_buf_builder_append_uint8(cf_buf_builder **bb_r, uint8_t i);
 extern int cf_buf_builder_reserve(cf_buf_builder **bb_r, int sz, uint8_t **buf);
 extern int cf_buf_builder_size(cf_buf_builder *bb);
 extern size_t cf_dyn_buf_get_newsize(int alloc, int used, int requested);
+
+// TODO - We've only implemented a few cf_ll_buf methods for now. We'll add more
+// functionality if and when it's needed.
+
+typedef struct cf_ll_buf_stage_s {
+	struct cf_ll_buf_stage_s	*next;
+	size_t						buf_sz;
+	size_t						used_sz;
+	uint8_t						buf[];
+} cf_ll_buf_stage;
+
+typedef struct cf_ll_buf_s {
+	bool			head_is_stack;
+	cf_ll_buf_stage	*head;
+	cf_ll_buf_stage	*tail;
+} cf_ll_buf;
+
+#define cf_ll_buf_inita(__x, __sz) \
+		uint8_t llb_stage##__x[sizeof(cf_ll_buf_stage) + __sz]; \
+		cf_ll_buf_stage* ll_buf_stage##__x = (cf_ll_buf_stage*)llb_stage##__x; \
+		ll_buf_stage##__x->next = NULL; \
+		ll_buf_stage##__x->buf_sz = __sz; \
+		ll_buf_stage##__x->used_sz = 0; \
+		cf_ll_buf __x = { true, ll_buf_stage##__x, ll_buf_stage##__x }
+
+extern int cf_ll_buf_reserve(cf_ll_buf *llb, size_t sz, uint8_t **from);
+extern void cf_ll_buf_free(cf_ll_buf *llb);

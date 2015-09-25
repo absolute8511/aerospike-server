@@ -238,9 +238,9 @@ extern uint32_t as_bin_particle_ptr(as_bin *b, uint8_t **p_value);
 // wire:
 extern int32_t as_bin_particle_size_modify_from_client(as_bin *b, const as_msg_op *op); // TODO - will we ever need this?
 extern int as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op);
-extern int as_bin_particle_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op);
+extern int as_bin_particle_stack_modify_from_client(as_bin *b, cf_ll_buf *particles_llb, const as_msg_op *op);
 extern int as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op);
-extern int as_bin_particle_stack_from_client(as_bin *b, cf_dyn_buf *particles_db, const as_msg_op *op);
+extern int as_bin_particle_stack_from_client(as_bin *b, cf_ll_buf *particles_llb, const as_msg_op *op);
 extern int as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled);
 extern int32_t as_bin_particle_stack_from_pickled(as_bin *b, uint8_t* stack, uint8_t **p_pickled);
 extern int as_bin_particle_compare_from_pickled(const as_bin *b, uint8_t **p_pickled);
@@ -253,7 +253,7 @@ extern uint32_t as_bin_particle_to_pickled(const as_bin *b, uint8_t *pickled);
 // normal APIs and particle table functions.
 extern int as_bin_cdt_read_from_client(const as_bin *b, as_msg_op *op, as_bin *result);
 extern int as_bin_cdt_alloc_modify_from_client(as_bin *b, as_msg_op *op, as_bin *result);
-extern int as_bin_cdt_stack_modify_from_client(as_bin *b, cf_dyn_buf *particles_db, as_msg_op *op, as_bin *result);
+extern int as_bin_cdt_stack_modify_from_client(as_bin *b, cf_ll_buf *particles_llb, as_msg_op *op, as_bin *result);
 
 // Different for LDTs - an LDT's as_list is expensive to generate, so we return
 // it from the sizing method, and cache it for later use by the packing method:
