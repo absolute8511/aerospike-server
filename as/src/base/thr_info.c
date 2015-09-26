@@ -5612,7 +5612,7 @@ info_msg_fn(cf_node node, msg *m, void *udata)
 //
 
 // Boolean flag to control printing a semicolon between service entries.
-static bool printed_a_service = false;
+static bool g_printed_a_service = false;
 
 int
 info_get_services_reduce_fn(void *key, void *data, void *udata)
@@ -5621,11 +5621,11 @@ info_get_services_reduce_fn(void *key, void *data, void *udata)
 	info_node_info *infop = (info_node_info *) data;
 
 	if (infop->service_addr) {
-		if (printed_a_service) {
+		if (g_printed_a_service) {
 			cf_dyn_buf_append_char(db, ';');
 		}
 		cf_dyn_buf_append_string(db, infop->service_addr);
-		printed_a_service = true;
+		g_printed_a_service = true;
 	}
 
 	return(0);
@@ -5634,7 +5634,7 @@ info_get_services_reduce_fn(void *key, void *data, void *udata)
 int
 info_get_services(char *name, cf_dyn_buf *db)
 {
-	printed_a_service = false;
+	g_printed_a_service = false;
 	shash_reduce(g_info_node_info_hash, info_get_services_reduce_fn, (void *) db);
 
 	return(0);
@@ -5643,7 +5643,7 @@ info_get_services(char *name, cf_dyn_buf *db)
 int
 info_get_services_alumni(char *name, cf_dyn_buf *db)
 {
-	printed_a_service = false;
+	g_printed_a_service = false;
 	shash_reduce(g_info_node_info_history_hash, info_get_services_reduce_fn, (void *) db);
 
 	return(0);
@@ -5656,15 +5656,14 @@ info_get_services_alumni(char *name, cf_dyn_buf *db)
 int
 history_purge_reduce_fn(void *key, void *data, void *udata)
 {
-	shash *info_shash = (shash *) udata;
-	return SHASH_OK == shash_get(info_shash, key, NULL) ? SHASH_OK : SHASH_REDUCE_DELETE;
+	return SHASH_OK == shash_get(g_info_node_info_hash, key, NULL) ? SHASH_OK : SHASH_REDUCE_DELETE;
 }
 
 int
 info_services_alumni_reset(char *name, cf_dyn_buf *db)
 {
-	shash_reduce_delete(g_info_node_info_history_hash, history_purge_reduce_fn, g_info_node_info_hash);
-	cf_info(AS_INFO, "Alumni list reset.");
+	shash_reduce_delete(g_info_node_info_history_hash, history_purge_reduce_fn, NULL);
+	cf_info(AS_INFO, "services alumni list reset");
 	cf_dyn_buf_append_string(db, "ok");
 
 	return(0);
