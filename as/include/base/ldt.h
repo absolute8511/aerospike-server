@@ -174,6 +174,7 @@ extern bool     as_ldt_merge_component_is_candidate(as_partition_reservation *rs
 
 extern void     as_ldt_record_set_rectype_bits    (as_record *r, const as_rec_props *props);
 extern int      as_ldt_record_pickle              (ldt_record *lrecord, uint8_t **pickled_buf, size_t *pickled_sz);
+extern void     as_ldt_get_property               (as_rec_props *props, bool *is_ldt_parent, bool *is_ldt_sub);
 
 // Version related functions
 extern uint64_t as_ldt_generate_version();

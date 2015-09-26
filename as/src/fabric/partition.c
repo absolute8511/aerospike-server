@@ -1137,54 +1137,6 @@ as_partition_reserve_migrate(as_namespace *ns, as_partition_id pid, as_partition
 
 }
 
-/*
- * This function allows reserving the partition in 3 cases.
- * If the node is the -
- * 1. master of this partition
- * 2. relica of this partition
- * 3. qnode of this partition
- * Populating sindex only in this 3 nodes is efficient.
- */
-int
-as_partition_reserve_replica_list(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv)
-{
-	as_partition *p = NULL;
-	int ret = -1;
-
-	cf_assert(ns, AS_PARTITION, CF_CRITICAL, "invalid namespace");
-	cf_assert(rsv, AS_PARTITION, CF_CRITICAL, "invalid reservation");
-	cf_assert((pid < AS_PARTITIONS), AS_PARTITION, CF_CRITICAL, "invalid partition");
-	p = &ns->partitions[pid];
-
-	cf_node self = g_config.self_node;
-	// find location of node in replica list, returns -1 if node is not found
-	int my_index = find_in_replica_list(p, self);
-
-	if (0 != pthread_mutex_lock(&p->lock))
-		cf_crash(AS_PARTITION, "couldn't acquire partition state lock: %s", cf_strerror(errno));
-
-	bool is_replica = (0 < my_index) && (my_index < p->p_repl_factor);
-	bool is_master  = (0 == my_index);
-
-	if (is_replica || is_master) {
-		/* This should always be true (desyncs will be caught above in the
-		 * migration path checking) */
-		if (AS_PARTITION_STATE_SYNC == p->state || AS_PARTITION_STATE_DESYNC == p->state) {
-			as_partition_reserve_lockfree(ns, pid, rsv);
-			ret = 0;
-		}
-		else {
-			// This is just a safety net.
-			memset(rsv, 0, sizeof(*rsv));
-		}
-	}
-
-	if (0 != pthread_mutex_unlock(&p->lock))
-		cf_crash(AS_PARTITION, "couldn't release partition state lock: %s", cf_strerror(errno));
-
-	return ret;
-
-}
 /* as_partition_reserve_qnode
  * Obtain a read reservation on qnode ... used by secondary index code to make sure * index is loaded on the qnode so queries can be served after scan quickly. Rather
  * than waiting till the migation finishes
@@ -3755,6 +3707,7 @@ as_partition_balance()
 					if (cf_contains64(dupl_nodes, n_dupl, self) && (my_index_in_hvlist < p->p_repl_factor)) {
 						cf_debug(AS_PARTITION, "{%s:%d} Partition will reject writes during merge", ns->name, j);
 						p->reject_writes = true;
+						ns_pending_migrate_tx_later++;
 					}
 
 					bool is_primary_version = (memcmp(&p->version_info, &p->primary_version_info, sizeof(as_partition_vinfo)) == 0);

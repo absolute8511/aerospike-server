@@ -2628,31 +2628,6 @@ as_storage_write_header(drv_ssd *ssd, ssd_device_header *header, size_t size)
 // Cold start utilities.
 //
 
-void
-ssd_record_get_ldt_property(as_rec_props *props, bool *is_ldt_parent,
-		bool *is_ldt_sub)
-{
-	uint16_t * ldt_rectype_bits;
-
-	*is_ldt_sub	= false;
-	*is_ldt_parent = false;
-
-	if (props->size != 0 &&
-			(as_rec_props_get_value(props, CL_REC_PROPS_FIELD_LDT_TYPE, NULL,
-					(uint8_t**)&ldt_rectype_bits) == 0)) {
-		if (as_ldt_flag_has_sub(*ldt_rectype_bits)) {
-			*is_ldt_sub = true;
-		}
-		else if (as_ldt_flag_has_parent(*ldt_rectype_bits)) {
-			*is_ldt_parent = true;
-		}
-	}
-
-	cf_detail(AS_LDT, "LDT_LOAD ssd_record_get_ldt_property: Parent=%d Subrec=%d",
-			*is_ldt_parent, *is_ldt_sub);
-}
-
-
 // Add a record just read from drive to the index, if all is well.
 // Return values:
 //  0 - success, record added or updated
@@ -2701,7 +2676,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 	bool is_ldt_sub;
 	bool is_ldt_parent;
 
-	ssd_record_get_ldt_property(&props, &is_ldt_parent, &is_ldt_sub);
+	as_ldt_get_property(&props, &is_ldt_parent, &is_ldt_sub);
 
 	if (ssd->sub_sweep) {
 		if (! is_ldt_sub) {
@@ -2734,12 +2709,6 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		cf_warning_digest(AS_DRV_SSD, &block->keyd, "record-add found generation 0 - changed to 1 ");
 	}
 
-	// Set 0 void-time to default, if there is one.
-	if (block->void_time == 0 && ns->default_ttl != 0) {
-		cf_debug(AS_DRV_SSD, "record-add changing 0 void-time to default");
-		block->void_time = as_record_void_time_get() + ns->default_ttl;
-	}
-
 	as_index* r = r_ref.r;
 
 	if (rv == 0) {
@@ -2748,7 +2717,8 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		// if generations are equal.
 		if (block->generation < r->generation ||
 				(block->generation == r->generation &&
-						block->void_time <= r->void_time)) {
+						(r->void_time == 0 || (block->void_time != 0 &&
+								block->void_time <= r->void_time)))) {
 			cf_detail(AS_DRV_SSD, "record-add skipping generation %u <= existing %u",
 					block->generation, r->generation);
 
@@ -2763,9 +2733,9 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 	r->void_time = block->void_time;
 	r->generation = block->generation;
 
-	// No expiry for ldt_sub based on the TTL. LDT sub are expired based on the 
-	// parent record expiry. 
-	if (r->void_time != 0 && !is_ldt_sub) {
+	// Skip records that have expired. Note - LDT subrecords are expired via
+	// their parent record.
+	if (r->void_time != 0 && ! is_ldt_sub) {
 		// The threshold may be ~ now, or it may be in the future if eviction
 		// has been happening.
 		uint32_t threshold_void_time =
