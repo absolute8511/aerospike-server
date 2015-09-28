@@ -14,22 +14,18 @@
 # Short-Description: Aerospike Clustered Data Service
 ### END INIT INFO
 
-# halt on error
-set -e
-
 ASD=/usr/bin/asd
 ASDN=$(basename $ASD)
-PIDDIR=/var/run/aerospike
 CONFIG_FILE=/etc/aerospike/aerospike.conf
 OPTS="--config-file $CONFIG_FILE"
 COLD_OPTS="$OPTS --cold-start"
+PIDDIR="/var/run/aerospike"
+PIDFILE=$PIDDIR/asd.pid
 ASD_USER="aerospike"
 ASD_GROUP=$ASD_USER
 
 INITFNS=/etc/aerospike/initfns
 if [ -f $INITFNS ]; then . $INITFNS; fi
-
-test -x $ASD || exit 0
 
 . /lib/lsb/init-functions
 
@@ -55,56 +51,75 @@ set_shmmax() {
 	fi
 }
 
-#We are adding create_piddir as /var/run is tmpfs on ubuntu12.04. This causes
+#We are adding create_piddir as /var/run is tmpfs on Debian 7+/Ubuntu 12+. This causes
 #the piddir to be removed on reboot
 create_piddir() {
-	if [ ! -d $PIDDIR ] 
+	if [ ! -d $PIDDIR ]
 	then
 		(mkdir $PIDDIR && chown $ASD_USER:$ASD_GROUP $PIDDIR) &> /dev/null
 	fi
-	}
+}
+
+start() {
+	start-stop-daemon --start --quiet --name $ASDN --pidfile $PIDFILE --exec $ASD -- $OPTS
+}
+
+coldstart() {
+	start-stop-daemon --start --quiet --name $ASDN --pidfile $PIDFILE --exec $ASD -- $COLD_OPTS
+}
+
+stop() {
+	[ -f $PIDFILE ] && pid=`cat $PIDFILE`
+	start-stop-daemon --stop --quiet --pidfile $PIDFILE --name $ASDN
+	rv=$?
+	[ $pid ] && while [ -e /proc/$pid ]; do sleep 0.1; done
+	return $rv
+}
 
 case "$1" in
-	start)
+	start|coldstart)
 		ulimit -n 100000
-		log_daemon_msg "Start aerospike: " "asd"
+		logger -t aerospike "ulimit -n=" `ulimit -n`
 		set_shmall
 		set_shmmax
 		create_piddir
-		if [ -n $LD_PRELOAD ]; then export LD_PRELOAD; fi
-		if start-stop-daemon --start --quiet --name $ASDN --exec $ASD -- $OPTS; then
-			log_end_msg 0
-		else
-			log_end_msg 1
-		fi
-		;;
-	coldstart)
-		ulimit -n 100000
-		log_daemon_msg "Cold-start aerospike: " "asd"
-		set_shmall
-		set_shmmax
-		create_piddir
-		if [ -n $LD_PRELOAD ]; then export LD_PRELOAD; fi
-		if start-stop-daemon --start --quiet --name $ASDN --exec $ASD -- $COLD_OPTS; then
-			log_end_msg 0
-		else
-			log_end_msg 1
-		fi
+		[ -n "$LD_PRELOAD" ] && export LD_PRELOAD
+		log_daemon_msg "${1^}ing aerospike"
+		$1
+		case $? in
+			0)
+				log_end_msg 0
+				;;
+			1)
+				echo "aerospike already started"
+				log_end_msg 0
+				;;
+			*)
+				log_end_msg 1
+				;;
+		esac
 		;;
 	stop)
-		log_daemon_msg "Halt aerospike: " "asd"
-		if start-stop-daemon --stop --quiet --name $ASDN  ; then
-			log_end_msg 0
-		else
-			log_end_msg 1
-		fi
+		log_daemon_msg "Stopping aerospike"
+		$1
+		case $? in
+			0)
+				log_end_msg 0
+				;;
+			1)
+				echo "aerospike already stopped"
+				log_end_msg 0
+				;;
+			*)
+				log_end_msg 1
+				;;
+		esac
 		;;
 	status)
-		status_of_proc $ASD $ASDN && exit 0 || exit $?
+		status_of_proc -p $PIDFILE $ASDN aerospike
 		;;
 	restart)
-		$0 stop
-		sleep 3
+		[ -n "`pgrep $ASDN`" ] && $0 stop
 		$0 start
 		;;
 	*)
@@ -112,5 +127,3 @@ case "$1" in
 		exit 2
 		;;
 esac
-
-exit 0
