@@ -729,14 +729,17 @@ as_record_component_winner(as_partition_reservation *rsv, int n_components,
 		as_record_merge_component *c = &components[i];
 		switch (rsv->ns->conflict_resolution_policy) {
 			case AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION:
-				if (c->generation > max_generation || (c->generation == max_generation && c->void_time > max_void_time)) {
+				if (c->generation > max_generation || (c->generation == max_generation &&
+						(max_void_time != 0 && (c->void_time == 0 || c->void_time > max_void_time)))) {
 					max_void_time  = c->void_time;
 					max_generation = c->generation;
 					winner_idx = (int32_t)i;
 				}
 				break;
 			case AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_TTL:
-				if (c->void_time > max_void_time || (c->void_time == max_void_time && c->generation > max_generation)) {
+				if ((max_void_time != 0 && (c->void_time == 0 ||
+						c->void_time > max_void_time)) || (c->void_time == max_void_time &&
+								c->generation > max_generation)) {
 					max_void_time = c->void_time;
 					max_generation = c->generation;
 					winner_idx = (int32_t)i;

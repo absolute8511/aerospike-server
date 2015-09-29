@@ -1432,8 +1432,10 @@ as_ldt_merge_component_is_candidate(as_partition_reservation *rsv, as_record_mer
 	bool rv = false;
 
 	// If component has higher generation ttl then it is merge candidate
-	if (c->pgeneration > r->generation
-			|| (c->pgeneration == r->generation && c->pvoid_time > r->void_time)) {
+	if (c->pgeneration > r->generation ||
+			(c->pgeneration == r->generation &&
+					(r->void_time != 0 && (c->pvoid_time == 0 ||
+							c->pvoid_time > r->void_time)))) {
 		as_record_done(&r_ref, rsv->ns);
 		rv = true;
 	} else {
