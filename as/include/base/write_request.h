@@ -190,7 +190,7 @@ void wr_track_init()
 void 			g_write_hash_delete(global_keyd *gk);
 write_request * write_request_create(void);
 int             write_request_init_tr(as_transaction *tr, void *wreq);
-bool            finish_rw_process_ack(write_request *wr, uint32_t result_code);
+bool            finish_rw_process_ack(write_request *wr, uint32_t result_code, bool is_repl_write);
 int             write_request_process_ack(int ns_id, cf_digest *keyd);
 void            write_request_finish(as_transaction *tr, write_request *wr, bool must_delete);
 int             write_request_start(as_transaction *tr, write_request **wrp, bool is_read);

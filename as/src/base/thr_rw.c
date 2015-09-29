@@ -754,8 +754,10 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 	int rv             = 0;
 	bool is_delete     = (tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE);
 
-	if ((wr->dupl_trans_complete == 0) && (tr->rsv.n_dupl > 0))
+	if ((wr->dupl_trans_complete == 0) && (tr->rsv.n_dupl > 0)) {
 		dupl_resolved = false;
+	}
+
 	if ((tr->rsv.n_dupl == 0) || !dupl_resolved) {
 		first_time = true;
 	} else {
@@ -1736,27 +1738,27 @@ finish_rw_process_dup_ack(write_request *wr)
 //   true if it is
 //
 bool
-finish_rw_process_ack(write_request *wr, uint32_t result_code)
+finish_rw_process_ack(write_request *wr, uint32_t result_code, bool is_repl_write)
 {
 	for (uint32_t node_id = 0; node_id < wr->dest_sz; node_id++) {
-		if (wr->dest_complete[node_id] == false) {
+		if (! wr->dest_complete[node_id]) {
 			return false;
 		}
 	}
-	// Figure out the ack is coming for which request type.
-	//   - If dupl_trans_complete is 0 then it is duplicate resolution ack
-	//   - Else is it prole ack
-	//
-	// If so, use the atomic to make sure only one response does finish
-	// processing for duplicate resolution.
-	if (wr->dupl_trans_complete == 0) { // in duplicate phase
+
+	// Use the atomic flags to make sure only one response does finish
+	// processing for respective operation.
+
+	if (! is_repl_write) { // in duplicate phase
 		if (1 == cf_atomic32_incr(&wr->dupl_trans_complete)) {
 			return finish_rw_process_dup_ack(wr);
 		}
-	} else if (1 == cf_atomic32_incr(&wr->trans_complete)) {
+	}
+	else if (1 == cf_atomic32_incr(&wr->trans_complete)) {
 		return finish_rw_process_prole_ack(wr, result_code);
 	}
-	return (false);
+
+	return false;
 }
 
 void
@@ -1971,7 +1973,7 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 
 	// 3. We now know this node's write/read is complete. Finish processing
 	WR_TRACK_INFO(wr, "finish_rw_process_ack: entering");
-	bool finished = finish_rw_process_ack(wr, AS_PROTO_RESULT_OK);
+	bool finished = finish_rw_process_ack(wr, AS_PROTO_RESULT_OK, is_write);
 	pthread_mutex_unlock(&wr->lock);
 
 	if (finished) {
@@ -5545,46 +5547,18 @@ rw_retransmit_reduce_fn(void *key, uint32_t keylen, void *data, void *udata)
 	}
 
 	if (wr->xmit_ms < p_now->now_ms) {
-
-		bool finished = false;
-
 		pthread_mutex_lock(&wr->lock);
-		if (wr->rsv.n_dupl > 0)
-			cf_debug(AS_RW,
-					"{%s:%d} rw retransmit reduce fn: RETRANSMITTING %"PRIx64" %s",
-					wr->rsv.ns->name, wr->rsv.pid, *(uint64_t *) & (wr->keyd), wr->is_read ? "READ" : "WRITE");
-		else
-			cf_debug(AS_RW,
-					"{%s:%d} rw retransmit reduce fn: RETRANSMITTING %"PRIx64" %s",
-					wr->rsv.ns->name, wr->rsv.pid, *(uint64_t *) & (wr->keyd), wr->is_read ? "READ" : "WRITE");
+
+		cf_debug(AS_RW, "{%s:%d} rw retransmit reduce fn: RETRANSMITTING %"PRIx64" %s n-dupl %u",
+				wr->rsv.ns->name, wr->rsv.pid, *(uint64_t *) & (wr->keyd), wr->is_read ? "READ" : "WRITE", wr->rsv.n_dupl);
 
 		wr->xmit_ms = p_now->now_ms + wr->retry_interval_ms;
 		wr->retry_interval_ms *= 2;
 
 		WR_TRACK_INFO(wr, "rw_retransmit_reduce_fn: retransmitting ");
 		send_messages(wr);
-		// No such ack processing for the shipped_op initiator. The request
-		// will get processed when the response for the shipped operation is
-		// finished
-		if (!wr->shipped_op_initiator) {
-			finished = finish_rw_process_ack(wr, AS_PROTO_RESULT_OK);
-		} else {
-			cf_debug(AS_LDT, "Skipping process ack for LDT ship op initiator");
-		}
-		pthread_mutex_unlock(&wr->lock);
 
-		if (finished == true) {
-			if (wr->rsv.n_dupl > 0)
-				cf_debug(AS_RW,
-						"{%s:%d} rw retransmit reduce fn: DELETING request %"PRIx64" %s",
-						wr->rsv.ns->name, wr->rsv.pid, *(uint64_t *) & (wr->keyd), wr->is_read ? "READ" : "WRITE");
-			else
-				cf_debug(AS_RW,
-						"{%s:%d} rw retransmit reduce fn: DELETING request %"PRIx64" %s",
-						wr->rsv.ns->name, wr->rsv.pid, *(uint64_t *) & (wr->keyd), wr->is_read ? "READ" : "WRITE");
-			WR_TRACK_INFO(wr, "rw_retransmit_reduce_fn: deleting ");
-			return (RCHASH_REDUCE_DELETE);
-		}
+		pthread_mutex_unlock(&wr->lock);
 	}
 
 	return (0);
