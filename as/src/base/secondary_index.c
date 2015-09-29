@@ -2495,12 +2495,18 @@ as_sindex_add_sbin_value_in_heap(as_sindex_bin * sbin, void * val)
 		if (sbin->num_values == 0) {
 			size = 2;
 		}
-		else if (sbin->num_values > 0) {
+		else if (sbin->num_values == 1) {
+			to_copy = true;
+			size = 2;
+			tmp_value = &sbin->value;
+		}
+		else if (sbin->num_values > 1) {
 			to_copy = true;
 			size = 2 * sbin->num_values;
 			tmp_value = sbin->values;
 		}
 		else {
+			cf_warning(AS_SINDEX, "num_values in sbin is less than 0 %d", sbin->num_values);
 			return AS_SINDEX_ERR;
 		}
 
