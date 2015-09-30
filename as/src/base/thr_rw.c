@@ -947,6 +947,9 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 			} // end, no XDR problems
 		} // end, else this is a write.
 
+		wr->generation = tr->generation;
+		wr->void_time = tr->void_time;
+
 		// from this function: -2 means retry, -1 means forever - like, gen mismatch or similar
 		if (rv != 0) {
 			if ((rv == -2) && (tr->proto_fd_h == 0) && (tr->proxy_msg == 0)) {
@@ -2030,7 +2033,7 @@ write_complete(write_request *wr, as_transaction *tr)
 	}
 	else if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-				tr->generation, tr->void_time, NULL, NULL, 0, NULL, NULL,
+				wr->generation, wr->void_time, NULL, NULL, 0, NULL, NULL,
 				tr->trid, NULL)) {
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
