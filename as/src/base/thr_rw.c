@@ -245,8 +245,8 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	tr->preprocessed = true;
 	tr->flag = 0;
 
-	tr->generation = 0;
-	tr->void_time = 0;
+	tr->generation = wr->generation;
+	tr->void_time = wr->void_time;
 	tr->microbenchmark_is_resolve = false;
 
 	if (wr->shipped_op)
@@ -947,9 +947,6 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 			} // end, no XDR problems
 		} // end, else this is a write.
 
-		wr->generation = tr->generation;
-		wr->void_time = tr->void_time;
-
 		// from this function: -2 means retry, -1 means forever - like, gen mismatch or similar
 		if (rv != 0) {
 			if ((rv == -2) && (tr->proto_fd_h == 0) && (tr->proxy_msg == 0)) {
@@ -1123,6 +1120,8 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 	wr->proxy_node = tr->proxy_node;
 	wr->proxy_msg  = tr->proxy_msg;
 	wr->shipped_op = (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) ? true : false;
+	wr->generation = tr->generation;
+	wr->void_time = tr->void_time;
 
 	UREQ_DATA_COPY(&wr->udata, &tr->udata);
 
@@ -2033,7 +2032,7 @@ write_complete(write_request *wr, as_transaction *tr)
 	}
 	else if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
-				wr->generation, wr->void_time, NULL, NULL, 0, NULL, NULL,
+				tr->generation, tr->void_time, NULL, NULL, 0, NULL, NULL,
 				tr->trid, NULL)) {
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
