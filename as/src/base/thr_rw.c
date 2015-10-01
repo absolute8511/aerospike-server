@@ -1755,6 +1755,9 @@ finish_rw_process_ack(write_request *wr, uint32_t result_code, bool is_repl_writ
 		if (1 == cf_atomic32_incr(&wr->dupl_trans_complete)) {
 			return finish_rw_process_dup_ack(wr);
 		}
+		else {
+			cf_warning(AS_RW, "extra dupl response - should have been handled earlier");
+		}
 	}
 	else if (1 == cf_atomic32_incr(&wr->trans_complete)) {
 		return finish_rw_process_prole_ack(wr, result_code);
@@ -1929,6 +1932,12 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 
 	pthread_mutex_lock(&wr->lock);
 
+	if (wr->dupl_trans_complete != 0 && ! is_write) {
+		cf_debug(AS_RW, "rw process ack: ignoring extra dupl response after dupl phase is done");
+		pthread_mutex_unlock(&wr->lock);
+		goto Out;
+	}
+
 	// 2. Now check to see if all are complete. If not wait for all messages
 	// to arrive
 	uint32_t node_id;
@@ -1945,7 +1954,7 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 				if (is_write == false) { // duplicate-phase messages are arriving
 					wr->dup_result_code[node_id] = result_code;
 					if (wr->dup_msg[node_id] != 0) {
-						cf_debug(AS_RW,
+						cf_warning(AS_RW,
 								"{%s:%d} dup process ack: received duplicate response from node %"PRIx64"",
 								wr->rsv.ns->name, wr->rsv.pid, *(uint64_t *)(&wr->keyd));
 					} else {
@@ -1956,16 +1965,17 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 								wr->rsv.ns->name, wr->rsv.pid, *(uint64_t *)(&wr->keyd));
 					}
 				}
-			} else
+			} else {
 				cf_debug(AS_RW,
 						"{%s:%d} write process ack: Ignoring duplicate response for read result code %d",
 						wr->rsv.ns->name, wr->rsv.pid, result_code);
+			}
 			break;
 		}
 	}
 	// received a message from a node that was unexpected -
 	if (node_id == wr->dest_sz) {
-		cf_debug(AS_RW,
+		cf_warning(AS_RW,
 				"rw process ack: received ack from node %"PRIx64" not in transmit list, ignoring",
 				node);
 		pthread_mutex_unlock(&wr->lock);
@@ -1988,8 +1998,9 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 	}
 
 Out:
-	if (m)
+	if (m) {
 		as_fabric_msg_put(m);
+	}
 
 	WR_TRACK_INFO(wr, "rw_process_ack: returning");
 	WR_RELEASE(wr);
@@ -2065,7 +2076,7 @@ rw_complete(write_request *wr, as_transaction *tr, as_index_ref *r_ref)
 	else {
 		read_local(tr, r_ref);
 
-		if (wr && (m->info1 & AS_MSG_INFO1_BATCH)) {
+		if (wr && wr->batch_shared) {
 			wr->msgp = NULL;
 		}
 	}
