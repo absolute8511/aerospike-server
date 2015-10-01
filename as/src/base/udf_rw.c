@@ -643,6 +643,18 @@ udf_call_destroy(udf_call * call)
 	call->arglist = NULL;
 }
 
+static inline bool
+udf_zero_bins_left(udf_record *urecord)
+{
+	if (!(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD)
+			&& (urecord->flag & UDF_RECORD_FLAG_OPEN)
+			&& !as_bin_inuse_has(urecord->rd)) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
 /*
  * Looks at the flags set in udf_record and determines if it is
  * read / write or delete operation
@@ -675,17 +687,8 @@ udf_rw_getop(udf_record *urecord, udf_optype *urecord_op)
 		*urecord_op  = UDF_OPTYPE_READ;
 	}
 
-	// If there exists a record reference but no bin of the record is in use,
-	// delete the record. remove from the tree. Only LDT_RECORD here not needed
-	// for LDT_SUBRECORD (only do it if requested by UDF). All the SUBRECORD of
-	// removed LDT_RECORD will be lazily cleaned up by defrag.
-	if (!(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD)
-			&& (urecord->flag & UDF_RECORD_FLAG_OPEN)
-			&& !as_bin_inuse_has(urecord->rd)) {
-		as_transaction *tr = urecord->tr;
-		as_index_delete(tr->rsv.tree, &tr->keyd);
-		urecord->starting_memory_bytes = 0;
-		*urecord_op                    = UDF_OPTYPE_DELETE;
+	if (udf_zero_bins_left(urecord)) {
+		*urecord_op  = UDF_OPTYPE_DELETE;
 	}
 }
 
@@ -751,7 +754,17 @@ udf_rw_post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set
 			urecord->tr, urecord->r_ref, urecord->rd,
 			(urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN));
 
-	if (*urecord_op == UDF_OPTYPE_WRITE)	{
+	// If there exists a record reference but no bin of the record is in use,
+	// delete the record. remove from the tree. Only LDT_RECORD here not needed
+	// for LDT_SUBRECORD (only do it if requested by UDF). All the SUBRECORD of
+	// removed LDT_RECORD will be lazily cleaned up by defrag.
+	if (udf_zero_bins_left(urecord)) {
+		as_transaction *tr = urecord->tr;
+		as_index_delete(tr->rsv.tree, &tr->keyd);
+		urecord->starting_memory_bytes = 0;
+		*urecord_op                    = UDF_OPTYPE_DELETE;
+	}
+	else if (*urecord_op == UDF_OPTYPE_WRITE)	{
 		cf_detail_digest(AS_UDF, &rd->keyd, "Committing Changes n_bins %d", as_bin_get_n_bins(r_ref->r, rd));
 
 		size_t  rec_props_data_size = as_storage_record_rec_props_size(rd);
@@ -888,6 +901,7 @@ udf_rw_finish(ldt_record *lrecord, write_request *wr, udf_optype * lrecord_op, u
 	// wr->pickled_ldt_version = lrecord->version;
 
 	if (h_urecord_op == UDF_OPTYPE_DELETE) {
+		udf_rw_post_processing(h_urecord, &h_urecord_op, set_id);
 		wr->pickled_buf      = NULL;
 		wr->pickled_sz       = 0;
 		as_rec_props_clear(&wr->pickled_rec_props);
