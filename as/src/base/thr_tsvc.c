@@ -698,14 +698,7 @@ process_transaction(as_transaction *tr)
 			// -2 :: "try again"
 			// -3 :: "duplicate proxy request, drop"
 			if (0 != rv) {
-				rv = as_rw_process_result(rv, tr, &free_msgp);
-			}
-			if (free_msgp == true) {
-				cf_free(msgp);
-				free_msgp = false;
-			}
-			if (rv) {
-				goto Cleanup;
+				as_rw_process_result(rv, tr, &free_msgp);
 			}
 		} else {
 			// rv != 0 (reservation failed) or cluster keys DO NOT MATCH.
@@ -761,11 +754,6 @@ process_transaction(as_transaction *tr)
 					udf_rw_complete(tr, cluster_keys_match ? AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH : AS_PROTO_RESULT_FAIL_UNKNOWN, __FILE__,__LINE__);
 				}
 			}
-			if (free_msgp == true) {
-				cf_free(msgp);
-				free_msgp = false;
-			}
-
 			goto Cleanup;
 		} // end else "other" transaction
 	} // end if read or write
@@ -776,11 +764,6 @@ process_transaction(as_transaction *tr)
 		}
 		if (tr->proto_fd_h) {
 			as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
-
-			if (free_msgp == true) {
-				cf_free(msgp);
-				free_msgp = false;
-			}
 		} else {
 			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
 				cf_info(AS_RW,
@@ -794,10 +777,6 @@ process_transaction(as_transaction *tr)
 			}
 			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
 					AS_PROTO_RESULT_FAIL_PARAMETER, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-			if (free_msgp == true) {
-				cf_free(msgp);
-				free_msgp = false;
-			}
 		}
 		goto Cleanup;
 	}

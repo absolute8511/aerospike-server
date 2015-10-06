@@ -713,9 +713,7 @@ thr_demarshal(void *arg)
 
 					// Fast path for batch requests.
 					if (tr.msgp->msg.info1 & AS_MSG_INFO1_BATCH) {
-						if (as_batch_queue_task(&tr)) {
-							goto NextEvent_FD_Cleanup;
-						}
+						as_batch_queue_task(&tr);
 						cf_atomic_int_incr(&g_config.proto_transactions);
 						goto NextEvent;
 					}

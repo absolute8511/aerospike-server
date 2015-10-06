@@ -962,6 +962,8 @@ Retry:
 				// TODO - why not pr.start_time?
 				tr.end_time   = pr->end_time;
 				tr.proto_fd_h = pr->fd_h;
+				tr.batch_shared = pr->batch_shared;
+				tr.batch_index = pr->batch_index;
 
 				sz = 0;
 				msg_get_buf(pr->fab_msg, PROXY_FIELD_AS_PROTO, (byte **) & (tr.msgp), &sz, MSG_GET_COPY_MALLOC);

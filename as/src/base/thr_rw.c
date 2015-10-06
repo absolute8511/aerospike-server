@@ -1767,14 +1767,21 @@ finish_rw_process_ack(write_request *wr, uint32_t result_code, bool is_repl_writ
 }
 
 void
-rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk)
+rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk, bool is_repl_write)
 {
 	cf_debug(AS_RW,
 			"{%s:%d} rw_process_cluster_key_mismatch: CLUSTER KEY MISMATCH rsp %"PRIx64" %s",
 			wr->rsv.ns->name, wr->rsv.pid, *(uint64_t *) & (wr->keyd), wr->is_read ? "READ" : "WRITE");
 	bool must_delete = false;
+
 	pthread_mutex_lock(&wr->lock);
-	if (wr->dupl_trans_complete == 0) {
+
+	if (wr->batch_shared && ! wr->msgp) {
+		pthread_mutex_unlock(&wr->lock);
+		return;
+	}
+
+	if (! is_repl_write) {
 		if (1 == cf_atomic32_incr(&wr->dupl_trans_complete)) {
 			cf_atomic32_incr(&wr->trans_complete);
 			// also complete the next transaction. we are bailing out
@@ -1816,7 +1823,9 @@ rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk)
 		WR_TRACK_INFO(wr, "rw_process_cluster_key_mismatch: cluster key mismatch deleting - final ");
 		must_delete = true;
 	}
+
 	pthread_mutex_unlock(&wr->lock);
+
 	if (must_delete) {
 		rchash_delete(g_write_hash, gk, sizeof(global_keyd));
 	}
@@ -1920,7 +1929,8 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 	WR_TRACK_INFO(wr, "rw_process_ack: entering");
 
 	if (result_code == AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH) {
-		rw_process_cluster_key_mismatch(wr, &gk);
+		rw_process_cluster_key_mismatch(wr, &gk, is_write);
+		goto Out;
 	}
 	else if (result_code != AS_PROTO_RESULT_OK) {
 		cf_debug_digest(AS_RW, "{%s:%d} rw_process_ack: Processing unexpected response(%d):",
@@ -1934,6 +1944,11 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 
 	if (wr->dupl_trans_complete != 0 && ! is_write) {
 		cf_debug(AS_RW, "rw process ack: ignoring extra dupl response after dupl phase is done");
+		pthread_mutex_unlock(&wr->lock);
+		goto Out;
+	}
+
+	if (wr->batch_shared && ! wr->msgp) {
 		pthread_mutex_unlock(&wr->lock);
 		goto Out;
 	}
@@ -1986,6 +2001,11 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 	// 3. We now know this node's write/read is complete. Finish processing
 	WR_TRACK_INFO(wr, "finish_rw_process_ack: entering");
 	bool finished = finish_rw_process_ack(wr, AS_PROTO_RESULT_OK, is_write);
+
+	if (wr->batch_shared && finished) {
+		wr->msgp = NULL;
+	}
+
 	pthread_mutex_unlock(&wr->lock);
 
 	if (finished) {
@@ -5540,8 +5560,10 @@ rw_retransmit_reduce_fn(void *key, uint32_t keylen, void *data, void *udata)
 			}
 		} else {
 			if (wr->batch_shared) {
-				as_batch_add_error(wr->batch_shared, wr->batch_index, AS_PROTO_RESULT_FAIL_TIMEOUT);
-				wr->msgp = NULL;
+				if (wr->msgp) {
+					as_batch_add_error(wr->batch_shared, wr->batch_index, AS_PROTO_RESULT_FAIL_TIMEOUT);
+					wr->msgp = NULL;
+				}
 			}
 			else {
 				if (wr->proto_fd_h) {
