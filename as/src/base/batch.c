@@ -798,10 +798,7 @@ as_batch_queue_task(as_transaction* btr)
 		}
 		else {
 			// Queue transaction to be processed by a transaction thread.
-			if (thr_tsvc_enqueue(&tr)) {
-				cf_warning(AS_BATCH, "Batch enqueue %u failed", tr.batch_index);
-				as_batch_add_error(tr.batch_shared, tr.batch_index, AS_PROTO_RESULT_FAIL_UNKNOWN);
-			}
+			thr_tsvc_enqueue(&tr);
 		}
 		tran_row++;
 	}

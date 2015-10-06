@@ -672,10 +672,7 @@ run_nsup_delete(void* pv_data)
 
 		MICROBENCHMARK_RESET();
 
-		if (0 != thr_tsvc_enqueue(&tr)) {
-			cf_warning(AS_DEMARSHAL, "nsup failed tsvc enqueue");
-			cf_free(msgp);
-		}
+		thr_tsvc_enqueue(&tr);
 
 		// Throttle - don't overwhelm tsvc queue.
 		if (g_config.nsup_delete_sleep != 0) {

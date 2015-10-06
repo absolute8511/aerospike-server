@@ -1796,15 +1796,7 @@ query_udf_txn_setup(tr_create_data * d)
 	qtr_reserve(qtr, __FILE__, __LINE__);
 	// Reset start time
 	tr.start_time = cf_getns();
-	if (0 != thr_tsvc_enqueue(&tr)) {
-		cf_warning(AS_QUERY, "UDF: Failed to queue transaction for digest %"PRIx64", "
-				"number of transactions enqueued [%d] .. dropping current "
-				"transaction.. ", tr.keyd, qtr->n_udf_tr_queued);
-		cf_free(tr.msgp);
-		tr.msgp = 0;
-		qtr_finish_work(qtr, &qtr->n_udf_tr_queued, __FILE__, __LINE__, true);
-		return AS_QUERY_ERR;
-	}
+	thr_tsvc_enqueue(&tr);
 	return AS_QUERY_OK;
 }
 

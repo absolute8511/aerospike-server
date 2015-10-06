@@ -157,13 +157,7 @@ write_request_restart(wreq_tr_element *w)
 
 	MICROBENCHMARK_RESET_P();
 
-	if (0 != thr_tsvc_enqueue(tr)) {
-		cf_warning(AS_RW,
-				"WRITE REQUEST: FAILED queueing back request %"PRIx64"",
-				*(uint64_t*)&tr->keyd);
-		cf_free(tr->msgp);
-		tr->msgp = 0;
-	}
+	thr_tsvc_enqueue(tr);
 	cf_atomic_int_decr(&g_config.n_waiting_transactions);
 	cf_free(w);
 }
@@ -1790,16 +1784,12 @@ rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk, bool is_repl
 			write_request_init_tr(&tr, wr);
 			MICROBENCHMARK_RESET();
 
-			// In order to re-write the prole, we actually REDO the transaction
-			// by re-queuing it and doing it ALL over again.
 			cf_atomic_int_incr(&g_config.stat_cluster_key_err_ack_dup_trans_reenqueue);
 
 			cf_debug_digest(AS_RW, &(wr->keyd), "[RE-ENQUEUE JOB from CK ERR ACK:1] TrID(0) SelfNode(%"PRIx64")",
 					g_config.self_node );
-			if (0 != thr_tsvc_enqueue(&tr)) {
-				cf_warning(AS_RW, "queue rw_process_cluster_key_mismatch failure");
-				cf_free(wr->msgp);
-			}
+
+			thr_tsvc_enqueue(&tr);
 			wr->msgp = 0;
 			WR_TRACK_INFO(wr, "rw_process_cluster_key_mismatch: cluster key mismatch deleting - duplicate ");
 			must_delete = true;
@@ -1815,10 +1805,7 @@ rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk, bool is_repl
 		cf_debug_digest(AS_RW, &(wr->keyd), "[RE-ENQUEUE JOB from CK ERR ACK:2] TrID(0) SelfNode(%"PRIx64")",
 				g_config.self_node );
 
-		if (0 != thr_tsvc_enqueue(&tr)) {
-			cf_warning(AS_RW, "queue rw_process_cluster_key_mismatch failure");
-			cf_free(wr->msgp);
-		}
+		thr_tsvc_enqueue(&tr);
 		wr->msgp = 0; // NULL this out so that the write_destructor does not free this pointer.
 		WR_TRACK_INFO(wr, "rw_process_cluster_key_mismatch: cluster key mismatch deleting - final ");
 		must_delete = true;

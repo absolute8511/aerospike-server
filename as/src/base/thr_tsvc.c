@@ -1010,11 +1010,14 @@ thr_tsvc_enqueue(as_transaction *tr)
 	cf_queue *q;
 
 	if ((q = g_config.transactionq_a[n_q]) == NULL) {
-		cf_warning(AS_TSVC, "transaction queue #%d not initialized!", n_q);
-		return -1;
+		cf_crash(AS_TSVC, "transaction queue #%d not initialized!", n_q);
 	}
 
-	return cf_queue_push(q, tr);
+	if (cf_queue_push(q, tr) != 0) {
+		cf_crash(AS_TSVC, "transaction queue push failed - out of memory?");
+	}
+
+	return 0;
 } // end thr_tsvc_enqueue()
 
 

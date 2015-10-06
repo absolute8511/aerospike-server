@@ -532,10 +532,7 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 
 			MICROBENCHMARK_RESET();
 
-			if (0 != thr_tsvc_enqueue(&tr)) {
-				cf_warning(AS_PROXY, "tsvc enqueue failed ~~ dropping incoming proxy request message!");
-				as_fabric_msg_put(m);
-			}
+			thr_tsvc_enqueue(&tr);
 		}
 		break;
 
@@ -705,10 +702,7 @@ SendFin:
 
 				MICROBENCHMARK_RESET();
 
-				if (0 != thr_tsvc_enqueue(&tr)) {
-					cf_warning(AS_PROXY, "queue");
-					cf_crash(AS_PROXY, "could not enqueue proxy redirect");
-				}
+				thr_tsvc_enqueue(&tr);
 
 				as_fabric_msg_put(pr->fab_msg);
 				shash_delete_lockfree(g_proxy_hash, &transaction_id);
@@ -972,11 +966,7 @@ Retry:
 
 				MICROBENCHMARK_RESET();
 
-				if (0 != thr_tsvc_enqueue(&tr)) {
-					cf_warning(AS_PROXY, "queue");
-					// Hope the next time around has more luck.
-					return 0;
-				}
+				thr_tsvc_enqueue(&tr);
 
 				// Getting deleted - cleanup the proxy request.
 				as_fabric_msg_put(pr->fab_msg);
