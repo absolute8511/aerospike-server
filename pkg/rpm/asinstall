@@ -58,7 +58,7 @@ echo Installing server
 if [ $# -eq 0 ]
 then
 	echo rpm -Uvh aerospike-server-*.rpm
-	rpm -ivh aerospike-server-*.rpm
+	rpm -Uvh aerospike-server-*.rpm
 else
 	echo rpm "$@" aerospike-server-*.rpm
 	rpm "$@" aerospike-server-*.rpm
