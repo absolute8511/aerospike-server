@@ -699,6 +699,8 @@ SendFin:
 				tr.start_time = pr->start_time; // start time
 				tr.end_time   = pr->end_time;
 				tr.proto_fd_h = pr->fd_h;
+				tr.batch_shared = pr->batch_shared;
+				tr.batch_index = pr->batch_index;
 
 				MICROBENCHMARK_RESET();
 
