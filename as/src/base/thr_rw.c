@@ -3077,6 +3077,10 @@ write_delete_local(as_transaction *tr, bool journal, cf_node masternode,
 	// Save the set-ID for XDR.
 	uint16_t set_id = as_index_get_set_id(r);
 
+	// Save the generation for XDR, and for ack to client. (This will also go to
+	// the prole if this is a master delete, but the prole will ignore it.)
+	tr->generation = r->generation;
+
 	as_index_delete(tree, &tr->keyd);
 	cf_atomic_int_incr(&g_config.stat_delete_success);
 	as_record_done(&r_ref, ns);
