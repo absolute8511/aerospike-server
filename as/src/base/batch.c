@@ -243,12 +243,12 @@ as_batch_send_final(as_batch_shared* shared)
 static inline void
 as_batch_free(as_batch_shared* shared, as_batch_queue* batch_queue)
 {
+	// Destroy lock
+	pthread_mutex_destroy(&shared->lock);
+
 	// Release memory
 	cf_free(shared->msgp);
 	cf_free(shared);
-
-	// Destroy lock
-	pthread_mutex_destroy(&shared->lock);
 
 	// It's critical that this count is decremented after the transaction is
 	// completely finished with the queue because "shutdown threads" relies
