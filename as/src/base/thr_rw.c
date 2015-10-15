@@ -2789,7 +2789,9 @@ write_process(cf_node node, msg *m, bool respond)
 			if (msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
 				rv = write_delete_local(&tr, true, node, false);
 			} else {
-				cf_crash_digest(AS_RW, keyd, "replica write trying to use write_local()");
+				// Older version nodes can send messages that get here.
+				cf_warning_digest(AS_RW, keyd, "replica write trying to use write_local() - ignoring ");
+				tr.result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 			}
 
 			cf_debug_digest(AS_RW, keyd, "Local RW: rv %d result code(%d)",
@@ -5169,7 +5171,9 @@ write_process_op(as_transaction *tr, cl_msg *msgp, cf_node node, as_generation g
 	if (msgp->msg.info2 & AS_MSG_INFO2_DELETE) {
 		rv = write_delete_local(tr, true, node, false);
 	} else {
-		cf_crash_digest(AS_RW, &tr->keyd, "replica write trying to use write_local()");
+		// Older version nodes can send messages that get here.
+		cf_warning_digest(AS_RW, &tr->keyd, "replica write trying to use write_local() - ignoring ");
+		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	if (rv == 0) {
