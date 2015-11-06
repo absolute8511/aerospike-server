@@ -33,6 +33,7 @@
 #include "base/proto.h"
 #include "base/security.h"
 #include "base/thr_tsvc.h"
+#include "jem.h"
 #include "queue.h"
 #include <errno.h>
 
@@ -59,15 +60,16 @@ typedef struct {
 	uint8_t info1;
 	uint8_t pad[2];
 	uint16_t n_ops;
-} as_batch_input;
+} __attribute__((__packed__)) as_batch_input;
 
 typedef struct {
 	uint32_t capacity;
 	uint32_t size;
 	uint32_t tran_count;
 	cf_atomic32 writers;
+	as_proto proto;
 	uint8_t data[];
-} as_batch_buffer;
+} __attribute__((__packed__)) as_batch_buffer;
 
 struct as_batch_shared {
 	pthread_mutex_t lock;
@@ -111,6 +113,9 @@ static as_buffer_pool batch_buffer_pool;
 static as_batch_queue batch_queues[MAX_BATCH_THREADS];
 static pthread_mutex_t batch_resize_lock;
 
+static int batch_buffer_arena_normal;
+static int batch_buffer_arena_huge;
+
 //---------------------------------------------------------
 // STATIC FUNCTIONS
 //---------------------------------------------------------
@@ -141,7 +146,7 @@ as_batch_send(int fd, uint8_t* buf, size_t len, int flags)
 }
 
 static int
-as_batch_send_error(as_file_handle* fd_h, int result_code)
+as_batch_send_error(as_transaction* btr, int result_code)
 {
 	cl_msg m;
 	m.proto.version = PROTO_VERSION;
@@ -161,8 +166,13 @@ as_batch_send_error(as_file_handle* fd_h, int result_code)
 	m.msg.n_ops = 0;
 	as_msg_swap_header(&m.msg);
 
-	int status = as_batch_send(fd_h->fd, (uint8_t*)&m, sizeof(m), MSG_NOSIGNAL);
-	AS_RELEASE_FILE_HANDLE(fd_h);
+	int status = as_batch_send(btr->proto_fd_h->fd, (uint8_t*)&m, sizeof(m), MSG_NOSIGNAL);
+
+	AS_RELEASE_FILE_HANDLE(btr->proto_fd_h);
+	btr->proto_fd_h = 0;
+
+	cf_free(btr->msgp);
+	btr->msgp = 0;
 
 	if (result_code == AS_PROTO_RESULT_FAIL_TIMEOUT) {
 		cf_atomic_int_incr(&g_config.batch_index_timeout);
@@ -182,9 +192,12 @@ as_batch_send_buffer(as_batch_shared* shared, as_batch_buffer* buffer)
 	}
 
 	// Send buffer block to client socket.
-	uint64_t proto = ((uint64_t)buffer->size - sizeof(as_proto)) | ((uint64_t)PROTO_VERSION << 56) | ((uint64_t)PROTO_TYPE_AS_MSG << 48);
-	*(uint64_t*)buffer->data = cf_swap_to_be64(proto);
-	int status = as_batch_send(shared->fd_h->fd, buffer->data, buffer->size, MSG_NOSIGNAL | MSG_MORE);
+	buffer->proto.version = PROTO_VERSION;
+	buffer->proto.type = PROTO_TYPE_AS_MSG;
+	buffer->proto.sz = buffer->size;
+	as_proto_swap(&buffer->proto);
+
+	int status = as_batch_send(shared->fd_h->fd, (uint8_t*)&buffer->proto, sizeof(as_proto) + buffer->size, MSG_NOSIGNAL | MSG_MORE);
 
 	if (status) {
 		// Socket error. Close socket.
@@ -280,16 +293,20 @@ as_batch_worker(void* udata)
 		if (buffer->capacity) {
 			// Send buffer block to client.
 			as_batch_send_buffer(shared, buffer);
-			as_buffer_pool_push_limit(&batch_buffer_pool, buffer, buffer->capacity, g_config.batch_max_unused_buffers);
+
+			if (as_buffer_pool_push_limit(&batch_buffer_pool, buffer, buffer->capacity, g_config.batch_max_unused_buffers) != 0) {
+				cf_atomic_int_incr(&g_config.batch_index_destroyed_buffers);
+			}
 		}
 		else {
 			// Server error buffers should not be put into buffer pool.
 			cf_free(buffer);
+			cf_atomic_int_incr(&g_config.batch_index_destroyed_buffers);
 		}
 
 		// Wait till all transactions have been received before sending
 		// final batch entry and releasing memory.
-		if (shared->tran_count_response >= shared->tran_max) {
+		if (shared->tran_count_response == shared->tran_max) {
 			as_batch_send_final(shared);
 			as_batch_free(shared, batch_queue);
 		}
@@ -394,7 +411,7 @@ as_batch_find_queue(int queue_index)
 	for (int index = queue_index - 1; index >= 0; index--) {
 		as_batch_queue* bq = &batch_queues[index];
 
-		if (bq->active && cf_queue_sz(bq->response_queue) <= g_config.batch_max_buffers_per_queue) {
+		if (bq->active && cf_queue_sz(bq->response_queue) < g_config.batch_max_buffers_per_queue) {
 			return bq;
 		}
 	}
@@ -408,32 +425,53 @@ as_batch_find_queue(int queue_index)
 			break;
 		}
 
-		if (cf_queue_sz(bq->response_queue) <= g_config.batch_max_buffers_per_queue) {
+		if (cf_queue_sz(bq->response_queue) < g_config.batch_max_buffers_per_queue) {
 			return bq;
 		}
 	}
 	return 0;
 }
 
+static as_batch_buffer*
+as_batch_buffer_create(uint32_t size, int arena)
+{
+#ifdef USE_JEM
+	// Create all buffers one batch buffer arena when jemalloc is used.
+	int orig_arena = jem_get_arena();
+	jem_set_arena(arena);
+#endif
+	as_batch_buffer* buffer = cf_malloc(size);
+	buffer->capacity = size - batch_buffer_pool.header_size;
+#ifdef USE_JEM
+	jem_set_arena(orig_arena);
+#endif
+	cf_atomic_int_incr(&g_config.batch_index_created_buffers);
+	return buffer;
+}
+
 static uint8_t*
 as_batch_buffer_pop(as_batch_shared* shared, uint32_t size)
 {
-	// The extra lock here is unavoidable.
-	as_buffer_result result;
-	int status = as_buffer_pool_pop(&batch_buffer_pool, size, &result);
+	as_batch_buffer* buffer;
+	uint32_t mem_size = size + batch_buffer_pool.header_size;
 
-	if (status == 0) {
-		as_batch_buffer* buffer = result.data;
-		buffer->capacity = result.capacity;
-		buffer->size = sizeof(as_proto);
+	if (mem_size > batch_buffer_pool.buffer_size) {
+		// Requested size is greater than fixed buffer size.
+		// Allocate new buffer, but don't put back into pool.
+		buffer = as_batch_buffer_create(mem_size, batch_buffer_arena_huge);
+		cf_atomic_int_incr(&g_config.batch_index_huge_buffers);
+	}
+	else {
+		// Pop existing buffer from queue.
+		// The extra lock here is unavoidable.
+		int status = cf_queue_pop(batch_buffer_pool.queue, &buffer, CF_QUEUE_NOWAIT);
 
-		// Reserve a slot in new buffer.
-		uint8_t* data = buffer->data + buffer->size;
-		buffer->size += size;
-		buffer->tran_count = 1;
-		buffer->writers = 2;
-		shared->buffer = buffer;
-		return data;
+		if (status == CF_QUEUE_OK) {
+			buffer->capacity = batch_buffer_pool.buffer_size - batch_buffer_pool.header_size;
+		}
+		else if (status == CF_QUEUE_EMPTY) {
+			// Queue is empty.  Create new buffer.
+			buffer = as_batch_buffer_create(batch_buffer_pool.buffer_size, batch_buffer_arena_normal);
 	}
 	else {
 		cf_warning(AS_BATCH, "Failed to pop new batch buffer: %d", status);
@@ -447,6 +485,14 @@ as_batch_buffer_pop(as_batch_shared* shared, uint32_t size)
 		shared->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		return 0;
 	}
+}
+
+	// Reserve a slot in new buffer.
+	buffer->size = size;
+	buffer->tran_count = 1;
+	buffer->writers = 2;
+	shared->buffer = buffer;
+	return buffer->data;
 }
 
 static inline void
@@ -574,7 +620,25 @@ as_batch_init()
 		return rc;
 	}
 
-	return as_batch_create_thread_queues(0, threads);
+	rc = as_batch_create_thread_queues(0, threads);
+
+	if (rc) {
+		return rc;
+	}
+
+#ifdef USE_JEM
+	batch_buffer_arena_normal = jem_create_arena();
+	batch_buffer_arena_huge = jem_create_arena();
+
+	if (batch_buffer_arena_normal >= 0 && batch_buffer_arena_huge >= 0) {
+		cf_info(AS_BATCH, "Created JEMalloc arena #%d for batch normal buffers", batch_buffer_arena_normal);
+		cf_info(AS_BATCH, "Created JEMalloc arena #%d for batch huge buffers", batch_buffer_arena_huge);
+	}
+	else {
+		cf_crash(AS_BATCH, "Failed to created JEMalloc arenas for batch buffers");
+	}
+#endif
+	return 0;
 }
 
 int
@@ -585,7 +649,7 @@ as_batch_queue_task(as_transaction* btr)
 
 	if (thread_size == 0 || thread_size > MAX_BATCH_THREADS) {
 		cf_warning(AS_BATCH, "batch-index-threads has been disabled: %d", thread_size);
-		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_BATCH_DISABLED);
+		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_BATCH_DISABLED);
 	}
 	uint32_t queue_index = counter % thread_size;
 
@@ -595,12 +659,12 @@ as_batch_queue_task(as_transaction* btr)
 	if (bproto->sz > PROTO_SIZE_MAX) {
 		cf_warning(AS_BATCH, "can't process message: invalid size %"PRIu64" should be %d or less",
 				bproto->sz, PROTO_SIZE_MAX);
-		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
+		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_PARAMETER);
 	}
 
 	if (bproto->type != PROTO_TYPE_AS_MSG) {
 		cf_warning(AS_BATCH, "Invalid proto type. Expected %d Received %d", PROTO_TYPE_AS_MSG, bproto->type);
-		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
+		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_PARAMETER);
 	}
 
 	// Check that the socket is authenticated.
@@ -608,7 +672,7 @@ as_batch_queue_task(as_transaction* btr)
 
 	if (result != AS_PROTO_RESULT_OK) {
 		as_security_log(btr->proto_fd_h, result, PERM_NONE, NULL, NULL);
-		return as_batch_send_error(btr->proto_fd_h, result);
+		return as_batch_send_error(btr, result);
 	}
 
 	// Parse header
@@ -624,7 +688,7 @@ as_batch_queue_task(as_transaction* btr)
 	for (int i = 0; i < bmsg->n_fields; i++) {
 		if ((uint8_t*)mf >= limit) {
 			cf_warning(AS_BATCH, "Batch field limit reached");
-			return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
+			return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_PARAMETER);
 		}
 		as_msg_swap_field(mf);
 		end = as_msg_field_get_next(mf);
@@ -637,7 +701,7 @@ as_batch_queue_task(as_transaction* btr)
 
 	if (! bf) {
 		cf_warning(AS_BATCH, "Batch index field not found");
-		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
+		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_PARAMETER);
 	}
 
 	// Parse batch field
@@ -647,12 +711,12 @@ as_batch_queue_task(as_transaction* btr)
 
 	if (tran_count == 0) {
 		cf_warning(AS_BATCH, "Batch request size is zero");
-		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_PARAMETER);
+		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_PARAMETER);
 	}
 
 	if (tran_count > g_config.batch_max_requests) {
 		cf_warning(AS_BATCH, "Batch request size %u exceeds max %u", tran_count, g_config.batch_max_requests);
-		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_BATCH_MAX_REQUESTS);
+		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_BATCH_MAX_REQUESTS);
 	}
 
 	// Initialize shared data
@@ -660,7 +724,7 @@ as_batch_queue_task(as_transaction* btr)
 
 	if (! shared) {
 		cf_warning(AS_BATCH, "Batch shared malloc failed");
-		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_UNKNOWN);
 	}
 
 	memset(shared, 0, sizeof(as_batch_shared));
@@ -669,7 +733,7 @@ as_batch_queue_task(as_transaction* btr)
 	if (pthread_mutex_init(&shared->lock, NULL)) {
 		cf_warning(AS_BATCH, "Failed to initialize batch lock");
 		cf_free(shared);
-		return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_UNKNOWN);
+		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_UNKNOWN);
 	}
 
 	shared->fd_h = btr->proto_fd_h;
@@ -680,7 +744,7 @@ as_batch_queue_task(as_transaction* btr)
 	as_batch_queue* batch_queue = &batch_queues[queue_index];
 
 	// batch_max_buffers_per_queue is a soft limit, but still must be checked under lock.
-	if (! (batch_queue->active && cf_queue_sz(batch_queue->response_queue) <= g_config.batch_max_buffers_per_queue)) {
+	if (! (batch_queue->active && cf_queue_sz(batch_queue->response_queue) < g_config.batch_max_buffers_per_queue)) {
 		// Queue buffer limit has been exceeded or thread has been shutdown (probably due to
 		// downwards thread resize).  Search for an available queue.
 		// cf_warning(AS_BATCH, "Queue %u full %d", queue_index, cf_queue_sz(batch_queue->response_queue));
@@ -689,7 +753,7 @@ as_batch_queue_task(as_transaction* btr)
 		if (! batch_queue) {
 			cf_warning(AS_BATCH, "Failed to find active batch queue that is not full");
 			cf_free(shared);
-			return as_batch_send_error(btr->proto_fd_h, AS_PROTO_RESULT_FAIL_BATCH_QUEUES_FULL);
+			return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_BATCH_QUEUES_FULL);
 		}
 	}
 	// Increment batch queue transaction count.
@@ -719,6 +783,10 @@ as_batch_queue_task(as_transaction* btr)
 	bool check_inline = (allow_inline && g_config.n_namespaces_not_in_memory != 0);
 	bool should_inline = (allow_inline && g_config.n_namespaces_not_in_memory == 0);
 
+	// Split batch rows into separate single record read transactions.
+	// The read transactions are located in the same memory block as
+	// the original batch transactions. This allows us to avoid performing
+	// an extra malloc for each transaction.
 	while (tran_row < tran_count && data + BATCH_REPEAT_SIZE <= limit) {
 		// Copy transaction data before memory gets overwritten.
 		in = (as_batch_input*)data;
@@ -731,19 +799,26 @@ as_batch_queue_task(as_transaction* btr)
 		}
 		else {
 			// Row contains full namespace/bin names.
-			// Copy swapped as_msg header except for n_fields and n_ops.
 			out = (cl_msg*)data;
 
 			if (data + sizeof(cl_msg) + sizeof(as_msg_field) > limit) {
 				break;
 			}
 
-			info = in->info1;
-			memcpy(&out->msg, bmsg, sizeof(as_msg) - sizeof(uint16_t) - sizeof(uint16_t));
-			out->msg.info1 = info | AS_MSG_INFO1_BATCH;
-
+			out->msg.header_sz = sizeof(as_msg);
+			out->msg.info1 = in->info1;
+			out->msg.info2 = 0;
+			out->msg.info3 = 0;
+			out->msg.unused = 0;
+			out->msg.result_code = 0;
+			out->msg.generation = 0;
+			out->msg.record_ttl = 0;
+			out->msg.transaction_ttl = bmsg->transaction_ttl; // already swapped
 			// n_fields just contains namespace field.
 			out->msg.n_fields = 1;
+			// n_ops is in exact same place on both input/output, but the value still
+			// needs to be swapped.
+			out->msg.n_ops = cf_swap_from_be16(in->n_ops);
 
 			// Namespace input is same as namespace field, so just leave in place and swap.
 			data += sizeof(cl_msg);
@@ -760,12 +835,10 @@ as_batch_queue_task(as_transaction* btr)
 				break;
 			}
 
-			// n_ops is already in the right place. Just swap.
-			in->n_ops = cf_swap_from_be16(in->n_ops);
-
-			if (in->n_ops) {
+			if (out->msg.n_ops) {
 				// Bin names input is same as transaction ops, so just leave in place and swap.
-				for (uint16_t j = 0; j < in->n_ops; j++) {
+				uint16_t n_ops = out->msg.n_ops;
+				for (uint16_t j = 0; j < n_ops; j++) {
 					if (data + sizeof(as_msg_op) > limit) {
 						goto TranEnd;
 					}

@@ -546,6 +546,12 @@ info_get_stats(char *name, cf_dyn_buf *db)
 	APPEND_STAT_COUNTER(db, g_config.batch_index_errors);
 	cf_dyn_buf_append_string(db, ";batch_index_unused_buffers=");
 	cf_dyn_buf_append_int(db, as_batch_unused_buffers());
+	cf_dyn_buf_append_string(db, ";batch_index_huge_buffers=");
+	APPEND_STAT_COUNTER(db, g_config.batch_index_huge_buffers);
+	cf_dyn_buf_append_string(db, ";batch_index_created_buffers=");
+	APPEND_STAT_COUNTER(db, g_config.batch_index_created_buffers);
+	cf_dyn_buf_append_string(db, ";batch_index_destroyed_buffers=");
+	APPEND_STAT_COUNTER(db, g_config.batch_index_destroyed_buffers);
 
 	cf_dyn_buf_append_string(db, ";batch_initiate=");
 	APPEND_STAT_COUNTER(db, g_config.batch_initiate);

@@ -431,6 +431,9 @@ typedef struct as_config_s {
 	cf_atomic_int		batch_index_complete;
 	cf_atomic_int		batch_index_timeout;
 	cf_atomic_int		batch_index_errors;
+	cf_atomic_int		batch_index_huge_buffers;
+	cf_atomic_int		batch_index_created_buffers;
+	cf_atomic_int		batch_index_destroyed_buffers;
 
 	cf_atomic_int		batch_initiate;
 	cf_atomic_int		batch_tree_count;
