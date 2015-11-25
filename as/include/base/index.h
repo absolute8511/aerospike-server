@@ -66,7 +66,7 @@ typedef struct as_index_s {
 	uint32_t void_time;
 
 	// offset: 44
-	uint16_t generation;
+	as_generation generation;
 
 	// offset: 46
 	// Used by the storage engines.

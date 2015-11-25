@@ -62,7 +62,7 @@
 
 // A rather heavyweight way to get a record generation during the initial
 // phase of a write request. Does a tree lookup.
-extern int thr_tsvc_get_generation(as_transaction *tr, uint32_t *generation);
+extern int thr_tsvc_get_generation(as_transaction *tr, as_generation *generation);
 
 // Sometimes I stamp the file descriptors bad in waiting queues. Don't just set
 // to 0, make sure I know it's a stompy thing.

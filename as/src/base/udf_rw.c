@@ -156,7 +156,7 @@ send_response(udf_call *call, const char *key, int vtype, void *val,
 {
 	as_transaction *    tr          = call->transaction;
 	as_namespace *      ns          = tr->rsv.ns;
-	uint32_t            generation  = tr->generation;
+	as_generation            generation  = tr->generation;
 	uint32_t            sp_sz       = 1024 * 16;
 	uint32_t            void_time   = tr->void_time;
 	uint32_t            written_sz  = 0;

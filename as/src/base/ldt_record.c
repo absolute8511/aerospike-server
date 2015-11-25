@@ -200,7 +200,7 @@ ldt_record_ttl(const as_rec * rec)
 	return as_rec_ttl(h_urec);
 }
 
-static uint16_t
+static uint32_t
 ldt_record_gen(const as_rec * rec)
 {
 	static const char * meth = "ldt_record_gen()";

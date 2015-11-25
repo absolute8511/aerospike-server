@@ -924,7 +924,7 @@ udf_record_ttl(const as_rec * rec)
 	return 0;
 }
 
-static uint16_t
+static as_generation
 udf_record_gen(const as_rec * rec)
 {
 	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);

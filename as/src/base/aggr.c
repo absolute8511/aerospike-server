@@ -150,7 +150,7 @@ query_record_ttl(const as_rec * rec)
 	return as_rec_ttl(urec);
 }
 
-static uint16_t
+static uint32_t
 query_record_gen(const as_rec * rec)
 {
 	query_record * qrecord = (query_record *) rec->data;
