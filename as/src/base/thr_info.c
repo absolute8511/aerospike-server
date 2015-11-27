@@ -4809,7 +4809,7 @@ as_info_set(const char *name, const char *value, bool def)
 }
 
 int
-as_info_set(const char *name, const char *value, bool def)
+as_hot_info_set(const char *name, const char *value, bool def)
 {
     return(as_info_set_buf(&hot_static_head, name, (const uint8_t *) value, strlen(value), def ) );
 }
