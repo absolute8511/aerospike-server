@@ -4277,20 +4277,54 @@ info_some(char *buf, char *buf_lim, const as_file_handle* fd_h, cf_dyn_buf *db)
 			char *name = tok;
 			bool handled = false;
 
-			// search the static queue first always
-			info_static *s = static_head;
-			while (s) {
-				if (strcmp(s->name, name) == 0) {
-					// return exact command string received from client
-					cf_dyn_buf_append_string( db, name);
-					cf_dyn_buf_append_char( db, SEP );
-					cf_dyn_buf_append_buf( db, (uint8_t *) s->value, s->value_sz);
-					cf_dyn_buf_append_char( db, EOL );
-					handled = true;
-					break;
-				}
-				s = s->next;
-			}
+            // search hot data first
+            info_static *s = hot_static_head;
+            while (s) {
+                if (strcmp(s->name, name) == 0) {
+                    // return exact command string received from client
+                    cf_dyn_buf_append_string( db, name);
+                    cf_dyn_buf_append_char( db, SEP );
+                    cf_dyn_buf_append_buf( db, (uint8_t *) s->value, s->value_sz);
+                    cf_dyn_buf_append_char( db, EOL );
+                    handled = true;
+                    break;
+                }
+                s = s->next;
+            }
+            
+            // didn't find in static, try dynamic
+            if (!handled) {
+                info_dynamic *d = hot_dynamic_head;
+                while (d) {
+                    if (strcmp(d->name, name) == 0) {
+                        // return exact command string received from client
+                        cf_dyn_buf_append_string( db, d->name);
+                        cf_dyn_buf_append_char(db, SEP );
+                        d->value_fn(d->name, db);
+                        cf_dyn_buf_append_char(db, EOL);
+                        handled = true;
+                        break;
+                    }
+                    d = d->next;
+                }
+            }
+            
+            if （!handled）{
+                // search the static queue first always
+                info_static *s = static_head;
+                while (s) {
+                    if (strcmp(s->name, name) == 0) {
+                        // return exact command string received from client
+                        cf_dyn_buf_append_string( db, name);
+                        cf_dyn_buf_append_char( db, SEP );
+                        cf_dyn_buf_append_buf( db, (uint8_t *) s->value, s->value_sz);
+                        cf_dyn_buf_append_char( db, EOL );
+                        handled = true;
+                        break;
+                    }
+                    s = s->next;
+                }
+            }
 
 			// didn't find in static, try dynamic
 			if (!handled) {
