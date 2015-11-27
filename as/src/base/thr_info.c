@@ -102,14 +102,32 @@ typedef int (*as_info_get_tree_fn) (char *name, char *subtree, cf_dyn_buf *db);
 typedef int (*as_info_get_value_fn) (char *name, cf_dyn_buf *db);
 typedef int (*as_info_command_fn) (char *name, char *parameters, cf_dyn_buf *db);
 
+typedef struct info_static_s {
+    struct info_static_s	*next;
+    bool   def; // default, but default is a reserved word
+    char *name;
+    char *value;
+    size_t	value_sz;
+} info_static;
+
+
+typedef struct info_dynamic_s {
+    struct info_dynamic_s *next;
+    bool 	def;  // default, but that's a reserved word
+    char *name;
+    as_info_get_value_fn	value_fn;
+} info_dynamic;
+
 // Sets a static value - set to 0 to remove a previous value.
-int as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool def);
+int as_info_set_buf(info_static **header, const char *name, const uint8_t *value, size_t value_sz, bool def);
 int as_info_set(const char *name, const char *value, bool def);
 
 // For dynamic items - you will get called when the name is requested. The
 // dynbuf will be fully set up for you - just add the information you want to
 // return.
 int as_info_set_dynamic(char *name, as_info_get_value_fn gv_fn, bool def);
+int as_hot_info_set_dynamic(char *name, as_info_get_value_fn gv_fn, bool def);
+int as_info_set_dynamic_common(info_dynamic **header, char *name, as_info_get_value_fn gv_fn, bool def);
 
 // For tree items - you will get called when the name is requested, and it will
 // have the name you registered (name) and the subtree portion (value). The
@@ -175,21 +193,6 @@ static bool g_mtrace_enabled = false;
 // The dynamic list has a name, and a function to call
 //
 
-typedef struct info_static_s {
-	struct info_static_s	*next;
-	bool   def; // default, but default is a reserved word
-	char *name;
-	char *value;
-	size_t	value_sz;
-} info_static;
-
-
-typedef struct info_dynamic_s {
-	struct info_dynamic_s *next;
-	bool 	def;  // default, but that's a reserved word
-	char *name;
-	as_info_get_value_fn	value_fn;
-} info_dynamic;
 
 typedef struct info_command_s {
 	struct info_command_s *next;
@@ -4197,6 +4200,8 @@ append_sec_err_str(cf_dyn_buf *db, uint32_t result, as_sec_perm cmd_perm) {
 static pthread_mutex_t		g_info_lock = PTHREAD_MUTEX_INITIALIZER;
 info_static		*static_head = 0;
 info_dynamic	*dynamic_head = 0;
+info_static		*hot_static_head = 0;
+info_dynamic	*hot_dynamic_head = 0;
 info_tree		*tree_head = 0;
 info_command	*command_head = 0;
 //
@@ -4543,14 +4548,25 @@ as_info_queue_get_size()
 // only does the registration!
 // def means it's part of the default set - will get returned if nothing is passed
 
-
 int
 as_info_set_dynamic(char *name, as_info_get_value_fn gv_fn, bool def)
+{
+    return as_info_set_dynamic_common(&dynamic_head, name, gv_fn, def)
+}
+
+int
+as_hot_info_set_dynamic(char *name, as_info_get_value_fn gv_fn, bool def)
+{
+    return as_info_set_dynamic_common(&hot_dynamic_head, name, gv_fn, def);
+}
+
+int
+as_info_set_dynamic_common(info_dynamic **header, char *name, as_info_get_value_fn gv_fn, bool def)
 {
 	int rv = -1;
 	pthread_mutex_lock(&g_info_lock);
 
-	info_dynamic *e = dynamic_head;
+	info_dynamic *e = *header;
 	while (e) {
 		if (strcmp(name, e->name) == 0) {
 			e->value_fn = gv_fn;
@@ -4570,8 +4586,8 @@ as_info_set_dynamic(char *name, as_info_get_value_fn gv_fn, bool def)
 			goto Cleanup;
 		}
 		e->value_fn = gv_fn;
-		e->next = dynamic_head;
-		dynamic_head = e;
+		e->next = *header;
+		*header = e;
 	}
 	rv = 0;
 Cleanup:
@@ -4667,7 +4683,7 @@ Cleanup:
 // def means it's part of the default set - will get returned if nothing is passed
 
 int
-as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool def)
+as_info_set_buf(info_static **header, const char *name, const uint8_t *value, size_t value_sz, bool def)
 {
 	pthread_mutex_lock(&g_info_lock);
 
@@ -4675,7 +4691,7 @@ as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool de
 	if (value_sz == 0 || value == 0) {
 
 		info_static *p = 0;
-		info_static *e = static_head;
+		info_static *e = *header;
 
 		while (e) {
 			if (strcmp(name, e->name) == 0) {
@@ -4686,11 +4702,11 @@ as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool de
 					cf_free(e);
 				}
 				else {
-					info_static *_t = static_head->next;
+					info_static *_t = (*header)->next;
 					cf_free(e->name);
 					cf_free(e->value);
-					cf_free(static_head);
-					static_head = _t;
+					cf_free(*header);
+					*header = _t;
 				}
 				break;
 			}
@@ -4701,7 +4717,7 @@ as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool de
 	// insert case
 	else {
 
-		info_static *e = static_head;
+		info_static *e = *header;
 
 		// search for old value and overwrite
 		while(e) {
@@ -4718,13 +4734,13 @@ as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool de
 		// not found, insert fresh
 		if (e == 0) {
 			info_static *_t = cf_malloc(sizeof(info_static));
-			_t->next = static_head;
+			_t->next = *header;
 			_t->def = def;
 			_t->name = cf_strdup(name);
 			_t->value = cf_malloc(value_sz);
 			memcpy(_t->value, value, value_sz);
 			_t->value_sz = value_sz;
-			static_head = _t;
+			*header = _t;
 		}
 	}
 
@@ -4788,7 +4804,7 @@ as_info_parameter_get(char *param_str, char *param, char *value, int *value_len)
 int
 as_info_set(const char *name, const char *value, bool def)
 {
-	return(as_info_set_buf(name, (const uint8_t *) value, strlen(value), def ) );
+	return(as_info_set_buf(&static_head, name, (const uint8_t *) value, strlen(value), def ) );
 }
 
 void *
@@ -6973,7 +6989,8 @@ as_info_init()
 
 	cf_str_itoa_u64(g_config.self_node, istr, 16);
 	as_info_set("node", istr, true);                     // Node ID. Unique 15 character hex string for each node based on the mac address and port.
-	as_info_set("name", istr, false);                    // Alias to 'node'.
+	as_hot_info_set("node", istr, true);
+    as_info_set("name", istr, false);                    // Alias to 'node'.
 	// Returns list of features supported by this server
 	as_info_set("features", "float;batch-index;replicas-all;replicas-master;replicas-prole;udf", true);
 	if (g_config.hb_mode == AS_HB_MODE_MCAST) {
@@ -7012,17 +7029,25 @@ as_info_init()
 	as_info_set_dynamic("namespaces", info_get_namespaces, false);    // Returns a list of namespace defined on this server.
 	as_info_set_dynamic("objects", info_get_objects, false);          // Returns the number of objects stored on this server.
 	as_info_set_dynamic("partition-generation", info_get_partition_generation, true); // Returns the current partition generation.
-	as_info_set_dynamic("partition-info", info_get_partition_info, false);  // Returns partition ownership information.
+    as_hot_info_set_dynamic("partition-generation", info_get_partition_generation, true); // Returns the current partition generation.
+
+    as_info_set_dynamic("partition-info", info_get_partition_info, false);  // Returns partition ownership information.
 	as_info_set_dynamic("replicas-read",info_get_replicas_read, false);     //
 	as_info_set_dynamic("replicas-prole",info_get_replicas_prole, false);   // Base 64 encoded binary representation of partitions this node is prole (replica) for.
-	as_info_set_dynamic("replicas-write",info_get_replicas_write, false);   //
+    as_hot_info_set_dynamic("replicas-prole",info_get_replicas_prole, false);   // Base 64 encoded binary representation of partitions this node is prole (replica) for.
+
+    as_info_set_dynamic("replicas-write",info_get_replicas_write, false);   //
 	as_info_set_dynamic("replicas-master",info_get_replicas_master, false); // Base 64 encoded binary representation of partitions this node is master (replica) for.
-	as_info_set_dynamic("replicas-all", info_get_replicas_all, false);      // Base 64 encoded binary representation of partitions this node is replica for.
+    as_hot_info_set_dynamic("replicas-master",info_get_replicas_master, false); // Base 64 encoded binary representation of partitions this node is master (replica) for.
+
+    as_info_set_dynamic("replicas-all", info_get_replicas_all, false);      // Base 64 encoded binary representation of partitions this node is replica for.
 	as_info_set_dynamic("service",info_get_service, false);           // IP address and server port for this node, expected to be a single.
 	                                                                  // address/port per node, may be multiple address if this node is configured.
 	                                                                  // to listen on multiple interfaces (typically not advised).
 	as_info_set_dynamic("services",info_get_services, true);          // List of addresses of neighbor cluster nodes to advertise for Application to connect.
-	as_info_set_dynamic("services-alumni",info_get_services_alumni, true); // All neighbor addresses (services) this server has ever know about.
+    as_hot_info_set_dynamic("services",info_get_services, true);          // List of addresses of neighbor cluster nodes to advertise for Application to connect.
+
+    as_info_set_dynamic("services-alumni",info_get_services_alumni, true); // All neighbor addresses (services) this server has ever know about.
 	as_info_set_dynamic("services-alumni-reset",info_services_alumni_reset, false); // Reset the services alumni to equal services
 	as_info_set_dynamic("sets", info_get_sets, false);                // Returns set statistics for all or a particular set.
 	as_info_set_dynamic("statistics", info_get_stats, true);          // Returns system health and usage stats for this server.
