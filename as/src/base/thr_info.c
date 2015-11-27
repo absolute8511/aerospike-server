@@ -4309,7 +4309,7 @@ info_some(char *buf, char *buf_lim, const as_file_handle* fd_h, cf_dyn_buf *db)
                 }
             }
             
-            if （!handled）{
+            if (!handled) {
                 // search the static queue first always
                 info_static *s = static_head;
                 while (s) {
