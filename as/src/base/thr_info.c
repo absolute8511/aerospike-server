@@ -121,6 +121,7 @@ typedef struct info_dynamic_s {
 // Sets a static value - set to 0 to remove a previous value.
 int as_info_set_buf(info_static **header, const char *name, const uint8_t *value, size_t value_sz, bool def);
 int as_info_set(const char *name, const char *value, bool def);
+int as_hot_info_set(const char *name, const char *value, bool def);
 
 // For dynamic items - you will get called when the name is requested. The
 // dynbuf will be fully set up for you - just add the information you want to
@@ -4551,7 +4552,7 @@ as_info_queue_get_size()
 int
 as_info_set_dynamic(char *name, as_info_get_value_fn gv_fn, bool def)
 {
-    return as_info_set_dynamic_common(&dynamic_head, name, gv_fn, def)
+    return as_info_set_dynamic_common(&dynamic_head, name, gv_fn, def);
 }
 
 int
@@ -4805,6 +4806,12 @@ int
 as_info_set(const char *name, const char *value, bool def)
 {
 	return(as_info_set_buf(&static_head, name, (const uint8_t *) value, strlen(value), def ) );
+}
+
+int
+as_info_set(const char *name, const char *value, bool def)
+{
+    return(as_info_set_buf(&hot_static_head, name, (const uint8_t *) value, strlen(value), def ) );
 }
 
 void *
