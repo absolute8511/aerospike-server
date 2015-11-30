@@ -1593,12 +1593,14 @@ as_partition_getreplica_write_str(cf_dyn_buf *db)
 #define B64_BITMAP_SIZE	(((BITMAP_SIZE + 2) / 3) * 4)
 
 void
-as_partition_getreplica_master_str(cf_dyn_buf *db)
+as_partition_getreplica_master_str(cf_dyn_buf *db, cf_node* node_list, int *old_gen)
 {
 	uint8_t master_bitmap[BITMAP_SIZE];
 	char b64_bitmap[B64_BITMAP_SIZE];
 
 	size_t db_sz = db->used_sz;
+    int read_gen = *old_gen;
+    *old_gen = g_config.partition_generation;
 
 	for (uint i = 0; i < g_config.namespaces; i++) {
 		as_namespace *ns = g_config.namespace[i];
@@ -1609,7 +1611,11 @@ as_partition_getreplica_master_str(cf_dyn_buf *db)
 
 		for (uint j = 0; j < AS_PARTITIONS; j++) {
 
-			if (g_config.self_node == as_partition_getreplica_master(ns, j) ) {
+            if (read_gen == 0 || read_gen != g_config.partition_generation) {
+                node_list[i*AS_PARTITIONS + j] = as_partition_getreplica_master(ns, j);
+            }
+            cf_node n = node_list[i*AS_PARTITIONS + j];
+			if (g_config.self_node == n) {
 
 				/* Fitting-in 4096 entries in a 512
 				 * index array each of 8 bits = divide 4096 by 8 = bitmap[j>>3].
@@ -1655,13 +1661,15 @@ as_partition_getreplica_read_str(cf_dyn_buf *db)
 }
 
 void
-as_partition_getreplica_prole_str(cf_dyn_buf *db)
+as_partition_getreplica_prole_str(cf_dyn_buf *db, cf_node* node_list, int old_gen)
 {
 	uint8_t prole_bitmap[BITMAP_SIZE];
 	char b64_bitmap[B64_BITMAP_SIZE];
 
 	size_t db_sz = db->used_sz;
-
+    int read_gen = *old_gen;
+    *old_gen = g_config.partition_generation;
+    
 	for (uint i = 0; i < g_config.namespaces; i++) {
 		as_namespace *ns = g_config.namespace[i];
 
@@ -1670,7 +1678,11 @@ as_partition_getreplica_prole_str(cf_dyn_buf *db)
 		cf_dyn_buf_append_char(db, ':');
 
 		for (uint j = 0; j < AS_PARTITIONS; j++) {
-			if (g_config.self_node == as_partition_getreplica_prole(ns, j) ) {
+            if (read_gen == 0 || read_gen != g_config.partition_generation) {
+                node_list[i*AS_PARTITIONS + j] = as_partition_getreplica_prole(ns, j);
+            }
+            cf_node n = node_list[i*AS_PARTITIONS + j];
+			if (g_config.self_node == n) {
 
 				/* Fitting-in 4096 entries in a 512
 				 * index array each of 8 bits = divide 4096 by 8 = bitmap[j>>3].

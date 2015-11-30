@@ -248,6 +248,21 @@ info_partition_getstates(as_partition_states *ps)
 	return;
 }
 
+pthread_mutex_t			g_cache_replicas_master_LOCK = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t			g_cache_replicas_prole_LOCK = PTHREAD_MUTEX_INITIALIZER;
+int g_old_replicas_master_gen = 0;
+int g_old_replicas_prole_gen = 0;
+cf_node *g_replicas_master = NULL;
+cf_node *g_replicas_prole = NULL;
+
+void
+init_replicas_node_info() {
+    g_replicas_master = (cf_node*)cf_malloc(g_config.namespaces * AS_PARTITIONS);
+    g_replicas_prole = (cf_node*)cf_malloc(g_config.namespaces * AS_PARTITIONS);
+    g_old_replicas_master_gen = 0;
+    g_old_replicas_prole_gen = 0;
+}
+
 //
 // DYNAMIC FUNCTIONS
 // These functions are internal bits that allow us to gather some basic
@@ -803,8 +818,10 @@ info_get_replicas_read(char *name, cf_dyn_buf *db)
 int
 info_get_replicas_prole(char *name, cf_dyn_buf *db)
 {
-	as_partition_getreplica_prole_str(db);
+    pthread_mutex_lock(g_cache_replicas_prole_LOCK);
+	as_partition_getreplica_prole_str(db, g_replicas_prole, &g_old_replicas_prole_gen);
 
+    pthread_mutex_unlock(g_cache_replicas_node_LOCK);
 	return(0);
 }
 
@@ -819,8 +836,10 @@ info_get_replicas_write(char *name, cf_dyn_buf *db)
 int
 info_get_replicas_master(char *name, cf_dyn_buf *db)
 {
-	as_partition_getreplica_master_str(db);
+    pthread_mutex_lock(g_cache_replicas_master_LOCK);
+	as_partition_getreplica_master_str(db, g_replicas_master, &g_old_replicas_master_gen);
 
+    pthread_mutex_unlock(g_cache_replicas_node_LOCK);
 	return(0);
 }
 
@@ -7174,6 +7193,7 @@ as_info_init()
 	as_info_set_command("sindex-list", info_command_sindex_list, PERM_NONE);
 	as_info_set_dynamic("sindex-builder-list", as_sbld_list, false);                         // List info for all secondary index builder jobs.
 
+    init_replicas_node_info();
 	// Spin up the Info threads *after* all static and dynamic Info commands have been added
 	// so we can guarantee that the static and dynamic lists will never again be changed.
 	pthread_attr_t thr_attr;
