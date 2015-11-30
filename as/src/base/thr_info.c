@@ -820,7 +820,7 @@ info_get_replicas_prole(char *name, cf_dyn_buf *db)
     if (g_old_replicas_prole_gen == 0 || g_config.partition_generation != g_old_replicas_prole_gen) {
         g_old_replicas_prole_gen = g_config.partition_generation;
         g_replicas_prole.used_sz = 0;
-        as_partition_getreplica_prole_str(g_replicas_prole);
+        as_partition_getreplica_prole_str(&g_replicas_prole);
     }
     cf_dyn_buf_append_buf(db, g_replicas_prole.buf, g_replicas_prole.used_sz);
 
@@ -844,7 +844,7 @@ info_get_replicas_master(char *name, cf_dyn_buf *db)
     if (g_old_replicas_master_gen == 0 || g_config.partition_generation != g_old_replicas_master_gen) {
         g_old_replicas_master_gen = g_config.partition_generation;
         g_replicas_master.used_sz = 0;
-        as_partition_getreplica_master_str(g_replicas_master);
+        as_partition_getreplica_master_str(&g_replicas_master);
     }
     
     cf_dyn_buf_append_buf(db, g_replicas_master.buf, g_replicas_master.used_sz);
