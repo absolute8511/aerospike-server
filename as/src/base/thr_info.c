@@ -818,10 +818,10 @@ info_get_replicas_read(char *name, cf_dyn_buf *db)
 int
 info_get_replicas_prole(char *name, cf_dyn_buf *db)
 {
-    pthread_mutex_lock(g_cache_replicas_prole_LOCK);
+    pthread_mutex_lock(&g_cache_replicas_prole_LOCK);
 	as_partition_getreplica_prole_str(db, g_replicas_prole, &g_old_replicas_prole_gen);
 
-    pthread_mutex_unlock(g_cache_replicas_node_LOCK);
+    pthread_mutex_unlock(&g_cache_replicas_prole_LOCK);
 	return(0);
 }
 
@@ -836,10 +836,10 @@ info_get_replicas_write(char *name, cf_dyn_buf *db)
 int
 info_get_replicas_master(char *name, cf_dyn_buf *db)
 {
-    pthread_mutex_lock(g_cache_replicas_master_LOCK);
+    pthread_mutex_lock(&g_cache_replicas_master_LOCK);
 	as_partition_getreplica_master_str(db, g_replicas_master, &g_old_replicas_master_gen);
 
-    pthread_mutex_unlock(g_cache_replicas_node_LOCK);
+    pthread_mutex_unlock(&g_cache_replicas_master_LOCK);
 	return(0);
 }
 

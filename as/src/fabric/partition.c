@@ -1661,7 +1661,7 @@ as_partition_getreplica_read_str(cf_dyn_buf *db)
 }
 
 void
-as_partition_getreplica_prole_str(cf_dyn_buf *db, cf_node* node_list, int old_gen)
+as_partition_getreplica_prole_str(cf_dyn_buf *db, cf_node* node_list, int *old_gen)
 {
 	uint8_t prole_bitmap[BITMAP_SIZE];
 	char b64_bitmap[B64_BITMAP_SIZE];
