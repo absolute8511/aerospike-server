@@ -252,13 +252,11 @@ pthread_mutex_t			g_cache_replicas_master_LOCK = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t			g_cache_replicas_prole_LOCK = PTHREAD_MUTEX_INITIALIZER;
 int g_old_replicas_master_gen = 0;
 int g_old_replicas_prole_gen = 0;
-cf_node *g_replicas_master = NULL;
-cf_node *g_replicas_prole = NULL;
+cf_dyn_buf_define_size(g_replicas_master, AS_PARTITIONS);
+cf_dyn_buf_define_size(g_replicas_prole, AS_PARTITIONS);
 
 void
 init_replicas_node_info() {
-    g_replicas_master = (cf_node*)cf_malloc(g_config.namespaces * AS_PARTITIONS);
-    g_replicas_prole = (cf_node*)cf_malloc(g_config.namespaces * AS_PARTITIONS);
     g_old_replicas_master_gen = 0;
     g_old_replicas_prole_gen = 0;
 }
@@ -819,7 +817,12 @@ int
 info_get_replicas_prole(char *name, cf_dyn_buf *db)
 {
     pthread_mutex_lock(&g_cache_replicas_prole_LOCK);
-	as_partition_getreplica_prole_str(db, g_replicas_prole, &g_old_replicas_prole_gen);
+    if (g_old_replicas_prole_gen == 0 || g_config.partition_generation != g_old_replicas_prole_gen) {
+        g_old_replicas_prole_gen = g_config.partition_generation;
+        g_replicas_prole.used_sz = 0;
+        as_partition_getreplica_prole_str(g_replicas_prole);
+    }
+    cf_dyn_buf_append_buf(db, g_replicas_prole.buf, g_replicas_prole.used_sz);
 
     pthread_mutex_unlock(&g_cache_replicas_prole_LOCK);
 	return(0);
@@ -837,7 +840,14 @@ int
 info_get_replicas_master(char *name, cf_dyn_buf *db)
 {
     pthread_mutex_lock(&g_cache_replicas_master_LOCK);
-	as_partition_getreplica_master_str(db, g_replicas_master, &g_old_replicas_master_gen);
+    
+    if (g_old_replicas_master_gen == 0 || g_config.partition_generation != g_old_replicas_master_gen) {
+        g_old_replicas_master_gen = g_config.partition_generation;
+        g_replicas_master.used_sz = 0;
+        as_partition_getreplica_master_str(g_replicas_master);
+    }
+    
+    cf_dyn_buf_append_buf(db, g_replicas_master.buf, g_replicas_master.used_sz);
 
     pthread_mutex_unlock(&g_cache_replicas_master_LOCK);
 	return(0);
