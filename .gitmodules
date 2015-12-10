@@ -1,6 +1,6 @@
 [submodule "modules/common"]
 	path = modules/common
-	url = https://github.com/aerospike/aerospike-common.git
+	url = https://github.com/absolute8511/aerospike-common.git
 [submodule "modules/mod-lua"]
 	path = modules/mod-lua
 	url = https://github.com/aerospike/aerospike-mod-lua.git

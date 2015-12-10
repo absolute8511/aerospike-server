@@ -7,6 +7,7 @@ include $(DEPTH)/make_in/Makefile.in
 # Use SystemTap?  [By default, no.]
 USE_SYSTEMTAP = 0
 
+CFLAGS +=	-g -ggdb -fno-omit-frame-pointer
 ifeq ($(USE_SYSTEMTAP),1)
 CFLAGS +=	-DUSE_SYSTEMTAP
 endif
