@@ -168,7 +168,7 @@ as_batch_send_error(as_transaction* btr, int result_code)
 
 	int status = as_batch_send(btr->proto_fd_h->fd, (uint8_t*)&m, sizeof(m), MSG_NOSIGNAL);
 
-	AS_RELEASE_FILE_HANDLE(btr->proto_fd_h);
+	as_end_of_transaction(btr->proto_fd_h, status != 0);
 	btr->proto_fd_h = 0;
 
 	cf_free(btr->msgp);
@@ -201,7 +201,7 @@ as_batch_send_buffer(as_batch_shared* shared, as_batch_buffer* buffer)
 
 	if (status) {
 		// Socket error. Close socket.
-		AS_RELEASE_FILE_HANDLE(shared->fd_h);
+		as_end_of_transaction_force_close(shared->fd_h);
 		shared->fd_h = 0;
 		cf_atomic_int_incr(&g_config.batch_index_errors);
 	}
@@ -234,7 +234,8 @@ as_batch_send_final(as_batch_shared* shared)
 	as_msg_swap_header(&m.msg);
 
 	int status = as_batch_send(shared->fd_h->fd, (uint8_t*) &m, sizeof(m), MSG_NOSIGNAL);
-	AS_RELEASE_FILE_HANDLE(shared->fd_h);
+
+	as_end_of_transaction(shared->fd_h, status != 0);
 	shared->fd_h = 0;
 
 	histogram_insert_data_point(g_config.batch_index_reads_hist, shared->start);

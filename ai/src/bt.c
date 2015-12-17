@@ -96,21 +96,25 @@ static bt *createOBT(uchar ktype, uchar vtype, int tmatch, uchar btype) {
 	if        (C_IS_I(ktype)) {
 		if (C_IS_I(vtype)) return createUUBT(tmatch, btype);
 		if (C_IS_L(vtype)) return createULBT(tmatch, btype);
+		if (C_IS_G(vtype)) return createULBT(tmatch, btype);
 		if (C_IS_X(vtype)) return createUXBT(tmatch, btype);
 		if (C_IS_Y(vtype)) return createUYBT(tmatch, btype);
-	} else if (C_IS_L(ktype)) {
+	} else if (C_IS_L(ktype) || C_IS_G(ktype)) {
 		if (C_IS_I(vtype)) return createLUBT(tmatch, btype);
 		if (C_IS_L(vtype)) return createLLBT(tmatch, btype);
+		if (C_IS_G(vtype)) return createLLBT(tmatch, btype);
 		if (C_IS_X(vtype)) return createLXBT(tmatch, btype);
 		if (C_IS_Y(vtype)) return createLYBT(tmatch, btype);
 	} else if (C_IS_X(ktype)) {
 		if (C_IS_I(vtype)) return createXUBT(tmatch, btype);
 		if (C_IS_L(vtype)) return createXLBT(tmatch, btype);
+		if (C_IS_G(vtype)) return createXLBT(tmatch, btype);
 		if (C_IS_X(vtype)) return createXXBT(tmatch, btype);
 		if (C_IS_Y(vtype)) return createXYBT(tmatch, btype);
 	} else if (C_IS_Y(ktype)) {
 		if (C_IS_I(vtype)) return createYUBT(tmatch, btype);
 		if (C_IS_L(vtype)) return createYLBT(tmatch, btype);
+		if (C_IS_G(vtype)) return createYLBT(tmatch, btype);
 		if (C_IS_X(vtype)) return createYXBT(tmatch, btype);
 		if (C_IS_Y(vtype)) return createYYBT(tmatch, btype);
 	}
@@ -118,6 +122,7 @@ static bt *createOBT(uchar ktype, uchar vtype, int tmatch, uchar btype) {
 }
 #define ASSIGN_CMP(ktype) C_IS_I(ktype) ? btIntCmp   : \
                           C_IS_L(ktype) ? btLongCmp  : \
+                          C_IS_G(ktype) ? btLongCmp  : \
                           C_IS_X(ktype) ? btU128Cmp  : \
                           C_IS_Y(ktype) ? btU160Cmp  : \
                           C_IS_F(ktype) ? btFloatCmp : \
@@ -151,6 +156,10 @@ bt *createIBT(uchar ktype, int imatch, uchar btype) {
 		bts.ksize = LL_SIZE;
 		cmp = llCmp;
 		bts.bflag = BTFLAG_ULONG_ULONG + BTFLAG_ULONG_INDEX;
+	} else if C_IS_G(ktype) { /* NOTE: under the covers: LL */
+		bts.ksize = LL_SIZE;
+		cmp = llCmp;
+		bts.bflag = BTFLAG_ULONG_ULONG + BTFLAG_ULONG_INDEX;
 	} else if C_IS_X(ktype) { /* NOTE: under the covers: XL */
 		bts.ksize = XL_SIZE;
 		cmp = xlCmp;
@@ -170,23 +179,27 @@ static bt *_createUIBT(uchar ktype, int imatch, uchar pktyp, uchar bflag) {
 	if        (C_IS_I(ktype)) {
 		return  C_IS_I(pktyp) ? createUUBT(imatch, bflag) :
 				(C_IS_L(pktyp) ? createULBT(imatch, bflag) :
+				(C_IS_G(pktyp) ? createULBT(imatch, bflag) :
 				 (C_IS_X(pktyp) ? createUXBT(imatch, bflag) :
-				  /* C_IS_Y */       createUYBT(imatch, bflag)));
-	} else if (C_IS_L(ktype)) {
+				  /* C_IS_Y */       createUYBT(imatch, bflag))));
+	} else if (C_IS_L(ktype) || C_IS_G(ktype)) {
 		return  C_IS_I(pktyp) ? createLUBT(imatch, bflag) :
 				(C_IS_L(pktyp) ? createLLBT(imatch, bflag) :
+				(C_IS_G(pktyp) ? createLLBT(imatch, bflag) :
 				 (C_IS_X(pktyp) ? createLXBT(imatch, bflag) :
-				  /* C_IS_Y */       createLYBT(imatch, bflag)));
+				  /* C_IS_Y */       createLYBT(imatch, bflag))));
 	} else if (C_IS_X(ktype)) {
 		return  C_IS_I(pktyp) ? createXUBT(imatch, bflag) :
 				(C_IS_L(pktyp) ? createXLBT(imatch, bflag) :
+				(C_IS_G(pktyp) ? createXLBT(imatch, bflag) :
 				 (C_IS_X(pktyp) ? createXXBT(imatch, bflag) :
-				  /* C_IS_Y */       createXYBT(imatch, bflag)));
+				  /* C_IS_Y */       createXYBT(imatch, bflag))));
 	} else if (C_IS_Y(ktype)) {
 		return  C_IS_I(pktyp) ? createYUBT(imatch, bflag) :
 				(C_IS_L(pktyp) ? createYLBT(imatch, bflag) :
+				(C_IS_G(pktyp) ? createYLBT(imatch, bflag) :
 				 (C_IS_X(pktyp) ? createYXBT(imatch, bflag) :
-				  /* C_IS_Y */       createYYBT(imatch, bflag)));
+				  /* C_IS_Y */       createYYBT(imatch, bflag))));
 	} else {
 		assert(!"_createUIBT ERROR");
 		return NULL;
@@ -219,7 +232,7 @@ bt *createIndexNode(uchar ktype, uchar obctype) {                /* INODE_BT */
 		cmp = uintCmp;
 		bts.ksize = UINTSIZE;
 		bts.bflag = BTFLAG_NONE;
-	} else if (C_IS_L(ktype)) {
+	} else if (C_IS_L(ktype) || C_IS_G(ktype)) {
 		cmp = ulongCmp;
 		bts.ksize = ULONGSIZE;
 		bts.bflag = BTFLAG_NONE;

@@ -20,3 +20,6 @@
 [submodule "modules/luajit"]
 	path = modules/luajit
 	url = https://github.com/aerospike/luajit.git
+[submodule "modules/s2-geometry-library"]
+	path = modules/s2-geometry-library
+	url = https://github.com/aerospike/s2-geometry-library.git

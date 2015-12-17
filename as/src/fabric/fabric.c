@@ -153,13 +153,14 @@ void as_fabric_dump();
 **   --------------------
 **
 **   High-performance, concurrent fabric message exchange is provided via worker threads handling a particular
-**   set of FBs.  (There is currently a maximum of 6 worker threads.)  Each worker thread has a Unix-domain
-**   notification ("note") socket that is used to send events to the worker thread.  The main work of receiving
-**   and sending fabric messages is handled by "fabric_worker_fn()", which does an "epoll_wait()" on the "note_fd"
-**   and all of the worker thread's attached FBs.  Events on the "note_fd" may be either "NEW_FABRIC_BUFFER" or
-**   "DELETE_FABRIC_BUFFER", received with a parameter that is the FB containing the FD to be listened to or
-**   else shutdown.  Events on the FBs FDs may be either readable, writable, or errors (which result in the
-**   particular fabric connection being closed.)
+**   set of FBs.  (There is a default of 16, and a maximum of 128, fabric worker threads.)  Each worker thread
+**   has an abstract Unix domain notification ("note") socket [Note:  This is a Linux-specific dependency!]
+**   that is used to send events to the worker thread.  The main work of receiving and sending fabric messages
+**   is handled by "fabric_worker_fn()", which does an "epoll_wait()" on the "note_fd" and all of the worker
+**   thread's attached FBs.  Events on the "note_fd" may be either "NEW_FABRIC_BUFFER" or "DELETE_FABRIC_BUFFER",
+**   received with a parameter that is the FB containing the FD to be listened to or else shutdown.  Events on
+**   the FBs FDs may be either readable, writable, or errors (which result in the particular fabric connection
+**   being closed.)
 **
 **   Debugging Utilities:
 **   --------------------
@@ -262,7 +263,6 @@ typedef enum fb_status_e {
 	FB_STATUS_IDLE,                 // The FB is not being used.
 	FB_STATUS_READ,                 // The FB has read data.
 	FB_STATUS_WRITE,                // The FB is being written.
-	FB_STATUS_ERROR                 // The FB is in an error state.
 } fb_status;
 
 
@@ -282,6 +282,8 @@ typedef struct {
 	int         connected;          // Is this a connected outbound FB?
 
 	fb_status   status;             // Is this FB in flight or idle?
+
+	bool failed;                    // This fb has failed and is unusable.
 
 	// this is the write section
 	size_t		w_total_len;		// total size to write
@@ -476,6 +478,7 @@ fabric_buffer_create(int fd)
 	fb->fne = NULL;
 	fb->connected = false; // not in the connected_fb_hash yet
 	fb->status = FB_STATUS_IDLE;
+	fb->failed = false;
 
 	fb->w_total_len = 0;
 	fb->w_len = 0;
@@ -771,25 +774,8 @@ fabric_connect(fabric_args *fa, fabric_node_element *fne)
 	struct in_addr self;
 	msg_set_uint64(m, FS_FIELD_NODE, g_config.self_node); // identifies self to remote
 	if (AS_HB_MODE_MESH == g_config.hb_mode) {
-
-		// If the user specified 'any' as heartbeat address, we listen on 0.0.0.0 (all interfaces)
-		// But we should send a proper IP address to the remote machine to send back heartbeat.
-		// Use the node's IP address in this case.
-		char *hbaddr_to_use = g_config.hb_addr;
-		// Checking the first byte is enough as '0' cannot be a valid IP address other than 0.0.0.0
-		if (*hbaddr_to_use == '0') {
-			cf_debug(AS_FABRIC, "Using address \"any\" for listening for heartbeats and a real IP address for receiving heartbeats");
-			hbaddr_to_use = g_config.node_ip;
-		}
-		// If the user specified an interface-address, however, we should instead
-		// send that address to the remote machine to send back heartbeats to us.
-		if (g_config.hb_tx_addr) {
-			cf_debug(AS_FABRIC, "Using \"interface-address\" for receiving heartbeats");
-			hbaddr_to_use = g_config.hb_tx_addr;
-		}
-		cf_debug(AS_FABRIC, "Sending %s as the IP address for receiving heartbeats", hbaddr_to_use);
-		
-		if (1 != inet_pton(AF_INET, hbaddr_to_use, &self))
+		cf_debug(AS_FABRIC, "Sending %s as the IP address for receiving heartbeats", g_config.hb_addr_to_use);
+		if (1 != inet_pton(AF_INET, g_config.hb_addr_to_use, &self))
 			cf_warning(AS_HB, "unable to call inet_pton: %s", cf_strerror(errno));
 		else {
 			msg_set_uint32(m, FS_ADDR, *(uint32_t *)&self);
@@ -1412,6 +1398,7 @@ fabric_worker_fn(void *argv)
 
 	// Connect to the notification socket
 	struct sockaddr_un note_so;
+	memset(&note_so, 0, sizeof(note_so));
 	int note_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (note_fd < 0) {
 		cf_debug(AS_FABRIC, "Could not create socket for notification thread");
@@ -1419,9 +1406,11 @@ fabric_worker_fn(void *argv)
 	}
 	note_so.sun_family = AF_UNIX;
 	strcpy(note_so.sun_path, fa->note_sockname);
-	int len = strlen(note_so.sun_path) + sizeof(note_so.sun_family);
+	int len = sizeof(note_so.sun_family) + strlen(note_so.sun_path) + 1;
+	// Use an abstract Unix domain socket [Note:  Linux-specific!] by setting the first path character to NUL.
+	note_so.sun_path[0] = '\0';
 	if (connect(note_fd, (struct sockaddr *) &note_so, len) == -1) {
-		cf_debug(AS_FABRIC, "could not connect to notification socket");
+		cf_crash(AS_FABRIC, "could not connect to notification socket");
 		return(0);
 	}
 	// Write the one byte that is my index
@@ -1506,7 +1495,7 @@ fabric_worker_fn(void *argv)
 
 				if (fb->fne && (fb->fne->live == false)) {
 
-					fb->status = FB_STATUS_ERROR;
+					fb->failed = true;
 
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fb->fd, 0);
 					fabric_buffer_release(fb);
@@ -1516,7 +1505,7 @@ fabric_worker_fn(void *argv)
 
 				if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
 
-					fb->status = FB_STATUS_ERROR;
+					fb->failed = true;
 
 					cf_debug(AS_FABRIC, "epoll : error, will close: fb %p fd %d errno %d", fb, fb->fd, errno);
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fb->fd, 0);
@@ -1966,15 +1955,18 @@ as_fabric_start()
 				 "could not create note server fd: %d %s", errno, cf_strerror(errno));
 	}
 	struct sockaddr_un ns_so;
+	memset(&ns_so, 0, sizeof(ns_so));
 	ns_so.sun_family = AF_UNIX;
-	snprintf(&fa->note_sockname[0], sizeof(ns_so.sun_path), "/tmp/wn-%d", getpid());
+	snprintf(&fa->note_sockname[0], sizeof(ns_so.sun_path), "@/tmp/wn-%d", getpid());
 	strcpy(ns_so.sun_path, fa->note_sockname);
-	unlink(ns_so.sun_path); // not sure why this is necessary
-	int ns_so_len = strlen(ns_so.sun_path) + sizeof(ns_so.sun_family) + 1;
+	int ns_so_len = sizeof(ns_so.sun_family) + strlen(ns_so.sun_path) + 1;
+	// Use an abstract Unix domain socket [Note:  Linux-specific!] by setting the first path character to NUL.
+	ns_so.sun_path[0] = '\0';
 	if (0 > bind(fa->note_server_fd, (struct sockaddr *)&ns_so, ns_so_len)) {
 		cf_crash(AS_FABRIC,
 				 "could not bind note server name %s: %d %s", ns_so.sun_path, errno, cf_strerror(errno));
 	}
+
 	if (0 > listen(fa->note_server_fd, 5)) {
 		cf_crash(AS_FABRIC, "listen: %s", cf_strerror(errno));
 	}
@@ -2100,8 +2092,8 @@ as_fabric_send(cf_node node, msg *m, int priority )
 	fabric_buffer *fb = 0;
 	do {
 		rv = cf_queue_pop(fne->xmit_buffer_queue, &fb, CF_QUEUE_NOWAIT);
-		if ((CF_QUEUE_OK == rv) && (fb->fd == -1)) {
-			cf_warning(AS_FABRIC, "releasing fb: %p with fne: %p and fd: -1", fb, fb->fne);
+		if ((CF_QUEUE_OK == rv) && (fb->fd == -1 || fb->failed)) {
+			cf_warning(AS_FABRIC, "releasing fb: %p with fne: %p and fd: %d (%s)", fb, fb->fne, fb->fd, fb->failed ? "Failed" : "Missing");
 			fabric_buffer_release(fb);
 			fb = 0;
 		}
@@ -2725,7 +2717,7 @@ fb_hash_dump_reduce_fn(void *key, void *data, void *udata)
 
 	int count = cf_rc_count(fb);
 
-	cf_info(AS_FABRIC, "\tFB[%d] fb(%p): fne: %p (node %p: %s); fd: %d ; wid: %d ; rc: %d ; polarity: %s", *item_num, fb, fb->fne, fb->fne->node, (fb->fne->live ? "live" : "dead"), fb->fd, fb->worker_id, count, (fb->connected ? "outbound" : "inbound"));
+	cf_info(AS_FABRIC, "\tFB[%d] fb(%p): fne: %p (node %p: %s); fd: %d (%s) ; wid: %d ; rc: %d ; polarity: %s", *item_num, fb, fb->fne, fb->fne->node, (fb->fne->live ? "live" : "dead"), fb->fd, fb->failed ? "failed" : "healthy", fb->worker_id, count, (fb->connected ? "outbound" : "inbound"));
 
 	*item_num += 1;
 

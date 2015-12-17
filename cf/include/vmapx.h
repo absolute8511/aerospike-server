@@ -85,38 +85,38 @@ size_t cf_vmapx_sizeof(uint32_t value_size, uint32_t max_count);
 //------------------------------------------------
 // Constructor
 //
-cf_vmapx_err cf_vmapx_create(cf_vmapx* this, uint32_t value_size,
+cf_vmapx_err cf_vmapx_create(cf_vmapx* _this, uint32_t value_size,
 		uint32_t max_count, uint32_t hash_size, uint32_t max_name_size);
 
 //------------------------------------------------
 // Destructor
 //
-void cf_vmapx_release(cf_vmapx* this);
+void cf_vmapx_release(cf_vmapx* _this);
 
 
 //------------------------------------------------
 // Number of Values
 //
-uint32_t cf_vmapx_count(cf_vmapx* this);
+uint32_t cf_vmapx_count(cf_vmapx* _this);
 
 //------------------------------------------------
 // Get a Value
 //
-cf_vmapx_err cf_vmapx_get_by_index(cf_vmapx* this, uint32_t index,
+cf_vmapx_err cf_vmapx_get_by_index(cf_vmapx* _this, uint32_t index,
 		void** pp_value);
-cf_vmapx_err cf_vmapx_get_by_name(cf_vmapx* this, const char* name,
+cf_vmapx_err cf_vmapx_get_by_name(cf_vmapx* _this, const char* name,
 		void** pp_value);
 
 //------------------------------------------------
 // Get Index from Name
 //
-cf_vmapx_err cf_vmapx_get_index(cf_vmapx* this, const char* name,
+cf_vmapx_err cf_vmapx_get_index(cf_vmapx* _this, const char* name,
 		uint32_t* p_index);
 
 //------------------------------------------------
 // Add a Value (if name is unique)
 //
-cf_vmapx_err cf_vmapx_put_unique(cf_vmapx* this, const void* p_value,
+cf_vmapx_err cf_vmapx_put_unique(cf_vmapx* _this, const void* p_value,
 		uint32_t* p_index);
 
 
@@ -125,4 +125,4 @@ cf_vmapx_err cf_vmapx_put_unique(cf_vmapx* this, const void* p_value,
 //
 
 uint32_t cf_vmapx_hash_fn(void* p_key);
-void* cf_vmapx_value_ptr(cf_vmapx* this, uint32_t index);
+void* cf_vmapx_value_ptr(cf_vmapx* _this, uint32_t index);

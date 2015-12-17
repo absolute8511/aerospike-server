@@ -1,0 +1,3 @@
+/etc/init.d/aerospike
+%dir /var/log/aerospike
+%dir /var/run/aerospike

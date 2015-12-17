@@ -296,3 +296,6 @@ as_ldt_string_todigest(const char *bdig, cf_digest *keyd)
 }
 
 as_val * as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_bin *binp); 
+
+void ldt_update_err_stats(as_namespace *ns, as_val *val);
+long ldt_get_error_code(void *val, size_t vlen); 

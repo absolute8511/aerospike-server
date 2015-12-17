@@ -1,7 +1,7 @@
 /*
  * transaction.h
  *
- * Copyright (C) 2008-2014 Aerospike, Inc.
+ * Copyright (C) 2008-2015 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -100,10 +100,12 @@
 //
 
 typedef struct as_file_handle_s {
+	char		client[64];		// client identifier (currently ip-addr:port)
 	uint64_t	last_used;		// last ms we read or wrote
 	int			fd;
-	bool		inuse;			// in use by the epoll routine
-	bool		t_inprogress;	// transaction is in progress
+	int			epoll_fd;		// the file descriptor of our epoll instance
+	bool		reap_me;		// tells the reaper to come and get us
+	bool		trans_active;	// a transaction is running on this connection
 	uint32_t	fh_info;		// bitmap containing status info of this file handle
 	as_proto	*proto;
 	uint64_t	proto_unread;
@@ -112,16 +114,11 @@ typedef struct as_file_handle_s {
 
 #define FH_INFO_DONOT_REAP	0x00000001	// this bit indicates that this file handle should not be reaped
 
-// Helper to release transaction file handles.
+// Helpers to release transaction file handles.
 void as_release_file_handle(as_file_handle *proto_fd_h);
-
-#define AS_RELEASE_FILE_HANDLE(__proto_fd_h) \
-{ \
-	if (0 == cf_rc_release(__proto_fd_h)) { \
-		as_release_file_handle(__proto_fd_h); \
-		cf_rc_free(__proto_fd_h); \
-	} \
-}
+void as_end_of_transaction(as_file_handle *proto_fd_h, bool force_close);
+void as_end_of_transaction_ok(as_file_handle *proto_fd_h);
+void as_end_of_transaction_force_close(as_file_handle *proto_fd_h);
 
 struct as_transaction_s;
 typedef int (*ureq_cb)(struct as_transaction_s *tr, int retcode);
@@ -259,7 +256,6 @@ typedef struct tr_create_data {
 	void *				udata;		/* udata to be passed on to the new transaction */
 } tr_create_data;
 
-extern int   as_internal_udf_txn_setup(tr_create_data * d);
-extern int   as_transaction_create(as_transaction *tr, tr_create_data * data);
+extern int   as_transaction_create_internal(as_transaction *tr, tr_create_data * data);
 
 void as_transaction_error(as_transaction* tr, uint32_t error_code);

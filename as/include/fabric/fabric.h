@@ -63,7 +63,7 @@ typedef enum {
 	FABRIC_NODE_DEPART,		// node departed
 	FABRIC_NODE_UNDUN,		// node un-dunned
 	FABRIC_NODE_DUN,		// node dunned
-	FABRIC_DELIVERED		// msg was delivered to destination
+	FABRIC_RESET		    // reset the universe of nodes
 } as_fabric_event_type;
 
 typedef struct as_fabric_event_node_t {

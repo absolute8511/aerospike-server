@@ -332,7 +332,7 @@ static void setHigh(btSIter *siter, ai_obj *high, uchar ktype) {
 	} else if (C_IS_I(ktype)) {
 		siter->x.high  = high->i;
 	}
-	else if (C_IS_L(ktype)) {
+	else if (C_IS_L(ktype) || C_IS_G(ktype)) {
 		siter->x.high  = high->l;
 	}
 	else if (C_IS_X(ktype)) {
@@ -419,7 +419,7 @@ btEntry *btRangeNext(btSIter *siter, bool asc) { //printf("btRangeNext\n");
 	int i = -1;
 	uchar *stream = btNext(siter, &x, &i, asc);
 	if (!streamToBTEntry(stream, siter, x, i)) return NULL;
-	if        (C_IS_I(siter->ktype) || C_IS_L(siter->ktype)) {
+	if (C_IS_I(siter->ktype) || C_IS_L(siter->ktype) || C_IS_G(siter->ktype)) {
 		long l = C_IS_I(siter->ktype) ? (ulong)(siter->key.i) : siter->key.l;
 		if (l == siter->x.high)  siter->x.finished = 1;       /* exact match */
 		if (!asc) {

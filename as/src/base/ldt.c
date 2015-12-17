@@ -1,7 +1,7 @@
 /*
  * ldt.c
  *
- * Copyright (C) 2013-2014 Aerospike, Inc.
+ * Copyright (C) 2013-2015 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -161,7 +161,7 @@
  *   -- If there are duplicates; find the winning node i.e node with winning LDT record based on parent 
  *      generation + ttl out of all the duplicate versions (it could be master / primary version / 
  *      zombie). Ship the operation to that node using proxy subsystem. 
- *   -- Apply LDT UDF on the winning node and replicate to (master / replica / qnode)
+ *   -- Apply LDT UDF on the winning node and replicate to (master / replica )
  * 
  *
  * - Replication: Replication at both at the time of the duplicates/migration and at the normal runtime 
@@ -178,7 +178,7 @@
  *   -- After write is applied pack up parent and all the modified sub record in single message along with 
  *      -- The source partition's current version 
  *      -- The source current outgoing migration LDT version.
- *      and send it to master (in case write happens on non-master node) replicas and qnode.
+ *      and send it to master (in case write happens on non-master node) replicas.
  *   -- At the destination on receiving the replication request check source partition version and destination 
  *      partition version. 
  *      - If the replication request is coming from partition version which is different then
@@ -923,7 +923,7 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 		cf_warning_digest(AS_LDT, &rd->keyd, "as_ldt_parent_storage_set_version: [LDT Control bin not found %s %d]", fname, lineno);
 		return -1;
 	}
-	as_val * valp           = as_val_frombin( binp );
+	as_val * valp           = as_bin_particle_to_asval( binp );
 	if (!valp) {
 		cf_warning(AS_LDT, "as_ldt_parent_storage_set_version : [LDT Control bin Deserialization error]... Fail");
 		return -2;
@@ -952,44 +952,22 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 		cf_free(valstr);
 	}
 
-	// Abstract it out in some API .. bad duplication here  ...
-	as_buffer buf;
-	as_buffer_init(&buf);
-	as_serializer s;
-	as_msgpack_init(&s);
-	int res = as_serializer_serialize(&s, valp, &buf);
-
-	if (res != 0) {
-		cf_warning(AS_LDT, "as_ldt_parent_storage_set_version: Map serialization failure (%d), res");
-		as_serializer_destroy(&s);
-		as_buffer_destroy(&buf);
-		as_val_destroy(valp);
-		return -4;
-	}
-
-#if 0
-	// Check not needed space is already there
-	if ( !as_storage_bin_can_fit(rd->ns, buf.size) ) {
-		cf_warning(AS_UDF, "map-list: bin size too big");
-		rsp = -1;
-	}
-#endif
-
-	int pbytes = 0;
 	if (rd->ns->storage_data_in_memory) {
-		as_bin_particle_replace_from_mem(binp, AS_PARTICLE_TYPE_HIDDEN_MAP, buf.data, buf.size);
+		as_bin_particle_replace_from_asval(binp, valp);
+		// TODO - check for failure?
 	}
 	else {
-		pbytes = (int)as_bin_particle_stack_from_mem(binp, pp_stack_particles, AS_PARTICLE_TYPE_HIDDEN_MAP, buf.data, buf.size);
+		as_bin_particle_stack_from_asval(binp, pp_stack_particles, valp);
 	}
-	as_serializer_destroy(&s);
-	as_buffer_destroy(&buf);
+
+	as_bin_particle_map_set_hidden(binp);
+
 	as_val_destroy(valp);
 	cf_debug(AS_LDT, "(%s:%d) Setting parent version to %ld %d", fname, lineno, ldt_version,rd->r->generation);
 	//PRINT_STACK();
 
 	rd->write_to_device = true;
-	return pbytes;
+	return 0;
 }
 
 /*
@@ -1025,7 +1003,7 @@ as_ldt_parent_storage_get_version(as_storage_rd *rd, uint64_t *ldt_version, bool
 		}
 		rv                      = -1;
 	} else {
-		const as_val * valp           = as_val_frombin( binp );
+		const as_val * valp           = as_bin_particle_to_asval( binp );
 		if (!valp) {
 			if (no_fail) {
 				cf_warning(AS_LDT, "Property Bin %s Corrupted", REC_LDT_CTRL_BIN);
@@ -1082,7 +1060,7 @@ as_ldt_subrec_storage_get_digests(as_storage_rd *rd, cf_digest *edigest, cf_dige
 		return -1;
 	}
 
-	as_val * valp        = as_val_frombin(binp);
+	as_val * valp        = as_bin_particle_to_asval(binp);
 	if (!valp) {
 		cf_warning(AS_LDT, "Property Bin %s Corrupted", SUBREC_PROP_BIN);
 		return -2;
@@ -1631,7 +1609,7 @@ char *
 as_ldt_leaf_getNext(as_storage_rd *rd)
 {
 	as_bin * bb    = as_bin_get(rd, "LsrControlBin");
-	as_val * srMap = as_val_frombin(bb);
+	as_val * srMap = as_bin_particle_to_asval(bb);
 
 	char key_buffer[2]; as_string key;
 	as_ldt_get_key((char)LF_NextPage, &key, key_buffer);
@@ -1671,7 +1649,7 @@ as_list *
 as_ldt_leaf_scan(as_storage_rd *rd)
 {
 	as_bin * bb  = as_bin_get(rd, "LsrListBin");
-	as_list *sl  = (as_list *)as_val_frombin(bb); 
+	as_list *sl  = (as_list *)as_bin_particle_to_asval(bb);
 	return sl;
 }
 
@@ -1767,12 +1745,12 @@ as_bin_get_llist(as_namespace *ns, as_storage_rd *rd, as_index_tree *sub_tree, a
 as_val *
 as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_bin *binp) 
 {
-	uint8_t type = as_particle_type_convert(as_bin_get_particle_type(binp));
-	if (type != AS_PARTICLE_TYPE_LIST) {
+	uint8_t type = as_bin_get_particle_type(binp);
+	if (! (type == AS_PARTICLE_TYPE_LIST || type == AS_PARTICLE_TYPE_HIDDEN_LIST)) {
 		return NULL;
 	}
 
-	as_val * valp  = as_val_frombin(binp);
+	as_val * valp  = as_bin_particle_to_asval(binp);
 	if (!valp) {
 		cf_warning(AS_LDT, "Property Bin %s Corrupted", SUBREC_PROP_BIN);
 		return NULL;
@@ -1809,6 +1787,163 @@ as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_
 
 	as_val_destroy(valp);
 	return (as_val *)result_list;
+}
+
+/*
+ * Parse (Actually, probe) the error string, and if we see this pattern:
+ * FileName:Line# 4digits:LDT-<Error String>
+ * For example:
+ * .../aerospike-lua-core/src/ldt/lib_llist.lua:982: 0002:LDT-Top Record Not Found
+ * All UDF errors (LDT included), have the "filename:line# " prefix, and then
+ * LDT errors follow that with a known pattern:
+ * (4 digits, colon, LDT-<Error String>).
+ * We will check the error string by looking for specific markers after the
+ * the space that follows the filename:line#.  If we see the markers, we will
+ * parse the LDT error code and use that as the wire protocol error if it is
+ * one of the special ones:
+ * (1)  "0002:LDT-Top Record Not Found"
+ * (2)  "0125:LDT-Item Not Found"
+ */
+long
+ldt_get_error_code(void *val, size_t vlen) 
+{
+	if (!vlen)
+		return 0;
+
+	char * charptr;
+	char * valptr = (char *) val;
+	long   error_code;
+
+	// Error Format   "XXXX:LDT-<message>"
+	if ((charptr = strchr((const char *) val, ' ')) != NULL) {
+		if (&charptr[9] < &valptr[vlen]) {
+			if (memcmp(&charptr[5], ":LDT-", 5) == 0) {
+				error_code = strtol(&charptr[1], NULL, 10);
+				cf_debug(AS_UDF, "LDT Error: Code(%ld) String(%s)",
+						error_code, (char *) val);
+				return error_code;
+			}
+		}
+	}
+	return 0;
+}
+
+void 
+ldt_update_err_stats(as_namespace *ns, as_val *result_val)
+{
+	if (!ns->ldt_enabled || !result_val) {
+		return;
+	}
+
+	as_string * s   = as_string_fromval(result_val);
+	char *      rs  = (char *) as_string_tostring(s);
+
+    if ( s ) {
+		long code = ldt_get_error_code(rs, as_string_len(s));
+		switch (code) {
+			case ERR_TOP_REC_NOT_FOUND: 
+				cf_atomic_int_incr(&ns->lstats.ldt_err_toprec_not_found);
+				break;
+			case ERR_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_item_not_found);
+				break;
+			case ERR_INTERNAL:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_internal);
+				break;
+			case ERR_UNIQUE_KEY:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_unique_key_violation);
+				break;
+			case ERR_INSERT:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_insert_fail);
+				break;
+			case ERR_SEARCH:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_search_fail);
+				break;
+			case ERR_DELETE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_delete_fail);
+				break;
+			case ERR_VERSION:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_version_mismatch);
+				break;
+
+			case ERR_CAPACITY_EXCEEDED:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_capacity_exceeded);
+				break;
+			case ERR_INPUT_PARM:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_param);
+				break;
+
+			case ERR_TYPE_MISMATCH:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_op_bintype_mismatch);
+				break;
+
+			case ERR_NULL_BIN_NAME:
+			case ERR_BIN_NAME_NOT_STRING:
+			case ERR_BIN_NAME_TOO_LONG:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_param);
+				break;
+
+			case ERR_TOO_MANY_OPEN_SUBRECS:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_too_many_open_subrec);
+				break;
+			case ERR_SUB_REC_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_subrec_not_found);
+				break;
+			case ERR_BIN_DOES_NOT_EXIST:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_bin_does_not_exist);
+				break;
+			case ERR_BIN_ALREADY_EXISTS:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_bin_exits);
+				break;
+			case ERR_BIN_DAMAGED:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_bin_damaged);
+				break;
+
+			case ERR_SUBREC_POOL_DAMAGED:
+			case ERR_SUBREC_DAMAGED:
+			case ERR_SUBREC_OPEN:
+			case ERR_SUBREC_UPDATE:
+			case ERR_SUBREC_CREATE:
+			case ERR_SUBREC_DELETE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_subrec_internal);
+				break;
+
+			case ERR_SUBREC_CLOSE:
+			case ERR_TOPREC_UPDATE:
+			case ERR_TOPREC_CREATE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_toprec_internal);
+				break;
+
+
+			case ERR_FILTER_BAD:
+			case ERR_FILTER_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_filter);
+				break;
+			case ERR_KEY_BAD:
+			case ERR_KEY_FIELD_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_key);
+				break;
+			case ERR_INPUT_CREATESPEC:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_createspec);
+				break;
+			case ERR_INPUT_USER_MODULE_NOT_FOUND:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_usermodule);
+				break;
+
+			case ERR_INPUT_TOO_LARGE:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_input_too_large);
+				break;
+			case ERR_NS_LDT_NOT_ENABLED:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_ldt_not_enabled);
+				break;
+			
+			default:
+				cf_atomic_int_incr(&ns->lstats.ldt_err_unknown);
+		}
+    } else {
+		cf_atomic_int_incr(&ns->lstats.ldt_err_unknown);
+	}
+	return;
 }
 
 void

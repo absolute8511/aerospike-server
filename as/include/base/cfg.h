@@ -86,6 +86,11 @@ typedef struct as_config_s {
 	char				*hb_mesh_seed_addrs[AS_CLUSTER_SZ];
 	int					hb_mesh_seed_ports[AS_CLUSTER_SZ];
 	char				*hb_tx_addr;
+	// Address advertised for receiving [mesh only] heartbeats:
+	// Computed starting with "heartbeat.address" (g_config.hb_addr),
+	// and set to a real IP address (g_config.node_ip) if that is "any",
+	// and finally overriden by "heartbeat.interface-address" (g_config.hb_tx_addr), if set.
+	char				*hb_addr_to_use;
 	uint32_t			hb_interval;
 	uint32_t			hb_timeout;
 	unsigned char		hb_mcast_ttl;
@@ -151,8 +156,13 @@ typedef struct as_config_s {
 	/* The TCP socket for the listener */
 	cf_socket_cfg		socket;
 
+	/* The TCP socket for the listener on 127.0.0.1 */
+	/* (Only opened if the main service socket is not already listening on 0.0.0.0 or 127.0.0.1.) */
+	cf_socket_cfg		localhost_socket;
+
 	char				*external_address; // hostname that clients will connect on
 	bool				is_external_address_virtual;
+	char				*alternate_address; // alternate service address (could be DNS)
 	char				*network_interface_name; // network_interface_name to use on this machine for generating the IP addresses
 
 	/* Whether or not a socket can be reused (SO_REUSEADDR) */
@@ -315,8 +325,8 @@ typedef struct as_config_s {
 	histogram      *_sindex_gc_pimd_rlock_hist;   // HIstogram to track time spent under pimd rlock by sindex GC
 	histogram      *_sindex_gc_pimd_wlock_hist;   // Histogram to track time spent under pimd wlock by sindex GC
 
-	bool                qnodes_pre_reserved;      // If true we will reserve all the qnodes upfront 
-												  // before processing query. Default - TRUE
+	bool                partitions_pre_reserved;  // If true query will reserve all the partitions upfront 
+												  // before processing query. Default - FALSE
 	cf_atomic64			query_reqs;
 	cf_atomic64			query_fail;
 	cf_atomic64			query_short_queue_full;
@@ -345,6 +355,12 @@ typedef struct as_config_s {
 	uint64_t			udf_runtime_max_memory; // Maximum runtime memory allowed for per UDF
 	uint64_t			udf_runtime_max_gmemory; // maximum runtime memory alloed for all UDF
 	cf_atomic_int		udf_runtime_gmemory_used; // Current runtime memory reserve by per UDF - BUG if global should be 64?
+
+    // Geospatial stats
+	cf_atomic_int		geo_region_query_count;		// Number of region queries
+	cf_atomic_int		geo_region_query_cells;		// Number of cells used by region queries
+	cf_atomic_int		geo_region_query_points;	// Number of valid points found
+	cf_atomic_int		geo_region_query_falsepos;	// Number of false positives found
 
 	/*
 	** STATISTICS
@@ -559,11 +575,6 @@ typedef struct as_config_s {
 	// we re-queue it on to the regular queue.  We expect slow queue push
 	// and pop to match.
 	cf_atomic_int		stat_slow_trans_queue_pop;
-
-	// When we pop from the slow queue -- we pop the entire batch of held
-	// transactions in one quick "whooosh".  Here we count the number of
-	// slow queue batch POP operations.
-	cf_atomic_int		stat_slow_trans_queue_batch_pop;
 
 	// For all REGULAR jobs (that pass thru the CK test), count the number of
 	// regular RW jobs processed.

@@ -104,7 +104,8 @@ typedef enum {
 	AS_SECURITY = 56,
 	AS_AGGR = 57,
 	AS_JOB = 58,
-	CF_FAULT_CONTEXT_UNDEF = 59
+	AS_GEO = 59,
+	CF_FAULT_CONTEXT_UNDEF = 60
 } cf_fault_context;
 
 extern char *cf_fault_context_strings[];
@@ -160,6 +161,7 @@ extern int cf_fault_sink_setcontext(cf_fault_sink *s, char *context, char *sever
 extern cf_fault_sink *cf_fault_sink_add(char *path);
 
 extern cf_fault_sink *cf_fault_sink_hold(char *path);
+extern bool cf_fault_console_is_held();
 extern int cf_fault_sink_activate_all_held();
 extern int cf_fault_sink_get_fd_list(int *fds);
 
@@ -170,6 +172,8 @@ extern int cf_fault_sink_context_strlist(int sink_id, char *context, cf_dyn_buf 
 extern cf_fault_sink *cf_fault_sink_get_id(int id);
 
 extern void cf_fault_sink_logroll(void);
+
+extern void cf_fault_use_local_time(bool val);
 
 // Define the mechanism that we'll use to write into the Server Log.
 // cf_fault_event() is "regular" logging

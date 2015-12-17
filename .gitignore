@@ -1,6 +1,13 @@
 .DS_Store
-.project
 .cproject
+.project
+/vg.log
+TAGS
 run
 target
-TAGS
+
+# emacs backup / temp files
+*~
+\#*\#
+.\#*
+

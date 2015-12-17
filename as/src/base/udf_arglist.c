@@ -64,7 +64,7 @@ static bool udf_arglist_foreach(const as_list * l, as_list_foreach_callback call
 
 	if ( field != NULL ) {
 		as_unpacker unpacker;
-		unpacker.buffer = (unsigned char*)field->data;
+		unpacker.buffer = (const unsigned char*)field->data;
 		unpacker.length = as_msg_field_get_value_sz(field);
 		unpacker.offset = 0;
 		if ( unpacker.length == 0 )
@@ -95,7 +95,7 @@ static as_val *udf_arglist_get(const as_list * l, const uint32_t idx) {
 
 	if ( field != NULL ) {
 		as_unpacker unpacker;
-		unpacker.buffer = (unsigned char*)field->data;
+		unpacker.buffer = (const unsigned char*)field->data;
 		unpacker.length = as_msg_field_get_value_sz(field);
 		unpacker.offset = 0;
 		if ( unpacker.length == 0 )

@@ -32,6 +32,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "citrusleaf/cf_clock.h"
+
 #include "msg.h"
 #include "queue.h"
 #include "util.h"
@@ -188,6 +190,7 @@ typedef struct as_paxos_transaction_t {
 	bool retired, confirmed;
 	bool votes[AS_CLUSTER_SZ];
 	as_paxos_change c;
+	cf_clock establish_time;
 } __attribute__((__packed__)) as_paxos_transaction;
 
 
@@ -222,8 +225,6 @@ typedef struct as_paxos_t {
 	bool partition_sync_state[AS_CLUSTER_SZ];
 
 	cf_node principal_pro_tempore; // Node with greatest ID currently vying to become Paxos principal (or 0 if there is none.)
-
-	int num_incoming_migrations;   // For receiver-side migration flow control.
 
 	int n_callbacks;
 	as_paxos_change_callback cb[MAX_CHANGE_CALLBACKS];

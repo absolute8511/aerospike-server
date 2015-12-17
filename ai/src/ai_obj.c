@@ -93,7 +93,7 @@ static int ai_objCmp(ai_obj *a, ai_obj *b)
 	} else if (C_IS_F(a->type)) {
 		float f = a->f - b->f;
 		return (f == 0.0)     ? 0 : ((f > 0.0)     ? 1 : -1);
-	} else if (C_IS_L(a->type)) {
+	} else if (C_IS_L(a->type) || C_IS_G(a->type)) {
 		return (a->l == b->l) ? 0 : ((a->l > b->l) ? 1 : -1);
 	} else if (C_IS_X(a->type)) {
 		return (a->x == b->x) ? 0 : ((a->x > b->x) ? 1 : -1);
@@ -162,7 +162,7 @@ void dump_ai_obj(FILE *fp, ai_obj *a)
 			memcpy_ai_objStoDumpBuf(dumpbuf, a);
 			fprintf(fp, "\t%s(S) ai_obj: mt: %d val: %s\n", name, a->empty, dumpbuf);
 		}
-	} else if (C_IS_L(a->type)) {
+	} else if (C_IS_L(a->type) || C_IS_G(a->type)) {
 		if (a->enc == COL_TYPE_LONG) {
 			fprintf(fp, "\tLONG ai_obj: mt: %d val: %lu\n", a->empty, a->l);
 		} else {

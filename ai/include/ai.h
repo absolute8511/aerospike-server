@@ -71,8 +71,3 @@ int ai_drop_table(char *tname);
  *  Return 0 if successful, -1 otherwise.
  */
 int ai_drop_index(char *iname);
-
-/*
- *  Shut Down the Aerospike Index Module.
- */
-void ai_shutdown(void);

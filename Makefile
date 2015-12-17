@@ -63,6 +63,7 @@ endif
 	$(MAKE) -C $(COMMON) CF=$(CF) EXT_CFLAGS="$(EXT_CFLAGS)"
 	$(MAKE) -C $(CF)
 	$(MAKE) -C $(MOD_LUA) CF=$(CF) COMMON=$(COMMON) LUA_CORE=$(LUA_CORE) EXT_CFLAGS="$(EXT_CFLAGS)" USE_LUAJIT=$(USE_LUAJIT) LUAJIT=$(LUAJIT) TARGET_SERVER=1
+	$(MAKE) -C $(S2)
 	$(MAKE) -C xdr
 	$(MAKE) -C ai
 	$(MAKE) -C as
@@ -70,8 +71,8 @@ endif
 .PHONY: targetdirs
 targetdirs:
 	mkdir -p $(GEN_DIR) $(LIBRARY_DIR) $(BIN_DIR)
-	mkdir -p $(MEXP_DIR)/base $(MEXP_DIR)/fabric $(MEXP_DIR)/storage
-	mkdir -p $(OBJECT_DIR)/base $(OBJECT_DIR)/fabric $(OBJECT_DIR)/storage
+	mkdir -p $(MEXP_DIR)/base $(MEXP_DIR)/fabric $(MEXP_DIR)/storage $(MEXP_DIR)/geospatial
+	mkdir -p $(OBJECT_DIR)/base $(OBJECT_DIR)/fabric $(OBJECT_DIR)/storage $(OBJECT_DIR)/geospatial
 
 strip:	server
 	$(MAKE) -C xdr strip
@@ -113,6 +114,7 @@ cleanmodules:
 		$(MAKE) -C $(LUAJIT) clean; \
 	fi
 	$(MAKE) -C $(MOD_LUA) COMMON=$(COMMON) LUA_CORE=$(LUA_CORE) USE_LUAJIT=$(USE_LUAJIT) LUAJIT=$(LUAJIT) clean
+	$(MAKE) -C $(S2) clean
 
 .PHONY: cleandist
 cleandist:
@@ -136,6 +138,7 @@ cleangit:
 	cd $(LUA_CORE); $(GIT_CLEAN)
 	cd $(LUAJIT); $(GIT_CLEAN)
 	cd $(MOD_LUA); $(GIT_CLEAN)
+	cd $(S2); $(GIT_CLEAN)
 	$(GIT_CLEAN)
 
 .PHONY: rpm deb tar

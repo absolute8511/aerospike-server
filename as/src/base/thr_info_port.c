@@ -232,10 +232,10 @@ thr_info_port_fn(void *arg)
 	info_socket.reuse_addr = g_config.socket_reuse_addr ? true : false;
 	// Listen happens here.
 	if (0 != cf_socket_init_svc(&info_socket)) {
-		cf_crash(AS_AS, "couldn't initialize service socket: %s", cf_strerror(errno));
+		cf_crash(AS_AS, "couldn't initialize service socket");
 	}
 	if (-1 == cf_socket_set_nonblocking(info_socket.sock)) {
-		cf_crash(AS_AS, "couldn't set socket nonblocking: %s", cf_strerror(errno));
+		cf_crash(AS_AS, "couldn't set socket nonblocking");
 	}
 
 	s = &info_socket;

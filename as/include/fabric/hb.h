@@ -44,14 +44,21 @@
 #include "socket.h"
 #include "util.h"
 
+#include "fabric/fabric.h"
+
 
 typedef enum { AS_HB_NODE_ARRIVE, AS_HB_NODE_DEPART, AS_HB_NODE_UNDUN, AS_HB_NODE_DUN } as_hb_event_type;
 
-typedef struct as_hb_event_node_t {
+typedef struct as_hb_event_node_s {
 	as_hb_event_type evt;
 	cf_node nodeid;
 	cf_node p_node; // the principal node from the succession list
 } as_hb_event_node;
+
+typedef struct as_hb_host_addr_port_s {
+	struct in_addr ip_addr;
+	int port;
+} as_hb_host_addr_port;
 
 typedef void (*as_hb_event_fn) (int nevents, as_hb_event_node *events, void *udata);
 
@@ -71,9 +78,13 @@ extern int as_hb_set_are_nodes_dunned(char *node_str, int node_str_len, bool is_
 // use a very large value for 'forever'
 extern int as_hb_snub(cf_node node, cf_clock ms);
 
+// Unsnub all snubbed nodes.
+extern int as_hb_unsnub_all();
+
 // TIP the heartbeat system that there might be a cluster at a given IP address.
 extern int as_hb_tip(char *host, int port);
-extern int as_hb_tip_clear();
+// Clear tips for the given list of nodes, or for all nodes if the list is empty.
+extern int as_hb_tip_clear(as_hb_host_addr_port *host_addr_port_list, int host_port_list_len);
 
 // Set the heartbeat protocol version.
 extern int as_hb_set_protocol(hb_protocol_enum protocol);
@@ -100,3 +111,19 @@ const char *as_hb_stats(bool verbose);
  *  Log the state of the heartbeat module.
  */
 void as_hb_dump(bool verbose);
+
+/**
+ * Generate events required to transform the input  succession list to a list
+ * that would be consistent with the heart beat adjacency list. This means nodes
+ * that are in the adjacency list but missing from the succession list will
+ * generate an NODE_ARRIVE event. Nodes in the succession list but missing from
+ * the adjacency list will generate a NODE_DEPART event.
+ *
+ * @param succession_list the succession list to correct. This should be large
+ * enough to hold g_config.paxos_max_cluster_size events.
+ * @param events the output events. This should be large enough to hold
+ * g_config.paxos_max_cluster_size events.
+ * @return the number of corrective events generated.
+ */
+int as_hb_get_corrective_events(cf_node *succession_list,
+								as_fabric_event_node *events);

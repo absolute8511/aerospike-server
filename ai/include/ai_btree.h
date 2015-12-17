@@ -75,8 +75,6 @@ int ai_btree_get_simatch_byname(char *nsname, char *iname);
 
 int ai_btree_get_simatch_by_binid(as_namespace *ns, char *set, int binid, bool isw);
 
-void ai_set_simatch_by_name(char *ns, char *iname, int *imatch, int *simatch);
-
 int ai_btree_numindex(void);
 
 void ai_post_append_only_file_init(int nprts);

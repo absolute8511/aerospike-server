@@ -88,15 +88,15 @@ typedef struct as_index_s {
 
 	// offset: 55
 	// In single-bin mode for data-in-memory namespaces, this is cast to an
-	// as_bin, though only the last 2 bits get used (for the iparticle state).
-	// The next-to-last 2 bits, or in multi-bin mode the last 4 bits, are used
-	// for index flags. Do not use flex_bits_2 directly - use access functions!
+	// as_bin, though only the last 4 bits get used (for the iparticle state).
+	// The first 4 bits are used for index flags. Do not use flex_bits_2
+	// directly - use access functions!
 	uint8_t flex_bits_2;
 
 	// offset: 56
 	// For data-not-in-memory namespaces, these 8 bytes are currently unused.
 	// For data-in-memory namespaces: in single-bin mode the as_bin is embedded
-	// here (these 8 bytes plus the last 2 bits in flex_bits_2 above), but in
+	// here (these 8 bytes plus the last 4 bits in flex_bits_2 above), but in
 	// multi-bin mode this is a pointer to either of:
 	// - an as_bin_space containing n_bins and an array of as_bin structs
 	// - an as_rec_space containing an as_bin_space pointer and other metadata
@@ -176,7 +176,7 @@ void as_index_clear_flags(as_index* index, as_index_flag flags) {
 
 static inline
 as_bin *as_index_get_single_bin(const as_index *index) {
-	// We're only allowed to use the last 2 bits for the bin state.
+	// We're only allowed to use the last 4 bits for the bin state.
 	return (as_bin*)&index->flex_bits_2;
 }
 
@@ -224,10 +224,10 @@ bool as_index_has_set(as_index *index) {
 
 static inline
 int as_index_set_set(as_index *index, as_namespace *ns, const char *set_name,
-		bool fail_if_deleted) {
+		bool apply_restrictions) {
 	uint16_t set_id;
 	int rv = as_namespace_get_create_set(ns, set_name, &set_id,
-			fail_if_deleted);
+			apply_restrictions);
 
 	if (rv != 0) {
 		return rv;

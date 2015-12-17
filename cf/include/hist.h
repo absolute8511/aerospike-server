@@ -35,7 +35,7 @@
 //
 
 #define N_BUCKETS (1 + 64)
-#define HISTOGRAM_NAME_SIZE 128
+#define HISTOGRAM_NAME_SIZE 512
 
 typedef enum {
 	HIST_MILLISECONDS,

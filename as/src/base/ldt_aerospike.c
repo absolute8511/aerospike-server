@@ -1,7 +1,7 @@
 /*
  * ldt_aerospike.c
  *
- * Copyright (C) 2013-2014 Aerospike, Inc.
+ * Copyright (C) 2013-2015 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -59,9 +59,6 @@
 /* GLOBALS */
 as_aerospike g_ldt_aerospike; // Only instantiation is enough
 
-/* Forward Declare */
-static void ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec);
-static void ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord);
 
 /* INIT */
 int
@@ -83,8 +80,100 @@ ldt_aerospike_init(as_aerospike * as)
 	return as_aerospike_init(as, NULL, &ldt_aerospike_hooks);
 }
 
+
+
+/*
+ * Slot and Chunk create destroy
+ */
+// **************************************************************************************************
+
+/*
+ * create_slot  : Creates slot and initializes variable
+ * create_chunk : Creates chunk and initializes
+ * expand_chunk : Expands chunk by single unit
+ *
+ * Note: The idea of having a extra level indirection for chunk and slot instead
+ *       of single array is because the address values of tr/rd/r_ref extra is
+ *       stored and used. Realloc may end up moving these to different memory
+ *       location, invalidating stored values.
+ *
+ * Return value:
+ * 		Slot functions
+ * 			valid slot pointer in case of success
+ * 			NULL in case of failure
+ * 		Chunk functions
+ * 			0 in case of success
+ * 			-1 in case of failure
+ */
+ldt_slot *
+create_slot()
+{
+	ldt_slot   *slots = cf_malloc(sizeof(ldt_slot) * LDT_SLOT_CHUNK_SIZE);
+	if (!slots) {
+		return NULL;
+	}
+	return slots;
+}
+
 int
-ldt_chunk_print(ldt_slot *lslotp)
+create_chunk(ldt_record *lrecord)
+{
+	lrecord->chunk   = cf_malloc(sizeof(ldt_slot_chunk));
+	if (!lrecord->chunk) {
+		return -1;
+	}
+	lrecord->chunk[0].slots = create_slot();
+	if (lrecord->chunk[0].slots == NULL) {
+		cf_free(lrecord->chunk);
+		return -1;
+	}
+
+	for(int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
+		lrecord->chunk[0].slots[j].inuse = false;
+	}
+
+	return 0;
+}
+
+int
+expand_chunk(ldt_record *lrecord)
+{
+	uint64_t   new_size  = lrecord->max_chunks + 1;
+	void *old_chunk      = lrecord->chunk;
+
+	if (lrecord->max_chunks) {
+		lrecord->chunk = cf_realloc(lrecord->chunk, sizeof(ldt_slot_chunk) * new_size);
+	} else {
+		lrecord->chunk = cf_malloc(sizeof(ldt_slot_chunk) * new_size);
+	}
+
+	if (lrecord->chunk == NULL) {
+		cf_warning(AS_LDT, "expand_chunk: Allocation Error !! [Chunk cannot be allocated ]... Fail");
+		lrecord->chunk = old_chunk;
+		return -1;
+	}
+
+	lrecord->chunk[lrecord->max_chunks].slots = create_slot();
+	if (lrecord->chunk[lrecord->max_chunks].slots == NULL) {
+		cf_warning(AS_LDT, "expand_chunk: Allocation Error !! [Slot cannot be allocated ]... Fail");
+		cf_free(lrecord->chunk);
+		lrecord->chunk = old_chunk;
+		return -1;
+	}
+
+	for (int i = lrecord->max_chunks; i < new_size; i++) {
+		for(int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
+			lrecord->chunk[i].slots[j].inuse = false;
+		}
+	}
+
+	cf_detail(AS_LDT, "Bumping up chunks from %"PRIu64" to %"PRIu64"", lrecord->max_chunks, new_size);
+	lrecord->max_chunks = new_size;
+	return 0;
+}
+
+int
+chunk_print(ldt_slot *lslotp)
 {
 	udf_record *c_urecord = &lslotp->c_urecord;
 
@@ -94,33 +183,28 @@ ldt_chunk_print(ldt_slot *lslotp)
 				c_urecord, c_urecord->tr, c_urecord->rd, c_urecord->r_ref);
 	return 0;
 }
+// **************************************************************************************************
+
+
 
 /*
- * Internal Function: Search if the sub record is already open by digest/passed as_rec pointer.
- *
- * Parameters:
- * 		lr      - Parent ldt_record
- * 		digest  - Digest to be searched for
+ * Slot Lookup Functions
+ */
+// **************************************************************************************************
+/*
+ * Search if the sub record is already open by digest/passed as_rec pointer.
  *
  * Return value:
  * 		>=0  slot if found
  * 		-1   in case not found
- *
- * Description:
- * 		The function walks through the lchunk array searching for
- * 		the request digest.
- *
- * Callers:
- *      ldt_aerospike_crec_open when UDF requests opening
- *      of new record
  */
 ldt_slot *
-ldt_crec_find_by_digest(ldt_record *lrecord, cf_digest *keyd)
+slot_lookup_by_digest(ldt_record *lrecord, cf_digest *keyd)
 {
 	for (int i = 0; i < lrecord->max_chunks; i++) {
 		ldt_slot_chunk *lchunk = &lrecord->chunk[i];
 		for (int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
-			if (lchunk->slots[j].inuse && 
+			if (lchunk->slots[j].inuse &&
 				(0 == cf_digest_compare(&lchunk->slots[j].rd.keyd, keyd))) {
 				return &lchunk->slots[j];
 			}
@@ -130,7 +214,7 @@ ldt_crec_find_by_digest(ldt_record *lrecord, cf_digest *keyd)
 }
 
 ldt_slot *
-ldt_crec_find_by_urec(ldt_record *lrecord, const as_rec *c_urec_p)
+slot_lookup_by_urec(ldt_record *lrecord, const as_rec *c_urec_p)
 {
 	for (int i = 0; i < lrecord->max_chunks; i++) {
 		ldt_slot_chunk *lchunk = &lrecord->chunk[i];
@@ -143,95 +227,6 @@ ldt_crec_find_by_urec(ldt_record *lrecord, const as_rec *c_urec_p)
 	return NULL;
 }
 
-/*
- * Internal Function: Create and expand slots
- *
- * create_slot  : Creates slot and initializes variable
- * create_chunk : Creates chunk and initializes 
- * expand_chunk : Expands chunk by single unit
- *
- * Note: The idea of having a extra level indirection for chunk and slot instead 
- *       of single array is because the address values of tr/rd/r_ref extra is 
- *       stored and used. Realloc may end up moving these to different memory 
- *       location, invalidating stored values.
- *
- * Return value:
- * 		Slot functions 
- * 			valid slot pointer in case of success
- * 			NULL in case of failure
- * 		Chunk functions
- * 			0 in case of success
- * 			-1 in case of failure
- *
- * Callers:
- *      ldt_crec_find_freeslot
- */
-ldt_slot *
-ldt_crec_create_slot() 
-{
-	ldt_slot   *slots = cf_malloc(sizeof(ldt_slot) * LDT_SLOT_CHUNK_SIZE);
-	if (!slots) {
-		return NULL;
-	}
-	return slots;
-}
-
-int 
-ldt_crec_create_chunk(ldt_record *lrecord) 
-{
-	lrecord->chunk   = cf_malloc(sizeof(ldt_slot_chunk));
-	if (!lrecord->chunk) {
-		return -1;
-	}
-	lrecord->chunk[0].slots = ldt_crec_create_slot();
-	if (lrecord->chunk[0].slots == NULL) {
-		cf_free(lrecord->chunk);
-		return -1;
-	}
-
-	for(int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
-		lrecord->chunk[0].slots[j].inuse = false;
-	}
-
-	return 0; 
-}
-
-int
-ldt_crec_expand_chunk(ldt_record *lrecord) 
-{
-	uint64_t   new_size  = lrecord->max_chunks + 1;
-	void *old_chunk      = lrecord->chunk;
-
-	if (lrecord->max_chunks) {
-		lrecord->chunk = cf_realloc(lrecord->chunk, sizeof(ldt_slot_chunk) * new_size);
-	} else {
-		lrecord->chunk = cf_malloc(sizeof(ldt_slot_chunk) * new_size);
-	}
-
-	if (lrecord->chunk == NULL) {
-		cf_warning(AS_LDT, "ldt_crec_expand_chunk: Allocation Error !! [Chunk cannot be allocated ]... Fail");
-		lrecord->chunk = old_chunk;
-		return -1;
-	}
-
-	lrecord->chunk[lrecord->max_chunks].slots = ldt_crec_create_slot();
-	if (lrecord->chunk[lrecord->max_chunks].slots == NULL) {
-		cf_warning(AS_LDT, "ldt_crec_expand_chunk: Allocation Error !! [Slot cannot be allocated ]... Fail");
-		cf_free(lrecord->chunk);
-		lrecord->chunk = old_chunk;
-		return -1;
-	}
-
-	for (int i = lrecord->max_chunks; i < new_size; i++) { 
-		for(int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
-			lrecord->chunk[i].slots[j].inuse = false;
-		}
-	}
-
-	cf_detail(AS_LDT, "Bumping up chunks from %"PRIu64" to %"PRIu64"", lrecord->max_chunks, new_size);
-	lrecord->max_chunks = new_size;
-	return 0;
-}
 /*
  * Internal Function: Search for the freeslot in the sub record array
  *
@@ -251,10 +246,10 @@ ldt_crec_expand_chunk(ldt_record *lrecord)
  *      ldt_aerospike_crec_create
  */
 ldt_slot *
-ldt_crec_find_freeslot(ldt_record *lrecord, char *func)
+slot_lookup_free(ldt_record *lrecord, char *func)
 {
 	if (lrecord->num_slots_used == (lrecord->max_chunks * LDT_SLOT_CHUNK_SIZE)) {
-		if (ldt_crec_expand_chunk(lrecord)) {
+		if (expand_chunk(lrecord)) {
 			goto Out;
 		}
 	}
@@ -267,7 +262,7 @@ ldt_crec_find_freeslot(ldt_record *lrecord, char *func)
 				chunk->slots[j].inuse = true;
 				cf_detail(AS_LDT, "%s Popped slot %p %"PRIu64"", func, &chunk->slots[j], lrecord->num_slots_used);
 				return &chunk->slots[j];
-			} 
+			}
 		}
 	}
 Out:
@@ -275,33 +270,34 @@ Out:
 				func, lrecord->num_slots_used);
 	return NULL;
 }
+// **************************************************************************************************
+
 
 /*
- * Internal Function: Which initializes ldt chunk array element.
- *
- * Parameters:
- * 		lslot - ldt_slot to be initialized
- * 		keyd  - digest
- *
- *
- * Return value : nothing
- *
- * Description:
- * 		1. Sets up udf_record
- * 		2. Zeroes out stuff
- * 		3. Setups as_rec in the lchunk
- *
- * Callers:
- *      ldt_aerospike_crec_open
- *      ldt_aerospike_crec_create
+ * Slot setup/init/cleanup functions
+ */
+// **************************************************************************************************
+
+/*
+ * Slot
+ *    init:
+ *    setup:
+ *    destroy:
  */
 
+/*
+ *  Sets up udf_record
+ * 	Zeroes out stuff
+ * 	Setups as_rec in the lchunk
+ * 	Sets up transaction and digest
+ * 	Sets up the partition reservation (same as parent)
+ */
 void
-ldt_slot_init(ldt_slot *lslotp, ldt_record *lrecord)
+slot_init(ldt_slot *lslotp, ldt_record *lrecord)
 {
 	// It is just a stub fill the proper values in
 	udf_record *c_urecord   = &lslotp->c_urecord;
-	udf_record_init(c_urecord);
+	udf_record_init(c_urecord, true);
 	// note: crec cannot be destroyed from inside lua
 	c_urecord->flag        |= UDF_RECORD_FLAG_IS_SUBRECORD;
 	c_urecord->lrecord      = (void *)lrecord;
@@ -309,89 +305,9 @@ ldt_slot_init(ldt_slot *lslotp, ldt_record *lrecord)
 	c_urecord->rd           = &lslotp->rd;
 	c_urecord->r_ref        = &lslotp->r_ref;
 	lslotp->r_ref.skip_lock = true;
-	lslotp->c_urec_p = as_rec_new(c_urecord, &udf_subrecord_hooks);
+	lslotp->c_urec_p = as_rec_new(c_urecord, &udf_record_hooks);
 
-	ldt_slot_setup(lslotp, lrecord->h_urec);
-	//ldt_slot_print(lslotp);
-}
-
-void ldt_chunk_destroy(ldt_record *lrecord, ldt_slot_chunk *lchunk)
-{
-	for (int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
-		if (lchunk->slots[j].inuse) {
-			ldt_slot *lslotp      = &lchunk->slots[j]; 
-			ldt_slot_destroy(lslotp, lrecord);
-		}
-	}
-	cf_free(lchunk->slots);
-	lchunk->slots         = NULL;
-}
-
-/**
- * Remove the slot entry, but decrement the count only if the destroy() op
- * was successful.
- */
-static void
-ldt_slot_destroy(ldt_slot *lslotp, ldt_record *lrecord)
-{
-	if (lslotp->c_urec_p) {
-		udf_record_destroy(lslotp->c_urec_p);
-		as_rec_destroy(lslotp->c_urec_p);
-		lslotp->c_urec_p = NULL;
-		lrecord->num_slots_used--;
-		lslotp->inuse = false;
-	} else {
-		cf_warning(AS_LDT, "ldt_slot_destroy: Internal Error [Attempt to free invalid slot] ... Skipped");
-	}
-}
-
-void
-ldt_slot_set_digest(ldt_slot *lslotp, cf_digest *keyd)
-{
-	as_transaction * c_tr      = &lslotp->tr;
-	c_tr->keyd                 = *keyd;
-	udf_record *c_urecord      = (udf_record *)as_rec_source(lslotp->c_urec_p);
-	c_urecord->keyd            = *keyd;
-
-	// There are 4 place digest is
-	// 1. tr->keyd
-	// 2. r_ref->r->key
-	// 3. rd->keyd
-	// 4. urecord->keyd
-	//
-	// First three are always equal. At the start tr->keyd is setup which then
-	// sets or gets r_ref / rd as normal work goes ...
-	//
-	// urecord->keyd is the digest which gets exposed to lua world. In this
-	// version bits are always set to zero.
-	cf_detail(AS_LDT, "LDT_VERSION Resetting @ create LDT version %p", *(uint64_t *)&c_urecord->keyd);
-	as_ldt_subdigest_resetversion(&c_urecord->keyd);
-
-}
-
-
-/*
- * Internal Function: Which sets up ldt chunk array element.
- *
- * Parameters:
- * 		lchunk  - ldt_chunk to be setup
- * 		h_urec    - initialized
- * 		keyd    - digest of the subrecord
- *
- * Return value : nothing
- *
- * Description:
- * 		1. Sets up transaction and digest
- * 		2. Sets up the partition reservation (same as parent)
- *
- * Callers:
- *      ldt_aerospike_crec_open
- *      ldt_aerospike_crec_create
- */
-static void
-ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec)
-{
-	udf_record     * h_urecord = (udf_record *)as_rec_source(h_urec);
+	udf_record     * h_urecord = (udf_record *)as_rec_source(lrecord->h_urec);
 	as_transaction * h_tr      = h_urecord->tr;
 	as_transaction * c_tr      = &lslotp->tr;
 
@@ -423,11 +339,73 @@ ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec)
 
 	// Parent reservation cannot go away as long as Chunck needs reservation.
 	memcpy(&c_tr->rsv, &h_tr->rsv, sizeof(as_partition_reservation));
+	//ldt_slot_print(lslotp);
 }
 
+void
+slot_setup_digest(ldt_slot *lslotp, cf_digest *keyd)
+{
+	as_transaction * c_tr      = &lslotp->tr;
+	c_tr->keyd                 = *keyd;
+	udf_record *c_urecord      = (udf_record *)as_rec_source(lslotp->c_urec_p);
+	c_urecord->keyd            = *keyd;
+
+	// There are 4 place digest is
+	// 1. tr->keyd
+	// 2. r_ref->r->key
+	// 3. rd->keyd
+	// 4. urecord->keyd
+	//
+	// First three are always equal. At the start tr->keyd is setup which then
+	// sets or gets r_ref / rd as normal work goes ...
+	//
+	// urecord->keyd is the digest which gets exposed to lua world. In this
+	// version bits are always set to zero.
+	cf_detail(AS_LDT, "LDT_VERSION Resetting @ create LDT version %p", *(uint64_t *)&c_urecord->keyd);
+	as_ldt_subdigest_resetversion(&c_urecord->keyd);
+
+}
+
+/**
+ * Remove the slot entry, but decrement the count only if the destroy() op
+ * was successful.
+ */
+static void
+slot_destroy(ldt_slot *lslotp, ldt_record *lrecord)
+{
+	if (lslotp->c_urec_p) {
+		udf_record_destroy(lslotp->c_urec_p);
+		as_rec_destroy(lslotp->c_urec_p);
+		lslotp->c_urec_p = NULL;
+		lrecord->num_slots_used--;
+		lslotp->inuse = false;
+	} else {
+		cf_warning(AS_LDT, "slot_destroy: Internal Error [Attempt to free invalid slot] ... Skipped");
+	}
+}
+
+void
+chunk_destroy(ldt_record *lrecord, ldt_slot_chunk *lchunk)
+{
+	for (int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
+		if (lchunk->slots[j].inuse) {
+			ldt_slot *lslotp      = &lchunk->slots[j];
+			slot_destroy(lslotp, lrecord);
+		}
+	}
+	cf_free(lchunk->slots);
+	lchunk->slots         = NULL;
+}
+// **************************************************************************************************
+
+
 /*
- * Internal Function: Function to open chunk record
- *
+ * WorkHorse CREC Management Functions
+ */
+// **************************************************************************************************
+
+/*
+ * Function to open chunk record
  * Parameters:
  * 		lrd  : Parent ldt record
  * 		keyd : Key digest for the record to be opened
@@ -447,30 +425,30 @@ ldt_slot_setup(ldt_slot *lslotp, as_rec *h_urec)
  *		ldt_aerospike_crec_open
  */
 int
-ldt_crec_open(ldt_record *lrecord, cf_digest *keyd, ldt_slot **lslotp)
+crec_open(ldt_record *lrecord, cf_digest *keyd, ldt_slot **lslotp)
 {
-	cf_detail_digest(AS_LDT, keyd, "[ENTER] ldt_crec_open(): Digest: ");
+	cf_detail_digest(AS_LDT, keyd, "[ENTER] crec_open(): Digest: ");
 
 	// 1. Search in opened record
-	*lslotp = ldt_crec_find_by_digest(lrecord, keyd);
+	*lslotp = slot_lookup_by_digest(lrecord, keyd);
 	if (*lslotp) {
 		cf_debug(AS_LDT, "ldt_aerospike_crec_open : Found already open");
 		return 0;
 	}
 
 	// 2. Find free slot and setup chunk
-	*lslotp     = ldt_crec_find_freeslot(lrecord, "ldt_crec_open");
+	*lslotp     = slot_lookup_free(lrecord, "crec_open");
 	if (!*lslotp) {
 		return -2;
 	}
-	ldt_slot_init(*lslotp, lrecord);
-	ldt_slot_set_digest(*lslotp, keyd);
+	slot_init(*lslotp, lrecord);
+	slot_setup_digest(*lslotp, keyd);
 
 	// 3. Open Record
 	int rv = udf_record_open((udf_record *)as_rec_source((*lslotp)->c_urec_p));
 	if (rv) {
 		// free the slot for reuse
-		ldt_slot_destroy(*lslotp, lrecord);
+		slot_destroy(*lslotp, lrecord);
 		*lslotp = NULL;
 		return -3;
 	}
@@ -497,28 +475,28 @@ ldt_crec_open(ldt_record *lrecord, cf_digest *keyd, ldt_slot **lslotp)
  */
 #define LDT_SUBRECORD_RANDOMIZER_MAX_RETRIES 2
 as_rec *
-ldt_crec_create(ldt_record *lrecord)
+crec_create(ldt_record *lrecord)
 {
 	// Generate Key Digest
 	udf_record *h_urecord = (udf_record *) as_rec_source(lrecord->h_urec);
 	cf_digest keyd        = h_urecord->r_ref->r->key;
 	as_namespace *ns      = h_urecord->tr->rsv.ns;
 	int retry_cnt         = 0;
-	ldt_slot *lslotp      = ldt_crec_find_freeslot(lrecord, "ldt_crec_create");
+	ldt_slot *lslotp      = slot_lookup_free(lrecord, "crec_create");
 
 	if (!lslotp) {
 		cf_crash(AS_LDT, "Allocation error !!!");
 	}
-	ldt_slot_init(lslotp, lrecord);
+	slot_init(lslotp, lrecord);
 
 	while (retry_cnt++ < LDT_SUBRECORD_RANDOMIZER_MAX_RETRIES) {
 
 		as_ldt_digest_randomizer(&keyd);
 		as_ldt_subdigest_setversion(&keyd, lrecord->version);
-		ldt_slot_set_digest(lslotp, &keyd);
+		slot_setup_digest(lslotp, &keyd);
 
 		int rv = as_aerospike_rec_create(lrecord->as, lslotp->c_urec_p);
-		
+
 		// rv == 0 if successful
 		// rv == 1 if record is already found retry
 		// other wise failure
@@ -529,37 +507,50 @@ ldt_crec_create(ldt_record *lrecord)
 		}
 
 		if (rv != 1) {
-			cf_warning(AS_LDT, "ldt_crec_create: LDT Sub-Record Create Error [rv=%d]... Fail", rv);
+			cf_warning(AS_LDT, "crec_create: LDT Sub-Record Create Error [rv=%d]... Fail", rv);
 			break;
 		}
 		cf_atomic64_incr(&ns->lstats.ldt_randomizer_retry);
 	}
 
-	ldt_slot_destroy(lslotp, lrecord);
+	slot_destroy(lslotp, lrecord);
 	cf_warning_digest(AS_LDT, &keyd, "ldt_aerospike_crec_create : Create failed after %d retries", retry_cnt);
 	return NULL;
 }
 
-bool
-ldt_record_destroy(as_rec * rec)
-{
-	static const char * meth = "ldt_record_destroy()";
-	if (!rec) {
-		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]... Fail", meth, rec);
-		return false;
-	}
 
-	ldt_record *lrecord = (ldt_record *)as_rec_source(rec);
+/*
+ * lrecord init and cleanup funtions
+ */
+// **************************************************************************************************
+extern as_aerospike g_as_aerospike;
+void
+ldt_record_init(ldt_record *lrecord)
+{
+	// h_urec is setup in udf_rw.c which point to the main record
+	lrecord->h_urec         = 0;
+	lrecord->as             = &g_as_aerospike;
+	lrecord->max_chunks     = 0;
+	lrecord->num_slots_used = 0;
+	lrecord->version        = 0;
+	lrecord->subrec_io      = 0;
+	// Default is normal UDF
+	lrecord->udf_context    = 0;
+}
+
+int
+ldt_record_destroy(ldt_record *lrecord)
+{
 	if (!lrecord) {
-		return false;
+		return -1;
 	}
 	as_rec *h_urec      = lrecord->h_urec;
 
 	// Note: destroy of udf_record today is no-op because all the closing
 	// of record happens after UDF has executed.
-	for (int i = 0; i < lrecord->max_chunks; i++) {
+	for (uint64_t i = 0; i < lrecord->max_chunks; i++) {
 		ldt_slot_chunk *lchunk = &lrecord->chunk[i];
-		ldt_chunk_destroy(lrecord, lchunk);
+		chunk_destroy(lrecord, lchunk);
 	}
 
 	if (lrecord->max_chunks) {
@@ -569,8 +560,9 @@ ldt_record_destroy(as_rec * rec)
 	// Dir destroy should release partition reservation and
 	// namespace reservation.
 	udf_record_destroy(h_urec);
-	return true;
+	return 0;
 }
+// **************************************************************************************************
 
 
 /*********************************************************************
@@ -625,7 +617,7 @@ ldt_aerospike_crec_create(const as_aerospike * as, const as_rec *rec)
 		return NULL;
 	}
 	cf_detail(AS_LDT, "ldt_aerospike_crec_create");
-	return ldt_crec_create(lrecord);
+	return crec_create(lrecord);
 }
 
 static int
@@ -705,7 +697,7 @@ ldt_aerospike_crec_close(const as_aerospike * as, const as_rec *crec_p)
 		return -1;
 	}
 
-	ldt_slot *lslotp   = ldt_crec_find_by_urec(lrecord, crec_p);
+	ldt_slot *lslotp   = slot_lookup_by_urec(lrecord, crec_p);
 	if (!lslotp) {
 		cf_warning(AS_LDT, "ldt_aerospike_crec_close: Invalid Operation [Sub Record close called for the record which is not open]... Fail");
 		return -1;
@@ -717,7 +709,7 @@ ldt_aerospike_crec_close(const as_aerospike * as, const as_rec *crec_p)
 	}
 	udf_record_close(c_urecord);
 	udf_record_cache_free(c_urecord);
-	ldt_slot_destroy(lslotp, lrecord);
+	slot_destroy(lslotp, lrecord);
 	c_urecord->flag &= ~UDF_RECORD_FLAG_ISVALID;
 	return 0;
 }
@@ -744,7 +736,7 @@ ldt_aerospike_crec_open(const as_aerospike * as, const as_rec *rec, const char *
 	}
 	as_ldt_subdigest_setversion(&keyd, lrecord->version);
 	ldt_slot    *lslotp = NULL;
-	int rv              = ldt_crec_open(lrecord, &keyd, &lslotp);
+	int rv              = crec_open(lrecord, &keyd, &lslotp);
 	if (rv) {
 		// This basically means the record is not found.
 		// Do we need to propagate error message rv
@@ -834,7 +826,7 @@ ldt_aerospike_rec_remove(const as_aerospike * as, const as_rec * rec)
 
 	for (int i = 0; i < lrecord->max_chunks; i++) {
 		ldt_slot_chunk *lchunk = &lrecord->chunk[i];
-		ldt_chunk_destroy(lrecord, lchunk);
+		chunk_destroy(lrecord, lchunk);
 	}
 
 	return as_aerospike_rec_remove(las, h_urec);
@@ -848,7 +840,7 @@ ldt_aerospike_log(const as_aerospike * a, const char * file,
 	// Logging for Lua Files (UDFs) should be labeled as "UDF", not "LDT".
 	// If we want to distinguish between LDT and general UDF calls, then we
 	// need to create a separate context for LDT.
-	cf_fault_event(AS_UDF, lvl, file, NULL, line, (char *) msg);
+	cf_fault_event(AS_UDF, lvl, file, NULL, line, "%s", (char *) msg);
 	return 0;
 }
 
@@ -872,7 +864,7 @@ ldt_aerospike_get_current_time(const as_aerospike * as)
 	// Does anyone really know what time it is?
 	return cf_clock_getabsolute();
 
-} // end ldt_aerospike_get_current_time()
+}
 
 /**
  * Provide hook from Lua to set execution context
@@ -896,12 +888,12 @@ ldt_aerospike_set_context(const as_aerospike * as, const as_rec *rec, const uint
     if (h_urecord->tr->rsv.ns->ldt_enabled == false) {
 		return -1;
 	}
-	
+
 	cf_detail(AS_LDT, "ldt_aerospike_set_context from %d to %d", lrecord->udf_context, lrecord->udf_context | context);
 	lrecord->udf_context |= context;
 
 	return 0;
-} // end ldt_aerospike_get_current_time()
+}
 
 /**
  * Provide hook from Lua to fetch server config settings
@@ -914,7 +906,7 @@ ldt_aerospike_get_config(const as_aerospike * as, const as_rec *rec, const char 
 		cf_warning(AS_LDT, "%s: Invalid Parameters [as=%p, record=%p]... Fail", meth, as, rec);
 		return 2;
 	}
-    
+
 	ldt_record *lrecord = (ldt_record *)as_rec_source(rec);
 	if (!lrecord) {
 		return 2;
@@ -933,8 +925,7 @@ ldt_aerospike_get_config(const as_aerospike * as, const as_rec *rec, const char 
 	}
     cf_detail(AS_LDT, "Returning %s = %d" ,name, val);
 	return val;
-} // end ldt_aerospike_get_config()
-
+}
 
 
 const as_aerospike_hooks ldt_aerospike_hooks = {

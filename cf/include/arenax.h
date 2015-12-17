@@ -123,24 +123,24 @@ const char* cf_arenax_errstr(cf_arenax_err err);
 //------------------------------------------------
 // Constructor
 //
-cf_arenax_err cf_arenax_create(cf_arenax* this, key_t key_base,
+cf_arenax_err cf_arenax_create(cf_arenax* _this, key_t key_base,
 		uint32_t element_size, uint32_t stage_capacity, uint32_t max_stages,
 		uint32_t flags);
 
 //------------------------------------------------
 // Allocate/Free an Element
 //
-cf_arenax_handle cf_arenax_alloc(cf_arenax* this);
-void cf_arenax_free(cf_arenax* this, cf_arenax_handle h);
+cf_arenax_handle cf_arenax_alloc(cf_arenax* _this);
+void cf_arenax_free(cf_arenax* _this, cf_arenax_handle h);
 
 //------------------------------------------------
 // Convert Handle to Pointer
 //
-void* cf_arenax_resolve(cf_arenax* this, cf_arenax_handle h);
+void* cf_arenax_resolve(cf_arenax* _this, cf_arenax_handle h);
 
 
 //==========================================================
 // Private API - for enterprise separation only
 //
 
-cf_arenax_err cf_arenax_add_stage(cf_arenax* this);
+cf_arenax_err cf_arenax_add_stage(cf_arenax* _this);

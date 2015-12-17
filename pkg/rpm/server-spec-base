@@ -1,6 +1,6 @@
 Name: aerospike
 Version: @VERSION@
-Release: 1.@RELEASE@
+Release: 1%{?dist}
 Summary: The Aerospike Database
 License: Proprietary
 Group: Application
@@ -14,13 +14,7 @@ and reliable data storage with elastic server properties.
 %define _topdir pkg/dist
 %define __spec_install_post /usr/lib/rpm/brp-compress
 %package server-@EDITION@
-Requires: logrotate
 Summary: Aerospike server
 Group: Applications
 %description server-@EDITION@
 This package contains all of the code for running the Aerospike server.
-%files server-@EDITION@
-%defattr(-,root,root)
-/usr/bin/asd
-/usr/bin/asmigrate2to3
-/usr/bin/asfixownership

@@ -834,7 +834,6 @@ thr_tsvc_slow(void *null_arg)
 			cf_crash(AS_TSVC, "unable to pop from SLOW transaction queue");
 		}
 		cf_atomic_int_incr(&g_config.stat_slow_trans_queue_pop);
-		cf_atomic_int_incr(&g_config.stat_slow_trans_queue_batch_pop);
 
 		usleep(500); // sleep 500 micro-seconds
 

@@ -102,6 +102,7 @@ as_index_rotate_right(as_index_tree *tree, as_index *r, cf_arenax_handle r_h)
 	r->parent_h = s_h;
 }
 
+#ifdef USE_KV
 /*
  * Create a tree "stub" for the storage has index case.
  * Returns:  1 = new
@@ -147,6 +148,7 @@ as_index_ref_initialize(as_index_tree *tree, cf_digest *key, as_index_ref *index
 			cf_atomic_int_decr(&g_config.global_record_lock_count);
 		}
 		as_index_release(n);
+		cf_atomic_int_decr(&g_config.global_record_ref_count);
 		cf_arenax_free(tree->arena, n_h);
 		index_ref->r = 0;
 		index_ref->r_h = 0;
@@ -154,6 +156,7 @@ as_index_ref_initialize(as_index_tree *tree, cf_digest *key, as_index_ref *index
 
 	return(rv);
 }
+#endif // USE_KV
 
 /* as_index_get_insert
  * Get or insert a node with a given tree into a red-black tree.

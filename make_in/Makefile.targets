@@ -19,3 +19,14 @@ else
 	$(CC) $(CFLAGS) $(DEF_FN) -o $@$(SUFFIX) -c $(INCLUDES) $(SRCDIR)$<
   endif
 endif
+
+$(OBJECT_DIR)/%.o: %.cc
+ifeq ($(MEXP_PHASE),1)
+	$(DEPTH)/build/mexp $< $(SRCDIR)$*.cc
+else
+  ifeq ($(MEXP_PHASE),2)
+	$(CXX) $(CXXFLAGS) $(CFLAGS) $(DEF_FN) -o $@$(SUFFIX) -c $(INCLUDES) $(SRCDIR)$*.cc
+  else
+	$(CXX) $(CXXFLAGS) $(CFLAGS) $(DEF_FN) -o $@$(SUFFIX) -c $(INCLUDES) $(SRCDIR)$<
+  endif
+endif

@@ -534,6 +534,7 @@ int     ktype = btr->s.ktype;
 		}
 		memcpy(key, akey->s, akey->len); /* after LEN, copy raw STRING */
 	} else if (C_IS_L(ktype))        cr8BTKLong (akey, ksize, btkey);
+    else if (C_IS_G(ktype))        cr8BTKLong (akey, ksize, btkey);
 	else if (C_IS_X(ktype))        cr8BTKU128 (akey, ksize, btkey);
 	else if (C_IS_Y(ktype))        cr8BTKU160 (akey, ksize, btkey);
 	else if (C_IS_F(ktype))        cr8BTKFloat(akey, ksize, btkey);
@@ -546,6 +547,7 @@ static uint32 skipToVal(uchar **stream, uchar ktype) { //printf("skipToVal\n");
 	uint32  klen  = 0;
 	if      (C_IS_I(ktype)) streamIntToUInt   (*stream, &klen);
 	else if (C_IS_L(ktype)) streamLongToULong (*stream, &klen);
+	else if (C_IS_G(ktype)) streamLongToULong (*stream, &klen);
 	else if (C_IS_X(ktype)) streamToU128      (*stream, &klen);
 	else if (C_IS_Y(ktype)) streamToU160      (*stream, &klen);
 	else if (C_IS_F(ktype)) streamFloatToFloat(*stream, &klen);
@@ -627,7 +629,7 @@ void convertStream2Key(uchar *stream, ai_obj *key, bt *btr) {
 			if        (C_IS_I(ktype)) {
 				key->type = key->enc = COL_TYPE_INT;
 				key->i    = streamIntToUInt(stream, NULL);
-			} else if (C_IS_L(ktype)) {
+			} else if (C_IS_L(ktype) || C_IS_G(ktype)) {
 				key->type = key->enc = COL_TYPE_LONG;
 				key->l    = streamLongToULong(stream, NULL);
 			} else if (C_IS_X(ktype)) {

@@ -57,7 +57,7 @@ cf_atomic_int g_num_msgs = 0;
 //   Total number of "msg" objects allocated per type
 cf_atomic_int g_num_msgs_by_type[M_TYPE_MAX] = { 0 };
 
-// Number of "msg" obejcts per type that can be allocated.
+// Number of "msg" objects per type that can be allocated.
 // (Default to -1, meaning there is no limit on allowed number of "msg" objects per type.)
 static int64_t g_max_msgs_per_type = -1;
 

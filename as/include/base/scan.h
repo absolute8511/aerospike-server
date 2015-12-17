@@ -28,15 +28,6 @@
 #include "base/transaction.h"
 #include "base/udf_rw.h"
 
-// TODO - move to proto.h?
-// These values correspond to client protocol values - do not change them!
-typedef enum as_scan_udf_op {
-	AS_SCAN_UDF_NONE			= 0,
-	AS_SCAN_UDF_OP_AGGREGATE	= 1,
-	AS_SCAN_UDF_OP_BACKGROUND	= 2,
-	AS_SCAN_UDF_OP_UDF			= 3		// not supported yet
-} as_scan_udf_op;
-
 void as_scan_init();
 int as_scan(as_transaction *tr);
 void as_scan_limit_active_jobs(uint32_t max_active);

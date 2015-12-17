@@ -61,11 +61,6 @@ typedef enum as_migrate_state_e {
 	AS_MIGRATE_STATE_EAGAIN
 } as_migrate_state;
 
-typedef enum as_migrate_type_e {
-	AS_MIGRATE_TYPE_MERGE = 0,
-	AS_MIGRATE_TYPE_OVERWRITE = 1
-} as_migrate_type;
-
 #define AS_MIGRATE_RX_STATE_SUBRECORD 1
 #define AS_MIGRATE_RX_STATE_RECORD 2
 typedef uint8_t as_partition_mig_rx_state;
@@ -76,20 +71,22 @@ typedef uint8_t as_partition_mig_rx_state;
 // will be tried later)
 //
 
-typedef enum as_migrate_cb_return_e {
-	AS_MIGRATE_CB_OK,
-	AS_MIGRATE_CB_FAIL,
-	AS_MIGRATE_CB_AGAIN,
-	AS_MIGRATE_CB_ALREADY_DONE
-} as_migrate_cb_return;
+typedef enum as_migrate_result_e {
+	AS_MIGRATE_OK,
+	AS_MIGRATE_FAIL,
+	AS_MIGRATE_AGAIN,
+	AS_MIGRATE_ALREADY_DONE
+} as_migrate_result;
 
-typedef as_migrate_cb_return (*as_migrate_callback) (
-	as_migrate_state state,
-	as_namespace *ns,
-	as_partition_id part_id,
-	as_index_tree *tree,
-	cf_node source_node,
-	void *udata);
+// A data structure for temporarily en-queuing partition migrations.
+typedef struct partition_migrate_record_s {
+	cf_node *dest;
+	uint dest_sz;
+	as_namespace *ns;
+	as_partition_id pid;
+	uint64_t cluster_key;
+	uint32_t tx_flags;
+} partition_migrate_record;
 
 // Listen for migration messages
 void as_migrate_init();
@@ -102,9 +99,7 @@ as_migrate_is_incoming(cf_digest *subrec_digest, uint64_t version, as_partition_
 
 // migrate a tree to a node
 // and find out when it's done
-int as_migrate(cf_node *dst, uint dst_sz,
-			   as_namespace *ns, as_partition_id partition, as_migrate_type mig_type,
-			   bool is_migrate_state_done, as_migrate_callback cb, void *udata);
+int as_migrate(const partition_migrate_record *pmr, bool is_migrate_state_done);
 
 // 0 if successfully found a migrate to cancel
 // -1 if failed for unknown reasons
@@ -116,9 +111,12 @@ int as_migrate_cancel(cf_node dst, as_namespace *ns, as_partition_id partition);
  */
 void as_migrate_dump(bool verbose);
 
-as_migrate_cb_return as_partition_migrate_rx(as_migrate_state s,
-		as_namespace *ns, as_partition_id pid, as_index_tree *tree,
-		cf_node source_node, void *udata);
+as_migrate_result as_partition_migrate_rx(as_migrate_state s,
+		as_namespace *ns, as_partition_id pid, uint64_t orig_cluster_key,
+		cf_node source_node);
+as_migrate_result as_partition_migrate_tx(as_migrate_state s,
+		as_namespace *ns, as_partition_id pid, uint64_t orig_cluster_key,
+		uint32_t tx_flags);
 
 /*
  * Check and return if passed in version is found in migration incoming ldt version hash

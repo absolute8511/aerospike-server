@@ -24,6 +24,7 @@ PIDDIR="/var/run/aerospike"
 ASD_USER="aerospike"
 ASD_GROUP=$ASD_USER
 STOP_TIMEOUT=${STOP_TIMEOUT-10}
+EDITION="@EDITION@"
 
 INITFNS=/etc/aerospike/initfns
 if [ -f $INITFNS ]; then . $INITFNS; fi
@@ -59,7 +60,7 @@ set_shmmax() {
 #This causes the piddir to be removed on reboot
 #adding this to centos init for parity
 create_piddir() {
-	if [ ! -d $PIDDIR ] 
+	if [ ! -d $PIDDIR ]
 	then
 		(mkdir $PIDDIR && chown $ASD_USER:$ASD_GROUP $PIDDIR) &> /dev/null
 	fi

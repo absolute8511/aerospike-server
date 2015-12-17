@@ -98,9 +98,11 @@ void as_record_initialize(as_index_ref *r_ref, as_namespace *ns)
 		r->storage_key.ssd.rblock_id = STORAGE_INVALID_RBLOCK;
 		r->storage_key.ssd.n_rblocks = 0;
 	}
+#ifdef USE_KV
 	else if (AS_STORAGE_ENGINE_KV == ns->storage_type) {
 		r->storage_key.kv.file_id = STORAGE_INVALID_FILE_ID;
 	}
+#endif
 	else if (AS_STORAGE_ENGINE_MEMORY == ns->storage_type) {
 		// The storage_key struct shouldn't be used, but for now is accessed
 		// when making the (useless for memory-only) object size histogram.
@@ -124,10 +126,11 @@ void as_record_initialize(as_index_ref *r_ref, as_namespace *ns)
 int
 as_record_get_create(as_index_tree *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns, bool is_subrec)
 {
-	// Only create the in-memory index tree when not using KV store.
-	int rv = (as_storage_has_index(ns) ?
-			as_index_ref_initialize(tree, keyd, r_ref, true, ns) :
-			as_index_get_insert_vlock(tree, keyd, r_ref));
+	int rv =
+#ifdef USE_KV
+			as_storage_has_index(ns) ? as_index_ref_initialize(tree, keyd, r_ref, true, ns) :
+#endif
+			as_index_get_insert_vlock(tree, keyd, r_ref);
 
 	if (rv == 0) {
 		cf_detail(AS_RECORD, "record get_create: digest %"PRIx64" found record %p", *(uint64_t *)keyd , r_ref->r);
@@ -230,12 +233,11 @@ as_record_destroy(as_record *r, as_namespace *ns)
 int
 as_record_get(as_index_tree *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns)
 {
-	// index search takes the refcount and releases the treelock, the opposite of the
-	// get_insert call above
-
-	int rv = (as_storage_has_index(ns)
-			  ? (!as_index_ref_initialize(tree, keyd, r_ref, false, ns) ? 0 : -1)
-			  : as_index_get_vlock(tree, keyd, r_ref));
+	int rv =
+#ifdef USE_KV
+			as_storage_has_index(ns) ? (! as_index_ref_initialize(tree, keyd, r_ref, false, ns) ? 0 : -1) :
+#endif
+			as_index_get_vlock(tree, keyd, r_ref);
 
 	if (rv == 0) {
 		cf_detail(AS_RECORD, "record get: digest %"PRIx64" found record %p", *(uint64_t *)keyd, r_ref->r);
@@ -261,12 +263,11 @@ as_record_get(as_index_tree *tree, cf_digest *keyd, as_index_ref *r_ref, as_name
 int
 as_record_exists(as_index_tree *tree, cf_digest *keyd, as_namespace *ns)
 {
-	// index search takes the refcount and releases the treelock, the opposite of the
-	// get_insert call above
-
-	int rv = (as_storage_has_index(ns)
-			  ? -1
-			  : as_index_exists(tree, keyd));
+	int rv =
+#ifdef USE_KV
+			as_storage_has_index(ns) ? -1 :
+#endif
+			as_index_exists(tree, keyd);
 
 	if (rv == -1) {
 		cf_detail(AS_RECORD, "record get: digest %"PRIx64" not found", *(uint64_t *)keyd);
@@ -459,9 +460,21 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 	
 	// To read the algorithm of upating sindex in bins check notes in ssd_record_add function.
 	SINDEX_BINS_SETUP(sbins, 2 * ns->sindex_cnt);
-
+	as_sindex * si_arr[2 * ns->sindex_cnt];
+	int si_arr_index = 0;
+	const char* set_name = NULL;
+	set_name = as_index_get_set_name(rd->r, ns);
+	
+	// RESERVE SIs for old bins
+	// Cannot reserve SIs for new bins as we do not know the bin-id yet
+	if (has_sindex) {
+		for (int i=0; i<old_n_bins; i++) {
+			si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(ns, set_name, rd->bins[i].id, &si_arr[si_arr_index]);
+		}
+	}
+	
 	if ((delta_bins < 0) && has_sindex) {
-		 sbins_populated += as_sindex_sbins_from_rd(rd, newbins, old_n_bins, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
+		sbins_populated += as_sindex_sbins_from_rd(rd, newbins, old_n_bins, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 	}
 
 	if (ns->storage_data_in_memory && ! ns->single_bin) {
@@ -474,11 +487,6 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		// Either single-bin data-in-memory where we deleted the (only) bin, or
 		// data-not-in-memory where we read existing bins for sindex purposes.
 		as_bin_destroy_from(rd, newbins);
-	}
-
-	const char* set_name = NULL;
-	if (has_sindex) {
-		set_name = as_index_get_set_name(rd->r, ns);
 	}
 
 	int ret = 0;
@@ -514,6 +522,7 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		}
 
 		if (has_sindex) {
+			si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(ns, set_name, b->id, &si_arr[si_arr_index]);
 			sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 		}
 	}
@@ -536,9 +545,9 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		rd->write_to_device = true;
 	}
 
-
-	if (has_sindex && sbins_populated) {
+	if (has_sindex) {
 		as_sindex_sbin_freeall(sbins, sbins_populated);
+		as_sindex_release_arr(si_arr, si_arr_index);
 	}
 
 	return ret;
@@ -671,11 +680,9 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 	// flatten gets called only for migration .. because there is no duplicate
 	// resolution .. there is only winner resolution
 	if (COMPONENT_IS_MIG(c) && as_ldt_record_is_parent(rd->r)) {
-		int pbytes = as_ldt_parent_storage_set_version(rd, c->version, p_stack_particles, __FILE__, __LINE__);
-		if (pbytes < 0) {
-			cf_warning_digest(AS_LDT, &rd->keyd, "LDT_MERGE Failed to write version in rv=%d", pbytes);
-		} else {
-			p_stack_particles += pbytes;			
+		int ldt_rv = as_ldt_parent_storage_set_version(rd, c->version, p_stack_particles, __FILE__, __LINE__);
+		if (ldt_rv < 0) {
+			cf_warning_digest(AS_LDT, &rd->keyd, "LDT_MERGE Failed to write version in rv=%d", ldt_rv);
 		}
 	}
 

@@ -1,7 +1,7 @@
 /*
  * proto.h
  *
- * Copyright (C) 2008-2014 Aerospike, Inc.
+ * Copyright (C) 2008-2015 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -97,18 +97,21 @@ struct as_file_handle_s;
 #define AS_SEC_ERR_NOT_AUTHENTICATED	80	// socket not authenticated
 #define AS_SEC_ERR_ROLE_VIOLATION		81	// role (privilege) violation
 
-// UDF Errors (100 - 120)
+// UDF Errors (100 - 109)
 #define AS_PROTO_RESULT_FAIL_UDF_EXECUTION     100
 
-// LDT (and general collection) Errors (125 - 140)
+// LDT (and general collection) Errors (125 - 129)
 #define AS_PROTO_RESULT_FAIL_COLLECTION_ITEM_NOT_FOUND 125 // Item not found
 
-// Batch Errors (150 - 160)
+// Batch Errors (150 - 159)
 #define AS_PROTO_RESULT_FAIL_BATCH_DISABLED		150 // batch functionality has been disabled
 #define AS_PROTO_RESULT_FAIL_BATCH_MAX_REQUESTS	151 // batch-max-requests has been exceeded
 #define AS_PROTO_RESULT_FAIL_BATCH_QUEUES_FULL	152 // all batch queues are full
 
-// Secondary Index Query Failure Codes 200 - 230
+// Geo Errors (160 - 169)
+#define AS_PROTO_RESULT_FAIL_GEO_INVALID_GEOJSON 160 // Invalid GeoJSON on insert/update
+
+// Secondary Index Query Failure Codes (200 - 219)
 #define AS_PROTO_RESULT_FAIL_INDEX_FOUND       200
 #define AS_PROTO_RESULT_FAIL_INDEX_NOTFOUND    201
 #define AS_PROTO_RESULT_FAIL_INDEX_OOM         202
@@ -123,7 +126,6 @@ struct as_file_handle_s;
 #define AS_PROTO_RESULT_FAIL_QUERY_CBERROR     213
 #define AS_PROTO_RESULT_FAIL_QUERY_NETIO_ERR   214
 #define AS_PROTO_RESULT_FAIL_QUERY_DUPLICATE   215
-
 
 /* SYNOPSIS
  * Aerospike wire protocol
@@ -399,7 +401,8 @@ typedef struct cl_msg_s {
 #define AS_MSG_INFO3_BIN_REPLACE_ONLY	(1 << 6) // replace existing bin, do not create new bin
 // (Note:  Bit 7 is unused.)
 
-#define AS_MSG_FIELD_SCAN_DISCONNECTED_JOB			(0x04) // for sproc jobs that won't be sending results back to the client
+#define AS_MSG_FIELD_SCAN_INCLUDE_LDT_DATA			(0x02) // whether to send ldt bin data back to the client
+#define AS_MSG_FIELD_SCAN_DISCONNECTED_JOB			(0x04) // for sproc jobs that won't be sending results back to the client [UNUSED]
 #define AS_MSG_FIELD_SCAN_FAIL_ON_CLUSTER_CHANGE	(0x08) // if we should fail when cluster is migrating or cluster changes
 #define AS_MSG_FIELD_SCAN_PRIORITY(__cl_byte)		((0xF0 & __cl_byte)>>4) // 4 bit value indicating the scan priority
 
@@ -566,3 +569,70 @@ int as_netio_send(as_netio *io, void *q, bool);
 #define AS_NETIO_CONTINUE  1
 #define AS_NETIO_ERR       2 
 #define AS_NETIO_IO_ERR    3 
+
+// These values correspond to client protocol values - do not change them!
+typedef enum as_udf_op {
+	AS_UDF_OP_KVS        = 0,
+	AS_UDF_OP_AGGREGATE  = 1,
+	AS_UDF_OP_BACKGROUND = 2,
+	AS_UDF_OP_FOREGROUND = 3		// not supported yet
+} as_udf_op;
+
+typedef enum as_cdt_paramtype_e {
+	AS_CDT_PARAM_NONE    = 0,
+
+	AS_CDT_PARAM_INDEX   = 1,
+	AS_CDT_PARAM_COUNT   = 2,
+	AS_CDT_PARAM_PAYLOAD = 3,
+} as_cdt_paramtype;
+
+typedef enum as_cdt_optype_e {
+	// ------------------------------------------------------------------------
+	// List Operation
+
+	// Add to list
+	AS_CDT_OP_LIST_APPEND        = 1,
+	AS_CDT_OP_LIST_APPEND_ITEMS  = 2,
+	AS_CDT_OP_LIST_INSERT        = 3,
+	AS_CDT_OP_LIST_INSERT_ITEMS  = 4,
+
+	// Remove from list
+	AS_CDT_OP_LIST_POP           = 5,
+	AS_CDT_OP_LIST_POP_RANGE     = 6,
+	AS_CDT_OP_LIST_REMOVE        = 7,
+	AS_CDT_OP_LIST_REMOVE_RANGE  = 8,
+
+	// Other list modifies
+	AS_CDT_OP_LIST_SET           = 9,
+	AS_CDT_OP_LIST_TRIM          = 10,
+	AS_CDT_OP_LIST_CLEAR         = 11,
+	AS_CDT_OP_LIST_INCREMENT_BY  = 12,
+
+	// Read from list
+	AS_CDT_OP_LIST_SIZE          = 16,
+	AS_CDT_OP_LIST_GET           = 17,
+	AS_CDT_OP_LIST_GET_RANGE     = 18,
+
+	// ------------------------------------------------------------------------
+	// Map Operation
+
+	// Adding <key, value> to the Map
+	AS_CDT_OP_MAP_PUT            = 32,
+	AS_CDT_OP_MAP_PUT_ITEMS      = 33,
+
+	// Op by key
+	AS_CDT_OP_MAP_GET            = 34,
+	AS_CDT_OP_MAP_GET_MATCHING   = 35,
+	AS_CDT_OP_MAP_REMOVE         = 36,
+	AS_CDT_OP_MAP_REMOVE_ALL     = 37,
+	AS_CDT_OP_MAP_CONTAINS_KEY   = 38,
+	AS_CDT_OP_MAP_INCREMENT_BY   = 39,
+	AS_CDT_OP_MAP_CONTAINS_VALUE = 40,
+
+	// Misc
+	AS_CDT_OP_MAP_GET_ITEMS      = 41,
+	AS_CDT_OP_MAP_KEYS           = 42,
+	AS_CDT_OP_MAP_VALUES         = 43,
+	AS_CDT_OP_MAP_CLEAR          = 44,
+	AS_CDT_OP_MAP_SIZE           = 45,
+} as_cdt_optype;

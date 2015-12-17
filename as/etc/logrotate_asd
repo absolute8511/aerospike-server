@@ -1,11 +1,12 @@
 /var/log/aerospike/aerospike.log {
-    missingok
     daily
     rotate 90
     dateext
     compress
-    olddir /var/log/aerospike/
+    olddir /var/log/aerospike
+    missingok
+    notifempty
     postrotate 
-        kill -HUP `cat /var/run/aerospike/asd.pid`
+        (kill -HUP `cat /var/run/aerospike/asd.pid`) > /dev/null 2>&1 || true
     endscript
 }

@@ -1,9 +1,6 @@
 #!/bin/bash
 # chkconfig: 2345 85 15
 # description: Starts and stops the Aerospike daemon
-# this version is for debian/ubuntu which is, as usual, very different from RH
-# current state of the art appears using /lib/lsb/init-functions for logging but not for process
-# this is a very minimal init script!
 
 ### BEGIN INIT INFO
 # Provides:          aerospike
@@ -23,6 +20,7 @@ PIDDIR="/var/run/aerospike"
 PIDFILE=$PIDDIR/asd.pid
 ASD_USER="aerospike"
 ASD_GROUP=$ASD_USER
+EDITION="@EDITION@"
 
 INITFNS=/etc/aerospike/initfns
 if [ -f $INITFNS ]; then . $INITFNS; fi
@@ -83,6 +81,7 @@ case "$1" in
 		set_shmall
 		set_shmmax
 		create_piddir
+
 		[ -n "$LD_PRELOAD" ] && export LD_PRELOAD
 		log_daemon_msg "${1^}ing aerospike"
 		$1
@@ -114,6 +113,14 @@ case "$1" in
 				log_end_msg 1
 				;;
 		esac
+		;;
+	stop)
+		log_daemon_msg "Halt aerospike: " "asd"
+		if start-stop-daemon --stop --quiet --name $ASDN  ; then
+			log_end_msg 0
+		else
+			log_end_msg 1
+		fi
 		;;
 	status)
 		status_of_proc -p $PIDFILE $ASDN aerospike

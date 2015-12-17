@@ -2877,6 +2877,17 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 			SINDEX_GRLOCK();
 		}
 		SINDEX_BINS_SETUP(sbins, 2 * ns->sindex_cnt);
+		as_sindex * si_arr[2 * ns->sindex_cnt];
+		int si_arr_index = 0;
+		const char * set_name = as_index_get_set_name(r, ns);
+
+		// RESERVE SIs for old_bins
+		// Cannot reserve for new bins as binid is not known yet
+		if (has_sindex) {
+			for (int i=0; i<old_n_bins; i++) {
+				si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(ns, set_name, rd.bins[i].id, &si_arr[si_arr_index]);
+			}
+		}
 
 		if (! rd.ns->single_bin) {
 			int32_t delta_bins = (int32_t)block->n_bins - (int32_t)rd.n_bins;
@@ -2889,12 +2900,11 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 				as_bin_allocate_bin_space(r, &rd, delta_bins);
 			}
 		}
-		const char * set_name = as_index_get_set_name(r, ns);
 		for (uint16_t i = 0; i < block->n_bins; i++) {
 			as_bin* b;
 			if (i < old_n_bins) {
 				b = &rd.bins[i];
-				if (has_sindex) {	
+				if (has_sindex) {
 					sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 				}
 				as_bin_set_id_from_name(ns, b, ssd_bin->name);
@@ -2911,6 +2921,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 			ssd_bin = (drv_ssd_bin*)(block_head + ssd_bin->next);
 
 			if (has_sindex) {
+				si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(ns, set_name, b->id, &si_arr[si_arr_index]);
 				sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 			}
 		}
@@ -2921,6 +2932,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 				as_sindex_update_by_sbin(ns, as_index_get_set_name(r, ns), sbins, sbins_populated, &rd.keyd);
 				as_sindex_sbin_freeall(sbins, sbins_populated);
 			}
+			as_sindex_release_arr(si_arr, si_arr_index);
 		}
 
 		as_storage_record_adjust_mem_stats(&rd, bytes_memory);

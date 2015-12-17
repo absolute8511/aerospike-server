@@ -1,7 +1,7 @@
 /*
  * as.c
  *
- * Copyright (C) 2008-2014 Aerospike, Inc.
+ * Copyright (C) 2008-2015 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -80,6 +80,7 @@ const struct option cmd_opts[] = {
 		{ "version", no_argument, 0, 'v' },
 		{ "config-file", required_argument, 0, 'f' },
 		{ "foreground", no_argument, 0, 'd' },
+		{ "fgdaemon", no_argument, 0, 'F' },
 		{ "cold-start", no_argument, 0, 'c' },
 		{ "instance", required_argument, 0, 'n' },
 		{ 0, 0, 0, 0 }
@@ -114,6 +115,11 @@ const char HELP[] =
 		"in gdb. Alternatively, add 'run-as-daemon false' in the service context of the\n"
 		"Aerospike config file.\n"
 		"\n"
+		"--fgdaemon"
+		"\n"
+		"Specify that Aerospike is to be run as a \"new-style\" (foreground) daemon. This\n"
+		"is useful for running Aerospike under systemd or Docker.\n"
+		"\n"
 		"--cold-start"
 		"\n"
 		"(Enterprise edition only.) At startup, force the Aerospike server to read all\n"
@@ -135,6 +141,7 @@ const char USAGE[] =
 		"asd runtime command-line options:\n"
 		"[--config-file <file>] "
 		"[--foreground] "
+		"[--fgdaemon] "
 		"[--cold-start] "
 		"[--instance <0-15>]\n"
 		;
@@ -268,6 +275,7 @@ main(int argc, char **argv)
 	int cmd_optidx;
 	const char *config_file = DEFAULT_CONFIG_FILE;
 	bool run_in_foreground = false;
+	bool new_style_daemon = false;
 	bool cold_start_cmd = false;
 	uint32_t instance = 0;
 
@@ -285,6 +293,20 @@ main(int argc, char **argv)
 		case 'f':
 			config_file = cf_strdup(optarg);
 			cf_assert(config_file, AS_AS, CF_CRITICAL, "config filename cf_strdup failed");
+			break;
+		case 'F':
+			// As a "new-style" daemon(*), asd runs in the foreground and
+			// ignores the following configuration items:
+			//  - user ('user')
+			//	- group ('group')
+			//  - PID file ('pidfile')
+			//
+			// If ignoring configuration items, or if the 'console' sink is not
+			// specified, warnings will appear in stderr.
+			//
+			// (*) http://0pointer.de/public/systemd-man/daemon.html#New-Style%20Daemons
+			run_in_foreground = true;
+			new_style_daemon = true;
 			break;
 		case 'd':
 			run_in_foreground = true;
@@ -326,9 +348,14 @@ main(int argc, char **argv)
 	// If not, the process will self-terminate with (hopefully!) a log message
 	// indicating which resource is not set up properly.
 	if (0 != c->uid && 0 == geteuid()) {
-		// To see this log, change NO_SINKS_LIMIT in fault.c:
-		cf_info(AS_AS, "privsep to %d %d", c->uid, c->gid);
-		cf_process_privsep(c->uid, c->gid);
+		if (! new_style_daemon) {
+			// To see this log, change NO_SINKS_LIMIT in fault.c:
+			cf_info(AS_AS, "privsep to %d %d", c->uid, c->gid);
+			cf_process_privsep(c->uid, c->gid);
+		}
+		else {
+			cf_warning(AS_AS, "will not do privsep in new-style daemon mode");
+		}
 	}
 
 	//
@@ -336,6 +363,14 @@ main(int argc, char **argv)
 	// or reopened below this line! (The configuration file is the only thing
 	// that must be opened above, in order to parse the user & group.)
 	//==========================================================================
+
+	// A "new-style" daemon expects console logging to be configured. (If not,
+	// log messages won't be seen via the standard path.)
+	if (new_style_daemon) {
+		if (! cf_fault_console_is_held()) {
+			cf_warning(AS_AS, "in new-style daemon mode, console logging is not configured");
+		}
+	}
 
 	// Activate log sinks. Up to this point, 'cf_' log output goes to stderr,
 	// filtered according to NO_SINKS_LIMIT in fault.c. After this point, 'cf_'
@@ -383,7 +418,14 @@ main(int argc, char **argv)
 	}
 
 	// Write the pid file, if specified.
-	write_pidfile(c->pidfile);
+	if (! new_style_daemon) {
+		write_pidfile(c->pidfile);
+	}
+	else {
+		if (c->pidfile) {
+			cf_warning(AS_AS, "will not write PID file in new-style daemon mode");
+		}
+	}
 
 	// Check that required directories are set up properly.
 	validate_directory(c->work_directory, "work");
@@ -425,7 +467,7 @@ main(int argc, char **argv)
 	as_proxy_init();			// do work on behalf of others
 	as_write_init();			// write service
 	as_query_init();			// query transaction handling
-	as_udf_init();				// apply user-defined functions
+	as_udf_rw_init();			// apply user-defined functions
 	as_scan_init();				// scan a namespace or set
 	as_batch_init();			// batch transaction handling
 	as_batch_direct_init();		// low priority transaction handling        

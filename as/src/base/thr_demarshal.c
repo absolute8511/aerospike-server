@@ -20,6 +20,8 @@
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
 
+#include "base/thr_demarshal.h"
+
 #include <errno.h>
 #include <pthread.h>
 #include <string.h>
@@ -86,6 +88,43 @@ pthread_t		g_demarshal_reaper_th;
 void *thr_demarshal_reaper_fn(void *arg);
 static cf_queue *g_freeslot = 0;
 
+int
+epoll_ctl_modify(as_file_handle *fd_h, uint32_t events)
+{
+	struct epoll_event ev;
+	memset(&ev, 0, sizeof ev);
+	ev.events = events;
+	ev.data.ptr = fd_h;
+	return epoll_ctl(fd_h->epoll_fd, EPOLL_CTL_MOD, fd_h->fd, &ev);
+}
+
+void
+thr_demarshal_pause(as_file_handle *fd_h)
+{
+	fd_h->trans_active = true;
+}
+
+void
+thr_demarshal_resume(as_file_handle *fd_h)
+{
+	fd_h->trans_active = false;
+
+	// Make the demarshal thread aware of pending connection data (if any).
+	// Writing to an FD's event mask makes the epoll instance re-check for
+	// data, even when edge-triggered. If there is data, the demarshal thread
+	// gets EPOLLIN for this FD.
+	if (epoll_ctl_modify(fd_h, EPOLLIN | EPOLLET | EPOLLRDHUP) < 0) {
+		if (errno == ENOENT) {
+			// Happens, when we reached NextEvent_FD_Cleanup (e.g, because the
+			// client disconnected) while the transaction was still ongoing.
+			return;
+		}
+
+		cf_crash(AS_DEMARSHAL, "unable to resume socket FD %d on epoll instance FD %d: %d (%s)",
+				fd_h->fd, fd_h->epoll_fd, errno, cf_strerror(errno));
+	}
+}
+
 void
 demarshal_file_handle_init()
 {
@@ -149,11 +188,13 @@ thr_demarshal_reaper_fn(void *arg)
 					as_security_refresh(fd_h);
 				}
 
-				// Reap if not obviously in use.
-				if (fd_h->inuse == false) {
+				// Reap, if asked to.
+				if (fd_h->reap_me) {
+					cf_debug(AS_DEMARSHAL, "Reaping FD %d as requested", fd_h->fd);
 					g_file_handle_a[i] = 0;
 					cf_queue_push(g_freeslot, &i);
-					AS_RELEASE_FILE_HANDLE(fd_h);
+					as_release_file_handle(fd_h);
+					fd_h = 0;
 				}
 				// Reap if past kill time.
 				else if ((0 != kill_ms) && (fd_h->last_used + kill_ms < now)) {
@@ -167,7 +208,8 @@ thr_demarshal_reaper_fn(void *arg)
 					cf_debug(AS_DEMARSHAL, "remove unused connection, fd %d", fd_h->fd);
 					g_file_handle_a[i] = 0;
 					cf_queue_push(g_freeslot, &i);
-					AS_RELEASE_FILE_HANDLE(fd_h);
+					as_release_file_handle(fd_h);
+					fd_h = 0;
 					cf_atomic_int_incr(&g_config.reaper_count);
 				}
 				else {
@@ -196,30 +238,6 @@ thr_demarshal_reaper_fn(void *arg)
 	return NULL;
 }
 
-// Get the remote IP address and port connected to a socket file descriptor.
-// Return 0 if successful, and populate the caller-provided IP address and port.
-// Return -1 otherwise.
-static int
-get_fd_ip_addr_and_port(int fd, char *ip_addr, size_t ip_addr_sz, int *port)
-{
-	struct sockaddr_in addr_in;
-	socklen_t addr_len = sizeof(addr_in);
-	int retval = -1;
-
-	// Try to get the client details for better logging.
-	// Otherwise, fall back to generic log message.
-	if (getpeername(fd, (struct sockaddr *) &addr_in, &addr_len) == 0
-		&& ip_addr
-		&& inet_ntop(AF_INET, &addr_in.sin_addr.s_addr, (char *) ip_addr, ip_addr_sz) != NULL) {
-		retval = 0;
-		if (port) {
-			*port = ntohs(addr_in.sin_port);
-		}
-	}
-
-	return retval;
-}
-
 
 // Log information about a suspicious incoming transaction.
 static void
@@ -238,9 +256,9 @@ log_as_proto_and_peeked_data(as_proto *proto, uint8_t *peekbuf, size_t peeked_da
 void *
 thr_demarshal(void *arg)
 {
-	cf_socket_cfg *s;
+	cf_socket_cfg *s, *ls;
 	// Create my epoll fd, register in the global list.
-	static struct epoll_event ev;
+	static struct epoll_event ev, lev;
 	int nevents, i, n, epoll_fd;
 	cf_clock last_fd_print = 0;
 
@@ -251,6 +269,7 @@ thr_demarshal(void *arg)
 	// Early stage aborts; these will cause faults in process scope.
 	cf_assert(arg, AS_DEMARSHAL, CF_CRITICAL, "invalid argument");
 	s = &g_config.socket;
+	ls = &g_config.localhost_socket;
 
 #ifdef USE_JEM
 	int orig_arena;
@@ -285,7 +304,15 @@ thr_demarshal(void *arg)
 		ev.data.fd = s->sock;
 		if (0 > epoll_ctl(epoll_fd, EPOLL_CTL_ADD, s->sock, &ev))
 			cf_crash(AS_DEMARSHAL, "epoll_ctl(): %s", cf_strerror(errno));
-		cf_info(AS_DEMARSHAL, "Service started: socket %d", s->port);
+		cf_info(AS_DEMARSHAL, "Service started: socket %s:%d", s->addr, s->port);
+
+		if (ls->sock) {
+			lev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+			lev.data.fd = ls->sock;
+			if (0 > epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ls->sock, &lev))
+			  cf_crash(AS_DEMARSHAL, "epoll_ctl(): %s", cf_strerror(errno));
+			cf_info(AS_DEMARSHAL, "Service also listening on localhost socket %s:%d", ls->addr, ls->port);
+		}
 	}
 	else {
 		epoll_fd = epoll_create(EPOLL_SZ);
@@ -317,16 +344,14 @@ thr_demarshal(void *arg)
 
 		// Iterate over all events.
 		for (i = 0; i < nevents; i++) {
-
-			if (s->sock == events[i].data.fd) {
-
+			if ((s->sock == events[i].data.fd) || (ls->sock == events[i].data.fd)) {
 				// Accept new connections on the service socket.
 				int csocket = -1;
 				struct sockaddr_in caddr;
 				socklen_t clen = sizeof(caddr);
-				char cpaddr[24];
+				char cpaddr[64];
 
-				if (-1 == (csocket = accept(s->sock, (struct sockaddr *)&caddr, &clen))) {
+				if (-1 == (csocket = accept(events[i].data.fd, (struct sockaddr *)&caddr, &clen))) {
 					// This means we're out of file descriptors - could be a SYN
 					// flood attack or misbehaving client. Eventually we'd like
 					// to make the reaper fairer, but for now we'll just have to
@@ -341,11 +366,24 @@ thr_demarshal(void *arg)
 					cf_crash(AS_DEMARSHAL, "accept: %s (errno %d)", cf_strerror(errno), errno);
 				}
 
-				if (NULL == inet_ntop(AF_INET, &caddr.sin_addr.s_addr, (char *)cpaddr, sizeof(cpaddr))) {
-					cf_crash(AS_DEMARSHAL, "inet_ntop(): %s (errno %d)", cf_strerror(errno), errno);
+				// Get the client IP address in string form.
+				if (caddr.sin_family == AF_INET) {
+					if (NULL == inet_ntop(AF_INET, &caddr.sin_addr.s_addr, (char *)cpaddr, sizeof(cpaddr))) {
+						cf_crash(AS_DEMARSHAL, "inet_ntop(): %s (errno %d)", cf_strerror(errno), errno);
+					}
+				}
+				else if (caddr.sin_family == AF_INET6) {
+					struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&caddr;
+
+					if (NULL == inet_ntop(AF_INET6, &addr_in6->sin6_addr, (char *)cpaddr, sizeof(cpaddr))) {
+						cf_crash(AS_DEMARSHAL, "inet_ntop(): %s (errno %d)", cf_strerror(errno), errno);
+					}
+				}
+				else {
+					cf_crash(AS_DEMARSHAL, "unknown address family %u", caddr.sin_family);
 				}
 
-				cf_detail(AS_DEMARSHAL, "new connection: %s", cpaddr);
+				cf_detail(AS_DEMARSHAL, "new connection: %s (fd %d)", cpaddr, csocket);
 
 				// Validate the limit of protocol connections we allow.
 				uint32_t conns_open = g_config.proto_connections_opened - g_config.proto_connections_closed;
@@ -376,11 +414,12 @@ thr_demarshal(void *arg)
 					cf_crash(AS_DEMARSHAL, "malloc");
 				}
 
+				sprintf(fd_h->client, "%s:%d", cpaddr, ntohs(caddr.sin_port));
 				fd_h->fd = csocket;
 
 				fd_h->last_used = cf_getms();
-				fd_h->inuse = true;
-				fd_h->t_inprogress = false;
+				fd_h->reap_me = false;
+				fd_h->trans_active = false;
 				fd_h->proto = 0;
 				fd_h->proto_unread = 0;
 				fd_h->fh_info = 0;
@@ -429,11 +468,13 @@ thr_demarshal(void *arg)
 						}
 					}
 
-					if (0 > (n = epoll_ctl(g_demarshal_args->epoll_fd[id], EPOLL_CTL_ADD, csocket, &ev))) {
+					fd_h->epoll_fd = g_demarshal_args->epoll_fd[id];
+
+					if (0 > (n = epoll_ctl(fd_h->epoll_fd, EPOLL_CTL_ADD, csocket, &ev))) {
 						cf_info(AS_DEMARSHAL, "unable to add socket to event queue of demarshal thread %d %d", id, g_demarshal_args->num_threads);
 						pthread_mutex_lock(&g_file_handle_a_LOCK);
-						fd_h->inuse = false;
-						AS_RELEASE_FILE_HANDLE(fd_h);
+						fd_h->reap_me = true;
+						as_release_file_handle(fd_h);
 						fd_h = 0;
 						pthread_mutex_unlock(&g_file_handle_a_LOCK);
 					}
@@ -450,6 +491,8 @@ thr_demarshal(void *arg)
 					goto NextEvent;
 				}
 
+				cf_detail(AS_DEMARSHAL, "epoll connection event: fd %d, events 0x%x", fd_h->fd, events[i].events);
+
 				// Process data on an existing connection: this might be more
 				// activity on an already existing transaction, so we have some
 				// state to manage.
@@ -462,15 +505,15 @@ thr_demarshal(void *arg)
 					goto NextEvent_FD_Cleanup;
 				}
 
+				if (fd_h->trans_active) {
+					goto NextEvent;
+				}
+
 				// If pointer is NULL, then we need to create a transaction and
 				// store it in the buffer.
 				if (fd_h->proto == NULL) {
 					as_proto proto;
 					int sz;
-
-					if (fd_h->t_inprogress) {
-						cf_debug(AS_DEMARSHAL, "receiving pipelined request");
-					}
 
 					/* Get the number of available bytes */
 					if (-1 == ioctl(fd, FIONREAD, &sz)) {
@@ -498,19 +541,9 @@ thr_demarshal(void *arg)
 					// Swap the necessary elements of the as_proto.
 					as_proto_swap(&proto);
 
-					// (For storing the returned values when getting the client info.)
-					char ip_addr[24];
-					ip_addr[0] = 0;
-					int port = 0;
-
 					if (proto.sz > PROTO_SIZE_MAX) {
-						if (!get_fd_ip_addr_and_port(fd, ip_addr, sizeof(ip_addr), &port)) {
-							cf_warning(AS_DEMARSHAL, "proto input from %s:%d: msg greater than %d, likely request from non-Aerospike client, rejecting: sz %"PRIu64,
-									   ip_addr, port, PROTO_SIZE_MAX, proto.sz);
-						} else {
-							cf_warning(AS_DEMARSHAL, "proto input: msg greater than %d, likely request from non-Aerospike client, rejecting: sz %"PRIu64,
-									   PROTO_SIZE_MAX, proto.sz);
-						}
+						cf_warning(AS_DEMARSHAL, "proto input from %s: msg greater than %d, likely request from non-Aerospike client, rejecting: sz %"PRIu64,
+								fd_h->client, PROTO_SIZE_MAX, proto.sz);
 						goto NextEvent_FD_Cleanup;
 					}
 
@@ -524,20 +557,18 @@ thr_demarshal(void *arg)
 					if (PROTO_TYPE_AS_MSG == proto.type) {
 						size_t offset = sizeof(as_msg);
 						// Number of bytes to peek from the socket.
-						size_t peek_sz = peekbuf_sz;                 // Peak up to the size of the peek buffer.
-//						size_t peek_sz = MIN(proto.sz, peekbuf_sz);  // Peek only up to the minimum necessary number of bytes.
+//						size_t peek_sz = peekbuf_sz;                 // Peak up to the size of the peek buffer.
+						size_t peek_sz = MIN(proto.sz, peekbuf_sz);  // Peek only up to the minimum necessary number of bytes.
 						if (!(peeked_data_sz = cf_socket_recv(fd, peekbuf, peek_sz, 0))) {
-							cf_warning(AS_DEMARSHAL, "could not peek the as_msg header");
-							goto NextEvent_FD_Cleanup;
-						} else if (peeked_data_sz > min_as_msg_sz) {
+							// That's actually legitimate. The as_proto may have gone into one
+							// packet, the as_msg into the next one, which we haven't yet received.
+							// This just "never happened" without async.
+							cf_detail(AS_DEMARSHAL, "could not peek the as_msg header, expected %zu byte(s)", peek_sz);
+						}
+						if (peeked_data_sz > min_as_msg_sz) {
 //							cf_debug(AS_DEMARSHAL, "(Peeked %zu bytes.)", peeked_data_sz);
 							if (peeked_data_sz > proto.sz) {
-								char ip_port_str[64];
-								ip_port_str[0] = '\0';
-								if (!get_fd_ip_addr_and_port(fd, ip_addr, sizeof(ip_addr), &port)) {
-									snprintf(ip_port_str, sizeof(ip_port_str), "%s:%d ", ip_addr, port);
-								}
-								cf_warning(AS_DEMARSHAL, "Received unexpected extra data from client %ssocket %d when peeking as_proto!", ip_port_str, fd);
+								cf_warning(AS_DEMARSHAL, "Received unexpected extra data from client %s socket %d when peeking as_proto!", fd_h->client, fd);
 								log_as_proto_and_peeked_data(&proto, peekbuf, peeked_data_sz);
 								goto NextEvent_FD_Cleanup;
 							}
@@ -569,7 +600,7 @@ thr_demarshal(void *arg)
 	//									cf_debug(AS_DEMARSHAL, "Message field %d is not namespace (type %d) ~~ Reading next field", field_num, field->type);
 										field_num++;
 										offset += sizeof(as_msg_field) + value_sz;
-										if (offset >= peekbuf_sz) {
+										if (offset >= peeked_data_sz) {
 											break;
 										}
 									}
@@ -631,7 +662,7 @@ thr_demarshal(void *arg)
 					// It's only really live if it's injecting a transaction.
 					fd_h->last_used = now_ms;
 
-					fd_h->t_inprogress = true; // disallow and/or detect pipelining
+					thr_demarshal_pause(fd_h); // pause reading while the transaction is in progress
 					fd_h->proto = 0;
 					fd_h->proto_unread = 0;
 
@@ -746,10 +777,13 @@ NextEvent_FD_Cleanup:
 					cf_rc_release(fd_h);
 				}
 				// Remove the fd from the events list.
-				epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, 0);
+				if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, 0) < 0) {
+					cf_crash(AS_DEMARSHAL, "unable to remove socket FD %d from epoll instance FD %d: %d (%s)",
+							fd, epoll_fd, errno, cf_strerror(errno));
+				}
 				pthread_mutex_lock(&g_file_handle_a_LOCK);
-				fd_h->inuse = false;
-				AS_RELEASE_FILE_HANDLE(fd_h);
+				fd_h->reap_me = true;
+				as_release_file_handle(fd_h);
 				fd_h = 0;
 				pthread_mutex_unlock(&g_file_handle_a_LOCK);
 NextEvent:
@@ -783,10 +817,23 @@ as_demarshal_start()
 	// de-escalation, we can't use privileged ports.
 	g_config.socket.reuse_addr = g_config.socket_reuse_addr;
 	if (0 != cf_socket_init_svc(&g_config.socket)) {
-		cf_crash(AS_DEMARSHAL, "couldn't initialize service socket: %s", cf_strerror(errno));
+		cf_crash(AS_DEMARSHAL, "couldn't initialize service socket");
 	}
 	if (-1 == cf_socket_set_nonblocking(g_config.socket.sock)) {
-		cf_crash(AS_DEMARSHAL, "couldn't set socket nonblocking: %s", cf_strerror(errno));
+		cf_crash(AS_DEMARSHAL, "couldn't set service socket nonblocking");
+	}
+
+	// Note:  The localhost socket address will only be set if the main service socket
+	//        is not already (effectively) listening on the localhost address.
+	if (g_config.localhost_socket.addr) {
+		cf_debug(AS_DEMARSHAL, "Opening a localhost service socket");
+		g_config.localhost_socket.reuse_addr = g_config.socket_reuse_addr;
+		if (0 != cf_socket_init_svc(&g_config.localhost_socket)) {
+			cf_crash(AS_DEMARSHAL, "couldn't initialize localhost service socket");
+		}
+		if (-1 == cf_socket_set_nonblocking(g_config.localhost_socket.sock)) {
+			cf_crash(AS_DEMARSHAL, "couldn't set localhost service socket nonblocking");
+		}
 	}
 
 	// Create first thread which is the listener, and wait for it to come up

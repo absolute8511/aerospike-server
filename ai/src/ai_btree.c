@@ -544,17 +544,19 @@ create_tname_from_imd(const as_sindex_metadata *imd)
 static char *
 create_cname(char *bin_path, int bin_type, int index_type)
 {
-	char type_str[2 * AS_SINDEX_TYPE_STR_SIZE];
-
+	int type_str_size = AS_SINDEX_KTYPE_MAX_TO_STR_SZ + 1 + AS_SINDEX_ITYPE_MAX_TO_STR_SZ;
+	char type_str[type_str_size];
+	bzero(type_str, type_str_size);
 	if (0 > snprintf(type_str, sizeof(type_str), "%d_%d", bin_type, index_type)) {
 		return NULL;
 	}
+	// TODO : CHECK SIZE
 	return str_concat(bin_path, '_', type_str);
 }
 
 static char *
 create_cname_from_imd(const as_sindex_metadata *imd) {
-	return create_cname(imd->path_str, imd->btype[0], imd->itype);
+	return create_cname(imd->path_str, imd->btype, imd->itype);
 }
 
 static char *
@@ -567,25 +569,6 @@ static char *
 get_iname_from_imd(const as_sindex_metadata *imd)
 {
 	return get_iname(imd->ns_name, imd->iname);
-}
-
-void
-ai_set_simatch_by_name(char *ns, char *iname, int *imatch, int *simatch)
-{
-	char *ai_iname = get_iname(ns, iname);
-
-	*simatch = -1;
-
-	AI_GRLOCK();
-
-	int im = match_index_name(ai_iname);
-	if (im != -1) {
-		*simatch = Index[im].simatch;
-	}
-
-	AI_UNLOCK();
-
-	*imatch = im;
 }
 
 int
@@ -625,14 +608,15 @@ ai_findandset_imatch(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, int idx
 		return AS_SINDEX_ERR;
 	}
 
-	char *tname = NULL, *cname = NULL, *iname = NULL;
-	int ret = AS_SINDEX_OK;
+	char *tname = NULL;
+	char *cname = NULL;
+	char *iname = NULL;
 
 	if (!(tname = create_tname_from_imd(imd))) {
 		return AS_SINDEX_ERR_NO_MEMORY;
 	}
 
-	ret = AS_SINDEX_ERR;
+	int ret = AS_SINDEX_ERR;
 
 	AI_GRLOCK();
 
@@ -641,16 +625,17 @@ ai_findandset_imatch(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, int idx
 		goto END;
 	}
 	if (imd->iname) {
+		// This is always true
 		if (!(iname = get_iname_from_imd(imd))) {
 			ret = AS_SINDEX_ERR_NO_MEMORY;
 			goto END;
 		}
-		char idx_str[NAME_STR_LEN];
-		snprintf(idx_str, sizeof(idx_str), "%d", idx);
-		char *piname = str_concat(iname, '.', idx_str);
+		
+		char piname[INDD_HASH_KEY_SIZE];
+		snprintf(piname, sizeof(piname), "%s.%d", iname, idx);	
 		pimd->imatch = match_partial_index_name(piname);
-		cf_free(piname);
 	} else {
+		// CAUTION : This will not work. Since ci->list is only populated for 0th pimd
 		if (!(cname = create_cname_from_imd(imd))) {
 			ret = AS_SINDEX_ERR_NO_MEMORY;
 			goto END;
@@ -660,9 +645,10 @@ ai_findandset_imatch(as_sindex_metadata *imd, as_sindex_pmetadata *pimd, int idx
 			goto END;
 		}
 		pimd->imatch = find_partial_index(tmatch, ic);
+		cf_free(ic);
 	}
 	if (pimd->imatch == -1) {
-		cf_debug(AS_SINDEX, "Index%s: %s not found", imd->iname ? "" : "column-name", imd->iname ? iname : cname);
+		cf_debug(AS_SINDEX, "Index %s not found for %dth pimd", imd->iname, idx);
 		goto END;
 	}
 
@@ -672,10 +658,15 @@ END:
 
 	AI_UNLOCK();
 
-	cf_free(tname);
-	cf_free(iname);
-	cf_free(cname);
-
+	if (tname) {
+		cf_free(tname);
+	}
+	if (iname) { 
+		cf_free(iname);
+	}
+	if (cname) {
+		cf_free(cname);
+	}
 	return ret;
 }
 
@@ -685,17 +676,18 @@ END:
  */
 static int
 btree_addsinglerec(as_sindex_metadata *imd, ai_obj * key, cf_digest *dig, cf_ll *recl, uint64_t *n_bdigs, 
-								bool * is_partition_qnode, bool qnodes_pre_reserved)
+								bool * can_partition_query, bool partitions_pre_reserved)
 {
-	// The digests which belongs to one of the qnode are elligible to go into recl
+	// The digests which belongs to one of the query-able partitions are elligible to go into recl
 	as_partition_id pid =  as_partition_getid(*dig);
-	if (qnodes_pre_reserved) {
-		if (!is_partition_qnode[pid]) {
+	as_namespace * ns = imd->si->ns;
+	if (partitions_pre_reserved) {
+		if (!can_partition_query[pid]) {
 			return 0;
 		}
 	}
 	else {
-		if (!as_sindex_partition_isqnode(imd->si->ns, dig)) {
+		if (!as_partition_is_queryable_lockfree(ns, &ns->partitions[pid])) {
 			return 0;
 		} 
 	}
@@ -765,7 +757,7 @@ add_recs_from_nbtr(as_sindex_metadata *imd, ai_obj *ikey, bt *nbtr, as_sindex_qc
 				continue;
 			}
 			if (btree_addsinglerec(imd, ikey, (cf_digest *)&akey->y, qctx->recl, &qctx->n_bdigs,
-									qctx->is_partition_qnode, qctx->qnodes_pre_reserved)) {
+									qctx->can_partition_query, qctx->partitions_pre_reserved)) {
 				ret = -1;
 				break;
 			}
@@ -791,7 +783,7 @@ add_recs_from_arr(as_sindex_metadata *imd, ai_obj *ikey, ai_arr *arr, as_sindex_
 
 	for (int i = 0; i < arr->used; i++) {
 		if (btree_addsinglerec(imd, ikey, (cf_digest *)&arr->data[i * CF_DIGEST_KEY_SZ], qctx->recl, 
-					&qctx->n_bdigs, qctx->is_partition_qnode, qctx->qnodes_pre_reserved)) {
+					&qctx->n_bdigs, qctx->can_partition_query, qctx->partitions_pre_reserved)) {
 			ret = -1;
 			break;
 		}
@@ -1284,21 +1276,21 @@ ai_btree_create(as_sindex_metadata *imd, int simatch, int *bimatch, int nprts)
 	char *iname = NULL, *cname = NULL, *tname = NULL;
 	int ret = AS_SINDEX_ERR, rv;
 
-	if (1 != imd->num_bins) {
-		cf_warning(AS_SINDEX, "Multi-bin indexes not supported");
-		return ret;
-	}
-
 	if (!(tname = create_tname_from_imd(imd))) {
 		return AS_SINDEX_ERR_NO_MEMORY;
 	}
 
 	if (!(cname = create_cname_from_imd(imd))) {
+		if (tname) {
+			cf_free(tname);
+		}
 		return AS_SINDEX_ERR_NO_MEMORY;
 	}
 
 	AI_GWLOCK();
 
+	// TODO : ai_create_table has this check. So this is redundant
+	// 3 shash_get can be reduced to 1 through ai_get_or_create_table func
 	int tmatch = find_table(tname);
 	if (tmatch == -1) {
 		if (0 > (rv = ai_create_table(tname))) {
@@ -1310,7 +1302,7 @@ ai_btree_create(as_sindex_metadata *imd, int simatch, int *bimatch, int nprts)
 	r_tbl_t *rt = &Tbl[tmatch];
 
 	// 1.) add entries in Aerospike Index's virtual TABLE
-	int col_type = imd->btype[0];
+	int col_type = imd->btype;
 	icol_t *ic = find_column(tmatch, cname);
 	if (!ic) { // COLUMN does not exist
 		if (0 > ai_add_column(tname, cname, col_type)) {
@@ -1318,7 +1310,10 @@ ai_btree_create(as_sindex_metadata *imd, int simatch, int *bimatch, int nprts)
 		}
 		// Add (cmatch+1) always non-zero
 		cf_debug(AS_SINDEX, "Added Mapping [BINNAME=%s: BINID=%d: COLID%d] [IMATCH=%d: SIMATCH=%d: INAME=%s]",
-				imd->bnames[0], imd->binid[0], rt->col_count, Num_indx - 1, simatch, imd->iname);
+				imd->bname, imd->binid, rt->col_count, Num_indx - 1, simatch, imd->iname);
+	}
+	else {
+		cf_free(ic);
 	}
 
 	//NOTE: COMMAND: CREATE PARTITIONED INDEX iname ON tname (cname) NUM = nprts
@@ -1334,7 +1329,7 @@ ai_btree_create(as_sindex_metadata *imd, int simatch, int *bimatch, int nprts)
 
 	*bimatch = match_partial_index_name(iname);
 	cf_debug(AS_SINDEX, "cr8SecIndex: iname: %s bname: %s type: %d ns: %s set: %s tmatch: %d bimatch: %d",
-		   imd->iname, imd->bnames[0], imd->btype[0], imd->ns_name, imd->set, tmatch, *bimatch);
+		   imd->iname, imd->bname, imd->btype, imd->ns_name, imd->set, tmatch, *bimatch);
 
 	ret = AS_SINDEX_OK;
 
@@ -1342,10 +1337,15 @@ END:
 
 	AI_UNLOCK();
 
-	cf_free(tname);
-	cf_free(cname);
-	cf_free(iname);
-
+	if (tname) {
+		cf_free(tname);
+	}
+	if (cname) {
+		cf_free(cname);
+	}
+	if (iname) {
+		cf_free(iname);
+	}
 	return ret;
 }
 
@@ -1363,7 +1363,7 @@ ai_post_index_creation_setup_pmetadata(as_sindex_metadata *imd, as_sindex_pmetad
 	ri->done = true;
 	if (idx == 0) { // idx of 0 means fill these in
 		imd->dtype = ri->dtype;
-		imd->btype[0] = ri->dtype;
+		imd->btype = ri->dtype;
 	}
 	pimd->tmatch = ri->tmatch;
 	pimd->ibtr = ri->btr;

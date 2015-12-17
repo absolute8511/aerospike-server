@@ -1,7 +1,7 @@
 /*
  * ldt_record.h
  *
- * Copyright (C) 2013-2014 Aerospike, Inc.
+ * Copyright (C) 2013-2015 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -97,5 +97,3 @@ struct ldt_record_s {
 	if (lrecord->chunk[i].slots[j].inuse) 
 
 extern const as_rec_hooks ldt_record_hooks;
-extern int   ldt_record_init   (ldt_record *lrecord);
-extern int   ldt_crec_create_chunk(ldt_record *lrecord);

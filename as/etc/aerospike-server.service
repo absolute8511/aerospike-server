@@ -12,7 +12,7 @@ Group=root
 EnvironmentFile=/etc/sysconfig/aerospike
 PermissionsStartOnly=True
 ExecStartPre=/usr/bin/asd-systemd-helper
-ExecStart=/usr/bin/asd $ASD_COLDSTART --config-file $ASD_CONFIG_FILE --foreground
+ExecStart=/usr/bin/asd $ASD_OPTIONS --config-file $ASD_CONFIG_FILE --fgdaemon
 
 [Install]
 WantedBy=multi-user.target

@@ -149,6 +149,8 @@ as_sindex__populate_fn(void *param)
 	while(1) {
 		as_sindex *si;
 		cf_queue_pop(g_sindex_populate_q, &si, CF_QUEUE_FOREVER);
+		// TODO should check flag under a lock
+		// conflict with as_sindex_repair
 		if (si->flag & AS_SINDEX_FLAG_POPULATING) {
 			// Earlier job to populate index is still going on, push it back
 			// into the queue to look at it later. this is problem only when
@@ -156,6 +158,7 @@ as_sindex__populate_fn(void *param)
 			cf_queue_push(g_sindex_populate_q, &si);
 		} else {
 			cf_debug(AS_SINDEX, "Populating index %s", si->imd->iname);
+			// should set under a lock
 			si->flag |= AS_SINDEX_FLAG_POPULATING;
 			as_sbld_build(si);
 		}
@@ -239,7 +242,7 @@ as_sindex_update_defrag_stat(as_sindex *si, uint64_t r, uint64_t start_time_ms)
  * 		Caller needs to release the ref count of sindex(si)
 */
 int
-as_sindex_get_pimd_to_defrag(as_namespace *ns, int *si_index, int *p_index, as_sindex_pmetadata** pimd,
+get_pimd_and_reserve(as_namespace *ns, int *si_index, int *p_index, as_sindex_pmetadata** pimd,
 		as_sindex ** sindex, int *si_defraged)
 {
 	if (*p_index >= ns->sindex_num_partitions) {
@@ -351,7 +354,7 @@ as_sindex__defrag_fn(void *udata)
 		int           sindex_defraged  = 0;
 		long          defrag_period    = 0;
 		long          limit            = 0;
-		// loop through all sindexes and pimds to defrag
+		
 		while (1) {
 			// Sleep for remainder of defrag period
 			curr_time                        = cf_getms();
@@ -366,7 +369,7 @@ as_sindex__defrag_fn(void *udata)
 			// Get pimd to defrag..
 			as_sindex           * si;
 			as_sindex_pmetadata * pimd;
-			int retval     = as_sindex_get_pimd_to_defrag(ns, &si_index, &p_index, &pimd, &si, &sindex_defraged);
+			int retval     = get_pimd_and_reserve(ns, &si_index, &p_index, &pimd, &si, &sindex_defraged);
 			if (retval != 0) {
 				if (retval == -1) {
 					// To avoid cases in which a sindex is dropped in middle of defragging
@@ -400,7 +403,6 @@ as_sindex__defrag_fn(void *udata)
 			uint64_t pimd_rlock_time_ns = 0;
 			uint64_t processed          = 0;
 			uint64_t found              = 0;
-			// Create Defrag List
 			start_time                  = cf_getms();
 			cf_ll defrag_list;
 			cf_ll_init(&defrag_list, &ll_sindex_gc_destroy_fn, false);
@@ -424,7 +426,6 @@ as_sindex__defrag_fn(void *udata)
 			g_config.sindex_gc_garbage_found         += found;
 			int listsize                              = cf_ll_size(&defrag_list);
 
-			// Run Defrag..
 			uint64_t deleted = 0;
 			start_time = cf_getms();
 			if ( (ret != AS_SINDEX_ERR ) && (listsize > 0) ) {
@@ -433,18 +434,20 @@ as_sindex__defrag_fn(void *udata)
 				uint64_t pimd_wlock_time_ns = 0; 
 				bool     more               = true;
 				while (more) {
+					// TODO IMD RLOCK
+					// TODO pimd = imd->pimd[p_index]
 					SINDEX_WLOCK(&pimd->slock);
 					SET_TIME_FOR_SINDEX_GC_HIST(pimd_wlock_time_ns);
 					more = ai_btree_defrag_list(si->imd, pimd, &defrag_list, wl_lim, &deleted);
 					SINDEX_GC_HIST_INSERT_DATA_POINT(sindex_gc_pimd_wlock_hist, pimd_wlock_time_ns);
 					SINDEX_UNLOCK(&pimd->slock);
+					// TODO IMD UNLOCK
 					pimd_wlock_time_ns = 0;
 				}
 				cf_detail(AS_SINDEX, "Deleted %d units of attempted %d units from index %s", listsize, limit, si->imd->iname);
 				as_sindex_update_defrag_stat(si, deleted, start_time);	
 			}
 
-			// Release list
 			cf_ll_reduce(&defrag_list, true /*forward*/, ll_sindex_gc_reduce_fn, NULL);
 			if ((ret == AS_SINDEX_DONE) || (ret == AS_SINDEX_ERR)) {
 				RELEASE_ITERATORS(icol)
@@ -787,15 +790,7 @@ sbld_job_reduce_cb(as_index_ref* r_ref, void* udata)
 	rd.bins = as_bin_get_all(r, &rd, stack_bins);
 
 	if (job->si) {
-		SINDEX_GRLOCK();
-		if(as_sindex_isactive(job->si)) {
-			AS_SINDEX_RESERVE(job->si);
-			SINDEX_GUNLOCK();
-			as_sindex_put_rd(job->si, &rd);
-		}
-		else {
-			SINDEX_GUNLOCK();
-		}
+		as_sindex_put_rd(job->si, &rd);
 	}
 	else {
 		as_sindex_putall_rd(ns, &rd);

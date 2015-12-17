@@ -198,11 +198,11 @@ cf_socket_init_svc(cf_socket_cfg *s)
 	struct timespec delay;
 	cf_assert(s, CF_SOCKET, CF_CRITICAL, "invalid argument");
 	if (!s->addr) {
-		cf_info(CF_SOCKET, "Could not initialize service, check config file");
+		cf_warning(CF_SOCKET, "could not initialize service, check config file");
 		return(-1);
 	}
 	if (s->port == 0) {
-		cf_info(CF_SOCKET, "could not initialize service, missing port, check config file");
+		cf_warning(CF_SOCKET, "could not initialize service, missing port, check config file");
 		return(-1);
 	}
 

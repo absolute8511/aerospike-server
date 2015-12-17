@@ -59,13 +59,13 @@ typedef struct as_rec_props_s {
 // Public API
 //
 
-void as_rec_props_clear(as_rec_props *this);
-int as_rec_props_get_value(const as_rec_props *this,
+void as_rec_props_clear(as_rec_props *_this);
+int as_rec_props_get_value(const as_rec_props *_this,
 		as_rec_props_field_id id, uint32_t *p_value_size, uint8_t **pp_value);
 uint32_t as_rec_props_sizeof_field(uint32_t value_size);
-void as_rec_props_init(as_rec_props *this, uint8_t *p_data);
-void as_rec_props_init_malloc(as_rec_props *this, uint32_t malloc_size);
-void as_rec_props_add_field(as_rec_props *this,
+void as_rec_props_init(as_rec_props *_this, uint8_t *p_data);
+void as_rec_props_init_malloc(as_rec_props *_this, uint32_t malloc_size);
+void as_rec_props_add_field(as_rec_props *_this,
 		as_rec_props_field_id id, uint32_t value_size, const uint8_t *p_value);
-void as_rec_props_add_field_null_terminate(as_rec_props *this,
+void as_rec_props_add_field_null_terminate(as_rec_props *_this,
 		as_rec_props_field_id id, uint32_t value_size, const uint8_t *p_value);

@@ -182,8 +182,8 @@ int match_partial_index(int tmatch, cf_ll *indl)
 
 int match_partial_index_name(char *iname)
 {
-	char tmp_name[TBLD_HASH_KEY_SIZE];
-	memset(tmp_name, 0, TBLD_HASH_KEY_SIZE);
+	char tmp_name[INDD_HASH_KEY_SIZE];
+	memset(tmp_name, 0, INDD_HASH_KEY_SIZE);
 	memcpy(tmp_name, iname, strlen(iname));
 
 	long val = -1;

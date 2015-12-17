@@ -62,6 +62,14 @@
 #include "fabric/migrate.h"
 
 
+//==============================================================================
+// Constants.
+//
+
+const char IPV4_ANY_ADDR[] = "0.0.0.0";
+const char IPV4_LOCALHOST_ADDR[] = "127.0.0.1";
+
+
 //==========================================================
 // Globals.
 //
@@ -82,6 +90,7 @@ void cfg_init_si_var(as_namespace* ns);
 uint32_t cfg_obj_size_hist_max(uint32_t hist_max);
 void cfg_create_all_histograms();
 int cfg_reset_self_node(as_config* config_p);
+char* cfg_set_addr(const char* name);
 void cfg_use_hardware_values(as_config* c);
 
 
@@ -159,6 +168,8 @@ cfg_set_defaults()
 
 	// Network service defaults.
 	c->socket.proto = SOCK_STREAM; // not configurable, but addr and port are
+	c->localhost_socket.proto = SOCK_STREAM; // not configurable
+	c->socket.addr = (char*)IPV4_ANY_ADDR; // by default listen on any IPv4 address
 	c->socket_reuse_addr = true;
 
 	// Fabric TCP socket keepalive defaults.
@@ -281,6 +292,7 @@ typedef enum {
 	CASE_SERVICE_HIST_TRACK_THRESHOLDS,
 	CASE_SERVICE_INFO_THREADS,
 	CASE_SERVICE_LDT_BENCHMARKS,
+	CASE_SERVICE_LOG_LOCAL_TIME,
 	CASE_SERVICE_MICROBENCHMARKS,
 	CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING,
 	CASE_SERVICE_MIGRATE_READ_PRIORITY,
@@ -302,7 +314,7 @@ typedef enum {
 	CASE_SERVICE_PROTO_FD_IDLE_MS,
 	CASE_SERVICE_QUERY_BATCH_SIZE,
 	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD,
-	CASE_SERVICE_QUERY_PRE_RESERVE_QNODES,
+	CASE_SERVICE_QUERY_PRE_RESERVE_PARTITIONS,
 	CASE_SERVICE_QUERY_PRIORITY,
 	CASE_SERVICE_QUERY_PRIORITY_SLEEP_US,
 	CASE_SERVICE_QUERY_THRESHOLD,
@@ -367,6 +379,7 @@ typedef enum {
 	// Service paxos recovery policy options (value tokens):
 	CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_ALL,
 	CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_MASTER,
+	CASE_SERVICE_PAXOS_RECOVERY_AUTO_RESET_MASTER,
 	CASE_SERVICE_PAXOS_RECOVERY_MANUAL,
 
 	// Logging options:
@@ -401,6 +414,7 @@ typedef enum {
 	// Normally hidden:
 	CASE_NETWORK_SERVICE_EXTERNAL_ADDRESS, // renamed
 	CASE_NETWORK_SERVICE_ACCESS_ADDRESS,
+	CASE_NETWORK_SERVICE_ALTERNATE_ADDRESS,
 	CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME,
 	CASE_NETWORK_SERVICE_REUSE_ADDRESS,
 
@@ -477,6 +491,7 @@ typedef enum {
 	CASE_NAMESPACE_SET_BEGIN,
 	CASE_NAMESPACE_SI_BEGIN,
 	CASE_NAMESPACE_SINDEX_BEGIN,
+	CASE_NAMESPACE_GEO2DSPHERE_WITHIN_BEGIN,
 	CASE_NAMESPACE_SINGLE_BIN,
 	CASE_NAMESPACE_STOP_WRITES_PCT,
 	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE,
@@ -550,6 +565,7 @@ typedef enum {
 	// Namespace set options:
 	CASE_NAMESPACE_SET_DISABLE_EVICTION,
 	CASE_NAMESPACE_SET_ENABLE_XDR,
+	CASE_NAMESPACE_SET_STOP_WRITES_COUNT,
 	// Deprecated:
 	CASE_NAMESPACE_SET_EVICT_HWM_COUNT,
 	CASE_NAMESPACE_SET_EVICT_HWM_PCT,
@@ -565,13 +581,20 @@ typedef enum {
 	CASE_NAMESPACE_SI_GC_PERIOD,
 	CASE_NAMESPACE_SI_GC_MAX_UNITS,
 	CASE_NAMESPACE_SI_DATA_MAX_MEMORY,
-	CASE_NAMESPACE_SI_TRACING,
 	CASE_NAMESPACE_SI_HISTOGRAM,
 	CASE_NAMESPACE_SI_IGNORE_NOT_SYNC,
 
 	// Namespace sindex options:
 	CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY,
 	CASE_NAMESPACE_SINDEX_NUM_PARTITIONS,
+
+    // Namespace geo2dsphere within options:
+    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_STRICT,
+    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MIN_LEVEL,
+    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_LEVEL,
+    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_CELLS,
+    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_LEVEL_MOD,
+    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_EARTH_RADIUS_METERS,
 
 	// Mod-lua options:
 	CASE_MOD_LUA_CACHE_ENABLED,
@@ -664,6 +687,7 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "hist-track-thresholds",			CASE_SERVICE_HIST_TRACK_THRESHOLDS },
 		{ "info-threads",					CASE_SERVICE_INFO_THREADS },
 		{ "ldt-benchmarks",					CASE_SERVICE_LDT_BENCHMARKS },
+		{ "log-local-time",					CASE_SERVICE_LOG_LOCAL_TIME },
 		{ "microbenchmarks",				CASE_SERVICE_MICROBENCHMARKS },
 		{ "migrate-max-num-incoming",		CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING },
 		{ "migrate-read-priority",			CASE_SERVICE_MIGRATE_READ_PRIORITY },
@@ -685,7 +709,7 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "proto-fd-idle-ms",				CASE_SERVICE_PROTO_FD_IDLE_MS },
 		{ "query-batch-size",				CASE_SERVICE_QUERY_BATCH_SIZE },
 		{ "query-in-transaction-thread",	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD },
-		{ "query-pre-reserve-qnodes", 		CASE_SERVICE_QUERY_PRE_RESERVE_QNODES },
+		{ "query-pre-reserve-partitions",   CASE_SERVICE_QUERY_PRE_RESERVE_PARTITIONS },
 		{ "query-priority", 				CASE_SERVICE_QUERY_PRIORITY },
 		{ "query-priority-sleep-us", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_US },
 		{ "query-threshold", 				CASE_SERVICE_QUERY_THRESHOLD },
@@ -751,6 +775,7 @@ const cfg_opt SERVICE_PAXOS_PROTOCOL_OPTS[] = {
 const cfg_opt SERVICE_PAXOS_RECOVERY_OPTS[] = {
 		{ "auto-dun-all",					CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_ALL },
 		{ "auto-dun-master",				CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_MASTER },
+		{ "auto-reset-master",				CASE_SERVICE_PAXOS_RECOVERY_AUTO_RESET_MASTER },
 		{ "manual",							CASE_SERVICE_PAXOS_RECOVERY_MANUAL }
 };
 
@@ -785,6 +810,7 @@ const cfg_opt NETWORK_SERVICE_OPTS[] = {
 		{ "port",							CASE_NETWORK_SERVICE_PORT },
 		{ "external-address",				CASE_NETWORK_SERVICE_EXTERNAL_ADDRESS },
 		{ "access-address",					CASE_NETWORK_SERVICE_ACCESS_ADDRESS },
+		{ "alternate-address",				CASE_NETWORK_SERVICE_ALTERNATE_ADDRESS },
 		{ "network-interface-name",			CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME },
 		{ "reuse-address",					CASE_NETWORK_SERVICE_REUSE_ADDRESS },
 		{ "}",								CASE_CONTEXT_END }
@@ -862,6 +888,7 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "set",							CASE_NAMESPACE_SET_BEGIN },
 		{ "si",								CASE_NAMESPACE_SI_BEGIN },
 		{ "sindex",							CASE_NAMESPACE_SINDEX_BEGIN },
+		{ "geo2dsphere-within",				CASE_NAMESPACE_GEO2DSPHERE_WITHIN_BEGIN },
 		{ "single-bin",						CASE_NAMESPACE_SINGLE_BIN },
 		{ "stop-writes-pct",				CASE_NAMESPACE_STOP_WRITES_PCT },
 		{ "write-commit-level-override",	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE },
@@ -941,6 +968,7 @@ const cfg_opt NAMESPACE_STORAGE_KV_OPTS[] = {
 const cfg_opt NAMESPACE_SET_OPTS[] = {
 		{ "set-disable-eviction",			CASE_NAMESPACE_SET_DISABLE_EVICTION },
 		{ "set-enable-xdr",					CASE_NAMESPACE_SET_ENABLE_XDR },
+		{ "set-stop-writes-count",			CASE_NAMESPACE_SET_STOP_WRITES_COUNT },
 		{ "set-evict-hwm-count",			CASE_NAMESPACE_SET_EVICT_HWM_COUNT },
 		{ "set-evict-hwm-pct",				CASE_NAMESPACE_SET_EVICT_HWM_PCT },
 		{ "set-stop-write-count",			CASE_NAMESPACE_SET_STOP_WRITE_COUNT },
@@ -958,7 +986,6 @@ const cfg_opt NAMESPACE_SI_OPTS[] = {
 		{ "si-gc-period",					CASE_NAMESPACE_SI_GC_PERIOD },
 		{ "si-gc-max-units",				CASE_NAMESPACE_SI_GC_MAX_UNITS },
 		{ "si-data-max-memory",				CASE_NAMESPACE_SI_DATA_MAX_MEMORY },
-		{ "si-tracing",						CASE_NAMESPACE_SI_TRACING},
 		{ "si-histogram",					CASE_NAMESPACE_SI_HISTOGRAM },
 		{ "si-ignore-not-sync",				CASE_NAMESPACE_SI_IGNORE_NOT_SYNC },
 		{ "}",								CASE_CONTEXT_END }
@@ -967,6 +994,16 @@ const cfg_opt NAMESPACE_SI_OPTS[] = {
 const cfg_opt NAMESPACE_SINDEX_OPTS[] = {
 		{ "data-max-memory",				CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY },
 		{ "num-partitions",					CASE_NAMESPACE_SINDEX_NUM_PARTITIONS },
+		{ "}",								CASE_CONTEXT_END }
+};
+
+const cfg_opt NAMESPACE_GEO2DSPHERE_WITHIN_OPTS[] = {
+		{ "strict",							CASE_NAMESPACE_GEO2DSPHERE_WITHIN_STRICT },
+		{ "min-level",						CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MIN_LEVEL },
+		{ "max-level",						CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_LEVEL },
+		{ "max-cells",						CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_CELLS },
+		{ "level-mod",						CASE_NAMESPACE_GEO2DSPHERE_WITHIN_LEVEL_MOD },
+		{ "earth-radius-meters",			CASE_NAMESPACE_GEO2DSPHERE_WITHIN_EARTH_RADIUS_METERS },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -1043,6 +1080,7 @@ const int NUM_NAMESPACE_SET_OPTS					= sizeof(NAMESPACE_SET_OPTS) / sizeof(cfg_o
 const int NUM_NAMESPACE_SET_ENABLE_XDR_OPTS			= sizeof(NAMESPACE_SET_ENABLE_XDR_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_SI_OPTS						= sizeof(NAMESPACE_SI_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_SINDEX_OPTS					= sizeof(NAMESPACE_SINDEX_OPTS) / sizeof(cfg_opt);
+const int NUM_NAMESPACE_GEO2DSPHERE_WITHIN_OPTS		= sizeof(NAMESPACE_GEO2DSPHERE_WITHIN_OPTS) / sizeof(cfg_opt);
 const int NUM_MOD_LUA_OPTS							= sizeof(MOD_LUA_OPTS) / sizeof(cfg_opt);
 const int NUM_CLUSTER_OPTS							= sizeof(CLUSTER_OPTS) / sizeof(cfg_opt);
 const int NUM_CLUSTER_GROUP_OPTS					= sizeof(CLUSTER_GROUP_OPTS) / sizeof(cfg_opt);
@@ -1087,7 +1125,7 @@ typedef enum {
 	SERVICE,
 	LOGGING, LOGGING_FILE, LOGGING_CONSOLE,
 	NETWORK, NETWORK_SERVICE, NETWORK_HEARTBEAT, NETWORK_FABRIC, NETWORK_INFO,
-	NAMESPACE, NAMESPACE_STORAGE_DEVICE, NAMESPACE_STORAGE_KV, NAMESPACE_SET, NAMESPACE_SI, NAMESPACE_SINDEX,
+	NAMESPACE, NAMESPACE_STORAGE_DEVICE, NAMESPACE_STORAGE_KV, NAMESPACE_SET, NAMESPACE_SI, NAMESPACE_SINDEX, NAMESPACE_GEO2DSPHERE_WITHIN,
 	XDR, XDR_DATACENTER,
 	MOD_LUA,
 	CLUSTER, CLUSTER_GROUP,
@@ -1102,7 +1140,7 @@ const char* CFG_PARSER_STATES[] = {
 		"SERVICE",
 		"LOGGING", "LOGGING_FILE", "LOGGING_CONSOLE",
 		"NETWORK", "NETWORK_SERVICE", "NETWORK_HEARTBEAT", "NETWORK_FABRIC", "NETWORK_INFO",
-		"NAMESPACE", "NAMESPACE_STORAGE_DEVICE", "NAMESPACE_STORAGE_KV", "NAMESPACE_SET", "NAMESPACE_SI", "NAMESPACE_SINDEX",
+		"NAMESPACE", "NAMESPACE_STORAGE_DEVICE", "NAMESPACE_STORAGE_KV", "NAMESPACE_SET", "NAMESPACE_SI", "NAMESPACE_SINDEX", "NAMESPACE_GEO2DSPHERE_WITHIN",
 		"XDR", "XDR_DATACENTER",
 		"MOD_LUA",
 		"CLUSTER", "CLUSTER_GROUP",
@@ -1909,6 +1947,9 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_LDT_BENCHMARKS:
 				c->ldt_benchmarks = cfg_bool(&line);
 				break;
+			case CASE_SERVICE_LOG_LOCAL_TIME:
+				cf_fault_use_local_time(cfg_bool(&line));
+				break;
 			case CASE_SERVICE_MICROBENCHMARKS:
 				c->microbenchmarks = cfg_bool(&line);
 				break;
@@ -1982,6 +2023,9 @@ as_config_init(const char *config_file)
 				case CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_MASTER:
 					c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_AUTO_DUN_MASTER;
 					break;
+				case CASE_SERVICE_PAXOS_RECOVERY_AUTO_RESET_MASTER:
+					c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_AUTO_RESET_MASTER;
+					break;
 				case CASE_SERVICE_PAXOS_RECOVERY_MANUAL:
 					c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_MANUAL;
 					break;
@@ -2003,8 +2047,8 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD:
 				c->query_in_transaction_thr = cfg_bool(&line);
 				break;
-			case CASE_SERVICE_QUERY_PRE_RESERVE_QNODES:
-				c->qnodes_pre_reserved = cfg_bool(&line);
+			case CASE_SERVICE_QUERY_PRE_RESERVE_PARTITIONS:
+				c->partitions_pre_reserved = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_QUERY_PRIORITY:
 				c->query_priority = cfg_int_no_checks(&line);
@@ -2258,11 +2302,11 @@ as_config_init(const char *config_file)
 		case NETWORK_SERVICE:
 			switch(cfg_find_tok(line.name_tok, NETWORK_SERVICE_OPTS, NUM_NETWORK_SERVICE_OPTS)) {
 			case CASE_NETWORK_SERVICE_ADDRESS:
-				// TODO - is the strdup necessary (addr ever freed)?
-				c->socket.addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup_no_checks(&line);
+				c->socket.addr = cfg_set_addr(line.val_tok_1);
 				break;
 			case CASE_NETWORK_SERVICE_PORT:
 				c->socket.port = cfg_port(&line);
+				c->localhost_socket.port = cfg_port(&line);
 				break;
 			case CASE_NETWORK_SERVICE_EXTERNAL_ADDRESS:
 				cfg_renamed_name_tok(&line, "access-address");
@@ -2270,6 +2314,9 @@ as_config_init(const char *config_file)
 			case CASE_NETWORK_SERVICE_ACCESS_ADDRESS:
 				c->external_address = cfg_strdup_no_checks(&line);
 				c->is_external_address_virtual = strcmp(line.val_tok_2, "virtual") == 0;
+				break;
+			case CASE_NETWORK_SERVICE_ALTERNATE_ADDRESS:
+				c->alternate_address = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME:
 				c->network_interface_name = cfg_strdup_no_checks(&line);
@@ -2307,7 +2354,7 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case CASE_NETWORK_HEARTBEAT_ADDRESS:
-				c->hb_addr = strcmp(line.val_tok_1, "any") == 0 ? cf_strdup("0.0.0.0") : cfg_strdup_no_checks(&line);
+				c->hb_addr = cfg_set_addr(line.val_tok_1);
 				break;
 			case CASE_NETWORK_HEARTBEAT_PORT:
 				c->hb_port = cfg_int_no_checks(&line);
@@ -2578,6 +2625,9 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_SINDEX_BEGIN:
 				cfg_begin_context(&state, NAMESPACE_SINDEX);
 				break;
+			case CASE_NAMESPACE_GEO2DSPHERE_WITHIN_BEGIN:
+				cfg_begin_context(&state, NAMESPACE_GEO2DSPHERE_WITHIN);
+				break;
 			case CASE_NAMESPACE_SINGLE_BIN:
 				ns->single_bin = cfg_bool(&line);
 				break;
@@ -2779,6 +2829,9 @@ as_config_init(const char *config_file)
 					break;
 				}
 				break;
+			case CASE_NAMESPACE_SET_STOP_WRITES_COUNT:
+				p_set->stop_writes_count = cfg_u64_no_checks(&line);
+				break;
 			case CASE_NAMESPACE_SET_EVICT_HWM_COUNT:
 			case CASE_NAMESPACE_SET_EVICT_HWM_PCT:
 			case CASE_NAMESPACE_SET_STOP_WRITE_COUNT:
@@ -2808,9 +2861,6 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_SI_DATA_MAX_MEMORY:
 				si_cfg.data_max_memory = cfg_u64_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_SI_TRACING:
-				si_cfg.trace_flag = cfg_u16_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_SI_HISTOGRAM:
 				si_cfg.enable_histogram = cfg_bool(&line);
@@ -2850,6 +2900,39 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_SINDEX_NUM_PARTITIONS:
 				// FIXME - minimum should be 1, but currently crashes.
 				ns->sindex_num_partitions = cfg_u32(&line, MIN_PARTITIONS_PER_INDEX, MAX_PARTITIONS_PER_INDEX);
+				break;
+			case CASE_CONTEXT_END:
+				cfg_end_context(&state);
+				break;
+			case CASE_NOT_FOUND:
+			default:
+				cfg_unknown_name_tok(&line);
+				break;
+			}
+			break;
+
+		//----------------------------------------
+		// Parse namespace::2dsphere-within context items.
+		//
+		case NAMESPACE_GEO2DSPHERE_WITHIN:
+			switch(cfg_find_tok(line.name_tok, NAMESPACE_GEO2DSPHERE_WITHIN_OPTS, NUM_NAMESPACE_GEO2DSPHERE_WITHIN_OPTS)) {
+			case CASE_NAMESPACE_GEO2DSPHERE_WITHIN_STRICT:
+				ns->geo2dsphere_within_strict = cfg_bool(&line);
+				break;
+			case CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MIN_LEVEL:
+				ns->geo2dsphere_within_min_level = cfg_u16(&line, 0, 30);
+				break;
+			case CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_LEVEL:
+				ns->geo2dsphere_within_max_level = cfg_u16(&line, 0, 30);
+				break;
+			case CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_CELLS:
+				ns->geo2dsphere_within_max_cells = cfg_u16(&line, 1, MAX_REGION_CELLS);
+				break;
+			case CASE_NAMESPACE_GEO2DSPHERE_WITHIN_LEVEL_MOD:
+				ns->geo2dsphere_within_level_mod = cfg_u16(&line, 1, 3);
+				break;
+			case CASE_NAMESPACE_GEO2DSPHERE_WITHIN_EARTH_RADIUS_METERS:
+				ns->geo2dsphere_within_earth_radius_meters = cfg_u32_no_checks(&line);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);
@@ -3234,7 +3317,7 @@ as_config_post_process(as_config *c, const char *config_file)
 	cf_info(AS_CFG, "Node id %"PRIx64, c->self_node);
 
 	// Handle specific service address (as opposed to 'any') if configured.
-	if (strcmp(g_config.socket.addr, "0.0.0.0") != 0) {
+	if (g_config.socket.addr != IPV4_ANY_ADDR) {
 		if (g_config.external_address) {
 			if (strcmp(g_config.external_address, g_config.socket.addr) != 0) {
 				cf_crash_nostack(AS_CFG, "external address '%s' does not match service address '%s'",
@@ -3244,6 +3327,12 @@ as_config_post_process(as_config *c, const char *config_file)
 		else {
 			// Set external address to avoid updating service list continuously.
 			g_config.external_address = g_config.socket.addr;
+		}
+
+		// Set the localhost socket address only if the main service socket is
+		// not already (effectively) listening on that address.
+		if (g_config.socket.addr != IPV4_LOCALHOST_ADDR) {
+			g_config.localhost_socket.addr = (char*)IPV4_LOCALHOST_ADDR;
 		}
 	}
 
@@ -3517,6 +3606,31 @@ cfg_reset_self_node(as_config * config_p) {
 
 	return 0;
 } // end cfg_reset_self_node()
+
+/**
+ * cfg_set_addr
+ * Normalize a name for an IP address into a specific IP address string.
+ * Returns a constant string pointer for certain well-known addresses.
+ */
+char*
+cfg_set_addr(const char* name)
+{
+	char* retval = NULL;
+
+	if (strcmp(name, "any") == 0 || strcmp(name, IPV4_ANY_ADDR) == 0) {
+		return (char*)IPV4_ANY_ADDR;
+	}
+	else if (strcmp(name, IPV4_LOCALHOST_ADDR) == 0) {
+		return (char*)IPV4_LOCALHOST_ADDR;
+	}
+	else {
+		if (NULL == (retval = cf_strdup(name))) {
+			cf_crash_nostack(AS_CFG, "failed alloc for %s", name);
+		}
+	}
+
+	return retval;
+}
 
 /**
  * cfg_use_hardware_values

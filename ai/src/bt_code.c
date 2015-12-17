@@ -191,7 +191,7 @@ static void bt_free_btree(bt *btr) { cf_free(btr); }
 bt *bt_create(bt_cmp_t cmp, uchar trans, bts_t *s, char dirty) {
 	int n = BTREE_LONG_TYPE_DEGREE;
 
-	if (C_IS_L(s->ktype)) {
+	if (C_IS_L(s->ktype) || C_IS_G(s->ktype)) {
 		n = BTREE_LONG_TYPE_DEGREE;
 	}
 	else if (C_IS_Y(s->ktype)) {

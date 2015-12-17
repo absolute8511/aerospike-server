@@ -161,7 +161,15 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->sindex_data_max_memory = ULONG_MAX;
 	ns->sindex_data_memory_used = 0;
 	ns->sindex_cfg_var_hash = NULL;
-	ns->sindex_num_partitions = 32;
+	ns->sindex_num_partitions = DEFAULT_PARTITIONS_PER_INDEX;
+
+    // Geospatial query within defaults
+    ns->geo2dsphere_within_strict = true;
+    ns->geo2dsphere_within_min_level = 1;
+    ns->geo2dsphere_within_max_level = 30;
+    ns->geo2dsphere_within_max_cells = 12;
+    ns->geo2dsphere_within_level_mod = 1;
+    ns->geo2dsphere_within_earth_radius_meters = 6371000;  // Wikipedia, mean
 
 	//
 	// END - Configuration defaults.
@@ -261,6 +269,7 @@ as_namespace_configure_sets(as_namespace *ns)
 			}
 
 			// Rewrite configurable metadata - config values may have changed.
+			p_set->stop_writes_count = ns->sets_cfg_array[i].stop_writes_count;
 			p_set->disable_eviction = ns->sets_cfg_array[i].disable_eviction;
 			p_set->enable_xdr = ns->sets_cfg_array[i].enable_xdr;
 		}
@@ -442,7 +451,7 @@ as_namespace_eval_write_state(as_namespace *ns, bool *hwm_breached, bool *stop_w
 	}
 
 	if (*hwm_breached || *stop_writes) {
-		cf_info(AS_NAMESPACE, "{%s} hwm_breached %s%s, stop_writes %s%s, memory sz:%"PRIu64" (%"PRIu64" + %"PRIu64") hwm:%"PRIu64" sw:%"PRIu64", disk sz:%"PRIu64" hwm:%"PRIu64,
+		cf_warning(AS_NAMESPACE, "{%s} hwm_breached %s%s, stop_writes %s%s, memory sz:%"PRIu64" (%"PRIu64" + %"PRIu64") hwm:%"PRIu64" sw:%"PRIu64", disk sz:%"PRIu64" hwm:%"PRIu64,
 				ns->name, *hwm_breached ? "true" : "false", reasons[how_breached], *stop_writes ? "true" : "false", reasons[why_stopped],
 				memory_sz, index_sz, data_in_memory_sz, mem_hwm, mem_stop_writes,
 				disk_sz, ssd_hwm);
@@ -550,7 +559,7 @@ uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name)
 	return INVALID_SET_ID;
 }
 
-int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool fail_if_deleted)
+int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool apply_restrictions)
 {
 	if (! set_name) {
 		// Should be impossible.
@@ -612,8 +621,8 @@ int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t
 			return -1;
 		}
 
-		// If requested, fail if emptying set.
-		if (fail_if_deleted && IS_SET_DELETED(p_set)) {
+		// If requested, fail if emptying set or stop-writes limit is breached.
+		if (apply_restrictions && (IS_SET_DELETED(p_set) || as_set_stop_writes(p_set))) {
 			return -2;
 		}
 
@@ -685,6 +694,9 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 	cf_dyn_buf_append_char(db, ':');
 	cf_dyn_buf_append_string(db, "n-bytes-memory=");
 	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->n_bytes_memory));
+	cf_dyn_buf_append_char(db, ':');
+	cf_dyn_buf_append_string(db, "stop-writes-count=");
+	cf_dyn_buf_append_uint64(db, cf_atomic64_get(p_set->stop_writes_count));
 	cf_dyn_buf_append_char(db, ':');
 	cf_dyn_buf_append_string(db, "set-enable-xdr=");
 	if (cf_atomic32_get(p_set->enable_xdr) == AS_SET_ENABLE_XDR_TRUE) {
