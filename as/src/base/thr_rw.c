@@ -3975,7 +3975,11 @@ write_local_bin_ops_loop(as_transaction *tr, as_storage_rd *rd,
 					return -result;
 				}
 
-				append_bin_to_destroy(&cleanup_bin, cleanup_bins, p_n_cleanup_bins);
+				// Account for noop CDT operations. Modifying non-mutable
+				// particle contents in-place is still disallowed.
+				if (cleanup_bin.particle != b->particle) {
+					append_bin_to_destroy(&cleanup_bin, cleanup_bins, p_n_cleanup_bins);
+				}
 			}
 			else {
 				if ((result = as_bin_cdt_stack_modify_from_client(b, particles_llb, op, &result_bin)) < 0) {

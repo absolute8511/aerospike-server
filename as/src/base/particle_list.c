@@ -191,26 +191,28 @@ static const list_wrapper list_wrapper_empty = {
 //
 
 static inline bool is_list_type(uint8_t type);
-static inline int32_t calc_index(int32_t index, int ele_count);
+static inline int64_t calc_index(int64_t index, int max_index);
+static inline uint64_t calc_count(uint64_t index, uint64_t input_count, int max_index);
 
 // as_bin
 static inline void as_bin_set_empty_packed_list(as_bin *b, rollback_alloc *alloc_buf);
 static inline as_packed_list_index *as_bin_get_packed_list_index(const as_bin *b);
-static void as_bin_create_temp_packed_list_if_notinuse(as_bin *b);
+static inline void as_bin_create_temp_packed_list_if_notinuse(as_bin *b);
+static inline bool as_bin_is_temp_packed_list(const as_bin *b);
 
 // as_packed_list
-static int as_packed_list_get_new_element_count(as_packed_list * pl);
-static int as_packed_list_header_element_count(as_packed_list * pl);
-static void as_packed_list_init(as_packed_list * pl, const uint8_t * buf, uint32_t size);
+static int32_t as_packed_list_get_new_element_count(as_packed_list *pl);
+static int32_t as_packed_list_header_element_count(as_packed_list *pl);
+static void as_packed_list_init(as_packed_list *pl, const uint8_t *buf, uint32_t size);
 static void as_packed_list_init_from_bin(as_packed_list *pl, const as_bin *b);
-static int as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32_t insert_size, as_packed_list_index *pli);
-static int as_packed_list_remove(as_packed_list *pl, uint32_t index, uint32_t count, as_packed_list_index *pli);
-static int as_packed_list_write_hdrseg1(as_packed_list *pl, uint8_t *buf);
-static int as_packed_list_write_header(uint8_t *buf, uint32_t ele_count);
-static int as_packed_list_write_header_new(as_packed_list *pl, uint8_t *buf);
-static int as_packed_list_write_header_old(as_packed_list *pl, uint8_t *buf);
-static int as_packed_list_write_seg1(as_packed_list *pl, uint8_t *buf);
-static int as_packed_list_write_seg2(as_packed_list *pl, uint8_t *buf);
+static int32_t as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32_t insert_size, as_packed_list_index *pli);
+static int32_t as_packed_list_remove(as_packed_list *pl, uint32_t index, uint32_t count, as_packed_list_index *pli);
+static int32_t as_packed_list_write_hdrseg1(as_packed_list *pl, uint8_t *buf);
+static int32_t as_packed_list_write_header(uint8_t *buf, uint32_t ele_count);
+static int32_t as_packed_list_write_header_new(as_packed_list *pl, uint8_t *buf);
+static int32_t as_packed_list_write_header_old(as_packed_list *pl, uint8_t *buf);
+static uint32_t as_packed_list_write_seg1(as_packed_list *pl, uint8_t *buf);
+static uint32_t as_packed_list_write_seg2(as_packed_list *pl, uint8_t *buf);
 
 // as_packed_list_index
 static void as_packed_list_index_cpy(as_packed_list_index *dst, as_packed_list_index *src);
@@ -234,11 +236,11 @@ static inline as_particle *packed_list_simple_create_empty(rollback_alloc *alloc
 static inline as_particle *packed_list_simple_create_nil(rollback_alloc *alloc_buf);
 
 // packed_list ops
-static int packed_list_append(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, uint32_t count, as_bin *result);
-static int packed_list_insert(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, int32_t index, uint32_t count, as_bin *result);
-static int packed_list_remove(as_bin *b, rollback_alloc *alloc_buf, int32_t index, uint32_t count, as_bin *result, bool result_is_count, bool result_is_list, rollback_alloc *alloc_result);
-static int packed_list_set(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, int32_t index);
-static int packed_list_trim(as_bin *b, rollback_alloc *alloc_buf, int32_t index, uint32_t count, as_bin *result);
+static int packed_list_append(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, bool payload_is_container, as_bin *result);
+static int packed_list_insert(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, bool payload_is_container, int64_t index, as_bin *result);
+static int packed_list_remove(as_bin *b, rollback_alloc *alloc_buf, int64_t index, uint64_t count, as_bin *result, bool result_is_count, bool result_is_list, rollback_alloc *alloc_result);
+static int packed_list_set(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, int64_t index);
+static int packed_list_trim(as_bin *b, rollback_alloc *alloc_buf, int64_t index, uint64_t count, as_bin *result);
 static uint8_t *packed_list_setup_bin(as_bin *b, rollback_alloc *alloc_buf, uint32_t new_size, uint32_t index, uint32_t new_ele_count, as_packed_list_index *pli);
 
 // Debugging support
@@ -609,10 +611,27 @@ is_list_type(uint8_t type)
 	return type == AS_PARTICLE_TYPE_LIST;
 }
 
-static inline int32_t
-calc_index(int32_t index, int ele_count)
+// Calculate index given index and max_index.
+static inline int64_t
+calc_index(int64_t index, int max_index)
 {
-	return index < 0 ? (int32_t)ele_count + index : index;
+	return index < 0 ? (int64_t)max_index + index : index;
+}
+
+// Calculate count given index and max_index.
+// input_count == 0 implies until end of list.
+// Assumes index < ele_count.
+static inline uint64_t
+calc_count(uint64_t index, uint64_t input_count, int max_index)
+{
+	uint64_t max = (uint64_t)max_index;
+
+	// Since we assume index < ele_count, max - index will never overflow.
+	if (input_count == 0 || input_count >= max - index) {
+		return max - index;
+	}
+
+	return input_count;
 }
 
 //------------------------------------------------
@@ -641,7 +660,7 @@ as_bin_get_packed_list_index(const as_bin *b)
 	return NULL;
 }
 
-static void
+static inline void
 as_bin_create_temp_packed_list_if_notinuse(as_bin *b)
 {
 	if (! as_bin_inuse(b)) {
@@ -650,18 +669,24 @@ as_bin_create_temp_packed_list_if_notinuse(as_bin *b)
 	}
 }
 
+static inline bool
+as_bin_is_temp_packed_list(const as_bin *b)
+{
+	return b->particle == (const as_particle *)&list_wrapper_empty;
+}
+
 //----------------------------------------------------------
 // as_packed_list
 //
 
-static int
+static int32_t
 as_packed_list_get_new_element_count(as_packed_list *pl)
 {
 	return pl->new_ele_count;
 }
 
 // Return negative int on failure, number of elements in list.
-static int
+static int32_t
 as_packed_list_header_element_count(as_packed_list *pl)
 {
 	if (pl->ele_count >= 0) {
@@ -717,27 +742,27 @@ as_packed_list_init_from_bin(as_packed_list *pl, const as_bin *b)
 
 // Calculate a packed list split via insert op.
 // Return negative int on failure, new size of packed buffer.
-static int
+static int32_t
 as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32_t insert_size, as_packed_list_index *pli)
 {
-	int ele_count = as_packed_list_header_element_count(pl);
+	int32_t ele_count = as_packed_list_header_element_count(pl);
 
 	if (ele_count < 0) {
 		return -1;
 	}
 
 	if (pl->new_ele_count < 0) {
-		pl->header_size = pl->upk.offset;
+		pl->header_size = (uint32_t)pl->upk.offset;
 
 		if (index >= ele_count) {
-			pl->new_ele_count = index + count;
-			pl->nil_ele_size = index - ele_count;
+			pl->new_ele_count = (int)(index + count);
+			pl->nil_ele_size = index - (uint32_t)ele_count;
 
-			pl->seg1_size = pl->upk.length;
+			pl->seg1_size = (uint32_t)pl->upk.length;
 			pl->seg2_size = 0;
 		}
 		else {
-			pl->new_ele_count = ele_count + count;
+			pl->new_ele_count = ele_count + (int)count;
 			pl->nil_ele_size = 0;
 
 			if (! as_unpack_list_elements_find_index(&pl->upk, index, pli)) {
@@ -753,79 +778,81 @@ as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32
 		pl->seg1_size -= pl->header_size;
 	}
 
-	return as_pack_list_header_get_size(pl->new_ele_count)
+	return (int32_t)(as_pack_list_header_get_size(pl->new_ele_count)
 			+ pl->seg1_size
 			+ pl->nil_ele_size
 			+ insert_size
-			+ pl->seg2_size;
+			+ pl->seg2_size);
 }
 
 // Calculate a packed list split via remove op.
 // Return -1 on failure, new size of packed buffer.
-static int
+static int32_t
 as_packed_list_remove(as_packed_list *pl, uint32_t index, uint32_t count, as_packed_list_index *pli)
 {
-	int ele_count = as_packed_list_header_element_count(pl);
+	int32_t ele_count = as_packed_list_header_element_count(pl);
 
 	if (ele_count < 0) {
 		return -1;
 	}
 
 	if (pl->new_ele_count < 0) {
-		pl->header_size = pl->upk.offset;
+		pl->header_size = (uint32_t)pl->upk.offset;
 
 		// Nothing to remove.
-		if (index >= ele_count) {
-			pl->seg1_size = pl->upk.length - pl->header_size;
+		if (index >= (uint32_t)ele_count) {
+			pl->seg1_size = (uint32_t)pl->upk.length - pl->header_size;
 			pl->seg2_size = 0;
 			pl->new_ele_count = ele_count;
 
 			return pl->upk.length;
 		}
 
-		if (index + count >= ele_count) {
-			pl->new_ele_count = index;
+		if (count >= (uint32_t)ele_count - index) {
+			pl->new_ele_count = (int)index;
 
 			if (! as_unpack_list_elements_find_index(&pl->upk, index, pli)) {
 				return -2;
 			}
 
-			pl->seg1_size = pl->upk.offset;
+			pl->seg1_size = (uint32_t)pl->upk.offset;
 			pl->seg2_index = 0;
 			pl->seg2_size = 0;
 		}
 		else {
-			pl->new_ele_count = ele_count - count;
+			pl->new_ele_count = ele_count - (int)count;
 
 			if (! as_unpack_list_elements_find_index(&pl->upk, index, pli)) {
 				return -3;
 			}
 
-			pl->seg1_size = pl->upk.offset;
+			pl->seg1_size = (uint32_t)pl->upk.offset;
 
 			for (uint32_t i = 0; i < count; i++) {
-				as_unpack_size(&pl->upk);
+				if (as_unpack_size(&pl->upk) < 0) {
+					return -4;
+				}
 			}
 
-			pl->seg2_index = pl->upk.offset;
-			pl->seg2_size = pl->upk.length - pl->upk.offset;
+			pl->seg2_index = (uint32_t)pl->upk.offset;
+			pl->seg2_size = (uint32_t)(pl->upk.length - pl->upk.offset);
 		}
 
 		// seg1_size does not include header.
 		pl->seg1_size -= pl->header_size;
 	}
 
-	return as_pack_list_header_get_size(pl->new_ele_count)
+	return (int32_t)(as_pack_list_header_get_size(pl->new_ele_count)
 			+ pl->seg1_size
-			+ pl->seg2_size;
+			+ pl->seg2_size);
 }
 
 // Write header and segment 1 and trailing nils if any.
 // Return -1 on failure, number of bytes written.
-static int
+static int32_t
 as_packed_list_write_hdrseg1(as_packed_list *pl, uint8_t *buf)
 {
-	int header_size = as_packed_list_write_header_new(pl, buf);
+	int32_t header_size = as_packed_list_write_header_new(pl, buf);
 
 	if (header_size < 0) {
 		return -1;
@@ -833,18 +860,12 @@ as_packed_list_write_hdrseg1(as_packed_list *pl, uint8_t *buf)
 
 	buf += header_size;
 
-	int seg1_size = as_packed_list_write_seg1(pl, buf);
-
-	if (seg1_size < 0) {
-		return -1;
-	}
-
-	return header_size + seg1_size;
+	return header_size + (int32_t)as_packed_list_write_seg1(pl, buf);
 }
 
 // Write header with ele_count elements.
 // Return -1 on failure, number of bytes written.
-static int
+static int32_t
 as_packed_list_write_header(uint8_t *buf, uint32_t ele_count)
 {
 	// Just a wrapping of as_pack_list_header().
@@ -865,7 +886,7 @@ as_packed_list_write_header(uint8_t *buf, uint32_t ele_count)
 
 // Write new header.
 // Return -1 on failure, number of bytes written.
-static int
+static int32_t
 as_packed_list_write_header_new(as_packed_list *pl, uint8_t *buf)
 {
 	if (pl->new_ele_count < 0) {
@@ -877,10 +898,10 @@ as_packed_list_write_header_new(as_packed_list *pl, uint8_t *buf)
 
 // Write original header.
 // Return -1 on failure, number of bytes written.
-static int
+static int32_t
 as_packed_list_write_header_old(as_packed_list *pl, uint8_t *buf)
 {
-	int ele_count = as_packed_list_header_element_count(pl);
+	int32_t ele_count = as_packed_list_header_element_count(pl);
 
 	if (ele_count < 0) {
 		return -1;
@@ -890,8 +911,9 @@ as_packed_list_write_header_old(as_packed_list *pl, uint8_t *buf)
 }
 
 // Write segment 1 and trailing nils if any.
-// Return -1 on failure, number of bytes written.
-static int
+// Assumes pl->new_ele_count is valid.
+// Return number of bytes written.
+static uint32_t
 as_packed_list_write_seg1(as_packed_list *pl, uint8_t *buf)
 {
 	memcpy(buf, pl->upk.buffer + pl->header_size, pl->seg1_size);
@@ -908,14 +930,11 @@ as_packed_list_write_seg1(as_packed_list *pl, uint8_t *buf)
 }
 
 // Write segment 2 if any.
+// Assumes pl->new_ele_count is valid.
 // Return -1 on failure, number of bytes written.
-static int
+static uint32_t
 as_packed_list_write_seg2(as_packed_list *pl, uint8_t *buf)
 {
-	if (pl->new_ele_count < 0) {
-		return -1;
-	}
-
 	if (pl->seg2_size == 0) {
 		return 0;
 	}
@@ -1201,77 +1220,86 @@ packed_list_simple_create_nil(rollback_alloc *alloc_buf)
 //
 
 static int
-packed_list_append(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, uint32_t count, as_bin *result)
+packed_list_append(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, bool payload_is_container, as_bin *result)
 {
 	as_packed_list pl;
 	as_packed_list_init_from_bin(&pl, b);
 
-	int ele_count = as_packed_list_header_element_count(&pl);
+	int32_t ele_count = as_packed_list_header_element_count(&pl);
 
 	if (ele_count < 0) {
 		cf_warning(AS_PARTICLE, "packed_list_append() invalid packed list");
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	return packed_list_insert(b, alloc_buf, payload, ele_count, count, result);
+	return packed_list_insert(b, alloc_buf, payload, payload_is_container, (int64_t)ele_count, result);
 }
 
 static int
-packed_list_insert(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, int32_t index, uint32_t count, as_bin *result)
+packed_list_insert(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, bool payload_is_container, int64_t index, as_bin *result)
 {
-	if (count == 0) {
-		return 0;
-	}
+	uint32_t count = 1;
+	uint32_t payload_hdr_sz = 0;
 
-	uint32_t payload_hdr_sz = (count > 1) ? as_pack_list_header_get_size(count) : 0;
+	if (payload_is_container) {
+		int payload_ele_count = as_unpack_buf_list_element_count(payload->ptr, payload->size);
+
+		if (payload_ele_count < 0) {
+			cf_warning(AS_PARTICLE, "packed_list_insert() invalid payload, expected a list");
+			return -AS_PROTO_RESULT_FAIL_PARAMETER;
+		}
+
+		if (payload_ele_count == 0) {
+			return AS_PROTO_RESULT_OK;
+		}
+
+		count = (uint32_t)payload_ele_count;
+		payload_hdr_sz = as_pack_list_header_get_size(payload_ele_count);
+	}
 
 	as_packed_list pl;
 	as_packed_list_init_from_bin(&pl, b);
 
-	int ele_count = as_packed_list_header_element_count(&pl);
+	int32_t ele_count = as_packed_list_header_element_count(&pl);
 
 	if (ele_count < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_insert() as_packed_list_insert failed, invalid list");
+		cf_warning(AS_PARTICLE, "packed_list_insert() invalid list");
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	if ((index = calc_index(index, ele_count)) < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_insert() index %d(%d) out of bounds", index - ele_count, index);
+	if (index > UINT32_MAX || (index = calc_index(index, ele_count)) < 0) {
+		cf_warning(AS_PARTICLE, "packed_list_insert() index %ld out of bounds for ele_count %d", index > 0 ? index : index - ele_count, ele_count);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	uint32_t uindex = (uint32_t)index;
 
 	as_packed_list_index *pli = as_bin_get_packed_list_index(b);
-	int new_size = as_packed_list_insert(&pl, uindex, count, payload->size - payload_hdr_sz, pli);
+	int32_t new_size = as_packed_list_insert(&pl, uindex, count, payload->size - payload_hdr_sz, pli);
 
 	if (new_size < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_insert() as_packed_list_insert failed, invalid list: ret=%d, cap=%d", new_size, pli->cap);
+		cf_warning(AS_PARTICLE, "packed_list_insert() as_packed_list_insert failed with ret=%d, index.cap=%u", new_size, pli->cap);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	int new_ele_count = as_packed_list_get_new_element_count(&pl);
-	uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, new_size, new_ele_count, uindex, pli);
+	int32_t new_ele_count = as_packed_list_get_new_element_count(&pl);
+	uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, (uint32_t)new_size, (uint32_t)new_ele_count, uindex, pli);
 
 	if (! ptr) {
 		cf_warning(AS_PARTICLE, "packed_list_insert() failed to alloc list particle");
 		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
-	int ret = as_packed_list_write_hdrseg1(&pl, ptr);
+	int32_t ret = as_packed_list_write_hdrseg1(&pl, ptr);
 
 	if (ret < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_insert() hdr+seg1 invalid list: ret=%d", ret);
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+		cf_warning(AS_PARTICLE, "packed_list_insert() write hdr+seg1 failed with ret=%d", ret);
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	ptr += ret;
 
-	if (! payload->ptr) {
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
-	}
-
-	if (count > 1) {
+	if (payload_is_container) {
 		if (payload_hdr_sz > payload->size) {
 			cf_warning(AS_PARTICLE, "packed_list_insert() invalid list header: payload->size=%d", payload->size);
 			return -AS_PROTO_RESULT_FAIL_PARAMETER;
@@ -1288,57 +1316,43 @@ packed_list_insert(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payl
 		ptr += payload->size;
 	}
 
-	ret = as_packed_list_write_seg2(&pl, ptr);
-
-	if (ret < 0) {
-		cf_crash(AS_PARTICLE, "packed_list_insert() seg2 invalid list");
-	}
+	as_packed_list_write_seg2(&pl, ptr);
 
 	if (result) {
 		as_bin_set_int(result, pl.new_ele_count);
 	}
 
-	return 0;
+	return AS_PROTO_RESULT_OK;
 }
 
+// count == 0 means missing count.
 static int
-packed_list_remove(as_bin *b, rollback_alloc *alloc_buf, int32_t index, uint32_t count, as_bin *result, bool result_is_count, bool result_is_list, rollback_alloc *alloc_result)
+packed_list_remove(as_bin *b, rollback_alloc *alloc_buf, int64_t index, uint64_t count, as_bin *result, bool result_is_count, bool result_is_list, rollback_alloc *alloc_result)
 {
-	if (count == 0) {
-		// Nothing to remove.
-		if (result_is_count) {
-			as_bin_set_int(result, 0);
-		}
-		else {
-			result->particle = packed_list_simple_create_empty(alloc_result);
-			as_bin_state_set_from_type(result, AS_PARTICLE_TYPE_LIST);
-		}
-
-		return 0;
-	}
-
 	as_packed_list pl;
 	as_packed_list_init_from_bin(&pl, b);
 
-	int ele_count = as_packed_list_header_element_count(&pl);
+	int32_t ele_count = as_packed_list_header_element_count(&pl);
 
 	if (ele_count < 0) {
 		cf_warning(AS_PARTICLE, "packed_list_remove() invalid list header");
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	if ((index = calc_index(index, ele_count)) < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_remove() index %d(%d) out of bounds", index - ele_count, index);
+	if (index >= ele_count || (index = calc_index(index, ele_count)) < 0) {
+		cf_warning(AS_PARTICLE, "packed_list_remove() index %ld out of bounds for ele_count %d", index > 0 ? index : index - ele_count, ele_count);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	uint32_t uindex = (uint32_t)index;
 
+	count = calc_count((uint64_t)index, count, ele_count);
+
 	as_packed_list_index *pli = as_bin_get_packed_list_index(b);
-	int new_size = as_packed_list_remove(&pl, uindex, count, pli);
+	int32_t new_size = as_packed_list_remove(&pl, uindex, (uint32_t)count, pli);
 
 	if (new_size < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_remove() invalid list");
+		cf_warning(AS_PARTICLE, "packed_list_remove() as_packed_list_remove failed with ret=%d", new_size);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
@@ -1346,31 +1360,27 @@ packed_list_remove(as_bin *b, rollback_alloc *alloc_buf, int32_t index, uint32_t
 		as_bin_set_empty_packed_list(b, alloc_buf);
 	}
 	else {
-		int new_ele_count = as_packed_list_get_new_element_count(&pl);
-		uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, new_size, new_ele_count, uindex, pli);
+		int32_t new_ele_count = as_packed_list_get_new_element_count(&pl);
+		uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, (uint32_t)new_size, (uint32_t)new_ele_count, uindex, pli);
 
 		if (! ptr) {
 			cf_warning(AS_PARTICLE, "packed_list_remove() failed to alloc list particle");
 			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 
-		int ret = as_packed_list_write_hdrseg1(&pl, ptr);
+		int32_t ret = as_packed_list_write_hdrseg1(&pl, ptr);
 
 		if (ret < 0) {
-			cf_crash(AS_PARTICLE, "packed_list_remove() invalid list");
+			cf_crash(AS_PARTICLE, "packed_list_remove() write hdr+seg1 failed with ret=%d", ret);
 		}
 
 		ptr += ret;
 
-		ret = as_packed_list_write_seg2(&pl, ptr);
-
-		if (ret < 0) {
-			cf_crash(AS_PARTICLE, "packed_list_remove() invalid list");
-		}
+		as_packed_list_write_seg2(&pl, ptr);
 	}
 
 	if (result) {
-		uint32_t result_count = pl.ele_count - as_packed_list_get_new_element_count(&pl);
+		uint32_t result_count = (uint32_t)(pl.ele_count - as_packed_list_get_new_element_count(&pl));
 
 		if (result_is_count) {
 			as_bin_set_int(result, result_count);
@@ -1378,7 +1388,7 @@ packed_list_remove(as_bin *b, rollback_alloc *alloc_buf, int32_t index, uint32_t
 		else {
 			uint32_t result_start = pl.header_size + pl.seg1_size;
 			const uint8_t *result_ptr = pl.upk.buffer + result_start;
-			uint32_t result_end = (pl.seg2_size > 0) ? pl.seg2_index : pl.upk.length;
+			uint32_t result_end = (pl.seg2_size > 0) ? pl.seg2_index : (uint32_t)pl.upk.length;
 			uint32_t result_size = result_end - result_start;
 
 			if (result_is_list) {
@@ -1401,159 +1411,150 @@ packed_list_remove(as_bin *b, rollback_alloc *alloc_buf, int32_t index, uint32_t
 		}
 	}
 
-	return 0;
+	return AS_PROTO_RESULT_OK;
 }
 
 static int
-packed_list_set(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, int32_t index)
+packed_list_set(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, int64_t index)
 {
 	as_packed_list pl;
 	as_packed_list_init_from_bin(&pl, b);
 
-	int ele_count = as_packed_list_header_element_count(&pl);
+	int32_t ele_count = as_packed_list_header_element_count(&pl);
 
 	if (ele_count < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_set() invalid list header");
+		cf_warning(AS_PARTICLE, "packed_list_set() invalid list");
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	if ((index = calc_index(index, ele_count)) < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_set() index %d(%d) out of bounds", index - ele_count, index);
+	if (index >= ele_count) {
+		return packed_list_insert(b, alloc_buf, payload, false, index, NULL);
+	}
+
+	if (index > UINT32_MAX || (index = calc_index(index, ele_count)) < 0) {
+		cf_warning(AS_PARTICLE, "packed_list_set() index %ld out of bounds for ele_count %d", index > 0 ? index : index - ele_count, ele_count);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	uint32_t uindex = (uint32_t)index;
 
-	if (uindex >= ele_count) {
-		return packed_list_insert(b, alloc_buf, payload, uindex, 1, NULL);
-	}
-
 	as_packed_list_index *pli = as_bin_get_packed_list_index(b);
-	int new_size = as_packed_list_remove(&pl, uindex, 1, pli);
+	int32_t new_size = as_packed_list_remove(&pl, uindex, 1, pli);
 
 	if (new_size < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_set() invalid list");
+		cf_warning(AS_PARTICLE, "packed_list_set() as_packed_list_remove failed with ret=%d", new_size);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	new_size += payload->size;
 
-	int new_ele_count = as_packed_list_get_new_element_count(&pl);
-	uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, new_size, new_ele_count, uindex, pli);
+	int32_t new_ele_count = as_packed_list_get_new_element_count(&pl);
+	uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, (uint32_t)new_size, (uint32_t)new_ele_count, uindex, pli);
 
 	if (! ptr) {
 		cf_warning(AS_PARTICLE, "packed_list_set() failed to alloc list particle");
 		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
-	int ret = as_packed_list_write_header_old(&pl, ptr);
+	int32_t ret = as_packed_list_write_header_old(&pl, ptr);
 
 	if (ret < 0) {
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+		cf_warning(AS_PARTICLE, "packed_list_set() write header failed with ret=%d", ret);
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	ptr += ret;
-
-	ret = as_packed_list_write_seg1(&pl, ptr);
-
-	if (ret < 0) {
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
-	}
-
-	ptr += ret;
-
-	if (! payload->ptr) {
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
-	}
+	ptr += as_packed_list_write_seg1(&pl, ptr);
 
 	memcpy(ptr, payload->ptr, payload->size);
 	ptr += payload->size;
 
-	ret = as_packed_list_write_seg2(&pl, ptr);
+	as_packed_list_write_seg2(&pl, ptr);
 
-	if (ret < 0) {
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
-	}
-
-	return 0;
+	return AS_PROTO_RESULT_OK;
 }
 
 static int
-packed_list_trim(as_bin *b, rollback_alloc *alloc_buf, int32_t index, uint32_t count, as_bin *result)
+packed_list_trim(as_bin *b, rollback_alloc *alloc_buf, int64_t index, uint64_t count, as_bin *result)
 {
 	// Remove head section.
 	as_packed_list pl;
 	as_packed_list_init_from_bin(&pl, b);
 
-	int original_ele_count = as_packed_list_header_element_count(&pl);
+	int32_t original_ele_count = as_packed_list_header_element_count(&pl);
+
+	if (original_ele_count < 0) {
+		cf_warning(AS_PARTICLE, "packed_list_trim() invalid list");
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
 
 	if (count == 0) {
 		// Remove everything.
 		as_bin_set_int(result, original_ele_count);
 		as_bin_set_empty_packed_list(b, alloc_buf);
-		return 0;
+
+		return AS_PROTO_RESULT_OK;
 	}
 
-	if ((index = calc_index(index, original_ele_count)) < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_trim() index %d(%d) out of bounds", index - original_ele_count, index);
+	if (index >= original_ele_count || (index = calc_index(index, original_ele_count)) < 0) {
+		cf_warning(AS_PARTICLE, "packed_list_trim() index %ld out of bounds for ele_count %d", index > 0 ? index : index - original_ele_count, original_ele_count);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	uint32_t uindex = (uint32_t)index;
 
+	count = calc_count((uint64_t)index, count, original_ele_count);
+
 	as_packed_list_index *pli = as_bin_get_packed_list_index(b);
-	int new_size = as_packed_list_remove(&pl, 0, uindex, pli);
+	int32_t new_size = as_packed_list_remove(&pl, 0, uindex, pli);
 
 	if (new_size < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_trim() invalid list");
+		cf_warning(AS_PARTICLE, "packed_list_trim() as_packed_list_remove failed with ret=%d", new_size);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	if (as_packed_list_get_new_element_count(&pl) == 0) {
 		as_bin_set_int(result, original_ele_count);
 		as_bin_set_empty_packed_list(b, alloc_buf);
-		return 0;
+
+		return AS_PROTO_RESULT_OK;
 	}
 
 	uint8_t temp_buf[new_size];
 	uint8_t *ptr = temp_buf;
 
-	int ret = as_packed_list_write_hdrseg1(&pl, ptr);
+	int32_t ret = as_packed_list_write_hdrseg1(&pl, ptr);
 
 	if (ret < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_trim() invalid list");
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+		cf_warning(AS_PARTICLE, "packed_list_trim() write hdr+seg1 failed with ret=%d", ret);
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
 	ptr += ret;
 
-	ret = as_packed_list_write_seg2(&pl, ptr);
-
-	if (ret < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_trim() invalid list");
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
-	}
+	as_packed_list_write_seg2(&pl, ptr);
 
 	// Remove tail section.
-	as_packed_list_init(&pl, temp_buf, new_size);
+	as_packed_list_init(&pl, temp_buf, (uint32_t)new_size);
 
-	int ele_count = as_packed_list_header_element_count(&pl);
-	new_size = as_packed_list_remove(&pl, count, ele_count - count, NULL);
+	int32_t ele_count = as_packed_list_header_element_count(&pl);
+	new_size = as_packed_list_remove(&pl, (uint32_t)count, (uint32_t)ele_count - (uint32_t)count, NULL);
 
 	if (new_size < 0) {
 		cf_warning(AS_PARTICLE, "packed_list_trim() invalid list");
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	int new_ele_count = as_packed_list_get_new_element_count(&pl);
+	int32_t new_ele_count = as_packed_list_get_new_element_count(&pl);
 
 	if (new_ele_count == 0) {
 		as_bin_set_int(result, original_ele_count);
 		as_bin_set_empty_packed_list(b, alloc_buf);
-		return 0;
+
+		return AS_PROTO_RESULT_OK;
 	}
 
-	ptr = packed_list_setup_bin(b, alloc_buf, new_size, new_ele_count, uindex, pli);
+	ptr = packed_list_setup_bin(b, alloc_buf, (uint32_t)new_size, (uint32_t)new_ele_count, uindex, pli);
 
 	if (! ptr) {
 		cf_warning(AS_PARTICLE, "packed_list_trim() failed to alloc list particle");
@@ -1563,23 +1564,17 @@ packed_list_trim(as_bin *b, rollback_alloc *alloc_buf, int32_t index, uint32_t c
 	ret = as_packed_list_write_hdrseg1(&pl, ptr);
 
 	if (ret < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_trim() invalid list");
+		cf_warning(AS_PARTICLE, "packed_list_trim() write hdr+seg1 failed with ret=%d", ret);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
 	ptr += ret;
 
-	ret = as_packed_list_write_seg2(&pl, ptr);
+	as_packed_list_write_seg2(&pl, ptr);
 
-	if (ret < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_trim() invalid list");
-		return -AS_PROTO_RESULT_FAIL_PARAMETER;
-	}
+	as_bin_set_int(result, original_ele_count - pl.new_ele_count);
 
-	uint32_t result_count = original_ele_count -  pl.new_ele_count;
-	as_bin_set_int(result, result_count);
-
-	return 0;
+	return AS_PROTO_RESULT_OK;
 }
 
 static uint8_t *
@@ -1597,7 +1592,8 @@ packed_list_setup_bin(as_bin *b, rollback_alloc *alloc_buf, uint32_t new_size, u
 	return p_list_wrapped->packed;
 }
 
-//----------------------------------------------------------
+
+//==========================================================
 // cdt_process_state_packed_list
 //
 
@@ -1630,7 +1626,7 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 
 		as_bin_create_temp_packed_list_if_notinuse(b);
 
-		int ret = packed_list_append(b, alloc_buf, &payload, 1, result);
+		int ret = packed_list_append(b, alloc_buf, &payload, false, result);
 
 		if (ret < 0) {
 			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() APPEND failed");
@@ -1649,22 +1645,20 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 			return false;
 		}
 
-		int ele_count = as_unpack_buf_list_element_count(payload.ptr, payload.size);
-
-		if (ele_count < 0) {
-			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
-			return false;
-		}
-
 		as_bin_create_temp_packed_list_if_notinuse(b);
 
-		int ret = packed_list_append(b, alloc_buf, &payload, ele_count, result);
+		int ret = packed_list_append(b, alloc_buf, &payload, true, result);
 
 		if (ret < 0) {
-			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() APPEND_LIST failed");
+			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() APPEND_ITEMS failed");
 			cdt_udata->ret_code = ret;
 			rollback_alloc_rollback(alloc_buf);
 			return false;
+		}
+
+		if (as_bin_is_temp_packed_list(b)) {
+			b->particle = packed_list_simple_create_empty(alloc_buf);
+			as_bin_state_set_from_type(b, AS_PARTICLE_TYPE_LIST);
 		}
 
 		break;
@@ -1680,7 +1674,7 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 
 		as_bin_create_temp_packed_list_if_notinuse(b);
 
-		int ret = packed_list_insert(b, alloc_buf, &payload, index, 1, result);
+		int ret = packed_list_insert(b, alloc_buf, &payload, false, index, result);
 
 		if (ret < 0) {
 			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() INSERT failed");
@@ -1700,22 +1694,20 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 			return false;
 		}
 
-		int ele_count = as_unpack_buf_list_element_count(payload.ptr, payload.size);
-
-		if (ele_count < 0) {
-			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
-			return false;
-		}
-
 		as_bin_create_temp_packed_list_if_notinuse(b);
 
-		int ret = packed_list_insert(b, alloc_buf, &payload, index, ele_count, result);
+		int ret = packed_list_insert(b, alloc_buf, &payload, true, index, result);
 
 		if (ret < 0) {
-			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() INSERT_LIST failed");
+			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() INSERT_ITEMS failed");
 			cdt_udata->ret_code = ret;
 			rollback_alloc_rollback(alloc_buf);
 			return false;
+		}
+
+		if (as_bin_is_temp_packed_list(b)) {
+			b->particle = packed_list_simple_create_empty(alloc_buf);
+			as_bin_state_set_from_type(b, AS_PARTICLE_TYPE_LIST);
 		}
 
 		break;
@@ -1744,6 +1736,7 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 	}
 
 	// OP by Index
+	case AS_CDT_OP_LIST_REMOVE:
 	case AS_CDT_OP_LIST_POP: {
 		int64_t index;
 
@@ -1757,9 +1750,10 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 			return false;
 		}
 
-		int ret = packed_list_remove(b, alloc_buf, index, 1, result, false, false, alloc_result);
+		int ret = packed_list_remove(b, alloc_buf, index, 1, result, optype == AS_CDT_OP_LIST_REMOVE, false, alloc_result);
 
 		if (ret < 0) {
+			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() POP/REMOVE failed");
 			cdt_udata->ret_code = ret;
 			rollback_alloc_rollback(alloc_result);
 			rollback_alloc_rollback(alloc_buf);
@@ -1768,6 +1762,7 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 
 		break;
 	}
+	case AS_CDT_OP_LIST_REMOVE_RANGE:
 	case AS_CDT_OP_LIST_POP_RANGE: {
 		int64_t index;
 		uint64_t count;
@@ -1782,60 +1777,34 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 			return false;
 		}
 
-		int ret = packed_list_remove(b, alloc_buf, index, count, result, false, true, alloc_result);
+		// User specifically asked for 0 count.
+		if (state->ele_count == 2 && count == 0) {
+			if (optype == AS_CDT_OP_LIST_POP_RANGE) {
+				result->particle = packed_list_simple_create_empty(alloc_result);
+				as_bin_state_set_from_type(result, AS_PARTICLE_TYPE_LIST);
+			}
+			else {
+				as_bin_set_int(result, 0);
+			}
+
+			break;
+		}
+
+		int ret = packed_list_remove(b,
+				alloc_buf,
+				index,
+				state->ele_count == 1 ? 0 : count,
+				result,
+				optype == AS_CDT_OP_LIST_REMOVE_RANGE,	// result_is_count
+				optype == AS_CDT_OP_LIST_POP_RANGE,		// result_is_list
+				alloc_result);
 
 		if (ret < 0) {
+			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() POP_RANGE/REMOVE_RANGE failed");
 			cdt_udata->ret_code = ret;
 			rollback_alloc_rollback(alloc_result);
 			rollback_alloc_rollback(alloc_buf);
 			return false;
-		}
-
-		break;
-	}
-	case AS_CDT_OP_LIST_REMOVE: {
-		int64_t index;
-
-		if (! CDT_OP_TABLE_GET_PARAMS(state, &index)) {
-			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
-			return false;
-		}
-
-		if (! is_list_type(as_bin_get_particle_type(b))) {
-			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
-			return false;
-		}
-
-		int ret = packed_list_remove(b, alloc_buf, index, 1, result, true, false, alloc_result);
-
-		if (ret < 0) {
-			rollback_alloc_rollback(alloc_result);
-			rollback_alloc_rollback(alloc_buf);
-			return ret;
-		}
-
-		break;
-	}
-	case AS_CDT_OP_LIST_REMOVE_RANGE: {
-		int64_t index;
-		uint64_t count;
-
-		if (! CDT_OP_TABLE_GET_PARAMS(state, &index, &count)) {
-			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
-			return false;
-		}
-
-		if (! is_list_type(as_bin_get_particle_type(b))) {
-			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE;
-			return false;
-		}
-
-		int ret = packed_list_remove(b, alloc_buf, index, count, result, true, false, alloc_result);
-
-		if (ret < 0) {
-			rollback_alloc_rollback(alloc_result);
-			rollback_alloc_rollback(alloc_buf);
-			return ret;
 		}
 
 		break;
@@ -1873,8 +1842,10 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 		int ret = packed_list_trim(b, alloc_buf, index, count, result);
 
 		if (ret < 0) {
+			cf_warning(AS_PARTICLE, "cdt_process_state_packed_list_modify_optype() TRIM failed");
+			cdt_udata->ret_code = ret;
 			rollback_alloc_rollback(alloc_buf);
-			return ret;
+			return false;
 		}
 
 		break;
@@ -1915,28 +1886,30 @@ cdt_process_state_packed_list_read_optype(cdt_process_state *state, cdt_read_dat
 		as_packed_list pl;
 		as_packed_list_init_from_bin(&pl, b);
 
-		int ele_count = as_packed_list_header_element_count(&pl);
+		int32_t ele_count = as_packed_list_header_element_count(&pl);
+
+		if (ele_count < 0) {
+			cf_warning(AS_PARTICLE, "OP_LIST_GET: invalid list header");
+			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
+			return false;
+		}
 
 		if (index >= ele_count || (index = calc_index(index, ele_count)) < 0) {
-			cf_warning(AS_PARTICLE, "OP_LIST_GET: index %d(%d) out of bounds", index - ele_count, index);
+			cf_warning(AS_PARTICLE, "OP_LIST_GET: index %ld out of bounds for ele_count %d", index > 0 ? index : index - ele_count, ele_count);
 			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
 			return false;
 		}
 
 		uint32_t uindex = (uint32_t)index;
 
-		if (uindex >= ele_count) {
-			// result left empty.
-			break;
-		}
-
 		as_packed_list_index *pli = as_bin_get_packed_list_index(b);
 		const uint8_t *ele_ptr = as_unpack_list_elements_find_index(&pl.upk, uindex, pli);
 		int ele_size = as_unpack_size(&pl.upk);
 
 		if (ele_size < 0) {
-			cf_warning(AS_PARTICLE, "OP_LIST_GET: unable to unpack element at %d", index);
-			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+			cf_warning(AS_PARTICLE, "OP_LIST_GET: unable to unpack element at %u", uindex);
+			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_UNKNOWN;
+			return false;
 		}
 
 		if (ele_size > 0) {
@@ -1958,38 +1931,53 @@ cdt_process_state_packed_list_read_optype(cdt_process_state *state, cdt_read_dat
 		as_packed_list pl;
 		as_packed_list_init_from_bin(&pl, b);
 
-		int ele_count = as_packed_list_header_element_count(&pl);
+		int32_t ele_count = as_packed_list_header_element_count(&pl);
 
-		// If missing count, take the rest of the list.
-		if (state->ele_count == 1) {
-			count = ele_count - index;
-		}
-
-		if (index >= ele_count || (index = calc_index(index, ele_count)) < 0) {
-			cf_warning(AS_PARTICLE, "OP_LIST_GET_RANGE: index %d(%d) out of bounds", index - ele_count, index);
+		if (ele_count < 0) {
+			cf_warning(AS_PARTICLE, "OP_LIST_GET_RANGE: invalid list header");
 			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
 			return false;
 		}
 
-		uint32_t uindex = (uint32_t)index;
+		if (index >= ele_count || (index = calc_index(index, ele_count)) < 0) {
+			cf_warning(AS_PARTICLE, "OP_LIST_GET_RANGE: index %ld out of bounds for ele_count %d", index > 0 ? index : index - ele_count, ele_count);
+			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
+			return false;
+		}
 
-		if (uindex >= ele_count) {
+		// User specifically asked for 0 count.
+		if (state->ele_count == 2 && count == 0) {
 			result->particle = packed_list_simple_create_empty(packed_alloc);
 			as_bin_state_set_from_type(result, AS_PARTICLE_TYPE_LIST);
 
 			break;
 		}
 
-		if (uindex + count >= ele_count) {
-			count = ele_count - uindex;
-		}
+		// If missing count, take the rest of the list.
+		count = calc_count((uint64_t)index, state->ele_count == 1 ? 0 : count, ele_count);
+
+		uint32_t uindex = (uint32_t)index;
 
 		as_packed_list_index *pli = as_bin_get_packed_list_index(b);
 		const uint8_t *ele_ptr = as_unpack_list_elements_find_index(&pl.upk, uindex, pli);
-		int ele_size = 0;
+		uint32_t ele_size = 0;
+
+		if (! ele_ptr) {
+			cf_warning(AS_PARTICLE, "OP_LIST_GET_RANGE: invalid list element with index <= %u", uindex);
+			cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
+			return false;
+		}
 
 		for (uint64_t i = 0; i < count; i++) {
-			ele_size += as_unpack_size(&pl.upk);
+			int64_t i_size = as_unpack_size(&pl.upk);
+
+			if (i_size < 0) {
+				cf_warning(AS_PARTICLE, "OP_LIST_GET_RANGE: invalid list element at index %u", uindex + (uint32_t)i);
+				cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_PARAMETER;
+				return false;
+			}
+
+			ele_size += (uint32_t)i_size;
 		}
 
 		result->particle = packed_list_simple_create_from_buf(packed_alloc, count, ele_ptr, ele_size);
@@ -2007,7 +1995,7 @@ cdt_process_state_packed_list_read_optype(cdt_process_state *state, cdt_read_dat
 		as_packed_list pl;
 		as_packed_list_init_from_bin(&pl, b);
 
-		int ele_count = as_packed_list_header_element_count(&pl);
+		int32_t ele_count = as_packed_list_header_element_count(&pl);
 
 		if (ele_count < 0) {
 			// TODO - is this the right policy?
@@ -2029,8 +2017,8 @@ cdt_process_state_packed_list_read_optype(cdt_process_state *state, cdt_read_dat
 }
 
 
-//------------------------------------------------
-// Debugging support
+//==========================================================
+// Debugging support.
 //
 
 static void
