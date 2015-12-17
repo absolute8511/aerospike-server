@@ -1,4 +1,0 @@
-/usr/lib/systemd/system/aerospike.service
-/usr/bin/asd-systemd-helper
-%config /etc/tmpfiles.d/aerospike.conf
-%config(noreplace) /etc/sysconfig/aerospike

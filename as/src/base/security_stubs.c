@@ -175,20 +175,3 @@ as_security_config_log_scope(uint32_t sink, const char* ns_name,
 {
 }
 
-
-//==========================================================
-// Public API - security configuration.
-//
-
-// Security is an enterprise feature - here, do nothing.
-void
-as_security_config_check()
-{
-}
-
-// Security is an enterprise feature - here, do nothing.
-void
-as_security_config_log_scope(uint32_t sink, const char* ns_name,
-		const char* set_name)
-{
-}
