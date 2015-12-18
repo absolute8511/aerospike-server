@@ -79,8 +79,8 @@
  */
 #define AS_NAMESPACE_SZ 32
 
-#define AS_STORAGE_MAX_DEVICES 32 // maximum devices per namespace
-#define AS_STORAGE_MAX_FILES 32 // maximum files per namespace
+#define AS_STORAGE_MAX_DEVICES 2 // maximum devices per namespace
+#define AS_STORAGE_MAX_FILES 2 // maximum files per namespace
 #define AS_STORAGE_MAX_DEVICE_SIZE (2L * 1024L * 1024L * 1024L * 1024L) // 2Tb, due to rblock_id in as_index
 
 #define OBJ_SIZE_HIST_NUM_BUCKETS 100
@@ -858,7 +858,7 @@ typedef enum {
 	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_TTL = 2
 } conflict_resolution_pol;
 
-#define AS_SET_MAX_COUNT 0x3FF	// ID's 10 bits worth minus 1 (ID 0 means no set)
+#define AS_SET_MAX_COUNT 0x3FFF	// ID's 10 + 4 bits worth minus 1 (ID 0 means no set)
 #define AS_BINID_HAS_SINDEX_SIZE  MAX_BIN_NAMES / ( sizeof(uint32_t) * CHAR_BIT )
 
 #define  NS_READ_CONSISTENCY_LEVEL_NAME()								\

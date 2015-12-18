@@ -794,7 +794,7 @@ as_proxy_send_redirect(cf_node dst, msg *m, cf_node rdst)
 // the requester. The CF_BYTEARRAY is handed off in this case. If you want to
 // keep a reference, then keep the reference yourself.
 int
-as_proxy_send_response(cf_node dst, msg *m, uint32_t result_code, uint32_t generation,
+as_proxy_send_response(cf_node dst, msg *m, uint32_t result_code, as_generation generation,
 		uint32_t void_time, as_msg_op **ops, as_bin **bins, uint16_t bin_count,
 		as_namespace *ns, uint64_t trid, const char *setname)
 {

@@ -182,7 +182,7 @@ typedef struct as_transaction_s {
 	/* and the digest to apply it to */
 	cf_digest 	      keyd;
 	/* generation to send to the user */
-	uint32_t          generation;
+	as_generation          generation;
 	/* transaction id passed in by the client (Optional) */
 	uint64_t	      trid;
 

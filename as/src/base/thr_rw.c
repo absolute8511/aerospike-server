@@ -1612,7 +1612,7 @@ finish_rw_process_dup_ack(write_request *wr)
 
 		// Note - older versions expect RW_FIELD_VINFOSET field here.
 
-		uint32_t generation = 0;
+		as_generation generation = 0;
 		if (0 != msg_get_uint32(m, RW_FIELD_GENERATION, &generation)) {
 			cf_info(AS_RW,
 					"finish_rw_process_dup_ack: received dup-response with no generation, %"PRIx64"",
@@ -3787,7 +3787,7 @@ write_local_pickle_unwind(pickle_info *pickle)
 
 typedef struct index_metadata_s {
 	uint32_t	void_time;
-	uint16_t	generation;
+	as_generation	generation;
 } index_metadata;
 
 void
@@ -5875,7 +5875,7 @@ as_write_init()
 void
 single_transaction_response(as_transaction *tr, as_namespace *ns,
 		as_msg_op **ops, as_bin **response_bins, uint16_t n_bins,
-		uint32_t generation, uint32_t void_time, uint *written_sz,
+		as_generation generation, uint32_t void_time, uint *written_sz,
 		char *setname)
 {
 
@@ -5993,7 +5993,7 @@ void
 read_local_done(as_transaction* tr, as_index_ref* r_ref, as_storage_rd* rd,
 		int result_code)
 {
-	uint32_t generation = 0;
+	as_generation generation = 0;
 	uint32_t void_time = 0;
 
 	if (r_ref) {

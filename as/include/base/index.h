@@ -66,7 +66,7 @@ typedef struct as_index_s {
 	uint32_t void_time;
 
 	// offset: 44
-	uint16_t generation;
+	as_generation generation;
 
 	// offset: 46
 	// Used by the storage engines.
@@ -74,8 +74,8 @@ typedef struct as_index_s {
 		struct {
 			uint64_t rblock_id: 34;		// can address 2^34 * 128b = 2Tb drive
 			uint64_t n_rblocks: 14;		// is enough for 1Mb/128b = 8K rblocks
-			uint64_t file_id: 6;		// can spec 2^6 = 64 drives
-			uint64_t set_id_bits: 10;	// do not use directly, used for set-ID
+			uint64_t file_id: 2;		// can spec 2^2 = 4 drives
+			uint64_t set_id_bits: 14;	// do not use directly, used for set-ID
 		} ssd;
 		struct {
 			uint32_t file_id: 6;

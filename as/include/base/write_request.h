@@ -95,7 +95,7 @@ typedef struct write_request_s {
 	uint8_t            * pickled_buf;
 	size_t               pickled_sz;
 	as_rec_props         pickled_rec_props;
-	uint32_t             generation;
+	as_generation             generation;
 	uint32_t             void_time;
 
 	// Store ops' responses here.
