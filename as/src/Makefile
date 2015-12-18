@@ -4,6 +4,7 @@
 DEPTH = ../..
 include $(DEPTH)/make_in/Makefile.in
 
+CFLAGS += -g -ggdb -fno-omit-frame-pointer
 # Use SystemTap?  [By default, no.]
 USE_SYSTEMTAP = 0
 
