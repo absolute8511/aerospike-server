@@ -1,5 +1,5 @@
 /*
- * ai_btree.h
+ * cluster_config.c
  *
  * Copyright (C) 2013-2014 Aerospike, Inc.
  *
@@ -33,13 +33,15 @@
 // String defined for the various cluster states
 const char * cc_state_str[] = {"unknown", "balanced", "unbalanced", "invalid"};
 
+const char * cc_mode_str[] = {CL_STR_NONE, CL_STR_STATIC, CL_STR_DYNAMIC};
+
 
 /**
  * cluster_config defaults
  * Set up the defaults for the Cluster Topology.
  */
 void
-cc_cluster_config_defaults(cluster_config_t * cc ) {
+cc_cluster_config_defaults(cluster_config_t *cc) {
 	memset(cc, 0, sizeof(cluster_config_t));
 	cc->cluster_state = unknown;  // not set yet.
 
@@ -54,19 +56,19 @@ cc_cluster_config_defaults(cluster_config_t * cc ) {
  * (*) Failure: Return -1
  */
 int
-cc_locate_node(cluster_config_t * cc, cc_node_t node_id ) {
+cc_locate_node(const cluster_config_t *cc, const cc_node_t node_id) {
 	int node_index = -1;
 	// Look for the node -- if found, then save the index.
 	// Simple search (for now).  Linear Scan of the group list.
 	int i = 0;
-	for( i = 0; i < cc->node_count; i++ ) {
-		if ( node_id == cc->node_ids[i] ) {
-			cf_detail(AS_PARTITION, "Found Node ID(%d)", node_id );
+	for (i = 0; i < cc->node_count; i++) {
+		if (node_id == cc->node_ids[i]) {
+			cf_detail(AS_PARTITION, "found node id:%d", node_id);
 			break;
 		}
 	}  // end for each node name
 
-	if( i < cc->node_count ) {
+	if (i < cc->node_count) {
 		node_index = i;
 	}
 
@@ -84,15 +86,15 @@ cc_locate_node(cluster_config_t * cc, cc_node_t node_id ) {
  * (*) Failure: Return -1
  */
 int
-cc_add_node(cluster_config_t * cc, cc_node_t node_id ) {
+cc_add_node(cluster_config_t *cc, const cc_node_t node_id) {
 	// Look for the node -- if found, then save the index.
 	// Simple search (for now).  Linear Scan of the node list.
 	int node_index = -1;
 	bool found = false;
 	int i = 0;
-	for( i = 0; i < cc->node_count; i++ ) {
-		if ( node_id == cc->node_ids[i] ) {
-			cf_detail(AS_PARTITION, "Found Node ID(%d)", node_id );
+	for (i = 0; i < cc->node_count; i++) {
+		if (node_id == cc->node_ids[i]) {
+			cf_detail(AS_PARTITION, "found node id:%d", node_id);
 			found = true;
 			break;
 		}
@@ -100,12 +102,14 @@ cc_add_node(cluster_config_t * cc, cc_node_t node_id ) {
 	node_index = i; // Found or not, this is (or will be) the index
 
 	// Didn't find it -- so just add it to the end and adjust the count.
-	if( found == false ) {
-		if( i >= CL_MAX_NODES ) {
+	if (found == false) {
+		if (i >= CL_MAX_NODES) {
 			cf_crash_nostack(AS_PARTITION,
-					"Exceeded Max Number of Nodes (%d) in Config File", CL_MAX_NODES);
-		} else {
-			cc->node_ids[ (cc->node_count)++ ] = node_id;
+					"exceeded max number of nodes:%d in config file",
+					CL_MAX_NODES);
+		}
+		else {
+			cc->node_ids[cc->node_count++] = node_id;
 		}
 	}
 
@@ -124,16 +128,16 @@ cc_add_node(cluster_config_t * cc, cc_node_t node_id ) {
  * (*) Failure: Return -1
  */
 int
-cc_add_fullnode(cluster_config_t * cc, cf_node fullnode ) {
+cc_add_fullnode(cluster_config_t *cc, const cf_node fullnode) {
 	// Look for the node -- if found, then save the index.
 	// Simple search (for now).  Linear Scan of the node list.
 	int node_index = -1;
 	bool found = false;
 	int i = 0;
-	cc_node_t node_id = cc_compute_node_id( fullnode );
-	for( i = 0; i < cc->node_count; i++ ) {
-		if ( node_id == cc->node_ids[i] ) {
-			cf_detail(AS_PARTITION, "Found Node ID(%d)", node_id );
+	cc_node_t node_id = cc_compute_node_id(fullnode);
+	for (i = 0; i < cc->node_count; i++) {
+		if (node_id == cc->node_ids[i]) {
+			cf_detail(AS_PARTITION, "found node id:%d", node_id);
 			found = true;
 			break;
 		}
@@ -141,13 +145,15 @@ cc_add_fullnode(cluster_config_t * cc, cf_node fullnode ) {
 	node_index = i; // Found or not, this is (or will be) the index
 
 	// Didn't find it -- so just add it to the end and adjust the count.
-	if( found == false ) {
-		if( i >= CL_MAX_NODES ) {
+	if (! found) {
+		if (i >= CL_MAX_NODES) {
 			cf_crash_nostack(AS_PARTITION,
-					"Exceeded Max Number of Nodes (%d) in Config File", CL_MAX_NODES);
-		} else {
-			cc->full_node_val[ cc->node_count ] = fullnode;
-			cc->node_ids[ (cc->node_count)++ ] = node_id;
+					"exceeded max number of nodes:%d in config file",
+					CL_MAX_NODES);
+		}
+		else {
+			cc->full_node_val[cc->node_count] = fullnode;
+			cc->node_ids[cc->node_count++] = node_id;
 		}
 	}
 
@@ -162,21 +168,21 @@ cc_add_fullnode(cluster_config_t * cc, cf_node fullnode ) {
  * (*) Failure: Return -1
  */
 int
-cc_locate_group(cluster_config_t * cc, cc_group_t group_id ) {
+cc_locate_group(const cluster_config_t *cc, const cc_group_t group_id) {
 	int group_index = -1;
 	bool found = false;
 	// Look for the group -- if found, then save the index.
 	// Simple search (for now).  Linear Scan of the group list.
 	int i = 0;
-	for( i = 0; i < cc->group_count; i++ ) {
-		if ( group_id == cc->group_ids[i] ) {
-			cf_detail(AS_PARTITION, "Found Group ID(%d)", group_id );
+	for (i = 0; i < cc->group_count; i++) {
+		if (group_id == cc->group_ids[i]) {
+			cf_detail(AS_PARTITION, "found group id:d %d", group_id);
 			found = true;
 			break;
 		}
 	}  // end for each group name
 
-	if( found == false ) {
+	if (! found) {
 		group_index = i;
 	}
 
@@ -192,15 +198,15 @@ cc_locate_group(cluster_config_t * cc, cc_group_t group_id ) {
  * (*) Failure: Return -1
  */
 int
-cc_add_group(cluster_config_t * cc, cc_group_t group_id ) {
+cc_add_group(cluster_config_t *cc, const cc_group_t group_id) {
 	// Look for the group -- if found, then save the index.
 	// Simple search (for now).  Linear Scan of the group list.
 	int group_index = -1;
 	bool found = false;
 	int i = 0;
-	for( i = 0; i < cc->group_count; i++ ) {
-		if ( group_id == cc->group_ids[i] ) {
-			cf_detail(AS_PARTITION, "Found Group ID(%d)", group_id );
+	for (i = 0; i < cc->group_count; i++) {
+		if (group_id == cc->group_ids[i]) {
+			cf_detail(AS_PARTITION, "found group id:%d", group_id);
 			found = true;
 			break;
 		}
@@ -208,12 +214,14 @@ cc_add_group(cluster_config_t * cc, cc_group_t group_id ) {
 	group_index = i; // Found or not, this is (or will be) the index
 
 	// Didn't find it -- so just add it to the end and adjust the count.
-	if( found == false ) {
-		if( i >=  CL_MAX_GROUPS ) {
+	if (found == false) {
+		if (i >=  CL_MAX_GROUPS) {
 			cf_crash_nostack(AS_PARTITION,
-					"Exceeded Max Number of Groups (%d) in Config File", CL_MAX_GROUPS);
-		} else {
-			cc->group_ids[ (cc->group_count)++ ] = group_id;
+					"exceeded max number of groups:%d in config file",
+					CL_MAX_GROUPS);
+		}
+		else {
+			cc->group_ids[cc->group_count++] = group_id;
 		}
 	}
 
@@ -226,21 +234,23 @@ cc_add_group(cluster_config_t * cc, cc_group_t group_id ) {
  * Add a Node and Group to the Topology Info.
  */
 int
-cc_add_node_group_entry(cluster_config_t * cc, cc_node_t node, cc_group_t group ) {
+cc_add_node_group_entry(cluster_config_t *cc, const cc_node_t node,
+		const cc_group_t group) {
 	int rc = 0;
 
 	// Look for the group -- if found, then save the index.
 	// And, if not found, add it, and save the index.
-	int group_ndx = cc_add_group( cc, group );
+	int group_ndx = cc_add_group(cc, group);
 
 	// Group is all set.  Now add the node (we shouldn't have one already).
-	int node_ndx = cc_add_node( cc, node );
+	int node_ndx = cc_add_node(cc, node);
 
 	// Quick validation step -- if the membership array shows a NON-negative
 	// entry, point that out, but ALSO
-	if( cc->membership[node_ndx]  > 0 && cc->membership[node_ndx] != group_ndx) {
-		cf_debug(AS_PARTITION, "Adding node(%d) group(%d) set(%d)",
-				node, group, cc->membership[node_ndx] );
+	if (cc->membership[node_ndx]  > 0
+			&& cc->membership[node_ndx] != group_ndx) {
+		cf_debug(AS_PARTITION, "adding node:%d group:%d set:%d",
+				node, group, cc->membership[node_ndx]);
 		rc = -1;
 	}
 
@@ -259,22 +269,23 @@ cc_add_node_group_entry(cluster_config_t * cc, cc_node_t node, cc_group_t group 
  * Add a Node and Group to the Topology Info.
  */
 int
-cc_add_fullnode_group_entry(cluster_config_t * cc, cf_node fullnode ) {
+cc_add_fullnode_group_entry(cluster_config_t *cc, const cf_node fullnode) {
 	int rc = 0;
 
 	// Look for the group -- if found, then save the index.
 	// And, if not found, add it, and save the index.
-	cc_group_t group_id = cc_compute_group_id( fullnode );
-	int group_ndx = cc_add_group( cc, group_id );
+	cc_group_t group_id = cc_compute_group_id(fullnode);
+	int group_ndx = cc_add_group(cc, group_id);
 
 	// Group is all set.  Now add the node (we shouldn't have one already).
-	int node_ndx = cc_add_fullnode( cc, fullnode );
+	int node_ndx = cc_add_fullnode(cc, fullnode);
 
 	// Quick validation step -- if the membership array shows a NON-negative
 	// entry, point that out, but ALSO
-	if( cc->membership[node_ndx]  > 0 && cc->membership[node_ndx] != group_ndx) {
-		cf_debug(AS_PARTITION, "Adding fullnode[%d](%"PRIx64") member(%d)",
-				node_ndx, fullnode, cc->membership[node_ndx] );
+	if (cc->membership[node_ndx]  > 0
+			&& cc->membership[node_ndx] != group_ndx) {
+		cf_debug(AS_PARTITION, "adding full node:%d %"PRIx64" member:%d",
+				node_ndx, fullnode, cc->membership[node_ndx]);
 		rc = -1;
 	}
 
@@ -296,9 +307,9 @@ cc_add_fullnode_group_entry(cluster_config_t * cc, cf_node fullnode ) {
  * (*) Failure: Return -1
  */
 int
-cc_locate_node_group(cluster_config_t * cc, cc_node_t node_id ) {
+cc_locate_node_group(const cluster_config_t * cc, const cc_node_t node_id) {
 
-	int node_index = cc_locate_node( cc, node_id );
+	int node_index = cc_locate_node(cc, node_id);
 	int group_index = cc->membership[ node_index];
 	cc_group_t group_id = cc->group_ids[group_index];
 
@@ -310,7 +321,7 @@ cc_locate_node_group(cluster_config_t * cc, cc_node_t node_id ) {
  * 64 bit self-node value
  */
 uint16_t
-cc_compute_port( cf_node self_node ) {
+cc_compute_port(const cf_node self_node) {
 	uint16_t result = (self_node >> 48) & 0xffff;
 	return result;
 } // end compute_port()
@@ -319,7 +330,7 @@ cc_compute_port( cf_node self_node ) {
  * Extract the Group ID portion (the Bits 33 to 48) of the 64 bit self-node value
  */
 cc_group_t
-cc_compute_group_id( cf_node self_node ) {
+cc_compute_group_id(const cf_node self_node) {
 	cc_group_t result = (self_node >> 32) & 0xffff;
 	return result;
 } // end compute_group_id()
@@ -328,7 +339,7 @@ cc_compute_group_id( cf_node self_node ) {
  * Extract the Node ID portion (lower 32 bits) of the self-node value
  */
 cc_node_t
-cc_compute_node_id( cf_node self_node ) {
+cc_compute_node_id(const cf_node self_node) {
 	cc_node_t result = self_node & 0xffffffff;
 	return result;
 } // end compute_gnode_id()
@@ -340,7 +351,8 @@ cc_compute_node_id( cf_node self_node ) {
  * 48 bits MAC address).
  */
 cf_node
-cc_compute_self_node( uint16_t port_num, cc_group_t group_id, cc_node_t node_id ) {
+cc_compute_self_node(const uint16_t port_num, const cc_group_t group_id,
+		const cc_node_t node_id) {
 	cf_node result = 0;
 	// Use 64 bit temp vars to avoid any sign extensions or weird overflow.
 	cf_node temp_port = port_num;
@@ -360,31 +372,34 @@ cc_compute_self_node( uint16_t port_num, cc_group_t group_id, cc_node_t node_id 
  * is in the g_config structure.
  */
 void
-cc_show_cluster_state( cluster_config_t * cc )
+cc_show_cluster_state(const cluster_config_t *cc)
 {
 	int i, j, buf_pos;
 	char print_buf[512];
 	if (CL_MODE_NO_TOPOLOGY == g_config.cluster_mode) {
-		cf_info(AS_PARTITION, "Rack Aware is disabled.");
-	} else {
-		cf_info(AS_PARTITION, "Rack Aware is enabled.  Mode: %s.",
+		cf_info(AS_PARTITION, "rack aware is disabled");
+	}
+	else {
+		cf_info(AS_PARTITION, "rack aware is enabled - mode:%s",
 				(CL_MODE_STATIC == g_config.cluster_mode ? CL_STR_STATIC : CL_STR_DYNAMIC));
 
 		// For each group -- print out the stats.  This is somewhat
 		// inefficient (N squared for N groups), but we don't expect N to
 		// be a large number (usually under 10, NEVER over 64).
-		cf_info(AS_PARTITION, "CLUSTER STATE(%s) SelfNode(%"PRIx64") Group Count(%d) Total Node Count(%d)",
-				cc_state_str[cc->cluster_state], g_config.self_node, cc->group_count, cc->node_count );
-		for( i = 0; i < cc->group_count; i++ ) {
-			sprintf(print_buf, "Group(%04x) GroupNodeCount(%u):: ",
-					cc->group_ids[i], cc->group_node_count[i] );
-			for( j = 0; j < cc->node_count; j++ ) {
-				if( cc->membership[j] == i ) {
-					buf_pos = strlen( print_buf ); // advance our position in buf
-					sprintf(&(print_buf[buf_pos - 1]), " Node(%"PRIx64") ", cc->full_node_val[j]);
+		cf_info(AS_PARTITION, "cluster state:%s self node:%"PRIx64" group count:%d total node count:%d",
+				cc_state_str[cc->cluster_state], g_config.self_node,
+				cc->group_count, cc->node_count);
+		for (i = 0; i < cc->group_count; i++) {
+			sprintf(print_buf, "group:%04x group node cnt:%u - ",
+					cc->group_ids[i], cc->group_node_count[i]);
+			for (j = 0; j < cc->node_count; j++) {
+				if ( cc->membership[j] == i) {
+					buf_pos = strlen(print_buf); // advance our position in buf
+					sprintf(&(print_buf[buf_pos - 1]), " node:%"PRIx64" ",
+							cc->full_node_val[j]);
 				}
 			}
-			cf_info(AS_PARTITION, "%s", print_buf );
+			cf_info(AS_PARTITION, "%s", print_buf);
 		} // for each group
 	} // Rack Aware Mode
 } // end cc_show_cluster_state()
@@ -396,31 +411,34 @@ cc_show_cluster_state( cluster_config_t * cc )
  * all of its fingers and toes, then it's invalid.
  */
 cluster_state_t
-cc_get_cluster_state( cluster_config_t * cc )
+cc_get_cluster_state(const cluster_config_t *cc)
 {
 	int i;
 	int first_group_count = 0;
 	int first_group_ndx = 0; // Remember the ndx of 1st non-zero count. It SHOULD be 0.
 	cluster_state_t result = unknown;
 	if (CL_MODE_NO_TOPOLOGY == g_config.cluster_mode) {
-		cf_info(AS_CFG, "Rack Aware is disabled.");
-	} else {
+		cf_info(AS_CFG, "rack aware is disabled");
+	}
+	else {
 		result = balanced;
-		cf_info(AS_PARTITION, "Rack Aware is enabled.  Mode: %s.",
+		cf_info(AS_PARTITION, "rack aware is enabled - mode:%s",
 				(CL_MODE_STATIC == g_config.cluster_mode ? CL_STR_STATIC : CL_STR_DYNAMIC));
 
 		// For each group, check the counts; if they are not equal, then
 		// declare this cluster unbalanced, and print out the counts.
-		for( i = 0; i < cc->group_count; i++ ) {
-			if( first_group_count == 0 ) {
+		for (i = 0; i < cc->group_count; i++) {
+			if (first_group_count == 0) {
 				first_group_ndx = i;
 				first_group_count = cc->group_node_count[i];
-				cf_info(AS_PARTITION, "Setting First Group(%d)[%04x] Cnt(%d)", i, cc->group_ids[i], first_group_count );
+				cf_info(AS_PARTITION, "setting first group:%d %04x cnt:%d",
+						i, cc->group_ids[i], first_group_count);
 			}
-			if( first_group_count != cc->group_node_count[i] ) {
+			if (first_group_count != cc->group_node_count[i]) {
 				result = unbalanced;
-				cf_warning(AS_PARTITION, "UNBALANCED CLUSTER::Group Node Counts Differ: First Group(%04x):Cnt(%d) This Group(%04x)Cnt(%d)",
-						cc->group_ids[first_group_ndx], first_group_count, cc->group_ids[i], cc->group_node_count[i] );
+				cf_warning(AS_PARTITION, "unbalanced cluster - group node counts differ - first group:%04x cnt:%d this group:%04x cnt:%d",
+						cc->group_ids[first_group_ndx], first_group_count,
+						cc->group_ids[i], cc->group_node_count[i]);
 			}
 		} // for each group
 	} // Rack Aware Mode
@@ -433,12 +451,13 @@ cc_get_cluster_state( cluster_config_t * cc )
  * If verbose, when enabled, decode the fields of each node in the Paxos succession list.
  */
 void
-cc_cluster_config_dump(bool verbose)
+cc_cluster_config_dump(const bool verbose)
 {
 	if (CL_MODE_NO_TOPOLOGY == g_config.cluster_mode) {
-		cf_info(AS_PARTITION, "Rack Aware is disabled.");
-	} else {
-		cf_info(AS_PARTITION, "Rack Aware is enabled.  Mode: %s.",
+		cf_info(AS_PARTITION, "rack aware is disabled");
+	}
+	else {
+		cf_info(AS_PARTITION, "rack aware is enabled - mode:%s",
 				(CL_MODE_STATIC == g_config.cluster_mode ? CL_STR_STATIC : CL_STR_DYNAMIC));
 
 		if (verbose) {
@@ -448,12 +467,17 @@ cc_cluster_config_dump(bool verbose)
 			cf_node principal_node = as_paxos_succession_getprincipal();
 			for (int i = 0; i < g_config.paxos_max_cluster_size; i++) {
 				cf_node node = p->succession[i];
-				if ((cf_node) 0 == node)
+				if ((cf_node)0 == node) {
 					continue;
+				}
 				self = (node == g_config.self_node);
 				principal = (node == principal_node);
-				cf_info(AS_PARTITION, "SuccessionList[%d]: Node %"PRIx64" : Port %u ; GroupID %u ; NodeID %u %s%s",
-						i, node, cc_compute_port(node), cc_compute_group_id(node), cc_compute_node_id(node), (self ? "[Self]" : ""), (principal ? "[Principal]" : ""));
+				cf_info(AS_PARTITION, "succession list[%d] - node:%"PRIx64" port:%u group_id:%u node_id:%u %s%s",
+						i, node, cc_compute_port(node),
+						cc_compute_group_id(node),
+						cc_compute_node_id(node),
+						(self ? "[Self]" : ""),
+						(principal ? "[Principal]" : ""));
 			}
 		}
 	}

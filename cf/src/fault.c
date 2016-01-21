@@ -424,6 +424,12 @@ cf_fault_use_local_time(bool val)
 	g_use_local_time = val;
 }
 
+bool
+cf_fault_is_using_local_time()
+{
+	return g_use_local_time;
+}
+
 /* cf_fault_event
  * Respond to a fault */
 void

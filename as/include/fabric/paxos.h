@@ -143,7 +143,7 @@ static const msg_template as_paxos_msg_template[] = {
  * changes, and a proposal number, monotonic within each sequence.  Most
  * sequence numbers will have only one proposal number */
 typedef struct as_paxos_generation {
-	uint32_t sequence, proposal;
+	uint32_t sequence;
 } as_paxos_generation;
 
 
@@ -189,6 +189,7 @@ typedef struct as_paxos_transaction_t {
 	as_paxos_generation gen;
 	bool retired, confirmed;
 	bool votes[AS_CLUSTER_SZ];
+	int election_cycle;
 	as_paxos_change c;
 	cf_clock establish_time;
 } __attribute__((__packed__)) as_paxos_transaction;
@@ -215,7 +216,8 @@ typedef void (*as_paxos_change_callback) (as_paxos_generation gen, as_paxos_chan
 typedef struct as_paxos_t {
 	pthread_mutex_t lock;
 
-	cf_queue *msgq;
+	cf_queue_priority *msgq;
+	bool need_to_rebalance;        // do rebalance if eq gen.sequence
 
 	bool ready;                    // Is Paxos intialized?
 
@@ -260,7 +262,7 @@ void as_paxos_init();
 void as_paxos_start();
 int as_paxos_register_change_callback(as_paxos_change_callback cb, void *udata);
 int as_paxos_deregister_change_callback(as_paxos_change_callback cb, void *udata);
-cf_node as_paxos_succession_getprincipal(void);
+cf_node as_paxos_succession_getprincipal();
 bool as_paxos_succession_ismember(cf_node n);
 
 // Get the head of the Paxos succession list, or zero if there is none.
@@ -301,4 +303,4 @@ int as_paxos_get_succession_list(cf_dyn_buf *db);
  * The first element of the list will become the Paxos principal.
  * Returns 0 if successful, -1 otherwise.
  */
-int as_paxos_set_succession_list(char *nodes_str, int nodes_str_len);
+int as_paxos_set_succession_list(/*const*/ char *nodes_str, int nodes_str_len);

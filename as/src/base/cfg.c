@@ -230,7 +230,7 @@ cfg_set_defaults()
 	c->start_ms = cf_getms();
 	c->record_locks = olock_create(16 * 1024, true); // TODO - configurable number of locks?
 
-	c->namespaces = 0;
+	c->n_namespaces = 0;
 }
 
 
@@ -1291,6 +1291,13 @@ cfg_unknown_val_tok_1(const cfg_line* p_line)
 }
 
 void
+cfg_obsolete(const cfg_line* p_line, const char *new_tok)
+{
+	cf_crash_nostack(AS_CFG, "line %d :: '%s' is obsolete - must use '%s'",
+			p_line->num, p_line->name_tok, new_tok);
+}
+
+void
 cfg_not_supported(const cfg_line* p_line, const char *feature)
 {
 	cf_crash_nostack(AS_CFG, "line %d :: illegal value '%s' for config parameter '%s' - feature %s is not supported",
@@ -2085,10 +2092,10 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_SERVICE_SINDEX_DATA_MAX_MEMORY:
 				config_val = cfg_u64_no_checks(&line);
-				if (config_val < c->sindex_data_memory_used) {
+				if (config_val <  cf_atomic64_get(c->sindex_data_memory_used)) {
 					cf_warning(AS_CFG, "sindex-data-max-memory must"
 							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(c->sindex_data_memory_used), line_num);
+							cf_atomic64_get(c->sindex_data_memory_used), line_num);
 				}
 				else {
 					c->sindex_data_max_memory = config_val; // this is in addition to namespace memory
@@ -2888,10 +2895,10 @@ as_config_init(const char *config_file)
 			switch(cfg_find_tok(line.name_tok, NAMESPACE_SINDEX_OPTS, NUM_NAMESPACE_SINDEX_OPTS)) {
 			case CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY:
 				config_val = cfg_u64_no_checks(&line);
-				if (config_val < ns->sindex_data_memory_used) {
+				if (config_val < cf_atomic64_get(ns->sindex_data_memory_used)) {
 					cf_warning(AS_CFG, "sindex-data-max-memory must"
 							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(ns->sindex_data_max_memory), line_num);
+							cf_atomic64_get(ns->sindex_data_memory_used), line_num);
 				}
 				else {
 					ns->sindex_data_max_memory = config_val; // this is in addition to namespace memory
@@ -3290,18 +3297,6 @@ as_config_post_process(as_config *c, const char *config_file)
 		if (c->cluster.cl_self_node == 0 && c->cluster_mode == CL_MODE_STATIC) {
 			cf_crash_nostack(AS_CFG,
 				"Cluster 'self-node-id' must be set to a non-zero value when in 'static' mode");
-		}
-		// Check that we are NOT claiming we can do Rack-Aware for RF > 2.
-		// Although that will be fixed soon, for now we must crash if the
-		// user has specified RA is ON for RF > 2.
-		// TODO: Remove this when RA works for RF > 2.
-		for (uint i = 0; i < g_config.namespaces; i++) {
-			as_namespace *ns = g_config.namespace[i];
-
-			if (ns->replication_factor > 2) {
-				cf_crash_nostack(AS_CFG,
-					"Rack-Aware Feature is not currently available for Replication Factor greater than 2.");
-			}
 		}
 
 		// If we got this far, then group/node should be ok.

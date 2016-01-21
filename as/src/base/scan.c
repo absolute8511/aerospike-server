@@ -309,7 +309,7 @@ get_scan_type(as_transaction* tr)
 	as_msg_field *filename_f = as_msg_field_get(&tr->msgp->msg,
 			AS_MSG_FIELD_TYPE_UDF_FILENAME);
 
-	if (! filename_f && ! tr->udata.req_udata) {
+	if (! filename_f) {
 		return SCAN_TYPE_BASIC;
 	}
 
@@ -320,8 +320,7 @@ get_scan_type(as_transaction* tr)
 		return SCAN_TYPE_AGGR;
 	}
 
-	if (tr->udata.req_udata || (udf_op_f &&
-			*udf_op_f->data == (uint8_t)AS_UDF_OP_BACKGROUND)) {
+	if (udf_op_f && *udf_op_f->data == (uint8_t)AS_UDF_OP_BACKGROUND) {
 		return SCAN_TYPE_UDF_BG;
 	}
 

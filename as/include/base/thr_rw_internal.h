@@ -98,14 +98,6 @@
  * error on the server. */
 #define MAX_TTL_WARNING 315360000 // Set to ten years for now.
 
-typedef struct write_local_generation {
-	bool use_gen_check;
-	as_generation gen_check;
-	bool use_gen_set;
-	as_generation gen_set;
-	bool use_msg_gen;
-} write_local_generation;
-
 typedef struct ldt_prole_info_s {
 	bool        replication_partition_version_match;
 	uint64_t    ldt_source_version;

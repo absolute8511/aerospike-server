@@ -41,12 +41,12 @@ as_xmem_scheme_check() {
 static bool
 check_capacity(uint32_t capacity)
 {
-	uint8_t* test_index_stages[g_config.namespaces];
-	uint8_t* test_data_blocks[g_config.namespaces];
+	uint8_t* test_index_stages[g_config.n_namespaces];
+	uint8_t* test_data_blocks[g_config.n_namespaces];
 	uint32_t i;
 
-	for (i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 		uint64_t stage_size = (uint64_t)as_index_size_get(ns) * capacity;
 
 		if ((test_index_stages[i] = cf_malloc(stage_size)) == NULL) {
@@ -65,7 +65,7 @@ check_capacity(uint32_t capacity)
 		cf_free(test_data_blocks[j]);
 	}
 
-	return i == g_config.namespaces;
+	return i == g_config.n_namespaces;
 }
 
 #define MIN_STAGE_CAPACITY (MAX_STAGE_CAPACITY / 8)

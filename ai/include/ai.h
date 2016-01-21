@@ -71,3 +71,9 @@ int ai_drop_table(char *tname);
  *  Return 0 if successful, -1 otherwise.
  */
 int ai_drop_index(char *iname);
+
+/*
+ * Destroys the index (btr)
+ * Does not destroy the metadata
+ */
+void ai_destroy_index(bt * ibtr, int imatch);

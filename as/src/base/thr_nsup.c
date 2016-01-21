@@ -51,6 +51,7 @@
 #include "base/index.h"
 #include "base/ldt.h"
 #include "base/proto.h"
+#include "base/thr_sindex.h"
 #include "base/thr_tsvc.h"
 #include "base/thr_write.h"
 #include "base/transaction.h"
@@ -99,6 +100,27 @@ void_time_to_ttl(uint32_t void_time, uint32_t now)
 
 
 //------------------------------------------------
+// Is record's set evictable?
+//
+static bool
+cold_start_is_set_evictable(as_namespace* ns, as_index* r)
+{
+	uint32_t set_id = (uint32_t)as_index_get_set_id(r);
+
+	if (set_id == INVALID_SET_ID) {
+		return true;
+	}
+
+	as_set* p_set;
+
+	if (cf_vmapx_get_by_index(ns->p_sets_vmap, set_id - 1, (void**)&p_set) != CF_VMAPX_OK) {
+		cf_crash(AS_NSUP, "{%s} cold start evict failed to get set index %u from vmap", ns->name, set_id - 1);
+	}
+
+	return ! IS_SET_EVICTION_DISABLED(p_set);
+}
+
+//------------------------------------------------
 // Reduce callback prepares for cold-start eviction.
 // - builds cold-start eviction histogram
 //
@@ -113,7 +135,8 @@ cold_start_evict_prep_reduce_cb(as_index_ref* r_ref, void* udata)
 	cold_start_evict_prep_info* p_info = (cold_start_evict_prep_info*)udata;
 	uint32_t void_time = r_ref->r->void_time;
 
-	if (void_time != 0) {
+	if (void_time != 0 &&
+			cold_start_is_set_evictable(p_info->ns, r_ref->r)) {
 		linear_histogram_insert_data_point(p_info->hist, void_time);
 	}
 
@@ -172,8 +195,9 @@ cold_start_evict_reduce_cb(as_index_ref* r_ref, void* udata)
 	uint32_t void_time = r_ref->r->void_time;
 
 	if (void_time != 0) {
-		if (void_time < ns->cold_start_threshold_void_time ||
-				(void_time < p_info->high_void_time && random_delete(p_info->mid_tenths_pct))) {
+		if (cold_start_is_set_evictable(ns, r_ref->r) &&
+				(void_time < ns->cold_start_threshold_void_time ||
+						(void_time < p_info->high_void_time && random_delete(p_info->mid_tenths_pct)))) {
 			as_index_delete(p_partition->vp, &r_ref->r->key);
 			p_info->num_evicted++;
 		}
@@ -825,9 +849,11 @@ evict_prep_reduce_cb(as_index_ref* r_ref, void* udata)
 //------------------------------------------------
 // Reduce callback evicts records.
 // - evicts based on general threshold
+// - does expiration on eviction-disabled sets
 //
 typedef struct evict_info_s {
 	as_namespace*	ns;
+	uint32_t		now;
 	bool*			sets_not_evicting;
 	uint32_t		low_void_time;
 	uint32_t		high_void_time;
@@ -844,8 +870,14 @@ evict_reduce_cb(as_index_ref* r_ref, void* udata)
 	uint32_t set_id = as_index_get_set_id(r);
 	uint32_t void_time = r->void_time;
 
-	if (void_time != 0 && ! p_info->sets_not_evicting[set_id]) {
-		if (void_time < p_info->low_void_time ||
+	if (void_time != 0) {
+		if (p_info->sets_not_evicting[set_id]) {
+			if (p_info->now > void_time) {
+				queue_for_delete(ns, &r->key);
+				p_info->num_evicted++;
+			}
+		}
+		else if (void_time < p_info->low_void_time ||
 				(void_time < p_info->high_void_time && random_delete(p_info->mid_tenths_pct))) {
 			queue_for_delete(ns, &r->key);
 			p_info->num_evicted++;
@@ -1112,8 +1144,8 @@ thr_ldt_sup(void *arg)
 		nanosleep(&delay, NULL);
 
 		// Iterate over every namespace.
-		for (int i = 0; i < g_config.namespaces; i++) {
-			as_namespace *ns = g_config.namespace[i];
+		for (int i = 0; i < g_config.n_namespaces; i++) {
+			as_namespace *ns = g_config.namespaces[i];
 
 			if (! ns->ldt_enabled) {
 				cf_detail(AS_LDT, "{%s} ldt sub skip", ns->name);
@@ -1144,9 +1176,9 @@ thr_nsup(void *arg)
 	cf_info(AS_NSUP, "namespace supervisor started");
 
 	// Garbage-collect long-expired proles, one partition per loop.
-	int prole_pids[g_config.namespaces];
+	int prole_pids[g_config.n_namespaces];
 
-	for (int n = 0; n < g_config.namespaces; n++) {
+	for (int n = 0; n < g_config.n_namespaces; n++) {
 		prole_pids[n] = -1;
 	}
 
@@ -1166,10 +1198,10 @@ thr_nsup(void *arg)
 		last_time = curr_time;
 
 		// Iterate over every namespace.
-		for (int i = 0; i < g_config.namespaces; i++) {
+		for (int i = 0; i < g_config.n_namespaces; i++) {
 			uint64_t start_ms = cf_getms();
 
-			as_namespace *ns = g_config.namespace[i];
+			as_namespace *ns = g_config.namespaces[i];
 
 			cf_info(AS_NSUP, "{%s} nsup start", ns->name);
 
@@ -1225,7 +1257,9 @@ thr_nsup(void *arg)
 						continue;
 					}
 
-					SET_DELETED_OFF(p_set);
+					// Starts a detached thread which clears all sindex entries
+					// for this set, then switches off the set's 'deleted' flag.
+					as_sindex_initiate_set_delete(ns, p_set);
 				}
 			}
 
@@ -1303,6 +1337,7 @@ thr_nsup(void *arg)
 
 				memset(&cb_info2, 0, sizeof(cb_info2));
 				cb_info2.ns = ns;
+				cb_info2.now = now;
 				cb_info2.sets_not_evicting = sets_not_evicting;
 
 				// Determine general eviction thresholds.

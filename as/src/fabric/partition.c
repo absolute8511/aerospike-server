@@ -598,8 +598,8 @@ as_partition_getstates(as_partition_states *ps)
 
 	memset(ps, 0, sizeof(as_partition_states));
 
-	for (int i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (int i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 		size_t ns_absent_partitions = 0;
 		for (int j = 0; j < AS_PARTITIONS; j++) {
 
@@ -1328,8 +1328,8 @@ as_partition_getreplica_write_str(cf_dyn_buf *db)
 {
 	size_t db_sz = db->used_sz;
 
-	for (uint i = 0 ; i < g_config.namespaces ; i++ ) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint i = 0 ; i < g_config.n_namespaces ; i++ ) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		for (uint j = 0 ; j < AS_PARTITIONS ; j++) {
 			if (g_config.self_node == as_partition_getreplica_write(ns, j) ) {
@@ -1358,8 +1358,8 @@ as_partition_getreplica_master_str(cf_dyn_buf *db)
 
 	size_t db_sz = db->used_sz;
 
-	for (uint i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		memset(master_bitmap, 0, BITMAP_SIZE);
 		cf_dyn_buf_append_string(db, ns->name);
@@ -1394,8 +1394,8 @@ as_partition_getreplica_read_str(cf_dyn_buf *db)
 {
 	size_t db_sz = db->used_sz;
 
-	for (uint i = 0 ; i < g_config.namespaces ; i++ ) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint i = 0 ; i < g_config.n_namespaces ; i++ ) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		for (uint j = 0 ; j < AS_PARTITIONS ; j++) {
 			if (g_config.self_node == as_partition_getreplica_read(ns, j) ) {
@@ -1420,8 +1420,8 @@ as_partition_getreplica_prole_str(cf_dyn_buf *db)
 
 	size_t db_sz = db->used_sz;
 
-	for (uint i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		memset(prole_bitmap, 0, sizeof(uint8_t) * BITMAP_SIZE);
 		cf_dyn_buf_append_string(db, ns->name);
@@ -1455,8 +1455,8 @@ as_partition_get_replicas_all_str(cf_dyn_buf *db)
 {
 	size_t db_sz = db->used_sz;
 
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		cf_dyn_buf_append_string(db, ns->name);
 		cf_dyn_buf_append_char(db, ':');
@@ -1541,8 +1541,8 @@ as_partition_getinfo_str(cf_dyn_buf *db)
 {
 	size_t db_sz = db->used_sz;
 
-	for (uint i = 0 ; i < g_config.namespaces ; i++ ) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint i = 0 ; i < g_config.n_namespaces ; i++ ) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		for (uint j = 0 ; j < AS_PARTITIONS ; j++) {
 
@@ -1878,8 +1878,7 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns,
 
 			switch (p->state) {
 				case AS_PARTITION_STATE_UNDEF:
-				case AS_PARTITION_STATE_JOURNAL_APPLY: // should never happen - it's a dummy state
-					cf_debug(AS_PARTITION, "{%s:%d} migrate rx start while in state %d, fail", ns->name, pid, p->state);
+					cf_warning(AS_PARTITION, "{%s:%d} migrate rx start while in state %d, fail", ns->name, pid, p->state);
 					rv = AS_MIGRATE_FAIL;
 					break;
 				case AS_PARTITION_STATE_ABSENT:
@@ -2063,7 +2062,6 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns,
 
 			switch (orig_p_state) {
 				case AS_PARTITION_STATE_UNDEF:
-				case AS_PARTITION_STATE_JOURNAL_APPLY: // should never happen - it's a dummy state
 				case AS_PARTITION_STATE_ABSENT:
 				case AS_PARTITION_STATE_ZOMBIE:
 					/* check for illegal state */
@@ -2253,256 +2251,180 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns,
 }
 
 
-// reduce the replication factor to 1 if the cluster size is less than or equal to the specified limit
-void as_partition_set_ns_replication_factor(int new_cluster_size)
+// Reduce the replication factor to 1 if the cluster size is less than or equal
+// to the specified limit.
+void
+as_partition_set_ns_replication_factor(int new_cluster_size)
 {
 	bool reduce_repl = false;
-	cf_info(AS_PAXOS, "setting replication factors: cluster size %d, paxos single replica limit %d", new_cluster_size, g_config.paxos_single_replica_limit);
-	if (new_cluster_size <= g_config.paxos_single_replica_limit)
+
+	cf_info(AS_PAXOS, "setting replication factors: cluster size %d, paxos single replica limit %d",
+			new_cluster_size, g_config.paxos_single_replica_limit);
+
+	if (new_cluster_size <= g_config.paxos_single_replica_limit) {
 		reduce_repl = true;
-	// normal case - set replication factor
+	}
+
+	// Normal case - set replication factor.
 	uint16_t max_repl;
-	for (int i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
-		max_repl = ns->cfg_replication_factor > new_cluster_size ? new_cluster_size : ns->cfg_replication_factor;
+	for (int i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
+
+		max_repl = ns->cfg_replication_factor > new_cluster_size ?
+				new_cluster_size : ns->cfg_replication_factor;
 		ns->replication_factor = reduce_repl ? 1 : max_repl;
-		cf_info(AS_PAXOS, "{%s} replication factor is %d", ns->name, ns->replication_factor);
+
+		cf_info(AS_PAXOS, "{%s} replication factor is %d",
+				ns->name, ns->replication_factor);
 	}
 }
+
 
 // Define the macros for accessing the HV and hv_slindex arrays.
 #define HV(x, y) hv_ptr[(x * g_config.paxos_max_cluster_size) + y]
 #define HV_SLINDEX(x, y) hv_slindex_ptr[(x * g_config.paxos_max_cluster_size) + y]
 
-/**
- * Print out the contents of an HV Row.  This is a DEBUG routine, and thus
- * the printf() statements are valid.
- */
-void as_partition_show_hv_row(cf_node hv_ptr[], int pid ) {
-	int i;
-	cf_node node;
-	cc_node_t node_id;
-	cc_group_t group_id;
 
-	int cluster_size = g_config.paxos_max_cluster_size;
-	printf("[Partition(%d) Succ List]::", pid );
-	for( i = 0; i <  cluster_size; i++ ) {
-		node = HV(pid, i );
-		if( node > 0 ) {
-			node_id = cc_compute_node_id( node );
-			group_id = cc_compute_group_id( node );
-			printf("Node(%d)[%016lx] G(%04x) N(%08x)",
-				   i, node, group_id, node_id );
-		} else {
-			break;
+// Returns true if group_id is unique within nodes list indices less than n.
+bool
+is_group_distinct_before_n(const as_partition *ptn, const cf_node hv_ptr[],
+		const int hv_slindex_ptr[], const cc_node_t group_id, const int index) {
+	const uint16_t pid = ptn->partition_id;
+
+	for (int cur_i = 0; cur_i < index; cur_i++) {
+		const cf_node cur_node = HV(pid, cur_i);
+		const cc_node_t cur_group_id = cc_compute_group_id(cur_node);
+
+		if (cur_group_id == group_id) {
+			return false;
 		}
 	}
-	printf("<END>\n");
-} // end as_partition_show_hv_row()
 
-/**
- * Adjust the Partition Map Array (HV) and SuccessionList Index Array to
- * Accommodate the GROUP (rack) rules for replicas (proles).  The first
- * "Replication Factor" number of nodes after the zero entry (the master) MUST
- * have different group ids.  We'll do a pair-wise swap of entries to make
- * sure that the first N node values have different group ids than the master.
- * First, check that we have a valid topology, sufficient for supporting
- * the Rack-Aware rules.
- */
-void as_partition_adjust_hv_and_slindex( as_partition * p, cf_node hv_ptr[],
-		int hv_slindex_ptr[], int pid )
+	return true;
+}
+
+
+// Adjust the Partition Map Array (HV) and SuccessionList Index Array to
+// Accommodate the GROUP (rack) rules for replicas (proles).  The first
+// "Replication Factor" number of nodes after the zero entry (the master) MUST
+// have different group ids.  We'll do a pair-wise swap of entries to make
+// sure that the first N node values have different group ids than the nodes
+// that preceded it.
+// Assumes the topology has already been verified to support the Rack-Aware
+// rules.
+void
+as_partition_adjust_hv_and_slindex(const as_partition *ptn, cf_node hv_ptr[],
+		int hv_slindex_ptr[])
 {
-	cf_node self_node = g_config.self_node;
-	cc_node_t node_id = cc_compute_node_id( self_node );
-	cc_group_t group_id = cc_compute_group_id( self_node );
-	cc_group_t master_group_id;
-	cc_node_t master_node_id;
-	cf_node master_node, node, temp_node;
-	cf_node next_node = 0;
-	int temp_index;
-	// NOTE: Master in slot ZERO, first prole in slot ONE.
-	int i = 0;
-	int j = 0;
-	int rf = p->p_repl_factor;
-	int cluster_size = g_config.paxos_max_cluster_size;
+	const uint rf = ptn->p_repl_factor;
+	const uint16_t pid = ptn->partition_id;
+	const uint64_t cluster_size = g_config.paxos->cluster_size;
+	const uint16_t n_groups = g_config.cluster.group_count;
+	const uint16_t n_needed = n_groups < rf ? n_groups : rf;
 
-	cf_detail(AS_PARTITION,
-			  "Part(%d) Rep(%d) HV Self Node(%016lx) Gid(%08x) Nid(%08x)",
-			  pid, p->p_repl_factor, self_node, group_id, node_id );
+	int next_i = n_needed; // next candidate index to swap with
 
-	// Compute the Group and Node of this partition's Master
-	master_node = HV( pid, 0 );
-	master_node_id = cc_compute_node_id( master_node );
-	master_group_id = cc_compute_group_id( master_node );
-	bool found = false;
+	for (int cur_i = 1; cur_i < n_needed; cur_i++) {
+		const cf_node cur_node = HV(pid, cur_i);
+		const cc_group_t cur_group_id = cc_compute_group_id(cur_node);
 
-	// Quick look -- if we see two different groups, jump out early
-	for( i = 1; i < rf; i++ ) {
-		node = HV(pid, i );
-		group_id = cc_compute_group_id( node );
-		if( group_id != master_group_id ) {
-			if( DEBUG )
-				printf("P(%d) Master Group(%04x) NodeGroup(%04x)\n",
-					   pid, master_group_id, group_id );
-			return;
+		if (cur_node == (cf_node)0) {
+			cf_crash(AS_PARTITION, "null node found within cluster_size");
 		}
-	}
 
-	if( DEBUG ) {
-		printf("SHOW HV ARRAY BEFORE ADJUSTMENT:: PID(%d)\n", pid);
-		as_partition_show_hv_row( hv_ptr, pid );
-	}
+		// If cur_group is unique for nodes < cur_i then continue to next node.
+		if (! is_group_distinct_before_n(ptn, hv_ptr, hv_slindex_ptr,
+				cur_group_id, cur_i)) {
 
-	if( DEBUG )
-		printf("MASTER Node[%016lx] G(%08x) N(%08x)",
-			   master_node, master_group_id, master_node_id );
+			// Find a group after cur_i that is unique for groups before cur_i.
+			int swap_i = cur_i; // if swap cannot be found then no change
+			for ( ; next_i < cluster_size; next_i++) {
+				const cf_node next_node = HV(pid, next_i);
+				const cc_group_t next_group_id = cc_compute_group_id(next_node);
 
-	p->replica[0] = master_node;
+				if (next_node == (cf_node)0) {
+					cf_crash(AS_PARTITION, "null node found within cluster_size");
+				}
 
-	// For each cell in the replica list (after the master, which is in cell
-	// position ZERO), make sure that the node in that cell has a different
-	// group id than the master.  Note: "rf" is usually 2, so we usually do
-	// this loop only one time.
-	for( i = 1; i < rf; i++ ) {
-		node = HV(pid, i );
-		group_id = cc_compute_group_id( node );
-		if( group_id == master_group_id ) {
-			cf_debug(AS_PARTITION, "Master(%016lx) Node(%d)(%016lx) COLLISION!!!",
-					 master_node, i, node );
-			// Ok -- so we have a GROUP overlap.  We need to swap this cell's
-			// node value with someone else in the list.  Go down the list and
-			// find the first cell with a different group.
-			for( j = i + 1; j < cluster_size; j++ ) {
-				next_node = HV(pid, j );
-				group_id = cc_compute_group_id( next_node );
-				if( group_id != master_group_id && next_node != (cf_node) 0 ) {
-					// Found it.
-					found = true;
+				if (is_group_distinct_before_n(ptn, hv_ptr, hv_slindex_ptr,
+						next_group_id, cur_i)) {
+					swap_i = next_i;
+					next_i++;
 					break;
 				}
 			}
-			if( found == true ) {
-				// Swap the cell values in "i" and "j" for both hv and slindex
-				cf_debug(AS_PARTITION,
-						 "ADJUST HV: MG(%04x) SWAP cells (%d)[%016lx] and (%d)[%016lx]",
-						 master_group_id, i, node, j, next_node );
-				temp_node = HV(pid, i);
-				HV(pid, i) = HV(pid, j);
-				HV(pid, j) = temp_node;
-				temp_index = HV_SLINDEX(pid, i);
-				HV_SLINDEX(pid, i) = HV_SLINDEX(pid, j);
-				HV_SLINDEX(pid, j) = temp_index;
-			} else {
-				cf_warning( AS_PARTITION,
-							"Can't find a diff group:i(%d) j(%d) Rack Aware Adjustment:MN(%016lx)andN(%016lx)",
-							i, j, master_node, node);
+
+			if (swap_i == cur_i) {
+				// No other distinct groups found. This shouldn't be possible.
+				// We should reach n_needed first.
+				cf_crash(AS_PARTITION, "can't find a diff cur:%d swap:%d repl:%d clsz:%d ptn:%d",
+						cur_i, swap_i, rf, cluster_size, pid);
 			}
-		} else {
-			cf_debug(AS_PARTITION, "Master(%016lx) Node(%d)(%016lx) OK",
-					 master_node, i, node );
+
+			// Now swap cur_i with swap_i.
+			// Swap node.
+			HV(pid, cur_i) ^= HV(pid, swap_i);
+			HV(pid, swap_i) = HV(pid, cur_i) ^ HV(pid, swap_i);
+			HV(pid, cur_i) ^= HV(pid, swap_i);
+
+			// Swap slindex.
+			HV_SLINDEX(pid, cur_i) ^= HV_SLINDEX(pid, swap_i);
+			HV_SLINDEX(pid, swap_i) = HV_SLINDEX(pid, cur_i) ^ HV_SLINDEX(pid, swap_i);
+			HV_SLINDEX(pid, cur_i) ^= HV_SLINDEX(pid, swap_i);
 		}
-	} // For each potential Replica Cell in HV
-
-	if( DEBUG ) {
-		printf("SHOW HV ARRAY !!AFTER!!  ADJUSTMENT\n");
-		as_partition_show_hv_row( hv_ptr, pid );
 	}
-
 } // end as_partition_adjust_hv_and_slindex()
 
 
-/**
- * DEBUG FUNCTION (so, yes, the printf()s are valid here).
- * Show the contents of the HV PTR array.  Needed for debugging the complex
- * world of Paxos and the succession list.
- * For each partition, show the contents of the succession list (stop after the
- * first ZERO entry);
- */
+// Check that we have more than one group in our paxos succession list,
+// otherwise we don't have a valid cluster topology.
+// Assumes namespace replication factors have been updated for this round.
 void
-as_partition_dump_hv_ptr_array( cf_node *hv_ptr ) {
-	int cluster_size =  g_config.paxos_max_cluster_size;
-	cf_node node;
+as_partition_cluster_topology_info(const as_paxos *paxos_p) {
+	const cf_node * succession = paxos_p->succession;
+	const uint64_t cluster_size = g_config.paxos->cluster_size;
 
-	printf("<< !!!!!!!!!!!!!!!!!!!! DUMP HV PTR ARRAY !!!!!!!!!!!!!!!!!!! >>\n");
-	for (int i = 0; i < AS_PARTITIONS; i++) {
-		printf("Partition[%d]:: ", i);
-
-		for (int j = 0; j < cluster_size; j++) {
-			if (( node = HV(i, j)) == 0 ) {
-				break;
-			} else {
-				printf("(%d)[%016lx] ", j, node );
-			}
-		} // end for each node in cluster
-		printf("<END>\n");
-	} // end for each partition
-} // end as_partition_dump_hv_ptr_array()
-
-
-/**
- * Check that we have more than one group in our paxos succession list,
- * otherwise we don't have a valid cluster topology.
- */
-bool as_partition_valid_cluster_topology( as_paxos *paxos_p ) {
-	bool result = false; // Feeling negative today
-	cf_node * succession = paxos_p->succession;
-	size_t cluster_size = g_config.paxos_max_cluster_size;
-
-	// Loop thru the paxos succession list and validate that there is more than
-	// a single group present.   Later versions of this function will do more,
-	// such as verify that the cluster is balanced (equal nodes per group)
-	// 05/28/2013::(tjl).
-	// One of the later versions is already here -- we walk thru the succession
-	// list and dump it to the log, in group order.
-	cc_group_t remember_group_id = 0;
-	cc_group_t group_id = 0;
+	uint32_t distinct_groups = 0;
 	cluster_config_t cc; // structure to hold state of the group
-	cc_cluster_config_defaults( &cc );
 
-	// Turn this on for Cluster Config Debugging. Otherwise, it stays off.
-	if( DEBUG ) {
-		printf("\n\n<><><> SUCCESSION LIST <><><> CL Size(%ld)::", cluster_size );
-		for (int i = 0; i < cluster_size; i++) {
-			if (succession[i] == (cf_node)0)  continue;
-			printf("NODE(%d)(%"PRIx64"] ", i, succession[i] );
-		} // end for each node in paxos succession list
-		printf("<END>\n\n");
+	cc_cluster_config_defaults(&cc);
+
+	// Verify that there are at least *replication-factor* groups present.
+	for (int cur_i = 0;
+			succession[cur_i] != (cf_node)0 && cur_i < cluster_size;
+			cur_i++) {
+		const cc_group_t cur_group = cc_compute_group_id(succession[cur_i]);
+		cc_add_fullnode_group_entry(&cc, succession[cur_i]);
+
+		int prev_i = 0;
+		for ( ; prev_i < cur_i; prev_i++) {
+			const cc_group_t prev_group = cc_compute_group_id(
+					succession[prev_i]);
+
+			if (prev_group == cur_group) {
+				break;
+			}
+		}
+
+		if (prev_i == cur_i) { // group is unique
+			distinct_groups++;
+		}
 	}
 
-	for (int i = 0; i < cluster_size; i++) {
-		if (succession[i] == (cf_node)0)  continue;
-		// Build up our cluster state -- so we can measure cluster health
-		group_id = cc_compute_group_id( succession[i] );
-		cc_add_fullnode_group_entry( &cc, succession[i] );
-		if( remember_group_id == 0 ) {
-			remember_group_id = group_id;
-		} else if( group_id != remember_group_id ) {
-			// Found a different group -- so for now, we're good.
-			// NOTE: The heavier-weight "validate cluster" call will do a more
-			// careful job of evaluating the state of the cluster.
-			result = true;
-			// Note: We used to BREAK here, since we could jump out with a VALID
-			// cluster rating after we saw a different group.  However, NOW we
-			// keep going because we want to build the FULL cluster state and
-			// then print it out.  6/2013 tjl.
-			// break; // No longer break.
-		}
-	} // end for each node in paxos succession list
-
-	cc.cluster_state = cc_get_cluster_state( &cc );
+	cc.cluster_state = cc_get_cluster_state(&cc);
+	g_config.cluster.cluster_state = cc.cluster_state;
+	g_config.cluster.group_count = cc.group_count;
 
 	// Show the state of the cluster -- list the contents of each group. Dump
 	// this all to the log.
-	cc_show_cluster_state( &cc );
-
-	return result;
+	cc_show_cluster_state(&cc);
 } // end as_partition_valid_cluster_topology()
 
 void
 as_migrate_increment_all_tx_fail() {
-	for (int i = 0; i < g_config.namespaces; i++) {
+	for (int i = 0; i < g_config.n_namespaces; i++) {
 		// All namespaces will fail to migrate.
-		as_namespace *ns = g_config.namespace[i];
+		as_namespace *ns = g_config.namespaces[i];
 		cf_atomic_int_incr(&ns->migrate_tx_partitions_imbalance);
 	}
 }
@@ -2526,20 +2448,17 @@ as_partition_balance()
 	if ((NULL == succession) || (NULL == alive)) {
 		as_migrate_increment_all_tx_fail();
 		cf_warning(AS_PARTITION,
-				   "succession list is uninitialized: couldn't start migrate");
+				"succession list is uninitialized: couldn't start migrate");
 		return;
 	}
 
 	if ((cf_node)0 == self) {
 		as_migrate_increment_all_tx_fail();
 		cf_warning(AS_PARTITION,
-				   "node value is uninitialized: couldn't start migrate");
+				"node value is uninitialized: couldn't start migrate");
 		return;
 	}
 
-	// Check to see if all of the nodes in the paxos succession list form
-	// a valid cluster (and thus, could support the Rack Aware rules.
-	bool cluster_valid = as_partition_valid_cluster_topology( paxos );
 	/*
 	 * Check that the succession list integrity
 	 * We expect that all if the succession list entries to be within the first
@@ -2596,7 +2515,7 @@ as_partition_balance()
 	 * Check that the global state table is well formed
 	 */
 	found_error = false;
-	for (int i = 0; i < g_config.namespaces; i++) {
+	for (int i = 0; i < g_config.n_namespaces; i++) {
 		for (int j = 0; j < cluster_size; j++) {
 			if (NULL == paxos->c_partition_vinfo[i][j]) {
 				found_error = true;
@@ -2621,8 +2540,8 @@ as_partition_balance()
 	 * Check that this partition's global state is the same as its local state
 	 */
 	found_error = false;
-	for (int i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (int i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 		for (int j = 0; j < AS_PARTITIONS; j++) {
 			if (memcmp(&ns->partitions[j].version_info, &paxos->c_partition_vinfo[i][self_index][j], sizeof(as_partition_vinfo)) != 0) {
 				found_error = true;
@@ -2640,6 +2559,8 @@ as_partition_balance()
 	// figure out effective replication factor in the face of node failures
 	as_partition_set_ns_replication_factor(cluster_size);
 
+	// Print rack aware info.
+	as_partition_cluster_topology_info(paxos);
 
 	// Populate an array that, for each partition, holds all of the potential
 	// successor nodes (a list of cluster-size node ids).  This is a "packed
@@ -2848,14 +2769,6 @@ as_partition_balance()
 		} // end for each node in cluster
 	} // end for each partition
 
-	// Debug Print of HV PTR:  Maybe make this a cf_detail() call.
-	// This is useful to see the whole contents of the partition table, but
-	// since that is 4096 lines of output (each time we rebalance), it's not
-	// a thing we would want to do in production.
-	if( DEBUG ) {
-		as_partition_dump_hv_ptr_array( hv_ptr );
-	}
-
 	int n_new_versions = 0;
 
 	/*
@@ -2876,16 +2789,16 @@ as_partition_balance()
 	size_t n_recreate = 0;
 	size_t n_duplicate = 0;
 
-	size_t n_total = g_config.namespaces * AS_PARTITIONS;
+	size_t n_total = g_config.n_namespaces * AS_PARTITIONS;
 	uint64_t orig_cluster_key = as_paxos_get_cluster_key();
 
 	cf_queue mig_q;
 	cf_queue* mq = &mig_q;
 	cf_queue_init(mq, sizeof(partition_migrate_record),
-				AS_PARTITIONS * g_config.namespaces, false);
+				AS_PARTITIONS * g_config.n_namespaces, false);
 
-	for (int i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (int i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 		if (NULL == ns)
 			continue;
 
@@ -2938,12 +2851,10 @@ as_partition_balance()
 			 * arrays to make sure that the first "replica-factor" entries have
 			 * group ids that are different than the master. (5/2013:tjl)
 			 */
-			if( g_config.cluster_mode != CL_MODE_NO_TOPOLOGY
-					&& paxos->cluster_size > 1
-					&& cluster_valid == true )
-			{
+			if (g_config.cluster_mode != CL_MODE_NO_TOPOLOGY
+					&& paxos->cluster_size > 1) {
 				// Check and then update the HV and SLINDEX arrays appropriately.
-				as_partition_adjust_hv_and_slindex( p, hv_ptr, hv_slindex_ptr, j );
+				as_partition_adjust_hv_and_slindex(p, hv_ptr, hv_slindex_ptr);
 			}
 			// So -- whether or not we updated HV and SLINDEX, now we create
 			// the the replica list for the current partition using the first
@@ -3450,9 +3361,9 @@ as_partition_balance()
 	//
 	// flush to storage
 	//
-	for (int i = 0; i < g_config.namespaces; i++) {
+	for (int i = 0; i < g_config.n_namespaces; i++) {
 
-		as_namespace *ns = g_config.namespace[i];
+		as_namespace *ns = g_config.namespaces[i];
 		if (NULL == ns)
 			continue;
 		flush_to_storage(ns);
@@ -3487,8 +3398,8 @@ as_partition_balance_init()
 	g_config.paxos->cluster_size = 1;
 	as_paxos_set_cluster_integrity(g_config.paxos, true);
 
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		ns->replication_factor = 1;
 
@@ -3541,8 +3452,8 @@ as_partition_balance_init_single_node_cluster()
 	memset(&new_vinfo, 0, sizeof(new_vinfo));
 	generate_new_partition_version(&new_vinfo);
 
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		uint32_t n_promoted = 0;
 

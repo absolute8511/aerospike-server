@@ -82,6 +82,7 @@ extern bool      g_sindex_boot_done;
 void as_sindex_thr_init();
 void as_sindex_gc_histogram_dumpall();
 objs_to_defrag_arr * as_sindex_gc_get_defrag_arr(void);
+void as_sindex_initiate_set_delete(as_namespace * ns, as_set * set);
 
 #define MAX_SINDEX_BUILDER_THREADS 32
 

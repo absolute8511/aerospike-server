@@ -1463,16 +1463,13 @@ update_alloc_at_location(void *p, size_t sz, alloc_type type, char *file, int li
 void *
 cf_malloc_at(size_t sz, char *file, int line)
 {
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_lock(&mem_count_lock);
-	}
-
 	void *p = malloc(sz);
 
 	if (!g_memory_accounting_enabled) {
 		return(p);
 	}
 
+	pthread_mutex_lock(&mem_count_lock);
 	cf_atomic64_incr(&mem_count_mallocs);
 
 	if (p) {
@@ -1495,10 +1492,7 @@ cf_malloc_at(size_t sz, char *file, int line)
 		}
 	}
 
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_unlock(&mem_count_lock);
-	}
-
+	pthread_mutex_unlock(&mem_count_lock);
 	return(p);
 }
 
@@ -1510,16 +1504,13 @@ cf_free_at(void *p, char *file, int line)
 		return;
 	}
 
-	pthread_mutex_lock(&mem_count_lock);
-
 	/* Apparently freeing 0 is both being done by our code and permitted in the GLIBC implementation. */
 	if (!p) {
 		cf_info(CF_ALLOC, "[Ignoring cf_free(0) @ %s:%d!]", file, line);
-		if (g_memory_accounting_enabled) {
-			pthread_mutex_unlock(&mem_count_lock);
-		}
 		return;
 	}
+
+	pthread_mutex_lock(&mem_count_lock);
 
 	size_t sz = 0;
 
@@ -1539,24 +1530,19 @@ cf_free_at(void *p, char *file, int line)
 #endif
 	}
 
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_unlock(&mem_count_lock);
-	}
+	pthread_mutex_unlock(&mem_count_lock);
 }
 
 void *
 cf_calloc_at(size_t nmemb, size_t sz, char *file, int line)
 {
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_lock(&mem_count_lock);
-	}
-
 	void *p = calloc(nmemb, sz);
 
 	if (!g_memory_accounting_enabled) {
 		return(p);
 	}
 
+	pthread_mutex_lock(&mem_count_lock);
 	cf_atomic64_incr(&mem_count_callocs);
 
 	if (p) {
@@ -1571,26 +1557,20 @@ cf_calloc_at(size_t nmemb, size_t sz, char *file, int line)
 		}
 	}
 
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_unlock(&mem_count_lock);
-	}
-
+	pthread_mutex_unlock(&mem_count_lock);
 	return(p);
 }
 
 void *
 cf_realloc_at(void *ptr, size_t sz, char *file, int line)
 {
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_lock(&mem_count_lock);
-	}
-
 	void *p = realloc(ptr, sz);
 
 	if (!g_memory_accounting_enabled) {
 		return(p);
 	}
 
+	pthread_mutex_lock(&mem_count_lock);
 	cf_atomic64_incr(&mem_count_reallocs);
 
 	if (!ptr) {
@@ -1661,20 +1641,13 @@ cf_realloc_at(void *ptr, size_t sz, char *file, int line)
 		}
 	}
 
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_unlock(&mem_count_lock);
-	}
-
+	pthread_mutex_unlock(&mem_count_lock);
 	return(p);
 }
 
 void *
 cf_strdup_at(const char *s, char *file, int line)
 {
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_lock(&mem_count_lock);
-	}
-
 #ifdef FORCE_WRAP // WRAP_MALLOC
 	// Force compiler not to optimize "strdup()" and call the wrapper function.
 	char *(*my_strdup)(const char *s) = strdup;
@@ -1688,6 +1661,8 @@ cf_strdup_at(const char *s, char *file, int line)
 	if (!g_memory_accounting_enabled) {
 		return(p);
 	}
+
+	pthread_mutex_lock(&mem_count_lock);
 
 	size_t sz = strlen(s) + 1;
 
@@ -1705,20 +1680,13 @@ cf_strdup_at(const char *s, char *file, int line)
 		}
 	}
 
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_unlock(&mem_count_lock);
-	}
-
+	pthread_mutex_unlock(&mem_count_lock);
 	return(p);
 }
 
 void *
 cf_strndup_at(const char *s, size_t n, char *file, int line)
 {
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_lock(&mem_count_lock);
-	}
-
 #ifdef FORCE_WRAP // WRAP_MALLOC
 	// Force compiler not to optimize "strndup()" and call the wrapper function.
 	char *(*my_strndup)(const char *s, size_t n) = strndup;
@@ -1732,6 +1700,8 @@ cf_strndup_at(const char *s, size_t n, char *file, int line)
 	if (!g_memory_accounting_enabled) {
 		return(p);
 	}
+
+	pthread_mutex_lock(&mem_count_lock);
 
 	size_t sz = MIN(n, strlen(s)) + 1;
 
@@ -1749,20 +1719,13 @@ cf_strndup_at(const char *s, size_t n, char *file, int line)
 		}
 	}
 
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_unlock(&mem_count_lock);
-	}
-
+	pthread_mutex_unlock(&mem_count_lock);
 	return(p);
 }
 
 void *
 cf_valloc_at(size_t sz, char *file, int line)
 {
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_lock(&mem_count_lock);
-	}
-
 	void *p = 0;
 
 	if (!g_memory_accounting_enabled) {
@@ -1773,6 +1736,7 @@ cf_valloc_at(size_t sz, char *file, int line)
 		}
 	}
 
+	pthread_mutex_lock(&mem_count_lock);
 	cf_atomic64_incr(&mem_count_vallocs);
 
 	if (0 == posix_memalign(&p, VALLOC_SZ, sz)) {
@@ -1785,9 +1749,7 @@ cf_valloc_at(size_t sz, char *file, int line)
 			cf_warning(CF_ALLOC, "Could not add ptr: %p sz: %zu to mem_count_shash @ %s:%d [IGNORED]", p, sz, file, line);
 #endif
 		}
-		if (g_memory_accounting_enabled) {
-			pthread_mutex_unlock(&mem_count_lock);
-		}
+		pthread_mutex_unlock(&mem_count_lock);
 		return(p);
 	} else {
 #ifdef STRICT_MEMORY_ACCOUNTING
@@ -1797,10 +1759,7 @@ cf_valloc_at(size_t sz, char *file, int line)
 #endif
 	}
 
-	if (g_memory_accounting_enabled) {
-		pthread_mutex_unlock(&mem_count_lock);
-	}
-
+	pthread_mutex_unlock(&mem_count_lock);
 	return(0);
 }
 

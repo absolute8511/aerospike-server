@@ -92,7 +92,7 @@ int
 epoll_ctl_modify(as_file_handle *fd_h, uint32_t events)
 {
 	struct epoll_event ev;
-	memset(&ev, 0, sizeof ev);
+	memset(&ev, 0, sizeof (ev));
 	ev.events = events;
 	ev.data.ptr = fd_h;
 	return epoll_ctl(fd_h->epoll_fd, EPOLL_CTL_MOD, fd_h->fd, &ev);
@@ -258,7 +258,7 @@ thr_demarshal(void *arg)
 {
 	cf_socket_cfg *s, *ls;
 	// Create my epoll fd, register in the global list.
-	static struct epoll_event ev, lev;
+	struct epoll_event ev;
 	int nevents, i, n, epoll_fd;
 	cf_clock last_fd_print = 0;
 
@@ -300,6 +300,7 @@ thr_demarshal(void *arg)
 		if (epoll_fd == -1)
 			cf_crash(AS_DEMARSHAL, "epoll_create(): %s", cf_strerror(errno));
 
+		memset(&ev, 0, sizeof (ev));
 		ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
 		ev.data.fd = s->sock;
 		if (0 > epoll_ctl(epoll_fd, EPOLL_CTL_ADD, s->sock, &ev))
@@ -307,9 +308,9 @@ thr_demarshal(void *arg)
 		cf_info(AS_DEMARSHAL, "Service started: socket %s:%d", s->addr, s->port);
 
 		if (ls->sock) {
-			lev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
-			lev.data.fd = ls->sock;
-			if (0 > epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ls->sock, &lev))
+			ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+			ev.data.fd = ls->sock;
+			if (0 > epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ls->sock, &ev))
 			  cf_crash(AS_DEMARSHAL, "epoll_ctl(): %s", cf_strerror(errno));
 			cf_info(AS_DEMARSHAL, "Service also listening on localhost socket %s:%d", ls->addr, ls->port);
 		}

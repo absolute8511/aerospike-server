@@ -217,7 +217,7 @@ void *
 thr_info_port_fn(void *arg)
 {
 	cf_socket_cfg *s;
-	static struct epoll_event ev;
+	struct epoll_event ev;
 	int nevents, i, n, epoll_fd;
 	int err_count = 0;
 
@@ -245,6 +245,7 @@ thr_info_port_fn(void *arg)
 	if (-1 == (epoll_fd = epoll_create(EPOLL_SZ))) {
 		cf_crash(AS_INFO_PORT, "epoll_create(): %s", cf_strerror(errno));
 	}
+	memset(&ev, 0, sizeof (ev));
 	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
 	ev.data.fd = s->sock;
 	if (0 > epoll_ctl(epoll_fd, EPOLL_CTL_ADD, s->sock, &ev)) {
@@ -317,6 +318,7 @@ thr_info_port_fn(void *arg)
 				ips->fd = csocket;
 
 				// Place the client socket in the event queue.
+				memset(&ev, 0, sizeof (ev));
 				ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP ;
 				ev.data.ptr = ips;
 				if (0 > (n = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, csocket, &ev))) {

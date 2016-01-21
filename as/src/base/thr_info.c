@@ -285,8 +285,8 @@ info_get_utilization(cf_dyn_buf *db)
 	uint64_t    used_pindex_memory      = 0;
 	uint64_t    used_sindex_memory      = 0;
 
-	for (uint i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		total_number_objects    += ns->n_objects;
 		total_number_objects_sub += ns->n_sub_objects;
@@ -294,7 +294,7 @@ info_get_utilization(cf_dyn_buf *db)
 		total_memory_size       += ns->memory_size;
 		used_data_memory        += ns->n_bytes_memory;
 		used_pindex_memory      += as_index_size_get(ns) * (ns->n_objects + ns->n_sub_objects);
-		used_sindex_memory      += cf_atomic_int_get(ns->sindex_data_memory_used);
+		used_sindex_memory      += cf_atomic64_get(ns->sindex_data_memory_used);
 
 		uint64_t inuse_disk_bytes = 0;
 		as_storage_stats(ns, 0, &inuse_disk_bytes);
@@ -429,12 +429,6 @@ info_get_stats(char *name, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db,   ";stat_cluster_key_transaction_reenqueue=");
 	APPEND_STAT_COUNTER(db, g_config.stat_cluster_key_transaction_reenqueue);
-
-	cf_dyn_buf_append_string(db,   ";stat_slow_trans_queue_push=");
-	APPEND_STAT_COUNTER(db, g_config.stat_slow_trans_queue_push);
-
-	cf_dyn_buf_append_string(db,   ";stat_slow_trans_queue_pop=");
-	APPEND_STAT_COUNTER(db, g_config.stat_slow_trans_queue_pop);
 
 	cf_dyn_buf_append_string(db,   ";stat_cluster_key_regular_processed=");
 	APPEND_STAT_COUNTER(db, g_config.stat_cluster_key_regular_processed);
@@ -2238,6 +2232,8 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_int(db, g_config.dump_message_above_size);
 	cf_dyn_buf_append_string(db, ";ticker-interval=");
 	cf_dyn_buf_append_int(db, g_config.ticker_interval);
+	cf_dyn_buf_append_string(db, ";log-local-time=");
+	cf_dyn_buf_append_string(db, cf_fault_is_using_local_time() ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";microbenchmarks=");
 	cf_dyn_buf_append_string(db, g_config.microbenchmarks ? "true" : "false");
 	cf_dyn_buf_append_string(db, ";storage-benchmarks=");
@@ -2695,6 +2691,17 @@ info_xdr_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, g_config.xdr_cfg.xdr_stop_writes_noxdr ? "true" : "false");
 }
 
+void
+info_cluster_config_get(cf_dyn_buf *db)
+{
+	cf_dyn_buf_append_string(db, "mode=");
+	cf_dyn_buf_append_string(db, cc_mode_str[g_config.cluster_mode]);
+	cf_dyn_buf_append_string(db, ";self-group-id=");
+	cf_dyn_buf_append_uint32(db, g_config.cluster.cl_self_group);
+	cf_dyn_buf_append_string(db, ";self-node-id=");
+	cf_dyn_buf_append_uint32(db, g_config.cluster.cl_self_node);
+}
+
 
 int
 info_command_config_get(char *name, char *params, cf_dyn_buf *db)
@@ -2706,7 +2713,11 @@ info_command_config_get(char *name, char *params, cf_dyn_buf *db)
 		char context[1024];
 		int context_len = sizeof(context);
 		if (0 == as_info_parameter_get(params, "context", context, &context_len)) {
-			if (strcmp(context, "namespace") == 0) {
+			if (strcmp(context, "cluster") == 0) {
+				info_cluster_config_get(db);
+				return 0;
+			}
+			else if (strcmp(context, "namespace") == 0) {
 				context_len = sizeof(context);
 				if (0 != as_info_parameter_get(params, "id", context, &context_len)) {
 					cf_dyn_buf_append_string(db, "Error:invalid id");
@@ -2715,20 +2726,20 @@ info_command_config_get(char *name, char *params, cf_dyn_buf *db)
 				info_namespace_config_get(context, db);
 				return(0);
 			}
-			else if (strcmp(context, "service") == 0) {
-				info_service_config_get(db);
+			else if (strcmp(context, "network.heartbeat") == 0) {
+				info_network_heartbeat_config_get(db);
 				return(0);
 			}
 			else if (strcmp(context, "network.info") == 0) {
 				info_network_info_config_get(db);
 				return(0);
 			}
-			else if (strcmp(context, "network.heartbeat") == 0) {
-				info_network_heartbeat_config_get(db);
-				return(0);
-			}
 			else if (strcmp(context, "security") == 0) {
 				info_security_config_get(db);
+				return(0);
+			}
+			else if (strcmp(context, "service") == 0) {
+				info_service_config_get(db);
 				return(0);
 			}
 			else if (strcmp(context, "xdr") == 0) {
@@ -5049,6 +5060,7 @@ void *
 info_debug_ticker_fn(void *unused)
 {
 	size_t total_ns_memory_inuse = 0;
+	uint32_t ticker_cycles = 0;
 
 	// Helps to know how many messages are going in an out, some general status
 	do {
@@ -5118,29 +5130,22 @@ info_debug_ticker_fn(void *unused)
 
 			// namespace disk and memory size and ldt gc stats
 			total_ns_memory_inuse = 0;
-			for (int i = 0; i < g_config.namespaces; i++) {
-				as_namespace *ns = g_config.namespace[i];
+
+			for (int i = 0; i < g_config.n_namespaces; i++) {
+				as_namespace *ns = g_config.namespaces[i];
 				int available_pct;
 				uint64_t inuse_disk_bytes;
 				as_storage_stats(ns, &available_pct, &inuse_disk_bytes);
-				size_t ns_memory_inuse = ns->n_bytes_memory + (as_index_size_get(ns) * ns->n_objects);
+				size_t ns_index_mem = as_index_size_get(ns) * (ns->n_objects + ns->n_sub_objects);
+				size_t ns_sindex_mem = ns->sindex_data_memory_used;
+				size_t ns_total_mem = ns_index_mem + ns_sindex_mem + ns->n_bytes_memory;
+				double mem_used_pct = (double)(ns_total_mem * 100) / (double)ns->memory_size;
+
 				if (ns->storage_data_in_memory) {
-					cf_info(AS_INFO, "{%s} disk inuse: %"PRIu64" memory inuse: %"PRIu64" (bytes) "
-							"sindex memory inuse: %"PRIu64" (bytes) "
-							"avail pct %d",
-							ns->name, inuse_disk_bytes, ns_memory_inuse,
-							ns->sindex_data_memory_used,
-							available_pct);
-					if (ns->ldt_enabled) {
-						uint64_t cnt              = cf_atomic_int_get(ns->lstats.ldt_gc_processed);
-						uint64_t io               = cf_atomic_int_get(ns->lstats.ldt_gc_io);
-						uint64_t gc               = cf_atomic_int_get(ns->lstats.ldt_gc_cnt);
-						uint64_t no_esr           = cf_atomic_int_get(ns->lstats.ldt_gc_no_esr_cnt);
-						uint64_t no_parent        = cf_atomic_int_get(ns->lstats.ldt_gc_no_parent_cnt);
-						uint64_t version_mismatch = cf_atomic_int_get(ns->lstats.ldt_gc_parent_version_mismatch_cnt);
-						cf_info(AS_INFO, "{%s} ldt_gc: cnt %"PRIu64" io %"PRIu64" gc %"PRIu64" (%"PRIu64", %"PRIu64", %"PRIu64")",
-								ns->name, cnt, io, gc, no_esr, no_parent, version_mismatch);
-					}
+					cf_info(AS_INFO, "{%s} disk bytes used %"PRIu64" : avail pct %d",
+							ns->name, inuse_disk_bytes, available_pct);
+					cf_info(AS_INFO, "{%s} memory bytes used %"PRIu64" (index %"PRIu64" : sindex %"PRIu64" : data %"PRIu64") : used pct %.2lf",
+							ns->name, ns_total_mem, ns_index_mem, ns_sindex_mem, ns->n_bytes_memory, mem_used_pct);
 				}
 				else {
 					uint32_t n_reads_from_cache = cf_atomic32_get(ns->n_reads_from_cache);
@@ -5149,26 +5154,24 @@ info_debug_ticker_fn(void *unused)
 					cf_atomic32_set(&ns->n_reads_from_cache, 0);
 					ns->cache_read_pct = (float)(100 * n_reads_from_cache) / (float)(n_total_reads == 0 ? 1 : n_total_reads);
 
-					cf_info(AS_INFO, "{%s} disk inuse: %"PRIu64" memory inuse: %"PRIu64" (bytes) "
-							"sindex memory inuse: %"PRIu64" (bytes) "
-							"avail pct %d cache-read pct %.2f",
-							ns->name, inuse_disk_bytes, ns_memory_inuse,
-							ns->sindex_data_memory_used,
-							available_pct,
-							ns->cache_read_pct);
-					if (ns->ldt_enabled) {
-						uint64_t cnt              = cf_atomic_int_get(ns->lstats.ldt_gc_processed);
-						uint64_t io               = cf_atomic_int_get(ns->lstats.ldt_gc_io);
-						uint64_t gc               = cf_atomic_int_get(ns->lstats.ldt_gc_cnt);
-						uint64_t no_esr           = cf_atomic_int_get(ns->lstats.ldt_gc_no_esr_cnt);
-						uint64_t no_parent        = cf_atomic_int_get(ns->lstats.ldt_gc_no_parent_cnt);
-						uint64_t version_mismatch = cf_atomic_int_get(ns->lstats.ldt_gc_parent_version_mismatch_cnt);
-						cf_info(AS_INFO, "{%s} ldt_gc: cnt %"PRIu64" io %"PRIu64" gc %"PRIu64" (%"PRIu64", %"PRIu64", %"PRIu64")",
-								ns->name, cnt, io, gc, no_esr, no_parent, version_mismatch);
-					}
+					cf_info(AS_INFO, "{%s} disk bytes used %"PRIu64" : avail pct %d : cache-read pct %.2f",
+							ns->name, inuse_disk_bytes, available_pct, ns->cache_read_pct);
+					cf_info(AS_INFO, "{%s} memory bytes used %"PRIu64" (index %"PRIu64" : sindex %"PRIu64") : used pct %.2lf",
+							ns->name, ns_total_mem, ns_index_mem, ns_sindex_mem, mem_used_pct);
 				}
 
-				total_ns_memory_inuse += ns_memory_inuse;
+				if (ns->ldt_enabled) {
+					uint64_t cnt              = cf_atomic_int_get(ns->lstats.ldt_gc_processed);
+					uint64_t io               = cf_atomic_int_get(ns->lstats.ldt_gc_io);
+					uint64_t gc               = cf_atomic_int_get(ns->lstats.ldt_gc_cnt);
+					uint64_t no_esr           = cf_atomic_int_get(ns->lstats.ldt_gc_no_esr_cnt);
+					uint64_t no_parent        = cf_atomic_int_get(ns->lstats.ldt_gc_no_parent_cnt);
+					uint64_t version_mismatch = cf_atomic_int_get(ns->lstats.ldt_gc_parent_version_mismatch_cnt);
+					cf_info(AS_INFO, "{%s} ldt_gc: cnt %"PRIu64" io %"PRIu64" gc %"PRIu64" (%"PRIu64", %"PRIu64", %"PRIu64")",
+							ns->name, cnt, io, gc, no_esr, no_parent, version_mismatch);
+				}
+
+				total_ns_memory_inuse += ns_total_mem;
 				as_sindex_histogram_dumpall(ns);
 
 				int64_t initial_rx_migrations = cf_atomic_int_get(ns->migrate_rx_partitions_initial);
@@ -5375,6 +5378,42 @@ info_debug_ticker_fn(void *unused)
 
 			if (g_config.fabric_dump_msgs) {
 				as_fabric_msg_queue_dump();
+			}
+
+			// Dump some stats every 30 ticker cycles (default 5 minutes).
+			if ((ticker_cycles++ % 30) == 0) {
+				cf_info(AS_INFO, "node id %"PRIx64"", g_config.self_node);
+				// Various transaction & error counters
+				cf_info(AS_INFO, "reads %"PRIu64",%"PRIu64" : writes %"PRIu64",%"PRIu64"",
+						g_config.stat_read_success, g_config.stat_read_errs_notfound + g_config.stat_read_errs_other,
+						g_config.stat_write_success, g_config.stat_write_errs);
+				cf_info(AS_INFO, "udf reads %"PRIu64",%"PRIu64" : udf writes %"PRIu64",%"PRIu64" : udf deletes %"PRIu64",%"PRIu64" : lua errors %"PRIu64"",
+						g_config.udf_read_success, g_config.udf_read_errs_other,
+						g_config.udf_write_success, g_config.udf_write_errs_other,
+						g_config.udf_delete_success, g_config.udf_delete_errs_other, g_config.udf_lua_errs);
+				cf_info(AS_INFO, "basic scans %"PRIu64",%"PRIu64" : aggregation scans %"PRIu64",%"PRIu64" : udf background scans %"PRIu64",%"PRIu64" :: active scans %d",
+						g_config.basic_scans_succeeded, g_config.basic_scans_failed, g_config.aggr_scans_succeeded, g_config.aggr_scans_failed,
+						g_config.udf_bg_scans_succeeded, g_config.udf_bg_scans_failed, as_scan_get_active_job_count());
+				uint64_t batch_failures = cf_atomic64_get(g_config.batch_timeout) + cf_atomic64_get(g_config.batch_errors);
+				cf_info(AS_INFO, "index (new) batches %"PRIu64",%"PRIu64" : direct (old) batches %"PRIu64",%"PRIu64"",
+						g_config.batch_index_complete, g_config.batch_index_timeout + g_config.batch_index_errors,
+						g_config.batch_initiate - batch_failures, batch_failures);
+				uint64_t agg_failures = cf_atomic64_get(g_config.n_agg_errs) + cf_atomic64_get(g_config.n_agg_abort);
+				uint64_t lookup_failures = cf_atomic64_get(g_config.n_lookup_errs) + cf_atomic64_get(g_config.n_lookup_abort);
+				cf_info(AS_INFO, "aggregation queries %"PRIu64",%"PRIu64" : lookup queries %"PRIu64",%"PRIu64"",
+						cf_atomic64_get(g_config.n_agg_success), agg_failures, cf_atomic64_get(g_config.n_lookup_success), lookup_failures);
+				cf_info(AS_INFO, "proxies %"PRIu64",%"PRIu64"",
+						g_config.stat_proxy_success, g_config.stat_proxy_errs);
+
+				// Namespace stats
+				for (uint idx = 0; idx < g_config.n_namespaces; idx++) {
+					as_namespace *ns = g_config.namespaces[idx];
+					as_master_prole_stats mp;
+					as_partition_get_master_prole_stats(ns, &mp);
+
+					cf_info(AS_INFO, "{%s} objects %"PRIu64" : sub-objects %"PRIu64" : master objects %"PRIu64" : master sub-objects %"PRIu64" : prole objects %"PRIu64" : prole sub-objects %"PRIu64"",
+							ns->name, ns->n_objects, ns->n_sub_objects, mp.n_master_records, mp.n_master_sub_records, mp.n_prole_records, mp.n_prole_sub_records);
+				}
 			}
 		}
 
@@ -5755,7 +5794,9 @@ info_node_info_reduce_fn(void *key, void *data, void *udata)
 			msg_set_str(m, INFO_FIELD_SERVICE_ADDRESS, g_service_str, MSG_SET_COPY);
 		}
 		if (g_config.alternate_address) {
-			msg_set_str(m, INFO_FIELD_ALT_ADDRESS, g_config.alternate_address, MSG_SET_COPY);
+			char alt_add_port[1024];
+			snprintf(alt_add_port, 1024, "%s:%d", g_config.alternate_address, g_config.socket.port);
+			msg_set_str(m, INFO_FIELD_ALT_ADDRESS, alt_add_port, MSG_SET_COPY);
 		}
 
 		pthread_mutex_unlock(&g_service_lock);
@@ -6027,12 +6068,12 @@ info_services_alumni_reset(char *name, cf_dyn_buf *db)
 int
 info_get_namespaces(char *name, cf_dyn_buf *db)
 {
-	for (uint i = 0; i < g_config.namespaces; i++) {
-		cf_dyn_buf_append_string(db, g_config.namespace[i]->name);
+	for (uint i = 0; i < g_config.n_namespaces; i++) {
+		cf_dyn_buf_append_string(db, g_config.namespaces[i]->name);
 		cf_dyn_buf_append_char(db, ';');
 	}
 
-	if (g_config.namespaces > 0) {
+	if (g_config.n_namespaces > 0) {
 		cf_dyn_buf_chomp(db);
 	}
 
@@ -6051,8 +6092,8 @@ info_get_objects(char *name, cf_dyn_buf *db)
 {
 	uint64_t	objects = 0;
 
-	for (uint i = 0; i < g_config.namespaces; i++) {
-		objects += g_config.namespace[i]->n_objects;
+	for (uint i = 0; i < g_config.n_namespaces; i++) {
+		objects += g_config.namespaces[i]->n_objects;
 	}
 
 	cf_dyn_buf_append_uint64(db, objects);
@@ -6088,8 +6129,8 @@ thr_info_get_object_count()
 {
 	uint64_t objects = 0;
 
-	for (uint i = 0; i < g_config.namespaces; i++) {
-		objects += g_config.namespace[i]->n_objects;
+	for (uint i = 0; i < g_config.n_namespaces; i++) {
+		objects += g_config.namespaces[i]->n_objects;
 	}
 
 	return objects;
@@ -6100,8 +6141,8 @@ thr_info_get_subobject_count()
 {
 	uint64_t sub_objects = 0;
 
-	for (uint i = 0; i < g_config.namespaces; i++) {
-		sub_objects += g_config.namespace[i]->n_sub_objects;
+	for (uint i = 0; i < g_config.n_namespaces; i++) {
+		sub_objects += g_config.namespaces[i]->n_sub_objects;
 	}
 
 	return sub_objects;
@@ -6136,7 +6177,7 @@ info_get_namespace_info(as_namespace *ns, cf_dyn_buf *db)
 	// total used memory =  data memory + primary index memory + secondary index memory
 	data_memory   = ns->n_bytes_memory;
 	pindex_memory = as_index_size_get(ns) * (ns->n_objects + ns->n_sub_objects);
-	sindex_memory = cf_atomic_int_get(ns->sindex_data_memory_used);
+	sindex_memory = cf_atomic64_get(ns->sindex_data_memory_used);
 	used_memory   = data_memory + pindex_memory + sindex_memory;
 
 	info_append_uint64("", "used-bytes-memory",        used_memory,     db);
@@ -6348,8 +6389,8 @@ info_get_tree_sets(char *name, char *subtree, cf_dyn_buf *db)
 
 	// format w/o namespace is ns1:set1:prop1=val1:prop2=val2:..propn=valn;ns1:set2...;ns2:set1...;
 	if (!ns) {
-		for (uint i = 0; i < g_config.namespaces; i++) {
-			as_namespace_get_set_info(g_config.namespace[i], set_name, db);
+		for (uint i = 0; i < g_config.n_namespaces; i++) {
+			as_namespace_get_set_info(g_config.namespaces[i], set_name, db);
 		}
 	}
 	// format w namespace w/o set name is ns:set1:prop1=val1:prop2=val2...propn=valn;ns:set2...;
@@ -6378,8 +6419,8 @@ info_get_tree_bins(char *name, char *subtree, cf_dyn_buf *db)
 	// format w/o namespace is
 	// ns:num-bin-names=val1,bin-names-quota=val2,name1,name2,...;ns:...
 	if (!ns) {
-		for (uint i = 0; i < g_config.namespaces; i++) {
-			as_namespace_get_bins_info(g_config.namespace[i], db, true);
+		for (uint i = 0; i < g_config.n_namespaces; i++) {
+			as_namespace_get_bins_info(g_config.namespaces[i], db, true);
 		}
 	}
 	// format w/namespace is
@@ -6490,8 +6531,8 @@ info_get_tree_sindexes(char *name, char *subtree, cf_dyn_buf *db)
 
 	// format w/o namespace is ns1:set1:prop1=val1:prop2=val2:..propn=valn;ns1:set2...;ns2:set1...;
 	if (!ns) {
-		for (uint i = 0; i < g_config.namespaces; i++) {
-			as_sindex_list_str(g_config.namespace[i], db);
+		for (uint i = 0; i < g_config.n_namespaces; i++) {
+			as_sindex_list_str(g_config.namespaces[i], db);
 		}
 	}
 	// format w namespace w/o set name is ns:set1:prop1=val1:prop2=val2...propn=valn;ns:set2...;
@@ -7117,8 +7158,8 @@ int info_command_sindex_list(char *name, char *params, cf_dyn_buf *db) {
 
 	if (listall) {
 		bool found = 0;
-		for (int i = 0; i < g_config.namespaces; i++) {
-			as_namespace *ns = g_config.namespace[i];
+		for (int i = 0; i < g_config.n_namespaces; i++) {
+			as_namespace *ns = g_config.namespaces[i];
 			if (ns) {
 				if (!as_sindex_list_str(ns, db)) {
 					found++;

@@ -743,28 +743,6 @@ as_ldt_shipop(write_request *wr, cf_node dest_node)
 	return 0;
 }
 
-extern int as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
-									   as_index_ref *r_ref, as_record_merge_component *c, bool *delete_record);
-int
-as_ldt_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
-					as_index_ref *r_ref, as_record_merge_component *c, bool *delete_record)
-{
-
-	// Setup index flags
-	if (COMPONENT_IS_LDT_ESR(c)) {
-		as_index_set_flags(r_ref->r, AS_INDEX_FLAG_CHILD_ESR);
-	} else if (COMPONENT_IS_LDT_SUBREC(c)) {
-		as_index_set_flags(r_ref->r, AS_INDEX_FLAG_CHILD_REC);
-	} else if (COMPONENT_IS_LDT_PARENT(c)) {
-		as_index_set_flags(r_ref->r, AS_INDEX_FLAG_SPECIAL_BINS);
-	} else {
-		cf_warning(AS_LDT, "NON LDT record fell through into LDT flatten code");
-	}
-
-	// default to normal record flattening
-	return as_record_flatten_component(rsv, rd, r_ref, c, delete_record);
-}
-
 /*
  * This is an internal function, that will get the requested prop_type from
  * inside prop_map and populate it inside value pointer(type of which is

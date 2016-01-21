@@ -235,8 +235,8 @@ extern int msg_get_uint64_array(msg *m, int field_id, const int index, uint64_t 
 extern int msg_get_str_array_size(msg *m, int field_id, int *size);
 extern int msg_get_str_array(msg *m, int field_id, const int index, char **r, size_t *len, msg_get_type type); // this length is strlen+1, the allocated size
 extern int msg_get_str_len_array(msg *m, int field_id, const int index, size_t *len); // this length is strlen+1, the allocated size
-extern int msg_get_buf_array_size(msg *m, int field_id, int *size);
-extern int msg_get_buf_array(msg *m, int field_id, const int index, uint8_t **r, size_t *len, msg_get_type type);
+extern int msg_get_buf_array_size(const msg *m, int field_id, int *size);
+extern int msg_get_buf_array(const msg *m, int field_id, const int index, uint8_t **r, size_t *len, msg_get_type type);
 extern int msg_set_uint32_array_size(msg *m, int field_id, const int size);
 extern int msg_set_uint32_array(msg *m, int field_id, const int index, const uint32_t v);
 extern int msg_set_uint64_array_size(msg *m, int field_id, const int size);
