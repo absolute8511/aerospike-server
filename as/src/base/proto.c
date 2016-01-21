@@ -904,7 +904,7 @@ as_msg_peek( cl_msg *msgp, proto_peek *peek )
 	if (nfp) {
 		uint32_t nsz = swap ? as_msg_field_get_value_sz_unswap(nfp) : as_msg_field_get_value_sz(nfp);
 		if (nsz >= AS_ID_NAMESPACE_SZ) goto no_ns; // this should be illegal
-		for (int i = 0; i < g_config.namespaces; i++) {
+		for (int i = 0; i < g_config.n_namespaces; i++) {
 			tsvc_namespace_devices *ndev = &g_tsvc_devices_a[i];
 			if (ndev->n_sz != nsz) continue;
 			if (0 == memcmp(ndev->n_name, nfp->data, nsz)) {

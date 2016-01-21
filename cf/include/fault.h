@@ -174,6 +174,7 @@ extern cf_fault_sink *cf_fault_sink_get_id(int id);
 extern void cf_fault_sink_logroll(void);
 
 extern void cf_fault_use_local_time(bool val);
+extern bool cf_fault_is_using_local_time();
 
 // Define the mechanism that we'll use to write into the Server Log.
 // cf_fault_event() is "regular" logging

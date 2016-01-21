@@ -103,6 +103,9 @@ ifeq ($(USE_XDR),1)
 endif
 	cat $(PKG)/rpm/server-spec-config >> $(PKG)/rpm/aerospike.spec
 	cat $(PKG)/rpm/server-spec-scripts >> $(PKG)/rpm/aerospike.spec
+ifeq ($(USE_SYSTEMD),1)
+	cat $(PKG)/rpm/server-spec-scripts-systemd >> $(PKG)/rpm/aerospike.spec
+endif
 
 	sed -i 's/@RELEASE@/'$(OS)'/g' $(PKG)/rpm/aerospike.spec
 	sed -i 's/@EDITION@/'$(EDITION)'/g' $(PKG)/rpm/aerospike.spec

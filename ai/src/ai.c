@@ -35,6 +35,7 @@
 #include "base/datamodel.h"
 
 #include "ai.h"
+#include "ai_btree.h"
 #include "ai_globals.h"
 #include "bt.h"
 #include "find.h"
@@ -220,8 +221,9 @@ static void destroy_index(bt *ibtr, bt_n *n, int imatch)
 			if (anbtr->is_btree) {
 				bt_destroy(anbtr->u.nbtr);
 			} else {
-				cf_free(anbtr);
+				ai_arr_destroy(anbtr->u.arr);
 			}
+			cf_free(anbtr);
 		}
 	}
 }
@@ -275,6 +277,12 @@ static void emptyIndex(int imatch, bool is_part)
 		node->match = imatch;
 		cf_ll_append(DropI, (cf_ll_element *)node);
 	}
+}
+
+// imatch is not necessary here.
+void ai_destroy_index(bt * btr, int imatch)
+{
+	destroy_index(btr, btr->root, imatch);
 }
 
 static int validateCreateTableCnames(cf_ll *cnames)

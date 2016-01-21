@@ -1223,8 +1223,15 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				c.void_time     = void_time;
 				c.rec_props     = rec_props;
 
+				// TODO - should have inline wrapper to peek pickled bin count.
+				if (*(uint16_t *)c.record_buf == 0) {
+					cf_warning_digest(AS_MIGRATE, key, "migration received binless pickle ");
+					migrate_recv_control_release(mc);
+					goto Done;
+				}
+
 				if (as_ldt_get_migrate_info(mc, &c, m, key)) {
-					cf_debug_digest(AS_MIGRATE, &key, "LDT_MIGRATE: sub record received Out Of Order");
+					cf_debug_digest(AS_MIGRATE, key, "LDT_MIGRATE: sub-record received out of order ");
 					migrate_recv_control_release(mc);
 					goto Done;
 				}
@@ -1684,6 +1691,11 @@ migrate_tree_reduce(as_index_ref *r_ref, void *udata)
 
 	migration *mig = (migration *) udata;
 
+	if (mig->cluster_key != as_paxos_get_cluster_key()) {
+		as_record_done(r_ref, mig->rsv.ns);
+		return; // No point continuing to reduce this tree
+	}
+
 	if (mig->pickled_array == 0) {
 		// find the size, and malloc the pickled_array
 		// size is not guaranteed to be correct now, because this
@@ -2138,13 +2150,11 @@ migrate_xmit_fn(void *arg)
 				break;
 			case AS_PARTITION_STATE_ABSENT:
 			case AS_PARTITION_STATE_UNDEF:
+			default:
 				cf_warning(AS_MIGRATE, "migration state %u unexpected", mig->rsv.state);
 				migrate_send_finish(mig, AS_MIGRATE_STATE_ERROR, "tree reserve fail");
 				cf_atomic_int_incr(&mig->rsv.ns->migrate_tx_partitions_imbalance);
 				goto FinishedMigrate;
-			case AS_PARTITION_STATE_JOURNAL_APPLY:
-				cf_crash(AS_MIGRATE, "migrations are not allowed to include state JOURNAL APPLY");
-				break;
 		}
 
 		cf_detail(AS_MIGRATE, "migrate xmit begin: migration id %d {%s:%d}  migp %p", mig->id, mig->rsv.ns->name, mig->rsv.pid, mig);

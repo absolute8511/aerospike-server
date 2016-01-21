@@ -72,8 +72,8 @@ as_storage_init()
 {
 	cf_queue *complete_q = cf_queue_create(sizeof(void*), true);
 
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (as_storage_namespace_init_table[ns->storage_type]) {
 			if (0 != as_storage_namespace_init_table[ns->storage_type](ns, complete_q, NULL)) {
@@ -87,7 +87,7 @@ as_storage_init()
 		}
 	}
 
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
 		void *_t;
 
 		while (CF_QUEUE_OK != cf_queue_pop(complete_q, &_t, 2000)) {
@@ -407,8 +407,8 @@ static const as_storage_wait_for_defrag_fn as_storage_wait_for_defrag_table[AS_S
 void
 as_storage_wait_for_defrag()
 {
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (as_storage_wait_for_defrag_table[ns->storage_type]) {
 			as_storage_wait_for_defrag_table[ns->storage_type](ns);
@@ -603,8 +603,8 @@ static const as_storage_ticker_stats_fn as_storage_ticker_stats_table[AS_STORAGE
 int
 as_storage_ticker_stats()
 {
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (as_storage_ticker_stats_table[ns->storage_type]) {
 			as_storage_ticker_stats_table[ns->storage_type](ns);
@@ -629,8 +629,8 @@ static const as_storage_histogram_clear_fn as_storage_histogram_clear_table[AS_S
 int
 as_storage_histogram_clear_all()
 {
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (as_storage_histogram_clear_table[ns->storage_type]) {
 			as_storage_histogram_clear_table[ns->storage_type](ns);
@@ -828,8 +828,8 @@ as_storage_shutdown(void)
 
  	cf_info(AS_STORAGE, "flushing data to storage ...");
 
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
 			as_storage_shutdown_ssd(ns);

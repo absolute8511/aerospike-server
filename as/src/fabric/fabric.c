@@ -400,6 +400,7 @@ fne_create(cf_node node)
 		cf_info(AS_FABRIC, " received second notification of already extant node: %"PRIx64, node);
 		cf_queue_destroy(fne->xmit_buffer_queue);
 		cf_queue_priority_destroy(fne->xmit_msg_queue);
+		shash_destroy(fne->connected_fb_hash);
 		cf_rc_releaseandfree( fne );
 		return fne;
 	}
@@ -775,8 +776,10 @@ fabric_connect(fabric_args *fa, fabric_node_element *fne)
 	msg_set_uint64(m, FS_FIELD_NODE, g_config.self_node); // identifies self to remote
 	if (AS_HB_MODE_MESH == g_config.hb_mode) {
 		cf_debug(AS_FABRIC, "Sending %s as the IP address for receiving heartbeats", g_config.hb_addr_to_use);
-		if (1 != inet_pton(AF_INET, g_config.hb_addr_to_use, &self))
-			cf_warning(AS_HB, "unable to call inet_pton: %s", cf_strerror(errno));
+		if (!g_config.hb_addr_to_use) {
+			cf_crash(AS_FABRIC, "hb_addr_to_use not initialized");
+		} else if (1 != inet_pton(AF_INET, g_config.hb_addr_to_use, &self))
+			cf_warning(AS_FABRIC, "unable to call inet_pton: %s", cf_strerror(errno));
 		else {
 			msg_set_uint32(m, FS_ADDR, *(uint32_t *)&self);
 			msg_set_uint32(m, FS_PORT, g_config.hb_port);
@@ -1138,7 +1141,7 @@ fabric_process_read_msg(fabric_buffer *fb)
 			if (NULL == inet_ntop(AF_INET, &addr_in.sin_addr.s_addr, (char *)some_addr, sizeof(some_addr)))
 				goto Next;
 
-			cf_debug(AS_HB, "getpeername | %s:%d (node = %"PRIx64", fd = %d)", some_addr, ntohs(addr_in.sin_port), node, fd);
+			cf_debug(AS_FABRIC, "getpeername | %s:%d (node = %"PRIx64", fd = %d)", some_addr, ntohs(addr_in.sin_port), node, fd);
 
 			cf_sockaddr_convertto(&addr_in, &socket);
 		} else if (AS_HB_MODE_MESH == g_config.hb_mode) {
@@ -1153,7 +1156,7 @@ fabric_process_read_msg(fabric_buffer *fb)
 			goto Next;
 
 		if (bufsz != (g_config.paxos_max_cluster_size * sizeof(cf_node))) {
-			cf_warning(AS_HB, "Corrupted data? The size of anv is inaccurate. Received: %d ; Expected: %d", bufsz, (g_config.paxos_max_cluster_size * sizeof(cf_node)));
+			cf_warning(AS_FABRIC, "Corrupted data? The size of anv is inaccurate. Received: %d ; Expected: %d", bufsz, (g_config.paxos_max_cluster_size * sizeof(cf_node)));
 			goto Next;
 		}
 
@@ -1480,7 +1483,7 @@ fabric_worker_fn(void *argv)
 							}
 						}
 						else {
-							cf_debug(AS_FABRIC, "worker %d received unknown notification on queue", worker_id, wqe.type);
+							cf_warning(AS_FABRIC, "worker %d received unknown notification on queue", worker_id, wqe.type);
 						}
 					}
 				}
@@ -1736,12 +1739,6 @@ fabric_node_disconnect(cf_node node)
 			cf_info(AS_FABRIC, "fabric disconnecting FAIL rchash delete: node %"PRIx64, node);
 
 		};
-
-		// DEBUG - it should be GONE
-		if (RCHASH_OK == rchash_get(g_fabric_node_element_hash, &node, sizeof(node), (void **) &fne)) {
-			cf_info(AS_FABRIC, "fabric disconnecting: deleted from hash, but still there SUPER FAIL");
-			fne_release(fne);
-		}
 
 		// drain the queues
 		int rv;
@@ -2324,7 +2321,10 @@ as_fabric_transact_reply(msg *m, void *transact_data) {
 	// TODO: make sure it's in the outbound hash?
 
 	// send the response for the first time
-	as_fabric_send(ftr->node, m, AS_FABRIC_PRIORITY_MEDIUM);
+	int rv = 0;
+	if ((rv = as_fabric_send(ftr->node, m, AS_FABRIC_PRIORITY_MEDIUM)) != 0) {
+		as_fabric_msg_put(m);
+	}
 
 	return(0);
 }
@@ -2606,7 +2606,7 @@ ll_ftx_reduce_fn(cf_ll_element *le, void *udata)
 			}
 		}
 		// Decrement ref count, incremented by rchash_get
-		cf_rc_release(ftx);
+		fabric_transact_xmit_release(ftx);
 	}
 	// Remove it from link list
 	return (CF_LL_REDUCE_DELETE);
@@ -2696,16 +2696,21 @@ as_fabric_send_list(cf_node *nodes, int nodes_sz, msg *m, int priority)
 	// careful with the ref count here: need to increment before every
 	// send except the last
 	int rv = 0;
-	for (int i = 0; i < nodes_sz ; i++) {
-		if (i != nodes_sz - 1) {
+	int index;
+	for (index = 0; index < nodes_sz; index++) {
+		if (index != nodes_sz - 1) {
 			msg_incr_ref(m);
 		}
-		rv = as_fabric_send(nodes[i], m, priority);
-		if (0 != rv) goto Cleanup;
+		rv = as_fabric_send(nodes[index], m, priority);
+		if (0 != rv) {
+			goto Cleanup;
+		}
 	}
 	return(0);
 Cleanup:
-	as_fabric_msg_put(m);
+	if (index != nodes_sz - 1) {
+		as_fabric_msg_put(m);
+	}
 	return(rv);
 }
 

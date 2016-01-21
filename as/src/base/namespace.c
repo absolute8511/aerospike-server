@@ -68,13 +68,13 @@ as_namespace_create(char *name, uint16_t replication_factor)
 		return NULL;
 	}
 
-	if (g_config.namespaces >= AS_NAMESPACE_SZ) {
+	if (g_config.n_namespaces >= AS_NAMESPACE_SZ) {
 		cf_warning(AS_NAMESPACE, "can't create namespace: already have %d", AS_NAMESPACE_SZ);
 		return NULL;
 	}
 
-	for (int i = 0; i < g_config.namespaces; i++) {
-		if (0 == strcmp(g_config.namespace[i]->name, name)) {
+	for (int i = 0; i < g_config.n_namespaces; i++) {
+		if (0 == strcmp(g_config.namespaces[i]->name, name)) {
 			cf_warning(AS_NAMESPACE, "can't create namespace: namespace %s mentioned again in the configuration", name);
 			return NULL;
 		}
@@ -175,8 +175,8 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	// END - Configuration defaults.
 	//--------------------------------------------
 
-	g_config.namespace[g_config.namespaces] = ns;
-	g_config.namespaces++;
+	g_config.namespaces[g_config.n_namespaces] = ns;
+	g_config.n_namespaces++;
 
 	char hist_name[HISTOGRAM_NAME_SIZE];
 	// Note - histograms' ranges MUST be set before use.
@@ -209,8 +209,8 @@ as_namespaces_init(bool cold_start_cmd, uint32_t instance)
 		cf_info(AS_NAMESPACE, "got cold-start command");
 	}
 
-	for (int i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (int i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		// Cold start if manually forced.
 		ns->cold_start = cold_start_cmd;
@@ -287,8 +287,8 @@ as_namespace_configure_sets(as_namespace *ns)
 as_namespace *
 as_namespace_get_byname(char *name)
 {
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (0 == strcmp(ns->name, name)) {
 			return ns;
@@ -302,8 +302,8 @@ as_namespace_get_byname(char *name)
 as_namespace *
 as_namespace_get_byid(uint id)
 {
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (id == ns->id) {
 			return ns;
@@ -321,8 +321,8 @@ as_namespace_get_bybuf(byte *buf, size_t len)
 		return NULL;
 	}
 
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (memcmp(buf, ns->name, len) == 0 && ns->name[len] == 0) {
 			return ns;
@@ -355,10 +355,10 @@ as_namespace_getid_bymsgfield(as_msg_field *fp)
 	}
 
 	as_namespace_id		ns_id = -1;
-	uint lim = g_config.namespaces;
+	uint lim = g_config.n_namespaces;
 	uint i;
 	for (i = 0; i < lim; i++) {
-		as_namespace *ns = g_config.namespace[i];
+		as_namespace *ns = g_config.namespaces[i];
 		if (strncmp((char *)fp->data, ns->name, as_msg_field_get_value_sz(fp)) == 0) {
 			ns_id = ns->id;
 			break;

@@ -2628,6 +2628,31 @@ as_storage_write_header(drv_ssd *ssd, ssd_device_header *header, size_t size)
 // Cold start utilities.
 //
 
+bool
+is_set_evictable(as_namespace* ns, const as_rec_props* p_props)
+{
+	if (p_props->size == 0) {
+		return true;
+	}
+
+	const char* set_name;
+
+	if (as_rec_props_get_value(p_props, CL_REC_PROPS_FIELD_SET_NAME, NULL,
+			(uint8_t**)&set_name) != 0) {
+		return true;
+	}
+
+	as_set *p_set;
+
+	if (cf_vmapx_get_by_name(ns->p_sets_vmap, set_name, (void**)&p_set) !=
+			CF_VMAPX_OK) {
+		return true;
+	}
+
+	return ! IS_SET_EVICTION_DISABLED(p_set);
+}
+
+
 // Add a record just read from drive to the index, if all is well.
 // Return values:
 //  0 - success, record added or updated
@@ -2736,8 +2761,9 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 	// Skip records that have expired. Note - LDT subrecords are expired via
 	// their parent record.
 	if (r->void_time != 0 && ! is_ldt_sub) {
-		// The threshold may be ~ now, or it may be in the future if eviction
-		// has been happening.
+		// The threshold may be ~ now - updated frequently by
+		// as_cold_start_evict_if_needed() above - or it may be in the future if
+		// eviction has been happening.
 		uint32_t threshold_void_time =
 				cf_atomic32_get(ns->cold_start_threshold_void_time);
 
@@ -2745,7 +2771,9 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		// (Note that if a record is skipped here, then later we encounter a
 		// version with older generation but bigger (not expired) void-time,
 		// that older version gets resurrected.)
-		if (r->void_time < threshold_void_time) {
+		if (r->void_time < threshold_void_time &&
+				(r->void_time < as_record_void_time_get() ||
+						is_set_evictable(ns, &props))) {
 			cf_detail(AS_DRV_SSD, "record-add deleting void-time %u < threshold %u",
 					r->void_time, threshold_void_time);
 
@@ -3929,8 +3957,8 @@ as_storage_namespace_init_ssd(as_namespace *ns, cf_queue *complete_q,
 void
 as_storage_cold_start_ticker_ssd()
 {
-	for (uint32_t i = 0; i < g_config.namespaces; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 
 		if (ns->cold_start_loading) {
 			char buf[2048];

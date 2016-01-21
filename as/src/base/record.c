@@ -636,13 +636,13 @@ as_record_set_properties(as_storage_rd *rd, const as_rec_props *p_rec_props)
 
 int
 as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
-		as_index_ref *r_ref, as_record_merge_component *c, bool *delete_record)
+		as_index_ref *r_ref, as_record_merge_component *c)
 {
 	as_index *r = r_ref->r;
 	bool has_sindex = as_sindex_ns_has_sindex(rd->ns);
 	rd->ignore_record_on_device = true; // TODO - set to ! has_sindex
 	rd->n_bins = as_bin_get_n_bins(r, rd);
-	uint16_t newbins = ntohs(*(uint16_t *) c->record_buf);
+	uint16_t newbins = ntohs(*(uint16_t *)c->record_buf); // already checked that newbins can't be 0 here
 
 	if (! rd->ns->storage_data_in_memory && ! rd->ns->single_bin && newbins > rd->n_bins) {
 		rd->n_bins = newbins;
@@ -697,13 +697,13 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 	if (n_bins_check == 0) cf_info(AS_RECORD, "merge: extra check: after write, no bins. peculiar.");
 #endif
 
-	if (!as_bin_inuse_has(rd)) {
-		*delete_record = true;
+	if (! as_bin_inuse_has(rd)) {
+		cf_crash(AS_RECORD, "as_record_flatten_component() resulted in binless record");
 	}
 
 	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 
-	rd->write_to_device = true;
+	rd->write_to_device = true; // TODO - this seems redundant?
 
 	// write record to device
 	as_storage_record_close(r, rd);
@@ -851,10 +851,10 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 			*winner_idx = as_record_component_winner(rsv, n_components, components, NULL);
 		}
 	}
-	
-	// Remote Winner
-	int  rv              = 0;
-	bool delete_record = false;
+
+	int rv = 0;
+
+	// Remote winner.
 	if (*winner_idx != -1) {
 		cf_detail(AS_LDT, "Flatten Record Remote LDT Winner @ %d", *winner_idx);
 		as_record_merge_component *c = &components[*winner_idx];
@@ -886,7 +886,7 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 			}
 
 			// NB: Side effect of this function is this closes the record
-			rv = as_record_flatten_component(rsv, &rd, &r_ref, c, &delete_record);
+			rv = as_record_flatten_component(rsv, &rd, &r_ref, c);
 		}
 
 		// delete newly created index above if there is no local copy
@@ -908,12 +908,6 @@ as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
 	// and after here it's GONE
 	as_record_done(&r_ref, rsv->ns);
 
-	if (delete_record) {
-		as_transaction tr;
-		as_transaction_init(&tr, keyd, NULL);
-		tr.rsv = *rsv;
-		write_delete_local(&tr, false, 0, false);
-	}
 	return rv;
 }
 

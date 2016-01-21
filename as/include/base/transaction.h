@@ -157,11 +157,7 @@ typedef struct udf_request_data {
 #define AS_TRANSACTION_FLAG_NSUP_DELETE     0x0001
 #define AS_TRANSACTION_FLAG_INTERNAL        0x0002
 #define AS_TRANSACTION_FLAG_SHIPPED_OP      0x0004
-// Indicates transaction is on LDT sub (either subrecord
-// or esr) record, only set at the prole while replicating
-// the LDT sub
-#define AS_TRANSACTION_FLAG_LDT_SUB         0x0008
-// Set if this transaction has touched secondary index
+#define AS_TRANSACTION_FLAG_UNUSED_8        0x0008 // deprecated LDT_SUB
 #define AS_TRANSACTION_FLAG_SINDEX_TOUCHED  0x0010
 
 struct as_batch_shared;
@@ -236,7 +232,6 @@ typedef struct as_transaction_s {
 } as_transaction;
 
 typedef struct as_query_transaction_s as_query_transaction;
-extern int write_delete_local(as_transaction *tr, bool journal, cf_node masternode, bool check_gen);
 
 extern int as_transaction_prepare(as_transaction *tr);
 extern void as_transaction_init(as_transaction *tr, cf_digest *, cl_msg *);

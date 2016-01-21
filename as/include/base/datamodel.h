@@ -638,7 +638,6 @@ typedef uint16_t as_partition_id;
 #define AS_PARTITION_STATE_DESYNC  2
 #define AS_PARTITION_STATE_ZOMBIE  3
 #define AS_PARTITION_STATE_ABSENT 5
-#define AS_PARTITION_STATE_JOURNAL_APPLY 6 // used in faked reservations
 typedef uint8_t as_partition_state;
 
 #define AS_PARTITION_MIG_TX_STATE_NONE  0
@@ -1088,7 +1087,7 @@ struct as_namespace_s {
 	int					sindex_cnt;
 	struct as_sindex_s	*sindex;  // array with AS_MAX_SINDEX meta data
 	uint64_t			sindex_data_max_memory;
-	cf_atomic_int		sindex_data_memory_used;
+	cf_atomic64		    sindex_data_memory_used;
 	shash               *sindex_set_binid_hash;
 	shash				*sindex_iname_hash;
 	uint32_t			binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];

@@ -63,10 +63,6 @@
 // failure?
 // #define VERIFY_BREAK 1
 
-// Forward declaration.
-int thr_tsvc_enqueue_slow(as_transaction *tr);
-
-
 static void
 dump_msg(cl_msg *msgp)
 {
@@ -339,7 +335,6 @@ process_transaction(as_transaction *tr)
 	// internally, and in other cases we may return to the client with a
 	// CLUSTER_KEY_MISMATCH error, which is a sign for them to retry.
 	uint64_t partition_cluster_key = 0;
-	uint64_t node_cluster_key = 0;
 
 	int rv;
 	bool free_msgp = true;
@@ -627,45 +622,6 @@ process_transaction(as_transaction *tr)
 		}
 
 		if ((0 == rv) && cluster_keys_match) {
-			// Even though the Transaction cluster key matches the current state
-			// of the partition (checked above), there's more to test. If the
-			// partition cluster key does not match the node cluster key, that
-			// would mean that the new partition map and the state of all of the
-			// partitions are not yet consistent with this node.
-			//
-			// If the node and partition are not in sync, then we need to set
-			// aside this transaction until the node and partition are in sync
-			// so that we can process the transaction.
-			node_cluster_key = as_paxos_get_cluster_key();
-			if (node_cluster_key != partition_cluster_key) {
-				// First check if the user relaxed the guarantees that he is
-				// expecting from the read or the write. If yes, let the txn go.
-				if (   (msgp->msg.info2 & AS_MSG_INFO2_WRITE) 
-					&& (g_config.write_duplicate_resolution_disable == true)
-					&& (TRANSACTION_COMMIT_LEVEL(tr) == AS_POLICY_COMMIT_LEVEL_MASTER)) {
-
-					cf_detail(AS_TSVC, "Letting the write with mistmatched cluster key (%"PRIx64") and partition key (%"PRIx64")",
-								node_cluster_key, partition_cluster_key);
-				} else if (    (msgp->msg.info1 & AS_MSG_INFO1_READ) 
-							&& (g_config.transaction_repeatable_read == false)
-							&& (TRANSACTION_CONSISTENCY_LEVEL(tr) == AS_POLICY_CONSISTENCY_LEVEL_ONE)) {
-
-					cf_detail(AS_TSVC, "Letting the read with mistmatched cluster key (%"PRIx64") and partition key (%"PRIx64")",
-								node_cluster_key, partition_cluster_key);
-				} else {
-					// This transaction is NOT READY to be processed. We must set it
-					// aside until the proper cluster state is restored. We queue
-					// this transaction on the "slow queue" to give it time to rest
-					// while the cluster state becomes consistent again.
-					as_partition_release(&tr->rsv);
-					cf_atomic_int_decr(&g_config.rw_tree_count);
-					thr_tsvc_enqueue_slow(tr);
-					ns = NULL;
-					free_msgp = false;
-					goto Cleanup;
-				}
-			}
-
 			ns = 0; // got a reservation
 			tr->microbenchmark_is_resolve = false;
 			if (msgp->msg.info2 & AS_MSG_INFO2_WRITE) {
@@ -812,52 +768,6 @@ thr_tsvc(void *arg)
 } // end thr_tsvc()
 
 
-// The weak cousin of thr_tsvc(), this thread waits for one or more transactions
-// to appear on the slow queue - waits for a brief moment, then pushes all of
-// the "slow" queue transactions back on to "fast" queue. The purpose of this
-// queue is to delay processing for those transactions that are not currently
-// ready to be processed - usually because they are seeing a "cluster key
-// mismatch" state. Note that we process ALL transactions on the slow queue
-// after a brief wait, so that none of the transactions on the queue are
-// unequally penalized.
-void *
-thr_tsvc_slow(void *null_arg)
-{
-	cf_queue *q = g_config.transaction_slow_q;
-
-	cf_assert(q, AS_TSVC, CF_CRITICAL, "invalid Q argument");
-
-	// Wait for a transaction to arrive.
-	for ( ; ; ) {
-		as_transaction tr;
-		if (0 != cf_queue_pop(q, &tr, CF_QUEUE_FOREVER)) {
-			cf_crash(AS_TSVC, "unable to pop from SLOW transaction queue");
-		}
-		cf_atomic_int_incr(&g_config.stat_slow_trans_queue_pop);
-
-		usleep(500); // sleep 500 micro-seconds
-
-		// Get the current size of the queue to transfer all remaining ...
-		int counter = cf_queue_sz(q);
-		// ... then transfer the one just popped, so it's not included in the
-		// count even if it gets returned to the slow queue immediately.
-		thr_tsvc_enqueue(&tr);
-
-		// Transfer all.
-		while (counter-- > 0) {
-			if (0 != cf_queue_pop(q, &tr, CF_QUEUE_NOWAIT)) {
-				cf_warning(AS_TSVC, "Empty Queue during Slow Trans Queue Clear");
-				break;
-			}
-			cf_atomic_int_incr(&g_config.stat_slow_trans_queue_pop);
-			thr_tsvc_enqueue(&tr);
-		}
-	}
-
-	return NULL;
-} // end thr_tsvc_slow()
-
-
 // Called at init time by as.c; must match the init sequence chosen.
 tsvc_namespace_devices *g_tsvc_devices_a = 0;
 
@@ -874,10 +784,10 @@ void
 as_tsvc_init()
 {
 	int n_queues = 0;
-	g_tsvc_devices_a = (tsvc_namespace_devices *) cf_malloc(sizeof(tsvc_namespace_devices) * g_config.namespaces);
+	g_tsvc_devices_a = (tsvc_namespace_devices *) cf_malloc(sizeof(tsvc_namespace_devices) * g_config.n_namespaces);
 
-	for (int i = 0 ; i < g_config.namespaces ; i++) {
-		as_namespace *ns = g_config.namespace[i];
+	for (int i = 0 ; i < g_config.n_namespaces ; i++) {
+		as_namespace *ns = g_config.namespaces[i];
 		tsvc_namespace_devices *dev = &g_tsvc_devices_a[i];
 		dev->n_sz = strlen(ns->name);
 		strcpy(dev->n_name, ns->name);
@@ -928,16 +838,6 @@ as_tsvc_init()
 				cf_crash(AS_TSVC, "tsvc thread %d:%d create failed", i, j);
 			}
 		}
-	}
-
-	// Now that we have the regular transaction queues set up, we set up the
-	// special SLOW queue - where we place transactions that need to pause a bit
-	// before running again.
-	g_config.transaction_slow_q = cf_queue_create(sizeof(as_transaction), true);
-
-	// Start the thread that manages the slow queue.
-	if (0 != pthread_create(&g_slow_queue_thread, NULL, thr_tsvc_slow, NULL)) {
-		cf_crash(AS_TSVC, "tsvc slow queue thread create failed");
 	}
 } // end thr_tsvc_init()
 
@@ -1018,26 +918,6 @@ thr_tsvc_enqueue(as_transaction *tr)
 
 	return 0;
 } // end thr_tsvc_enqueue()
-
-
-// Similar to the regular thr_tsvc_enqueue(), this function enqueues a
-// transaction on the "slow" queue. The purpose of this queue is simply to slow
-// down the processing of any transaction placed here, as the transaction is
-// likely not ready for processing for the next milli-second or two. Rather than
-// re-queue it on the regular (fast) thr_tsvc queue (which results in "spin"),
-// we enqueue transactions here that need to take a small breather before being
-// thrust back into action.
-int
-thr_tsvc_enqueue_slow(as_transaction *tr)
-{
-	cf_queue *q = g_config.transaction_slow_q;
-
-	cf_assert(q, AS_TSVC, CF_CRITICAL, "invalid Q argument");
-
-	cf_atomic_int_incr(&g_config.stat_slow_trans_queue_push);
-
-	return cf_queue_push(q, tr);
-} // end thr_tsvc_enqueue_slow()
 
 
 // Get one of the most interesting load statistics: the transaction queue depth.
