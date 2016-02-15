@@ -966,12 +966,21 @@ as_storage_record_open_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_
 }
 
 int
+as_storage_record_write_kv(as_record *r, as_storage_rd *rd)
+{
+	cf_detail(AS_DRV_KV, "record write: r %p rd %p", r, rd);
+
+	if (as_bin_inuse_has(rd)) {
+		kv_write(r, rd);
+	}
+
+	return 0;
+}
+
+int
 as_storage_record_close_kv(as_record *r, as_storage_rd *rd)
 {
 	cf_detail(AS_DRV_KV, "record close: r %p rd %p", r, rd);
-
-	if (rd->write_to_device && as_bin_inuse_has(rd))
-	  kv_write(r, rd);
 
 	if (rd->u.kv.block && rd->u.kv.must_free_block) {
 		cf_free(rd->u.kv.block);
@@ -1231,6 +1240,14 @@ as_storage_record_create_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, c
 
 int
 as_storage_record_open_kv(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_digest *keyd)
+{
+	error_out();
+
+	return 0;
+}
+
+int
+as_storage_record_write_kv(as_record *r, as_storage_rd *rd)
 {
 	error_out();
 

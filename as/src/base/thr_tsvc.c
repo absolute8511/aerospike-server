@@ -44,217 +44,11 @@
 #include "base/secondary_index.h"
 #include "base/security.h"
 #include "base/thr_batch.h"
-#include "base/thr_info.h"
 #include "base/thr_proxy.h"
 #include "base/thr_write.h"
 #include "base/transaction.h"
 #include "fabric/fabric.h"
 #include "storage/storage.h"
-
-// These must all be OFF in production.
-// #define DEBUG 1
-// #define DEBUG_VERBOSE 1
-// #define DIGEST_VALIDATE 1
-
-// Would you like to dump packets to the log?
-// #define DUMP_SYNC_ERROR 1
-
-// Would you like to break the server into the debugger so we can examine a
-// failure?
-// #define VERIFY_BREAK 1
-
-static void
-dump_msg(cl_msg *msgp)
-{
-	cf_info(AS_TSVC, "message dump: proto: version %d type %d size %"PRIu64,
-			msgp->proto.version, msgp->proto.type, (uint64_t) msgp->proto.sz);
-	uint64_t sz = msgp->proto.sz;
-	uint8_t *d = msgp->proto.data;
-	for (uint64_t i = 0; sz > 0; ) {
-		if (sz >= 16) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
-			i += 16;
-			sz -= 16;
-		}
-		else if (sz == 15) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14]);
-			i += 15;
-			sz -= 15;
-		}
-		else if (sz == 14) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13]);
-			i += 14;
-			sz -= 14;
-		}
-		else if (sz == 13) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x %02x %02x : %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12]);
-			i += 13;
-			sz -= 13;
-		}
-		else if (sz == 12) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11]);
-			i += 12;
-			sz -= 12;
-		}
-		else if (sz == 11) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10]);
-			i += 11;
-			sz -= 11;
-		}
-		else if (sz == 10) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x : %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9]);
-			i += 10;
-			sz -= 10;
-		}
-		else if (sz == 9) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x : %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8]);
-			i += 9;
-			sz -= 9;
-		}
-		else if (sz == 8) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
-			i += 8;
-			sz -= 8;
-		}
-		else if (sz == 7) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5], d[6]);
-			i += 7;
-			sz -= 7;
-		}
-		else if (sz == 6) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4], d[5]);
-			i += 6;
-			sz -= 6;
-		}
-		else if (sz == 5) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x : %02x",
-					(int)i, d[0], d[1], d[2], d[3], d[4]);
-			i += 5;
-			sz -= 5;
-		}
-		else if (sz == 4) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x %02x",
-					(int)i, d[0], d[1], d[2], d[3]);
-			i += 4;
-			sz -= 4;
-		}
-		else if (sz == 3) {
-			cf_info(AS_TSVC, " %06u - %02x %02x %02x",
-					(int)i, d[0], d[1], d[2]);
-			i += 3;
-			sz -= 3;
-		}
-		else if (sz == 2) {
-			cf_info(AS_TSVC, " %06u - %02x %02x",
-					(int)i, d[0], d[1]);
-			i += 2;
-			sz -= 2;
-		}
-		else if (sz == 1) {
-			cf_info(AS_TSVC, " %06u - %02x",
-					(int)i, d[0]);
-			i += 1;
-			sz -= 1;
-		}
-
-		if (sz >= 16) {
-			d += 16;
-		}
-		else {
-			d += sz;
-		}
-	}
-}
-
-
-// Sanity-check the message.
-// Returns:
-//   0: On success.
-// 	-1: If caller should return.
-// 	 1: If caller should jump to cleanup and not free msg.
-// 	 2: If caller should jump to cleanup and free msg.
-int
-transaction_check_msg(as_transaction *tr)
-{
-	cl_msg *msgp = tr->msgp;
-
-	if (msgp == 0) {
-		cf_warning(AS_TSVC, " incoming transaction has no message, illegal protofd %p proxymsg %p", tr->proto_fd_h, tr->proxy_msg);
-		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
-		return -1;
-	}
-
-#if 0
-	// WARNING! This happens legally in one place, where thr_nsup is deleting
-	// elements. If expiration/eviction is off, you should never see this!
-	if ((tr->proto_fd == 0) && (tr->proxy_msg == 0)) {
-		cf_warning(AS_TSVC , "bad message");
-		return 2;
-	}
-#endif
-
-#ifdef DEBUG_VERBOSE
-	fprintf(stderr, "msgp DEBUG: thr_tsvc: version %d type %d nfields %d sz %"PRIu64"\n",
-			msgp->proto.version, msgp->proto.type, msgp->msg.n_fields,  (uint64_t) msgp->proto.sz);
-	for (uint64_t j = 0; j < msgp->proto.sz; j++) {
-		fprintf(stderr, "%02x ", msgp->proto.data[j]);
-		if (j % 16 == 15) fprintf(stderr, "\n");
-	}
-	fprintf(stderr, "\n");
-#endif
-
-	if (msgp->proto.version != PROTO_VERSION) {
-		cf_info(AS_TSVC, "can't process message: wrong version %d expecting %d",
-				msgp->proto.version, PROTO_VERSION);
-#ifdef DUMP_SYNC_ERROR
-		dump_msg(msgp);
-#endif
-		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
-		return 1;
-	}
-
-	if (msgp->proto.type >= PROTO_TYPE_MAX) {
-		cf_info(AS_TSVC, "can't process message: invalid type %d should be %d or less",
-				msgp->proto.type, PROTO_TYPE_MAX);
-#ifdef DUMP_SYNC_ERROR
-		dump_msg(msgp);
-#endif
-		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
-		return 1;
-	}
-
-	if (msgp->proto.sz > PROTO_SIZE_MAX) {
-		cf_info(AS_TSVC, "can't process message: invalid size %"PRIu64" should be %d or less",
-				msgp->proto.sz, PROTO_SIZE_MAX);
-#ifdef DUMP_SYNC_ERROR
-		dump_msg(msgp);
-#endif
-		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
-		return 1;
-	}
-
-	if ((msgp->proto.type != PROTO_TYPE_INFO) && (msgp->proto.type != PROTO_TYPE_AS_MSG)) {
-		cf_info(AS_TSVC, "received unknown message type %d, ignoring", msgp->proto.type);
-		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
-		return 2;
-	}
-
-	if (msgp->proto.sz > g_config.dump_message_above_size) {
-		dump_msg(msgp);
-	}
-	return 0;
-}
 
 
 static inline bool
@@ -305,7 +99,7 @@ as_rw_process_result(int rv, as_transaction *tr, bool *free_msgp)
 						tr->result_code, tr->proxy_node);
 			}
 			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
-					tr->result_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
+					tr->result_code, 0, 0, 0, 0, 0, 0, as_transaction_trid(tr), NULL);
 		}
 		else {
 			as_transaction_error(tr, tr->result_code);
@@ -320,8 +114,6 @@ as_rw_process_result(int rv, as_transaction *tr, bool *free_msgp)
 void
 process_transaction(as_transaction *tr)
 {
-	cf_node dest;
-
 	// There are two different types of cluster keys.  There is a "global"
 	// cluster key (CK) for a node -- which shows the state of THIS node
 	// compared to the paxos principle.  Then there is the partition CK that
@@ -341,42 +133,20 @@ process_transaction(as_transaction *tr)
 	as_namespace *ns = 0;
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(q_wait_hist);
-	if (!tr || !tr->msgp) {
-		return;
-	}
+
 	cl_msg *msgp = tr->msgp;
-
-	int retval = transaction_check_msg(tr);
-	if (retval == -1) {
-		return;
-	} else if (retval == 1) {
-		free_msgp = false;
-		goto Cleanup;
-	} else if (retval == 2) {
-		free_msgp = true;
-		goto Cleanup;
-	}
-
-	if (msgp->proto.type == PROTO_TYPE_INFO) {
-
-		// Info request - process it.
-		if (0 == as_info(tr)) {
-			free_msgp = false;
-		}
-
-		goto Cleanup;
-	}
 
 	if (! as_partition_balance_is_init_resolved() &&
 			(tr->flag & AS_TRANSACTION_FLAG_NSUP_DELETE) == 0) {
-		if (tr->preprocessed) {
-			// It's very possible proxy transactions get here.
-	        cf_debug(AS_TSVC, "rejecting fabric transaction - initial partition balance unresolved");
+		if (tr->proto_fd_h) {
+			cf_debug(AS_TSVC, "rejecting client transaction - initial partition balance unresolved");
+			as_transaction_error_unswapped(tr, AS_PROTO_RESULT_FAIL_UNAVAILABLE);
 		}
 		else {
-	        cf_warning(AS_TSVC, "rejecting client transaction - initial partition balance unresolved");
+			// It's very possible proxy transactions get here.
+			cf_debug(AS_TSVC, "rejecting fabric transaction - initial partition balance unresolved");
+			as_transaction_error(tr, AS_PROTO_RESULT_FAIL_UNAVAILABLE);
 		}
-		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_UNAVAILABLE);
 		goto Cleanup;
 	}
 
@@ -386,7 +156,7 @@ process_transaction(as_transaction *tr)
 
 		if (result != AS_PROTO_RESULT_OK) {
 			as_security_log(tr->proto_fd_h, result, PERM_NONE, NULL, NULL);
-			as_transaction_error(tr, (uint32_t)result);
+			as_transaction_error_unswapped(tr, (uint32_t)result);
 			goto Cleanup;
 		}
 	}
@@ -410,24 +180,23 @@ process_transaction(as_transaction *tr)
 				int rr = 0;
 				if (as_msg_field_get(&msgp->msg,
 						AS_MSG_FIELD_TYPE_INDEX_RANGE) != NULL) {
-					cf_detail(AS_TSVC, "Received Query Request(%"PRIx64")", tr->trid);
 					cf_atomic64_incr(&g_config.query_reqs);
 					if (! as_security_check_data_op(tr, &msgp->msg, ns,
 							is_udf(msgp) ? PERM_UDF_QUERY : PERM_QUERY)) {
 						as_transaction_error(tr, tr->result_code);
 						goto Cleanup;
 					}
-					// Responsibility of query layer to free the msgp.
-					free_msgp = false;
 					rr = as_query(tr);   // <><><> Q U E R Y <><><>
-					if (rr != 0) {
+					if (rr == 0) {
+						free_msgp = false;
+					}
+					else {
 						cf_atomic64_incr(&g_config.query_fail);
 						cf_debug(AS_TSVC, "Query failed with error %d",
 								tr->result_code);
 						as_transaction_error(tr, tr->result_code);
 					}
 				} else {
-					cf_debug(AS_TSVC, "Received Scan Request: TrID(%"PRIx64")", tr->trid);
 					// We got a scan, it might be for udfs, no need to know now,
 					// for now, do not free msgp for all the cases. Should take
 					// care of it inside as_scan.
@@ -436,9 +205,11 @@ process_transaction(as_transaction *tr)
 						as_transaction_error(tr, tr->result_code);
 						goto Cleanup;
 					}
-					free_msgp = false;
 					rr = as_scan(tr);   // <><><> S C A N <><><>
-					if (rr != 0) {
+					if (rr == 0) {
+						free_msgp = false;
+					}
+					else {
 						as_transaction_error(tr, rr);
 					}
 
@@ -454,10 +225,6 @@ process_transaction(as_transaction *tr)
 					as_transaction_error(tr, rv);
 					cf_atomic_int_incr(&g_config.batch_errors);
 				}
-			} else if (rv == -4) {
-				cf_info(AS_TSVC, "bailed due to bad protocol. Returning failure to client");
-				dump_msg(msgp);
-				as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 			}
 			else {
 				// All other transaction_prepare() errors.
@@ -506,236 +273,166 @@ process_transaction(as_transaction *tr)
 		goto Cleanup;
 	}
 
-	// Process the transaction.
-	if ((msgp->msg.info2 & AS_MSG_INFO2_WRITE)
-			|| (msgp->msg.info1 & AS_MSG_INFO1_READ)) {
-		cf_detail_digest(AS_TSVC, &(tr->keyd), "  wr  tr %p fd %d proxy(%"PRIx64") ::",
-				tr, tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_node);
-
-		// Obtain a write reservation - or get the node that would satisfy.
-		if (msgp->msg.info2 & AS_MSG_INFO2_WRITE) {
-			// If there is udata in the transaction, it's a udf internal
-			// transaction, so don't free msgp here as other internal udf
-			// transactions might end up using it later. Free when the scan job
-			// is complete.
-			if (tr->udata.req_udata) {
-				free_msgp = false;
-			}
-			else if (tr->proto_fd_h && ! as_security_check_data_op(tr, &msgp->msg, ns, PERM_WRITE)) {
-				as_transaction_error(tr, tr->result_code);
-				goto Cleanup;
-			}
-
-			// If the transaction is "shipped proxy op" to the winner node then
-			// just do the migrate reservation.
-			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
-				as_partition_reserve_migrate(ns, as_partition_getid(tr->keyd),
-						&tr->rsv, &dest);
-				partition_cluster_key = tr->rsv.cluster_key;
-				cf_debug(AS_TSVC,
-						"[Write MIGRATE CASE]: Partition CK(%"PRIx64")", partition_cluster_key);
-				rv = 0;
-			} else {
-				rv = as_partition_reserve_write(ns,
-						as_partition_getid(tr->keyd), &tr->rsv, &dest, &partition_cluster_key);
-				cf_debug(AS_TSVC, "[WRITE CASE]: Partition CK(%"PRIx64")", partition_cluster_key);
-			}
-
-			if (g_config.write_duplicate_resolution_disable == true) {
-				// Zombie writes can be a real drain on performance, so turn
-				// them off in an emergency.
-				tr->rsv.n_dupl = 0;
-				// memset(tr->rsv.dupl_nodes, 0, sizeof(tr->rsv.dupl_nodes));
-			}
-			if (rv == 0) {
-				cf_atomic_int_incr(&g_config.rw_tree_count);
-			}
-		}
-		else {  // <><><> READ Transaction <><><>
-
-			if (tr->proto_fd_h && ! as_security_check_data_op(tr, &msgp->msg, ns, PERM_READ)) {
-				as_transaction_error(tr, tr->result_code);
-				goto Cleanup;
-			}
-
-			// If the transaction is "shipped proxy op" to the winner node then
-			// just do the migrate reservation.
-			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
-				as_partition_reserve_migrate(ns, as_partition_getid(tr->keyd),
-						&tr->rsv, &dest);
-				partition_cluster_key = tr->rsv.cluster_key;
-				cf_debug(AS_TSVC, "[Read MIGRATE CASE]: Partition CK(%"PRIx64")", partition_cluster_key);
-				rv = 0;
-			} else {
-				rv = as_partition_reserve_read(ns, as_partition_getid(tr->keyd),
-						&tr->rsv, &dest, &partition_cluster_key);
-				cf_debug(AS_TSVC, "[READ CASE]: Partition CK(%"PRIx64")", partition_cluster_key);
-			}
-
-			if (rv == 0) {
-				cf_atomic_int_incr(&g_config.rw_tree_count);
-			}
-			if ((0 == rv) & (tr->rsv.n_dupl > 0)) {
-				// A duplicate merge is in progress, upgrade to a write
-				// reservation.
-				as_partition_release(&tr->rsv);
-				cf_atomic_int_decr(&g_config.rw_tree_count);
-				rv = as_partition_reserve_write(ns,
-						as_partition_getid(tr->keyd), &tr->rsv, &dest, &partition_cluster_key);
-				if (rv == 0) {
-					cf_atomic_int_incr(&g_config.rw_tree_count);
-				}
-			}
-		}
-		if (dest == 0) {
-			cf_crash(AS_TSVC, "invalid destination while reserving partition");
-		}
-
-		// If a partition reservation was obtained and the cluster keys (CK)
-		// DO NOT match, then release this reservation.
-		//
-		// Note that this execution path drops into the PROXY DIVERT case if the
-		// transaction CK does not match the partition CK. This is a reasonable
-		// action, since if the cluster got reorganized, it is likely that THIS
-		// NODE will no longer be the master for THIS partition, and thus we
-		// will need proxy_divert() to send it to the right node.
-		//
-		// Also, note that incoming_CK is ZERO is when it comes from the CLIENT,
-		// so any message from the client ALWAYS MATCHES. The OTHER case
-		// (non-zero) is when it is sent by proxy - and THEN it is important
-		// that the C Keys match.
-		bool cluster_keys_match = (tr->incoming_cluster_key == 0)
-				|| (tr->incoming_cluster_key == partition_cluster_key);
-		if ((0 == rv) && !cluster_keys_match) {
-			// Transaction and Partition cluster keys DO NOT MATCH, AND this msg
-			// was sent by another node (not the client).
-			ns = 0;
-			as_partition_release(&tr->rsv);
-			cf_atomic_int_decr(&g_config.rw_tree_count);
-			memset(&tr->rsv, -1, sizeof(tr->rsv)); // probably not needed
-			cf_debug_digest(AS_TSVC, &(tr->keyd),
-					"Trans/Part Cluster Key Mismatch: ReQ! P(%u) XCK(%"PRIx64") PtCK(%"PRIx64"): ",
-					tr->rsv.pid, tr->incoming_cluster_key, partition_cluster_key);
-			cf_atomic_int_incr(&g_config.stat_cluster_key_trans_to_proxy_retry);
-			// Execution path naturally drops into the proxy handling section
-			// below, which is the "else" clause of this next "if".
-		}
-
-		if ((0 == rv) && cluster_keys_match) {
-			ns = 0; // got a reservation
-			tr->microbenchmark_is_resolve = false;
-			if (msgp->msg.info2 & AS_MSG_INFO2_WRITE) {
-				// Do the WRITE.
-				cf_detail_digest(AS_TSVC, &(tr->keyd),
-						"AS_WRITE_START  dupl(%d) : ", tr->rsv.n_dupl);
-
-				MICROBENCHMARK_HIST_INSERT_AND_RESET_P(wt_q_process_hist);
-
-				rv = as_write_start(tr); // <><> WRITE <><>
-				if (rv == 0) {
-					free_msgp = false;
-				}
-			}
-			else {
-				// Do the READ.
-				cf_detail_digest(AS_TSVC, &(tr->keyd),
-						"AS_READ_START  dupl(%d) :", tr->rsv.n_dupl);
-
-				MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_q_process_hist);
-
-				rv = as_read_start(tr); // <><> READ <><>
-				if (rv == 0) {
-					free_msgp = false;
-				}
-			}
-
-			// Process the return value from as_rw_start():
-			// -1 :: "report error to requester"
-			// -2 :: "try again"
-			// -3 :: "duplicate proxy request, drop"
-			if (0 != rv) {
-				as_rw_process_result(rv, tr, &free_msgp);
-			}
-		} else {
-			// rv != 0 (reservation failed) or cluster keys DO NOT MATCH.
-			//
-			// Make sure that if it is shipped op it is not further redirected.
-			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
-
-				int ret_code = 0;
-				if (!cluster_keys_match) {
-					ret_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
-				} else {
-					cf_warning(AS_RW,
-							"Failing the shipped op due to reservation error %d",
-							rv);
-					ret_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-				}
-
-				as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
-						ret_code, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-
-			} else if (tr->proto_fd_h) {
-				// Divert the transaction into the proxy system; in this case, no
-				// reservation was obtained. Pass the cluster key along. Note that
-				// if we landed here because of a CLUSTER KEY MISMATCH,
-				// (transaction CK != Partition CK), then it is probably the case
-				// that we have to forward this request by proxy, since the
-				// partition for this transaction has probably moved and is no
-				// longer appropriate for this node.
-
-				// Proxy divert - reroute client message. Note that
-				// as_proxy_divert() consumes the msgp.
-				cf_detail(AS_PROXY, "proxy divert (wr) to %("PRIx64")", dest);
-				// Originating node, no write request associated.
-				as_proxy_divert(dest, tr, ns, partition_cluster_key);
-				ns = 0;
-				free_msgp = false;
-			} else if (tr->proxy_msg) {
-				// Reroute proxy msg: in this case, send the request back to the
-				// original node for a retry. dest returned by partition
-				// reservation is meaningless here.
-				if (!cluster_keys_match) {
-					dest = tr->proxy_node;
-					cf_debug_digest(AS_PROXY, &(tr->keyd),
-							"[CLUSTER KEY MISMATCH] detected sending proxy redirect back to first node(%"PRIx64"): ", dest);
-				}
-				// Proxy redirect.
-				cf_debug_digest(AS_PROXY, &(tr->keyd),
-						"proxy REDIRECT (wr) to(%"PRIx64") :", dest);
-				as_proxy_send_redirect(tr->proxy_node, tr->proxy_msg, dest);
-			} else if (tr->udata.req_udata){
-				cf_debug(AS_TSVC,"Internal transaction. Partition reservation failed or cluster key mismatch:%d", rv);
-				if (udf_rw_needcomplete(tr)) {
-					udf_rw_complete(tr, cluster_keys_match ? AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH : AS_PROTO_RESULT_FAIL_UNKNOWN, __FILE__,__LINE__);
-				}
-			}
-			goto Cleanup;
-		} // end else "other" transaction
-	} // end if read or write
-	else {
-		cf_info(AS_TSVC, " acting on transaction neither read nor write, error");
-		if (ns) {
-			ns = 0;
-		}
-		if (tr->proto_fd_h) {
-			as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
-		} else {
-			if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
-				cf_info(AS_RW,
-						"sending ship op reply, rc AS_PROTO_RESULT_FAIL_PARAMETER to %"PRIx64"",
-						tr->proxy_node);
-			}
-			else {
-				cf_detail(AS_RW,
-						"sending proxy reply, rc AS_PROTO_RESULT_FAIL_PARAMETER to %"PRIx64"",
-						tr->proxy_node);
-			}
-			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
-					AS_PROTO_RESULT_FAIL_PARAMETER, 0, 0, 0, 0, 0, 0, tr->trid, NULL);
-		}
+	// Sanity check - must know which code path to follow.
+	if ((msgp->msg.info2 & AS_MSG_INFO2_WRITE) == 0 &&
+			(msgp->msg.info1 & AS_MSG_INFO1_READ) == 0) {
+		cf_warning(AS_TSVC, "transaction is neither read nor write - unexpected");
+		as_transaction_error(tr, AS_PROTO_RESULT_FAIL_PARAMETER);
 		goto Cleanup;
 	}
+
+	// Process the transaction.
+	cf_detail_digest(AS_TSVC, &(tr->keyd), "  wr  tr %p fd %d proxy(%"PRIx64") ::",
+			tr, tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_node);
+
+	cf_node dest;
+
+	// Obtain a write reservation - or get the node that would satisfy.
+	if (msgp->msg.info2 & AS_MSG_INFO2_WRITE) {
+		// If there is udata in the transaction, it's a udf internal
+		// transaction, so don't free msgp here as other internal udf
+		// transactions might end up using it later. Free when the scan job
+		// is complete.
+		if (tr->udata.req_udata) {
+			free_msgp = false;
+		}
+		else if (tr->proto_fd_h && ! as_security_check_data_op(tr, &msgp->msg, ns, PERM_WRITE)) {
+			as_transaction_error(tr, tr->result_code);
+			goto Cleanup;
+		}
+
+		// If the transaction is "shipped proxy op" to the winner node then
+		// just do the migrate reservation.
+		if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
+			as_partition_reserve_migrate(ns, as_partition_getid(tr->keyd),
+					&tr->rsv, &dest);
+			partition_cluster_key = tr->rsv.cluster_key;
+			cf_debug(AS_TSVC,
+					"[Write MIGRATE CASE]: Partition CK(%"PRIx64")", partition_cluster_key);
+			rv = 0;
+		} else {
+			rv = as_partition_reserve_write(ns,
+					as_partition_getid(tr->keyd), &tr->rsv, &dest, &partition_cluster_key);
+			cf_debug(AS_TSVC, "[WRITE CASE]: Partition CK(%"PRIx64")", partition_cluster_key);
+		}
+
+		if (g_config.write_duplicate_resolution_disable == true) {
+			// Zombie writes can be a real drain on performance, so turn
+			// them off in an emergency.
+			tr->rsv.n_dupl = 0;
+			// memset(tr->rsv.dupl_nodes, 0, sizeof(tr->rsv.dupl_nodes));
+		}
+		if (rv == 0) {
+			cf_atomic_int_incr(&g_config.rw_tree_count);
+		}
+	}
+	else {  // <><><> READ Transaction <><><>
+
+		if (tr->proto_fd_h && ! as_security_check_data_op(tr, &msgp->msg, ns, PERM_READ)) {
+			as_transaction_error(tr, tr->result_code);
+			goto Cleanup;
+		}
+
+		// If the transaction is "shipped proxy op" to the winner node then
+		// just do the migrate reservation.
+		if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
+			as_partition_reserve_migrate(ns, as_partition_getid(tr->keyd),
+					&tr->rsv, &dest);
+			partition_cluster_key = tr->rsv.cluster_key;
+			cf_debug(AS_TSVC, "[Read MIGRATE CASE]: Partition CK(%"PRIx64")", partition_cluster_key);
+			rv = 0;
+		} else {
+			rv = as_partition_reserve_read(ns, as_partition_getid(tr->keyd),
+					&tr->rsv, &dest, &partition_cluster_key);
+			cf_debug(AS_TSVC, "[READ CASE]: Partition CK(%"PRIx64")", partition_cluster_key);
+		}
+
+		if (rv == 0) {
+			cf_atomic_int_incr(&g_config.rw_tree_count);
+		}
+		if ((0 == rv) & (tr->rsv.n_dupl > 0)) {
+			// A duplicate merge is in progress, upgrade to a write
+			// reservation.
+			as_partition_release(&tr->rsv);
+			cf_atomic_int_decr(&g_config.rw_tree_count);
+			rv = as_partition_reserve_write(ns,
+					as_partition_getid(tr->keyd), &tr->rsv, &dest, &partition_cluster_key);
+			if (rv == 0) {
+				cf_atomic_int_incr(&g_config.rw_tree_count);
+			}
+		}
+	}
+	if (dest == 0) {
+		cf_crash(AS_TSVC, "invalid destination while reserving partition");
+	}
+
+	if (0 == rv) {
+		tr->microbenchmark_is_resolve = false;
+		if (msgp->msg.info2 & AS_MSG_INFO2_WRITE) {
+			// Do the WRITE.
+			cf_detail_digest(AS_TSVC, &(tr->keyd),
+					"AS_WRITE_START  dupl(%d) : ", tr->rsv.n_dupl);
+
+			MICROBENCHMARK_HIST_INSERT_AND_RESET_P(wt_q_process_hist);
+
+			rv = as_write_start(tr); // <><> WRITE <><>
+			if (rv == 0) {
+				free_msgp = false;
+			}
+		}
+		else {
+			// Do the READ.
+			cf_detail_digest(AS_TSVC, &(tr->keyd),
+					"AS_READ_START  dupl(%d) :", tr->rsv.n_dupl);
+
+			MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_q_process_hist);
+
+			rv = as_read_start(tr); // <><> READ <><>
+			if (rv == 0) {
+				free_msgp = false;
+			}
+		}
+
+		// Process the return value from as_rw_start():
+		// -1 :: "report error to requester"
+		// -2 :: "try again"
+		// -3 :: "duplicate proxy request, drop"
+		if (0 != rv) {
+			as_rw_process_result(rv, tr, &free_msgp);
+		}
+	} else {
+		// rv != 0 (reservation failed)
+		//
+		// Make sure that if it is shipped op it is not further redirected.
+		if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
+			cf_warning(AS_RW,
+					"Failing the shipped op due to reservation error %d",
+					rv);
+
+			as_proxy_send_response(tr->proxy_node, tr->proxy_msg,
+					AS_PROTO_RESULT_FAIL_UNKNOWN, 0, 0, 0, 0, 0, 0, as_transaction_trid(tr), NULL);
+		}
+		else if (tr->proto_fd_h) {
+			// Divert the transaction into the proxy system; in this case, no
+			// reservation was obtained. Pass the cluster key along.
+
+			// Proxy divert - reroute client message. Note that
+			// as_proxy_divert() consumes the msgp.
+			cf_detail(AS_PROXY, "proxy divert (wr) to %("PRIx64")", tr->proxy_node);
+			// Originating node, no write request associated.
+			as_proxy_divert(dest, tr, ns, partition_cluster_key);
+			free_msgp = false;
+		}
+		else if (tr->proxy_msg) {
+			as_proxy_return_to_sender(tr);
+		}
+		else if (tr->udata.req_udata) {
+			cf_debug(AS_TSVC,"Internal transaction. Partition reservation failed or cluster key mismatch:%d", rv);
+			if (udf_rw_needcomplete(tr)) {
+				udf_rw_complete(tr, AS_PROTO_RESULT_FAIL_UNKNOWN, __FILE__,__LINE__);
+			}
+		}
+	} // end else "other" transaction
 
 	cf_detail(AS_TSVC, "message service complete tr %p", tr);
 

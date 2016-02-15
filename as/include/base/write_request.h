@@ -196,4 +196,4 @@ bool            finish_rw_process_ack(write_request *wr, uint32_t result_code, b
 int             write_request_process_ack(int ns_id, cf_digest *keyd);
 void            write_request_finish(as_transaction *tr, write_request *wr, bool must_delete);
 int             write_request_start(as_transaction *tr, write_request **wrp, bool is_read);
-int             write_request_setup(write_request *wr, as_transaction *tr, int op);
+int             write_request_setup(write_request *wr, as_transaction *tr, int optype, bool fast_dupl_resolve);

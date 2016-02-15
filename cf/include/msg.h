@@ -68,8 +68,8 @@ typedef enum msg_type_t {
 	M_TYPE_SCAN = 9,
 	M_TYPE_BATCH = 10,
 	M_TYPE_XDR = 11,
-	M_TYPE_FB_HEALTH_PING = 12,
-	M_TYPE_FB_HEALTH_ACK = 13,
+	M_TYPE_FB_HEALTH_PING = 12, // deprecated
+	M_TYPE_FB_HEALTH_ACK = 13,  // deprecated
 	M_TYPE_TSCAN = 14,
 	M_TYPE_SMD = 15,		// System MetaData msg
 	M_TYPE_MULTIOP = 16,	// multiple op

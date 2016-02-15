@@ -944,7 +944,6 @@ as_ldt_parent_storage_set_version(as_storage_rd *rd, uint64_t ldt_version, uint8
 	cf_debug(AS_LDT, "(%s:%d) Setting parent version to %ld %d", fname, lineno, ldt_version,rd->r->generation);
 	//PRINT_STACK();
 
-	rd->write_to_device = true;
 	return 0;
 }
 
@@ -1485,7 +1484,7 @@ as_ldt_record_pickle(ldt_record *lrecord,
 							h_urecord->pickled_sz,
 							&h_urecord->pickled_rec_props,
 							RW_OP_WRITE,
-							true, false);
+							true, false, false);
 			buflen = 0;
 			msg_fillbuf(m[ops], NULL, &buflen);
 			sz += buflen;
@@ -1524,7 +1523,7 @@ as_ldt_record_pickle(ldt_record *lrecord,
 							c_urecord->pickled_sz,
 							&c_urecord->pickled_rec_props,
 							RW_OP_WRITE,
-							true, true);
+							true, true, false);
 
 			if (reset_flag) {
 				c_tr->msgp->msg.info2 &= ~AS_MSG_INFO2_DELETE;

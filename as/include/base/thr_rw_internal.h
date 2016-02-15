@@ -146,5 +146,6 @@ rw_msg_setup(
 	as_rec_props * p_pickled_rec_props,
 	int op,
 	bool has_udf,
-	bool is_subrec
+	bool is_subrec,
+	bool fast_dupl_resolve
 	);

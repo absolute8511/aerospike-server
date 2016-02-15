@@ -150,9 +150,6 @@ typedef struct as_config_s {
 	/* The TCP port for the info socket */
 	int					info_port;
 
-	/* Whether to bypass thr_tsvc for Info protocol requests. */
-	bool				info_fastpath_enabled;
-
 	/* The TCP socket for the listener */
 	cf_socket_cfg		socket;
 
@@ -215,9 +212,6 @@ typedef struct as_config_s {
 
 	// maximum number of "msg" objects permitted per type
 	int64_t				max_msgs_per_type;
-
-	// size at which to dump incoming data
-	uint32_t			dump_message_above_size;
 
 	// the common work directory cache
 	char				*work_directory;
@@ -286,13 +280,6 @@ typedef struct as_config_s {
 	cf_atomic_int		migrate_num_incoming;
 	// For debouncing re-tansmitted migrate start messages:
 	int					migrate_rx_lifetime_ms;
-
-	uint32_t			fb_health_msg_per_burst; // health probe paxos messages per "burst"
-	uint32_t			fb_health_msg_timeout; // milliseconds after which to give up on health probe message
-	uint32_t			fb_health_good_pct; // percent of successful messages in a burst at/above which node is deemed ok
-	uint32_t			fb_health_bad_pct; // percent of successful messages in a burst at/below which node is deemed bad
-	bool				auto_dun; // enables fb health and paxos to dun nodes
-	bool				auto_undun; // enables fb health to undun nodes that have been dunned
 
 	// Temporary dangling prole garbage collection.
 	uint32_t			prole_extra_ttl;	// seconds beyond expiry time after which we garbage collect, 0 for no garbage collection
@@ -551,35 +538,10 @@ typedef struct as_config_s {
 	cf_atomic_int		stat_proxy_retransmits;
 	cf_atomic_int		stat_proxy_redirect;
 
-	// When another proxy has passed in a transaction, and it is from a different
-	// cluster instance (cluster key mismatch), then we retry the transaction
-	// by diverting it to another proxy (either proxy_divert() or proxy_send_redirect()).
-	cf_atomic_int		stat_cluster_key_trans_to_proxy_retry;
-
-	// When the cluster keys match (either it's a client-generated transaction,
-	// or the proxy tr CK matches the Partition CK), BUT the node itself is not yet
-	// consistent (the Node CK doesn't match the Partition CK), we must re-queue
-	// the transaction.
-	cf_atomic_int		stat_cluster_key_transaction_reenqueue;
-
-	// For all REGULAR jobs (that pass thru the CK test), count the number of
-	// regular RW jobs processed.
-	cf_atomic_int		stat_cluster_key_regular_processed;
-
-	// Problem writing the prole -- Retry (return CK error), which will cause
-	// the master to requeue the transaction and try it again.  This is also known
-	// as the "ABSENT PARTITION" or "TURD" problem, which we fix by having the
-	// prole spot the CK mismatch and returning CLUSTER_KEY_MISMATCH error.
-	cf_atomic_int		stat_cluster_key_prole_retry;
-
-	// The Number of Partitions that were impacted by Partition Transaction Queue.
-	cf_atomic_int		stat_cluster_key_partition_transaction_queue_count;
-
 	// When a Prole Write fails, it returns a CLUSTER_KEY_MISMATCH error to the
 	// master, who then re-queues the transaction to be performed again.
 	// There are two cases: One for Duplicate transactions and one for RW trans.
 	cf_atomic_int		stat_cluster_key_err_ack_dup_trans_reenqueue;
-	cf_atomic_int		stat_cluster_key_err_ack_rw_trans_reenqueue;
 
 	cf_atomic_int		stat_expired_objects;
 	cf_atomic_int		stat_evicted_objects;

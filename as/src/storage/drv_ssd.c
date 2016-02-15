@@ -4059,23 +4059,13 @@ as_storage_record_open_ssd(as_namespace *ns, as_record *r, as_storage_rd *rd,
 int
 as_storage_record_close_ssd(as_record *r, as_storage_rd *rd)
 {
-	int result = 0;
-
-	// All record writes except defrag come through here! (Note - can get here
-	// twice if ssd_write() fails - make sure second call will be a no-op.)
-
-	if (rd->write_to_device && as_bin_inuse_has(rd)) {
-		result = ssd_write(r, rd);
-		rd->write_to_device = false;
-	}
-
 	if (rd->u.ssd.must_free_block) {
 		cf_free(rd->u.ssd.must_free_block);
 		rd->u.ssd.must_free_block = NULL;
 		rd->u.ssd.block = NULL;
 	}
 
-	return result;
+	return 0;
 }
 
 
@@ -4090,6 +4080,14 @@ bool
 as_storage_record_size_and_check_ssd(as_storage_rd *rd)
 {
 	return rd->ns->storage_write_block_size >= as_storage_record_size(rd);
+}
+
+
+int
+as_storage_record_write_ssd(as_record *r, as_storage_rd *rd)
+{
+	// All record writes except defrag come through here!
+	return as_bin_inuse_has(rd) ? ssd_write(r, rd) : 0;
 }
 
 

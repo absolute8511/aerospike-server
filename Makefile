@@ -196,7 +196,7 @@ $(LUAJIT)/src/luaconf.h: $(LUAJIT)/src/luaconf.h.orig
 source: src
 
 tags etags:
-	etags `find ai as cf modules xdr $(EEREPO) -name "*.[ch]" | egrep -v '(target/Linux|m4)'` `find /usr/include -name "*.h"`
+	etags `find ai as cf modules xdr $(EEREPO) -name "*.[ch]" -o -name "*.cc" | egrep -v '(target/Linux|m4)'` `find /usr/include -name "*.h"`
 
 # Common target definitions:
 ifneq ($(EEREPO),)

@@ -1857,20 +1857,22 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns,
 	switch (s) {
 		case AS_MIGRATE_STATE_START:
 		{
-			// Receiver-side migration flow control check.
-			int num_incoming = cf_atomic_int_get(g_config.migrate_num_incoming);
-			if (num_incoming >= g_config.migrate_max_num_incoming) {
-				cf_atomic_int_incr(&g_config.migrate_num_incoming_refused);
-				cf_debug(AS_PARTITION, "too busy with %d incoming migrations ~~ waving off migrate request {%s:%d}", num_incoming, ns->name, pid);
-				return AS_MIGRATE_AGAIN;
-			}
-
 			mq =  cf_queue_create(sizeof(partition_migrate_record), false);
 
 			pthread_mutex_lock(&p->lock);
 
 			if (orig_cluster_key != as_paxos_get_cluster_key()) {
 				pthread_mutex_unlock(&p->lock);
+				return AS_MIGRATE_AGAIN;
+			}
+
+			// Receiver-side migration flow control check.
+			int64_t num_incoming = cf_atomic_int_incr(&g_config.migrate_num_incoming);
+			if (num_incoming > g_config.migrate_max_num_incoming) {
+				cf_atomic_int_decr(&g_config.migrate_num_incoming);
+				cf_atomic_int_incr(&g_config.migrate_num_incoming_refused);
+				pthread_mutex_unlock(&p->lock);
+				cf_debug(AS_PARTITION, "too busy with %d incoming migrations ~~ waving off migrate request {%s:%d}", num_incoming, ns->name, pid);
 				return AS_MIGRATE_AGAIN;
 			}
 
@@ -1918,8 +1920,8 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns,
 								pid, orig_cluster_key, TX_FLAGS_NONE);
 						cf_queue_push(mq, &r);
 
-						rv = AS_MIGRATE_ALREADY_DONE;
 						cf_debug(AS_PARTITION, "{%s:%d} Request for migration received from master. Migrate scheduled", ns->name, pid);
+						rv = AS_MIGRATE_ALREADY_DONE;
 						break;
 					}
 					if (p->state == AS_PARTITION_STATE_ZOMBIE) {
@@ -1940,11 +1942,12 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns,
 					 */
 					if (g_config.self_node != p->replica[0]) {
 						bool is_replica = false;
-						for (int i = 1; i < p->p_repl_factor; i++)
+						for (int i = 1; i < p->p_repl_factor; i++) {
 							if (g_config.self_node == p->replica[i]) {
 								is_replica = true;
 								break;
 							}
+						}
 						if (!is_replica) {
 							// this is a state corruption error
 							cf_warning(AS_PARTITION, "{%s:%d} migrate rx aborted. NON replica node received migrate request", ns->name, pid);
@@ -1986,11 +1989,12 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns,
 							break; // out of switch
 						}
 						bool dupl_node_found = false;
-						for (int i = 0; i < p->n_dupl; i++)
+						for (int i = 0; i < p->n_dupl; i++) {
 							if (source_node == p->dupl_nodes[i]) {
 								dupl_node_found = true;
 								break;
 							}
+						}
 						if (!dupl_node_found) {
 							// this has been determined NOT to be a state corruption error - I think it's multiple migrate STARTs?
 							cf_warning(AS_PARTITION, "{%s:%d} migrate rx aborted. SYNC Master receiving migrate from node not in duplicate list", ns->name, pid);
@@ -1999,17 +2003,20 @@ as_partition_migrate_rx(as_migrate_state s, as_namespace *ns,
 						}
 					}
 
-					// Total number of incoming migrations accepted and completed.
-					cf_atomic_int_incr(&g_config.migrate_num_incoming_accepted);
-
-					// For receiver-side migration flow control.
-					cf_atomic_int_incr(&g_config.migrate_num_incoming);
-					rv = 0;
+					rv = AS_MIGRATE_OK;
 					break;
 			}
 
-			if (rv == 0) {
-				if (CF_Q_SZ(mq) != 0) cf_detail(AS_PARTITION, "Migrate: Unexpected queue size != 0");
+			if (rv == AS_MIGRATE_OK) {
+				// Total number of incoming migrations accepted.
+				cf_atomic_int_incr(&g_config.migrate_num_incoming_accepted);
+
+				if (CF_Q_SZ(mq) != 0) {
+					cf_detail(AS_PARTITION, "Migrate: Unexpected queue size != 0");
+				}
+			} else {
+				// Migration has been rejected, incoming migration not expected.
+				cf_atomic_int_decr(&g_config.migrate_num_incoming);
 			}
 
 			pthread_mutex_unlock(&p->lock);

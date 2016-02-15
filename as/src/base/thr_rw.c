@@ -218,7 +218,6 @@ write_request_create(void) {
 int write_request_init_tr(as_transaction *tr, void *wreq) {
 	// INIT_TR
 	write_request *wr = (write_request *) wreq;
-	tr->incoming_cluster_key = 0;
 	tr->start_time = wr->start_time;
 	tr->end_time = cf_atomic64_get(wr->end_time);
 
@@ -235,7 +234,6 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	as_partition_reservation_copy(&tr->rsv, &wr->rsv);
 	tr->msgp = wr->msgp;
 	tr->result_code = AS_PROTO_RESULT_OK;
-	tr->trid = 0;
 	tr->preprocessed = true;
 	tr->flag = 0;
 
@@ -492,7 +490,8 @@ rw_msg_setup_ldt_fields(msg *m, as_transaction *tr, cf_digest *keyd)
 int
 rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 		uint8_t ** p_pickled_buf, size_t pickled_sz,
-		as_rec_props * p_pickled_rec_props, int op, bool has_udf, bool is_subrec)
+		as_rec_props * p_pickled_rec_props, int op, bool has_udf,
+		bool is_subrec, bool fast_dupl_resolve)
 {
 	// setup the write message
 	msg_set_buf(m, RW_FIELD_DIGEST, (void *) keyd, sizeof(cf_digest),
@@ -549,10 +548,21 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 		}
 	} else if (op == RW_OP_DUP) {
 		msg_set_uint32(m, RW_FIELD_OP, RW_OP_DUP);
+
+		if (fast_dupl_resolve) {
+			as_index_ref r_ref;
+			r_ref.skip_lock = false;
+			if (0 == as_record_get(tr->rsv.tree, &tr->keyd, &r_ref, tr->rsv.ns)) {
+				msg_set_uint32(m, RW_FIELD_GENERATION, r_ref.r->generation);
+				msg_set_uint32(m, RW_FIELD_VOID_TIME, r_ref.r->void_time);
+				as_record_done(&r_ref, tr->rsv.ns);
+			}
+		}
+
 		if (tr->rsv.n_dupl > 1) {
 			cf_debug(AS_RW, "{%s:%d} requesting duplicates from %d nodes, very "
-					 "unlikely, digest %"PRIx64"",
-					 tr->rsv.ns->name, tr->rsv.pid, tr->rsv.n_dupl, *(uint64_t*)&tr->keyd);
+					"unlikely, digest %"PRIx64"",
+					tr->rsv.ns->name, tr->rsv.pid, tr->rsv.n_dupl, *(uint64_t*)&tr->keyd);
 		}
 	} else if (op == RW_OP_MULTI) {
 		// TODO: What is meaning of generation and TTL here ???
@@ -591,7 +601,8 @@ rw_msg_setup(msg *m, as_transaction *tr, cf_digest *keyd,
 // Side effect: wr->dest_msg is allocated and populated
 //
 int
-write_request_setup(write_request *wr, as_transaction *tr, int optype)
+write_request_setup(write_request *wr, as_transaction *tr, int optype,
+		bool fast_dupl_resolve)
 {
 	// create the write message
 	if (!wr->dest_msg) {
@@ -605,7 +616,7 @@ write_request_setup(write_request *wr, as_transaction *tr, int optype)
 	}
 
 	rw_msg_setup(wr->dest_msg, tr, &wr->keyd, &wr->pickled_buf, wr->pickled_sz,
-			&wr->pickled_rec_props, optype, wr->has_udf, false);
+			&wr->pickled_rec_props, optype, wr->has_udf, false, fast_dupl_resolve);
 
 	if (wr->shipped_op) {
 		cf_detail(AS_RW,
@@ -759,6 +770,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 	bool dupl_resolved = true;
 	int rv             = 0;
 	bool is_delete     = (tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE);
+	bool fast_dupl_resolve = true;
 
 	if ((wr->dupl_trans_complete == 0) && (tr->rsv.n_dupl > 0)) {
 		dupl_resolved = false;
@@ -812,6 +824,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 			//     - if there are duplicates then go do duplicate
 			//       resolution. To get hold of some value if there
 			//       is any in cluster
+			fast_dupl_resolve = false;
 		}
 	}
 
@@ -828,7 +841,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 		wr->dest_sz = tr->rsv.n_dupl;
 		memcpy(wr->dest_nodes, tr->rsv.dupl_nodes,
 				wr->dest_sz * sizeof(cf_node));
-		if (write_request_setup(wr, tr, RW_OP_DUP)) {
+		if (write_request_setup(wr, tr, RW_OP_DUP, fast_dupl_resolve)) {
 			rw_cleanup(wr, tr, first_time, true, __LINE__);
 			*delete = true;
 			return (0);
@@ -1041,7 +1054,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 			fabric_op = RW_OP_MULTI;
 		}
 
-		if (write_request_setup(wr, tr, fabric_op)) {
+		if (write_request_setup(wr, tr, fabric_op, false)) {
 			rw_cleanup(wr, tr, first_time, true, __LINE__);
 			*delete = true;
 			return (0);
@@ -1293,9 +1306,9 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			 */
 			// INIT_TR
 			wreq_tr_element *e = cf_malloc( sizeof(wreq_tr_element) );
-			if (!e)
+			if (!e) {
 				cf_crash(AS_RW, "cf_malloc");
-			e->tr.incoming_cluster_key = tr->incoming_cluster_key;
+			}
 			e->tr.start_time = tr->start_time;
 			e->tr.end_time = tr->end_time;
 			e->tr.proto_fd_h = tr->proto_fd_h;
@@ -1307,7 +1320,6 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			AS_PARTITION_RESERVATION_INIT(e->tr.rsv);
 			e->tr.result_code = AS_PROTO_RESULT_OK;
 			e->tr.msgp = tr->msgp;
-			e->tr.trid = tr->trid;
 			tr->msgp = 0;
 			e->tr.preprocessed = true;
 			e->tr.flag = 0;
@@ -1326,8 +1338,8 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			cf_atomic_int_incr(&g_config.n_waiting_transactions);
 
 			cf_detail_digest(AS_RW, &tr->keyd,
-					"as rw start:  write in progress QUEUEING returning 0 (%d:%p:%"PRIx64") wr(%p) %ld",
-					tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, tr->proxy_node, wr2, tr->trid);
+					"as rw start:  write in progress QUEUEING returning 0 (%d:%p:%"PRIx64") wr(%p)",
+					tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, tr->proxy_node, wr2);
 
 			as_partition_release(&tr->rsv);
 			cf_atomic_int_decr(&g_config.rw_tree_count);
@@ -1489,7 +1501,7 @@ void rw_msg_get_ldt_dupinfo(as_record_merge_component *c, msg *m) {
 int
 finish_rw_process_prole_ack(write_request *wr, uint32_t result_code)
 {
-    cf_debug(AS_RW, "Prole Ack");
+	cf_debug(AS_RW, "Prole Ack");
 	if (wr->shipped_op) {
 		cf_detail_digest(AS_RW, &wr->keyd, "SHIPPED_OP WINNER [Digest %"PRIx64"] Replication Done",
 				*(uint64_t *)&wr->keyd);
@@ -1759,7 +1771,7 @@ finish_rw_process_ack(write_request *wr, uint32_t result_code, bool is_repl_writ
 }
 
 void
-rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk, bool is_repl_write)
+rw_process_dup_cluster_key_mismatch(write_request *wr, global_keyd *gk)
 {
 	cf_debug(AS_RW,
 			"{%s:%d} rw_process_cluster_key_mismatch: CLUSTER KEY MISMATCH rsp %"PRIx64" %s",
@@ -1773,39 +1785,22 @@ rw_process_cluster_key_mismatch(write_request *wr, global_keyd *gk, bool is_repl
 		return;
 	}
 
-	if (! is_repl_write) {
-		if (1 == cf_atomic32_incr(&wr->dupl_trans_complete)) {
-			cf_atomic32_incr(&wr->trans_complete);
-			// also complete the next transaction. we are bailing out
-			// INIT_TR
-			as_transaction tr;
-			write_request_init_tr(&tr, wr);
-			MICROBENCHMARK_RESET();
-
-			cf_atomic_int_incr(&g_config.stat_cluster_key_err_ack_dup_trans_reenqueue);
-
-			cf_debug_digest(AS_RW, &(wr->keyd), "[RE-ENQUEUE JOB from CK ERR ACK:1] TrID(0) SelfNode(%"PRIx64")",
-					g_config.self_node );
-
-			thr_tsvc_enqueue(&tr);
-			wr->msgp = 0;
-			WR_TRACK_INFO(wr, "rw_process_cluster_key_mismatch: cluster key mismatch deleting - duplicate ");
-			must_delete = true;
-		}
-	} else if (1 == cf_atomic32_incr(&wr->trans_complete)) {
+	if (1 == cf_atomic32_incr(&wr->dupl_trans_complete)) {
+		cf_atomic32_incr(&wr->trans_complete);
+		// also complete the next transaction. we are bailing out
 		// INIT_TR
 		as_transaction tr;
 		write_request_init_tr(&tr, wr);
 		MICROBENCHMARK_RESET();
 
-		cf_atomic_int_incr(&g_config.stat_cluster_key_err_ack_rw_trans_reenqueue);
+		cf_atomic_int_incr(&g_config.stat_cluster_key_err_ack_dup_trans_reenqueue);
 
-		cf_debug_digest(AS_RW, &(wr->keyd), "[RE-ENQUEUE JOB from CK ERR ACK:2] TrID(0) SelfNode(%"PRIx64")",
+		cf_debug_digest(AS_RW, &(wr->keyd), "[RE-ENQUEUE JOB from CK ERR ACK:1] TrID(0) SelfNode(%"PRIx64")",
 				g_config.self_node );
 
 		thr_tsvc_enqueue(&tr);
-		wr->msgp = 0; // NULL this out so that the write_destructor does not free this pointer.
-		WR_TRACK_INFO(wr, "rw_process_cluster_key_mismatch: cluster key mismatch deleting - final ");
+		wr->msgp = 0;
+		WR_TRACK_INFO(wr, "rw_process_cluster_key_mismatch: cluster key mismatch deleting - duplicate ");
 		must_delete = true;
 	}
 
@@ -1914,8 +1909,11 @@ rw_process_ack(cf_node node, msg *m, bool is_write)
 	WR_TRACK_INFO(wr, "rw_process_ack: entering");
 
 	if (result_code == AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH) {
-		rw_process_cluster_key_mismatch(wr, &gk, is_write);
-		goto Out;
+		if (! is_write) {
+			rw_process_dup_cluster_key_mismatch(wr, &gk);
+			goto Out;
+		}
+		// else - CLUSTER_KEY_MISMATCH on replica write is treated as OK.
 	}
 	else if (result_code != AS_PROTO_RESULT_OK) {
 		cf_debug_digest(AS_RW, "{%s:%d} rw_process_ack: Processing unexpected response(%d):",
@@ -2025,7 +2023,7 @@ ops_complete(as_transaction *tr, cf_dyn_buf *db)
 	}
 	else if (tr->proxy_msg) {
 		as_proxy_send_ops_response(tr->proxy_node, tr->proxy_msg, db);
-		tr->proxy_msg = 0;
+		// TODO - set tr->proxy_msg NULL - currently used as flag for stats.
 	}
 	else {
 		cf_warning(AS_RW, "ops_complete with no proto_fd_h or proxy_msg");
@@ -2049,7 +2047,7 @@ write_complete(write_request *wr, as_transaction *tr)
 	else if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
 				tr->generation, tr->void_time, NULL, NULL, 0, NULL, NULL,
-				tr->trid, NULL)) {
+				as_transaction_trid(tr), NULL)) {
 			cf_warning(AS_RW, "can't send reply to client, fd %d",
 					tr->proto_fd_h->fd);
 		}
@@ -2058,9 +2056,10 @@ write_complete(write_request *wr, as_transaction *tr)
 	}
 	else if (tr->proxy_msg) {
 		as_proxy_send_response(tr->proxy_node, tr->proxy_msg, tr->result_code,
-				0, 0, NULL, NULL, 0, NULL, tr->trid, NULL);
+				0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
+		// TODO - set tr->proxy_msg NULL - currently used as flag for stats.
 	}
-	// else something is really wrong ...
+	// else (hopefully) it's an nsup delete ...
 
 	MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
 }
@@ -2138,6 +2137,11 @@ rw_dup_prole(cf_node node, msg *m)
 		goto Out1;
 	}
 
+	uint32_t generation = 0;
+	uint32_t void_time = 0;
+	bool local_conflict_check = (0 == msg_get_uint32(m, RW_FIELD_GENERATION, &generation)
+			&& 0 == msg_get_uint32(m, RW_FIELD_VOID_TIME, &void_time));
+
 	// NB need to use the _migrate variant here so we can write into desync
 	as_partition_reservation rsv;
 	AS_PARTITION_RESERVATION_INIT(rsv);
@@ -2165,6 +2169,14 @@ rw_dup_prole(cf_node node, msg *m)
 	}
 	as_index *r = r_ref.r;
 	uint32_t info = 0;
+
+	if (local_conflict_check &&
+			0 >= as_record_resolve_conflict(rsv.ns->conflict_resolution_policy,
+					generation, void_time, r->generation, r->void_time)) {
+		result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
+		cf_debug_digest(AS_RW, keyd, "local conflict resolution lost ");
+		goto Out3;
+	}
 
 	if (rsv.ns->ldt_enabled && as_ldt_record_is_parent(r)) {
 		// NB: We search only on main tree in the code here because
@@ -2247,7 +2259,7 @@ Out1:
 	msg_set_uint32(m, RW_FIELD_RESULT, result_code);
 	msg_set_unset(m, RW_FIELD_NAMESPACE);
 
-	int rv2 = as_fabric_send(node, m, AS_FABRIC_PRIORITY_HIGH);
+	int rv2 = as_fabric_send(node, m, AS_FABRIC_PRIORITY_MEDIUM);
 	if (rv2 != 0) {
 		cf_debug(AS_RW, "write process: send fabric message bad return %d",
 				rv2);
@@ -2573,6 +2585,7 @@ write_local_pickled(cf_digest *keyd, as_partition_reservation *rsv,
 		// code path does so.
 	}
 
+	as_storage_record_write(r, &rd);
 	as_storage_record_close(r, &rd);
 
 	uint16_t set_id = as_index_get_set_id(r);
@@ -2672,13 +2685,6 @@ write_process(cf_node node, msg *m, bool respond)
 		goto Out;
 	}
 
-	uint64_t cluster_key;
-	if (0 != msg_get_uint64(m, RW_FIELD_CLUSTER_KEY, &cluster_key)) {
-		cf_warning(AS_RW, "write process received message without cluster key");
-		cf_atomic_int_incr(&g_config.rw_err_write_internal);
-		goto Out;
-	}
-
 	as_generation generation = 0;
 	if (0 != msg_get_uint32(m, RW_FIELD_GENERATION, &generation)) {
 		cf_detail(AS_RW, "write process recevied message without generation");
@@ -2747,15 +2753,10 @@ write_process(cf_node node, msg *m, bool respond)
 		}
 
 		if (tr.rsv.state == AS_PARTITION_STATE_ABSENT) {
-			cf_debug_digest(AS_RW, keyd, "[PROLE STATE MISMATCH:1] TID(0) Partition PID(%u) State is Absent or other(%u). Return to Sender.",
-					tr.rsv.pid, tr.rsv.state );
+			cf_debug_digest(AS_RW, keyd, "prole delete: ptn_id:%u state: absent ",
+					tr.rsv.pid);
 			result_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
-			// We're going to have to retry this Prole Write operation.  We'll
-			// do this by telling the master to retry (which will cause the
-			// master to re-enqueue the transaction).
-			cf_atomic_int_incr(&g_config.stat_cluster_key_prole_retry);
-			cf_debug_digest(AS_RW, keyd, "[CK MISMATCH] P PID(%u) State ABSENT or other(%u):",
-					tr.rsv.pid, tr.rsv.state );
+			// The requester will treat this as OK, but send this for info.
 		}
 		else {
 			cf_debug_digest(AS_RW, keyd, "[PROLE write]: SingleBin(%d) generation(%d):",
@@ -2844,15 +2845,11 @@ write_process(cf_node node, msg *m, bool respond)
 			goto Out;
 		}
 
-		// See if we're being asked to write into an ABSENT PROLE PARTITION.
-		// If so, then DO NOT WRITE.  Instead, return an error so that the
-		// Master will retry with the correct node.
 		if (rsv.state == AS_PARTITION_STATE_ABSENT) {
+			cf_debug_digest(AS_RW, keyd, "prole delete: ptn_id:%u state: absent ",
+					rsv.pid);
 			result_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
-			cf_atomic_int_incr(&g_config.stat_cluster_key_prole_retry);
-			cf_debug_digest(AS_RW, keyd,
-					"[PROLE STATE MISMATCH:2] TID(0) P PID(%u) State:ABSENT or other(%u). Return to Sender. :",
-					rsv.pid, rsv.state  );
+			// The requester will treat this as OK, but send this for info.
 		}
 		else {
 			cf_debug_digest(AS_RW, keyd, "Write Pickled: PID(%u) PState(%d) Gen(%d):",
@@ -2866,7 +2863,6 @@ write_process(cf_node node, msg *m, bool respond)
 			} else {
 				result_code = AS_PROTO_RESULT_OK;
 			}
-
 		} // end else valid Partition state
 
 		as_partition_release(&rsv);
@@ -2880,8 +2876,6 @@ Out:
 			cf_atomic_int_incr(&g_config.err_write_fail_prole_generation);
 		} else if (result_code == AS_PROTO_RESULT_FAIL_UNKNOWN) {
 			cf_atomic_int_incr(&g_config.err_write_fail_prole_unknown);
-		} else if (result_code == AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH ) {
-			cf_atomic_int_incr(&g_config.rw_err_write_cluster_key);
 		}
 	}
 
@@ -3506,6 +3500,12 @@ write_local_policies(as_transaction *tr, bool *p_must_not_create,
 	// Shortcut pointers.
 	as_msg *m = &tr->msgp->msg;
 	as_namespace *ns = tr->rsv.ns;
+
+	if (m->n_ops == 0) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: bin op(s) expected, none present ", ns->name);
+		return AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
+
 	bool info1_get_all = (m->info1 & AS_MSG_INFO1_GET_ALL) != 0;
 	bool respond_all_ops = (m->info2 & AS_MSG_INFO2_RESPOND_ALL_OPS) != 0;
 
@@ -4161,7 +4161,8 @@ write_local_bin_ops(as_transaction *tr, as_storage_rd *rd,
 	size_t msg_sz = 0;
 	uint8_t *msgp = (uint8_t *)as_msg_make_response_msg(AS_PROTO_RESULT_OK,
 			r->generation, r->void_time, has_read_all_op ? NULL : ops, bins,
-			(uint16_t)n_response_bins, ns, NULL, &msg_sz, tr->trid, NULL);
+			(uint16_t)n_response_bins, ns, NULL, &msg_sz,
+			as_transaction_trid(tr), NULL);
 
 	destroy_stack_bins(result_bins, n_result_bins);
 
@@ -4274,10 +4275,8 @@ write_local_dim_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 	uint64_t start_ns = g_config.microbenchmarks ? cf_getns() : 0;
 
-	rd->write_to_device = true;
-
-	if ((result = as_storage_record_close(r, rd)) < 0) {
-		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
+	if ((result = as_storage_record_write(r, rd)) < 0) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_write() ", ns->name);
 		write_local_pickle_unwind(pickle);
 		write_local_index_metadata_unwind(&old_metadata, r);
 		write_local_dim_single_bin_unwind(&old_bin, rd->bins, cleanup_bins, n_cleanup_bins);
@@ -4418,10 +4417,8 @@ write_local_dim(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 	uint64_t start_ns = g_config.microbenchmarks ? cf_getns() : 0;
 
-	rd->write_to_device = true;
-
-	if ((result = as_storage_record_close(r, rd)) < 0) {
-		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
+	if ((result = as_storage_record_write(r, rd)) < 0) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_write() ", ns->name);
 		write_local_pickle_unwind(pickle);
 		cf_free(new_bin_space);
 		write_local_index_metadata_unwind(&old_metadata, r);
@@ -4554,16 +4551,12 @@ write_local_ssd_single_bin(as_transaction *tr, as_storage_rd *rd,
 
 	uint64_t start_ns = g_config.microbenchmarks ? cf_getns() : 0;
 
-	rd->write_to_device = true;
-
-	int write_result = as_storage_record_close(r, rd);
-
-	if (write_result < 0) {
-		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
+	if ((result = as_storage_record_write(r, rd)) < 0) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_write() ", ns->name);
 		write_local_pickle_unwind(pickle);
 		cf_ll_buf_free(&particles_llb);
 		write_local_index_metadata_unwind(&old_metadata, r);
-		return -write_result;
+		return -result;
 	}
 
 	if (g_config.microbenchmarks && start_ns) {
@@ -4642,6 +4635,11 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 	if (has_sindex && n_old_bins != 0) {
 		memcpy(old_bins, new_bins, n_old_bins * sizeof(as_bin));
+
+		// If it's a replace, clear the new bins array.
+		if (record_level_replace) {
+			as_bin_set_all_empty(rd);
+		}
 	}
 
 	//------------------------------------------------------
@@ -4687,10 +4685,8 @@ write_local_ssd(as_transaction *tr, const char *set_name, as_storage_rd *rd,
 
 	uint64_t start_ns = g_config.microbenchmarks ? cf_getns() : 0;
 
-	rd->write_to_device = true;
-
-	if ((result = as_storage_record_close(r, rd)) < 0) {
-		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_close() ", ns->name);
+	if ((result = as_storage_record_write(r, rd)) < 0) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: failed as_storage_record_write() ", ns->name);
 		write_local_pickle_unwind(pickle);
 		cf_ll_buf_free(&particles_llb);
 		write_local_index_metadata_unwind(&old_metadata, r);
@@ -4960,6 +4956,7 @@ write_local(as_transaction *tr, uint8_t **pickled_buf, size_t *pickled_sz,
 		cf_atomic_int_setmax( &tr->rsv.p->max_void_time, r->void_time);
 	}
 
+	as_storage_record_close(r, &rd);
 	as_record_done(&r_ref, ns);
 
 	// Don't send an XDR delete if it's disallowed.
@@ -5165,13 +5162,6 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_r
 	if (0 != msg_get_buf(m, RW_FIELD_DIGEST, (byte **) &keyd, &sz,
 			MSG_GET_DIRECT)) {
 		cf_debug(AS_RW, "write process received message with out digest");
-		cf_atomic_int_incr(&g_config.rw_err_write_internal);
-		goto Out;
-	}
-
-	uint64_t cluster_key;
-	if (0 != msg_get_uint64(m, RW_FIELD_CLUSTER_KEY, &cluster_key)) {
-		cf_warning(AS_RW, "write process received message without cluster key");
 		cf_atomic_int_incr(&g_config.rw_err_write_internal);
 		goto Out;
 	}
@@ -5510,6 +5500,7 @@ rw_retransmit_reduce_fn(void *key, uint32_t keylen, void *data, void *udata)
 				if (wr->msgp) {
 					as_batch_add_error(wr->batch_shared, wr->batch_index, AS_PROTO_RESULT_FAIL_TIMEOUT);
 					wr->msgp = NULL;
+					wr->proto_fd_h = 0;
 				}
 			}
 			else if (wr->proto_fd_h) {
@@ -5829,7 +5820,7 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 		else {
 			if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
 					generation, void_time, ops, response_bins, n_bins, ns,
-					written_sz, tr->trid, setname)) {
+					written_sz, as_transaction_trid(tr), setname)) {
 				cf_info(AS_RW, "rw: can't send reply, fd %d rc %d",
 						tr->proto_fd_h->fd, tr->result_code);
 			}
@@ -5846,8 +5837,8 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 					tr->result_code, tr->proxy_node);
 
 		as_proxy_send_response(tr->proxy_node, tr->proxy_msg, tr->result_code,
-				generation, void_time, ops, response_bins, n_bins, ns, tr->trid,
-				setname);
+				generation, void_time, ops, response_bins, n_bins, ns,
+				as_transaction_trid(tr), setname);
 		tr->proxy_msg = 0;
 	} else {
 		// In this case, this is a call from write_process() above.
@@ -5857,7 +5848,7 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 			size_t msg_sz = 0;
 			tr->msgp = as_msg_make_response_msg(tr->result_code, generation,
 					void_time, ops, response_bins, n_bins, ns, (cl_msg *) NULL,
-					&msg_sz, tr->trid, setname);
+					&msg_sz, as_transaction_trid(tr), setname);
 			// TODO - if it turns out this is normal, demote to debug:
 			cf_warning_digest(AS_RW, &tr->keyd,
 					"{%s} thr_tsvc_read returns response message for duplicate read %p ",
@@ -6039,6 +6030,12 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 		as_bin_get_all_p(&rd, response_bins);
 	}
 	else {
+		if (m->n_ops == 0) {
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: bin op(s) expected, none present ", ns->name);
+			read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_PARAMETER);
+			return;
+		}
+
 		bool respond_all_ops = (m->info2 & AS_MSG_INFO2_RESPOND_ALL_OPS) != 0;
 		int result;
 
@@ -6177,12 +6174,6 @@ rw_multi_process(cf_node node, msg *m)
 		goto Out;
 	}
 
-	uint64_t cluster_key;
-	if (0 != msg_get_uint64(m, RW_FIELD_CLUSTER_KEY, &cluster_key)) {
-		cf_warning(AS_RW, "MULTI_OP: Message without Cluster Key");
-		goto Out;
-	}
-
 	uint8_t *ns_name = 0;
 	size_t ns_name_len;
 	if (0 != msg_get_buf(m, RW_FIELD_NAMESPACE, &ns_name, &ns_name_len,
@@ -6215,11 +6206,9 @@ rw_multi_process(cf_node node, msg *m)
 	cf_atomic_int_incr(&g_config.wprocess_tree_count);
 	reserved = true;
 	if (rsv.state == AS_PARTITION_STATE_ABSENT) {
+		cf_debug_digest(AS_RW, keyd, "prole delete: ptn_id:%u state: absent ",
+				rsv.pid);
 		result_code = AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
-		cf_atomic_int_incr(&g_config.stat_cluster_key_prole_retry);
-		cf_debug_digest(AS_RW, keyd,
-				"[PROLE STATE MISMATCH:2] TID(0) P PID(%u) State:ABSENT or other(%u). Return to Sender. :",
-				rsv.pid, rsv.state  );
 		goto Out;
 	}
 	ldt_prole_info linfo;
