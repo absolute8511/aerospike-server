@@ -45,6 +45,7 @@
 #include "base/scan.h"
 #include "base/security.h"
 #include "base/thr_demarshal.h"
+#include "base/thr_proxy.h"
 #include "base/udf_rw.h"
 
 /* as_transaction_prepare
@@ -82,8 +83,6 @@ as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
 		tr->keyd                  = cf_digest_zero;
 		tr->preprocessed          = false;
 	}
-	tr->incoming_cluster_key      = 0;
-	tr->trid                      = 0;
 	tr->flag                      = 0;
 	tr->generation                = 0;
 	tr->result_code               = AS_PROTO_RESULT_OK;
@@ -98,8 +97,6 @@ as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
 
 	tr->proxy_node                = 0;
 	tr->proxy_msg                 = 0;
-
-	tr->incoming_cluster_key      = 0;
 
 	UREQ_DATA_INIT(&tr->udata);
 
@@ -169,17 +166,6 @@ int as_transaction_prepare(as_transaction *tr) {
 		cf_debug(AS_PROTO, "received request with digest array, batch");
 		return(-3);
 	}
-
-	// If the client had sent a transaction-id, set it as the attribute for the transaction.
-	as_msg_field *tridfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_TRID);
-	if (tridfp) {
-		//We know that the network byte order is big-endian.
-		//So, convert the 64bit integer from big-endian to host byte order.
-		uint64_t trid_nbo;
-		memcpy(&trid_nbo, tridfp->data, sizeof(trid_nbo));
-		tr->trid = __be64_to_cpu(trid_nbo);
-	}
-
 
 	// It's tempting to move this to the final return, but queries
 	// actually escape in the if clause below ...
@@ -348,6 +334,36 @@ as_transaction_create_internal(as_transaction *tr, tr_create_data *  trc_data)
 }
 
 void
+as_transaction_demarshal_error(as_transaction* tr, uint32_t error_code)
+{
+	as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, 0, NULL);
+	tr->proto_fd_h = NULL;
+
+	cf_free(tr->msgp);
+	tr->msgp = NULL;
+}
+
+// TODO - deprecate this when swap is moved out into thr_demarshal.c!
+void
+as_transaction_error_unswapped(as_transaction* tr, uint32_t error_code)
+{
+	if (tr->batch_shared) {
+		as_batch_add_error(tr->batch_shared, tr->batch_index, error_code);
+		// Clear this transaction's msgp so calling code does not free it.
+		tr->msgp = 0;
+	}
+	else {
+		as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, 0, NULL);
+		tr->proto_fd_h = 0;
+		MICROBENCHMARK_HIST_INSERT_P(error_hist);
+		cf_atomic_int_incr(&g_config.err_tsvc_requests);
+		if (error_code == AS_PROTO_RESULT_FAIL_TIMEOUT) {
+			cf_atomic_int_incr(&g_config.err_tsvc_requests_timeout);
+		}
+	}
+}
+
+void
 as_transaction_error(as_transaction* tr, uint32_t error_code)
 {
 	if (tr->proto_fd_h) {
@@ -357,7 +373,7 @@ as_transaction_error(as_transaction* tr, uint32_t error_code)
 			tr->msgp = 0;
 		}
 		else {
-			as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, tr->trid, NULL);
+			as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, as_transaction_trid(tr), NULL);
 			tr->proto_fd_h = 0;
 			MICROBENCHMARK_HIST_INSERT_P(error_hist);
 			cf_atomic_int_incr(&g_config.err_tsvc_requests);
@@ -365,7 +381,12 @@ as_transaction_error(as_transaction* tr, uint32_t error_code)
 				cf_atomic_int_incr(&g_config.err_tsvc_requests_timeout);
 			}
 		}
-	} else if (tr->udata.req_udata) {
+	}
+	else if (tr->proxy_msg) {
+		as_proxy_send_response(tr->proxy_node, tr->proxy_msg, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
+		tr->proxy_msg = NULL;
+	}
+	else if (tr->udata.req_udata) {
 		if (udf_rw_needcomplete(tr)) {
 			udf_rw_complete(tr, error_code, __FILE__,__LINE__);
 		}

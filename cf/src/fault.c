@@ -97,21 +97,20 @@ char *cf_fault_context_strings[] = {
 	"trial",       // 43
 	"xdr",         // 44
 	"cf:rbuffer",  // 45
-	"fb_health",   // 46
-	"cf:arenax",   // 47
-	"compression", // 48
-	"sindex",      // 49
-	"udf",         // 50
-	"query",       // 51
-	"smd",         // 52
-	"mon",         // 53
-	"ldt",         // 54
-	"cf:jem",      // 55
-	"security",    // 56
-	"aggr",        // 57
-	"job",         // 58
-	"geo",         // 59
-	NULL           // 60
+	"cf:arenax",   // 46
+	"compression", // 47
+	"sindex",      // 48
+	"udf",         // 49
+	"query",       // 50
+	"smd",         // 51
+	"mon",         // 52
+	"ldt",         // 53
+	"cf:jem",      // 54
+	"security",    // 55
+	"aggr",        // 56
+	"job",         // 57
+	"geo",         // 58
+	NULL           // 59
 };
 
 static const char *cf_fault_severity_strings[] = { "CRITICAL", "WARNING", "INFO", "DEBUG", "DETAIL", NULL };

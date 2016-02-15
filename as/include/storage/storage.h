@@ -101,7 +101,6 @@ typedef struct as_storage_rd_s {
 	bool			record_on_device;			// if true, record exists on device
 	bool			ignore_record_on_device;	// if true, never read record off device (such as in replace case)
 	bool			have_device_block;			// if true, we have a storage block as part of the rd. if false, we must get one.
-	bool			write_to_device;			// if true, the contents of the bin pointer will be written to disk
 	cf_digest		keyd;						// when doing a write, we'll need to stash this to do the "callback"
 
 	// Parameters used when handling key storage:
@@ -155,6 +154,7 @@ extern uint16_t as_storage_record_get_n_bins(as_storage_rd *rd);
 extern int as_storage_record_read(as_storage_rd *rd);
 extern int as_storage_particle_read_all(as_storage_rd *rd);
 extern bool as_storage_record_size_and_check(as_storage_rd *rd);
+extern int as_storage_record_write(as_record *r, as_storage_rd *rd);
 
 // Storage capacity monitoring.
 extern void as_storage_wait_for_defrag();
@@ -221,6 +221,7 @@ extern uint16_t as_storage_record_get_n_bins_ssd(as_storage_rd *rd);
 extern int as_storage_record_read_ssd(as_storage_rd *rd);
 extern int as_storage_particle_read_all_ssd(as_storage_rd *rd);
 extern bool as_storage_record_size_and_check_ssd(as_storage_rd *rd);
+extern int as_storage_record_write_ssd(as_record *r, as_storage_rd *rd);
 
 extern void as_storage_wait_for_defrag_ssd(as_namespace *ns);
 extern bool as_storage_overloaded_ssd(as_namespace *ns);
@@ -259,5 +260,6 @@ extern int as_storage_record_close_kv(as_record *r, as_storage_rd *rd);
 extern uint16_t as_storage_record_get_n_bins_kv(as_storage_rd *rd);
 extern int as_storage_record_read_kv(as_storage_rd *rd);
 extern int as_storage_particle_read_all_kv(as_storage_rd *rd);
+extern int as_storage_record_write_kv(as_record *r, as_storage_rd *rd);
 
 extern int as_storage_stats_kv(as_namespace *ns, int *available_pct, uint64_t *used_disk_bytes);

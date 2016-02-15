@@ -386,7 +386,7 @@ as_batch_direct_queue_task(as_transaction* tr)
 	}
 
 	batch_transaction btr;
-	btr.trid = tr->trid;
+	btr.trid = as_transaction_trid(tr);
 	btr.end_time = tr->end_time;
 	btr.get_data = !(msg->info1 & AS_MSG_INFO1_GET_NOBINDATA);
 	btr.complete = false;

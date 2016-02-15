@@ -539,6 +539,15 @@ thr_demarshal(void *arg)
 						goto NextEvent_FD_Cleanup;
 					}
 
+					if (proto.version != PROTO_VERSION &&
+							// For backward compatibility, allow version 0 with
+							// security messages.
+							! (proto.version == 0 && proto.type == PROTO_TYPE_SECURITY)) {
+						cf_warning(AS_DEMARSHAL, "proto input from %s: unsupported proto version %u",
+								fd_h->client, proto.version);
+						goto NextEvent_FD_Cleanup;
+					}
+
 					// Swap the necessary elements of the as_proto.
 					as_proto_swap(&proto);
 
@@ -677,6 +686,16 @@ thr_demarshal(void *arg)
 					tr.start_time   = now_ns; // set transaction start time
 					tr.preprocessed = false;
 
+					if (! as_proto_is_valid_type(proto_p)) {
+						cf_warning(AS_DEMARSHAL, "unsupported proto message type %u", proto_p->type);
+						// We got a proto message type we don't recognize, so it
+						// may not do any good to send back an as_msg error, but
+						// it's the best we can do. At least we can keep the fd.
+						as_transaction_demarshal_error(&tr, AS_PROTO_RESULT_FAIL_UNKNOWN);
+						cf_atomic_int_incr(&g_config.proto_transactions);
+						goto NextEvent;
+					}
+
 					if (g_config.microbenchmarks) {
 						histogram_insert_data_point(g_config.demarshal_hist, now_ns);
 						tr.microbenchmark_time = cf_getns();
@@ -692,7 +711,9 @@ thr_demarshal(void *arg)
 						if ((rv = as_packet_decompression((uint8_t *)proto_p, &decompressed_buf, &decompressed_buf_size))) {
 							cf_warning(AS_DEMARSHAL, "as_proto decompression failed! (rv %d)", rv);
 							cf_warning_binary(AS_DEMARSHAL, proto_p, sizeof(as_proto) + proto_p->sz, CF_DISPLAY_HEX_SPACED, "compressed proto_p");
-							goto NextEvent_FD_Cleanup;
+							as_transaction_demarshal_error(&tr, AS_PROTO_RESULT_FAIL_UNKNOWN);
+							cf_atomic_int_incr(&g_config.proto_transactions);
+							goto NextEvent;
 						}
 						// Count the packets.
 						cf_atomic_int_add(&g_config.stat_compressed_pkts_received, 1);
@@ -704,22 +725,12 @@ thr_demarshal(void *arg)
 						tr.msgp = (cl_msg *)decompressed_buf;
 						as_proto_swap(&(tr.msgp->proto));
 
-						if (tr.msgp->proto.sz > PROTO_SIZE_MAX) {
-							cf_warning(AS_DEMARSHAL, "as_proto decompressed packet sz %lu > %lu (MAX) %d", tr.msgp->proto.sz, PROTO_SIZE_MAX, (tr.msgp->proto.sz > PROTO_SIZE_MAX));
-							cf_free(decompressed_buf);
-							goto NextEvent_FD_Cleanup;
-						}
-
-						if (tr.msgp->proto.sz != decompressed_buf_size - sizeof(as_proto)) {
-							cf_warning(AS_DEMARSHAL, "as_proto decompressed packet sz %lu != decompressed buffer size %lu", tr.msgp->proto.sz, decompressed_buf_size - sizeof(as_proto));
-							cf_free(decompressed_buf);
-							goto NextEvent_FD_Cleanup;
-						}
-
-						if (tr.msgp->proto.type == PROTO_TYPE_AS_MSG_COMPRESSED) {
-							cf_warning(AS_DEMARSHAL, "as_proto decompressed packet cannot contain another compressed packet.");
-							cf_free(decompressed_buf);
-							goto NextEvent_FD_Cleanup;
+						if (! as_proto_wrapped_is_valid(&tr.msgp->proto, decompressed_buf_size)) {
+							cf_warning(AS_DEMARSHAL, "decompressed unusable proto: version %u, type %u, sz %lu [%lu]",
+									tr.msgp->proto.version, tr.msgp->proto.type, tr.msgp->proto.sz, decompressed_buf_size);
+							as_transaction_demarshal_error(&tr, AS_PROTO_RESULT_FAIL_UNKNOWN);
+							cf_atomic_int_incr(&g_config.proto_transactions);
+							goto NextEvent;
 						}
 					}
 
@@ -730,9 +741,8 @@ thr_demarshal(void *arg)
 						goto NextEvent;
 					}
 
-					// Fast path for info protocol requests.
-					if ((tr.msgp->proto.type == PROTO_TYPE_INFO) && g_config.info_fastpath_enabled) {
-						cf_debug(AS_DEMARSHAL, "[Sending Info request via fast path.]");
+					// Info protocol requests.
+					if (tr.msgp->proto.type == PROTO_TYPE_INFO) {
 						if (as_info(&tr)) {
 							cf_warning(AS_DEMARSHAL, "Info request failed to be enqueued ~~ Freeing protocol buffer");
 							goto NextEvent_FD_Cleanup;

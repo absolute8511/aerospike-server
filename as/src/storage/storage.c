@@ -235,7 +235,6 @@ as_storage_record_create(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_d
 	rd->record_on_device = false;
 	rd->ignore_record_on_device = false;
 	rd->have_device_block = false;
-	rd->write_to_device = false;
 	rd->key_size = 0;
 	rd->key = NULL;
 
@@ -271,7 +270,6 @@ as_storage_record_open(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_dig
 	rd->record_on_device = true;
 	rd->ignore_record_on_device = false;
 	rd->have_device_block = false;
-	rd->write_to_device = false;
 	rd->key_size = 0;
 	rd->key = NULL;
 
@@ -286,7 +284,7 @@ as_storage_record_open(as_namespace *ns, as_record *r, as_storage_rd *rd, cf_dig
 // as_storage_record_close
 //
 
-typedef int (*as_storage_record_close_fn)(as_record *ns, as_storage_rd *rd);
+typedef int (*as_storage_record_close_fn)(as_record *r, as_storage_rd *rd);
 static const as_storage_record_close_fn as_storage_record_close_table[AS_STORAGE_ENGINE_TYPES] = {
 	NULL,
 	0, // memory has no record close
@@ -390,6 +388,28 @@ as_storage_record_size_and_check(as_storage_rd *rd)
 	}
 
 	return true;
+}
+
+//--------------------------------------
+// as_storage_record_write
+//
+
+typedef int (*as_storage_record_write_fn)(as_record *r, as_storage_rd *rd);
+static const as_storage_record_write_fn as_storage_record_write_table[AS_STORAGE_ENGINE_TYPES] = {
+	NULL,
+	0, // memory has no record write
+	as_storage_record_write_ssd,
+	as_storage_record_write_kv
+};
+
+int
+as_storage_record_write(as_record *r, as_storage_rd *rd)
+{
+	if (as_storage_record_write_table[rd->storage_type]) {
+		return as_storage_record_write_table[rd->storage_type](r, rd);
+	}
+
+	return 0;
 }
 
 //--------------------------------------

@@ -311,8 +311,6 @@ slot_init(ldt_slot *lslotp, ldt_record *lrecord)
 	as_transaction * h_tr      = h_urecord->tr;
 	as_transaction * c_tr      = &lslotp->tr;
 
-	c_tr->incoming_cluster_key = h_tr->incoming_cluster_key;
-
 	// Chunk Record Does not respond for proxy request
 	c_tr->proto_fd_h           = NULL;       // Need not reply
 	c_tr->proxy_node           = 0;          // ??
@@ -331,7 +329,6 @@ slot_init(ldt_slot *lslotp, ldt_record *lrecord)
 	c_tr->microbenchmark_is_resolve = false;
 	c_tr->start_time           = h_tr->start_time;
 	c_tr->end_time             = h_tr->end_time;
-	c_tr->trid                 = h_tr->trid;
 
 	// Chunk transaction is always preprocessed
 	c_tr->preprocessed         = true;       // keyd is hence preprocessed

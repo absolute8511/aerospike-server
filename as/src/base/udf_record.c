@@ -168,11 +168,16 @@ udf_storage_record_close(udf_record *urecord)
 		}
 
 		if (r_ref) {
+			if (urecord->flag & UDF_RECORD_FLAG_HAS_UPDATES) {
+				as_storage_record_write(r_ref->r, rd);
+				urecord->flag &= ~UDF_RECORD_FLAG_HAS_UPDATES; // TODO - necessary?
+			}
 			as_storage_record_close(r_ref->r, rd);
 		} else {
 			// Should never happen.
 			cf_warning(AS_UDF, "Unexpected Internal Error (null r_ref)");
 		}
+
 		urecord->flag &= ~UDF_RECORD_FLAG_STORAGE_OPEN;
 		cf_detail_digest(AS_UDF, &urecord->tr->keyd, "Storage Close:: Rec(%p) Flag(%x) Digest:",
 				urecord, urecord->flag );

@@ -505,7 +505,7 @@ as_sindex__dup_meta(as_sindex_metadata *imd, as_sindex_metadata **qimd,
 		cf_crash( AS_TSVC, "pthread_rwlockattr_setkind_np: %s",
 				cf_strerror(errno));
 	}
-	if (pthread_rwlock_init(&qimdp->slock, NULL)) {
+	if (pthread_rwlock_init(&qimdp->slock, &rwattr)) {
 		cf_crash(AS_SINDEX,
 				"Could not create secondary index dml mutex ");
 	}
@@ -1713,7 +1713,7 @@ as_sindex__create_pmeta(as_sindex *si, int simatch, int nptr)
 
 	for (int i = 0; i < nptr; i++) {
 		as_sindex_pmetadata *pimd = &si->imd->pimd[i];
-		if (pthread_rwlock_init(&pimd->slock, NULL)) {
+		if (pthread_rwlock_init(&pimd->slock, &rwattr)) {
 			cf_crash(AS_SINDEX,
 					"Could not create secondary index dml mutex ");
 		}
@@ -1957,15 +1957,6 @@ as_sindex_update(as_sindex_metadata* imd)
 void
 as_sindex_destroy_pmetadata(as_sindex *si)
 {
-	pthread_rwlockattr_t rwattr;
-	if (pthread_rwlockattr_init(&rwattr))
-		cf_crash(AS_AS,
-				"pthread_rwlockattr_init: %s", cf_strerror(errno));
-	if (pthread_rwlockattr_setkind_np(&rwattr,
-				PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP))
-		cf_crash(AS_TSVC,
-				"pthread_rwlockattr_setkind_np: %s",cf_strerror(errno));
-
 	for (int i = 0; i < si->imd->nprts; i++) {
 		as_sindex_pmetadata *pimd = &si->imd->pimd[i];
 		pthread_rwlock_destroy(&pimd->slock);
@@ -2636,7 +2627,9 @@ as_sindex_range_free(as_sindex_range **range)
 {
 	cf_debug(AS_SINDEX, "as_sindex_range_free");
 	as_sindex_range *sk = (*range);
-	geo_region_destroy(sk->region);
+	if (sk->region) {
+		geo_region_destroy(sk->region);
+	}
 	cf_free(sk);
 	return AS_SINDEX_OK;
 }
@@ -2744,6 +2737,9 @@ as_sindex_range_from_msg(as_namespace *ns, as_msg *msgp, as_sindex_range *srange
 {
 	cf_debug(AS_SINDEX, "as_sindex_range_from_msg");
 	srange->num_binval = 0;
+	// Ensure region is initialized in case we need to return an error code early.
+	srange->region = NULL;
+
 	// getting ranges
 	as_msg_field *itype_fp  = as_msg_field_get(msgp, AS_MSG_FIELD_TYPE_INDEX_TYPE);
 	as_msg_field *rfp = as_msg_field_get(msgp, AS_MSG_FIELD_TYPE_INDEX_RANGE);
@@ -2883,7 +2879,6 @@ as_sindex_range_from_msg(as_namespace *ns, as_msg *msgp, as_sindex_range *srange
 			}
 
 			srange->cellid = 0;
-			srange->region = NULL;
 			if (!geo_parse(ns, start_binval, startl,
 						   &srange->cellid, &srange->region)) {
 				cf_warning(AS_GEO, "failed to parse query GeoJSON");
@@ -2892,6 +2887,7 @@ as_sindex_range_from_msg(as_namespace *ns, as_msg *msgp, as_sindex_range *srange
 
 			if (srange->cellid && srange->region) {
 				geo_region_destroy(srange->region);
+				srange->region = NULL;
 				cf_warning(AS_GEO, "query geo_parse: both point and region");
 				goto Cleanup;
 			}
@@ -3453,12 +3449,82 @@ as_sindex_add_digest_from_asval(as_val *val, as_sindex_bin *sbin)
 	return as_sindex_add_string_to_sbin(sbin, str_val);
 }
 
+as_sindex_status
+as_sindex_add_geo2dsphere_from_as_val(as_val *val, as_sindex_bin *sbin)
+{
+	if (! val || sbin->type != AS_PARTICLE_TYPE_GEOJSON) {
+		return AS_SINDEX_ERR;
+	}
+
+	const char *s = as_geojson_get((as_geojson *)val);
+
+	if (s) {
+		size_t jsonsz = as_geojson_len((as_geojson *)val);
+		uint64_t parsed_cellid = 0;
+		geo_region_t parsed_region = NULL;
+
+		if (! geo_parse(NULL, s, jsonsz, &parsed_cellid, &parsed_region)) {
+			cf_warning(AS_PARTICLE, "geo_parse() failed - unexpected");
+			geo_region_destroy(parsed_region);
+			return AS_SINDEX_ERR;
+		}
+
+		if (parsed_cellid) {
+			if (parsed_region) {
+				geo_region_destroy(parsed_region);
+				cf_warning(AS_PARTICLE, "geo_parse found both point and region");
+				return AS_SINDEX_ERR;
+			}
+
+			// POINT
+			if (as_sindex_add_integer_to_sbin(sbin, parsed_cellid) != AS_SINDEX_OK) {
+				cf_warning(AS_PARTICLE, "as_sindex_add_integer_to_sbin() failed - unexpected");
+				return AS_SINDEX_ERR;
+			}
+		}
+		else if (parsed_region) {
+			// REGION
+			int numcells;
+			uint64_t outcells[MAX_REGION_CELLS];
+
+			if (! geo_region_cover(NULL, parsed_region, MAX_REGION_CELLS, outcells, NULL, NULL, &numcells)) {
+				geo_region_destroy(parsed_region);
+				cf_warning(AS_PARTICLE, "geo_region_cover failed");
+				return AS_SINDEX_ERR;
+			}
+
+			geo_region_destroy(parsed_region);
+
+			int added = 0;
+			for (size_t i = 0; i < numcells; i++) {
+				if (as_sindex_add_integer_to_sbin(sbin, outcells[i]) == AS_SINDEX_OK) {
+					added++;
+				}
+				else {
+					cf_warning(AS_PARTICLE, "as_sindex_add_integer_to_sbin() failed - unexpected");
+				}
+			}
+
+			if (added == 0 && numcells > 0) {
+				return AS_SINDEX_ERR;
+			}
+		}
+		else {
+			cf_warning(AS_PARTICLE, "geo_parse found neither point nor region");
+			return AS_SINDEX_ERR;
+		}
+	}
+
+	return AS_SINDEX_OK;
+}
+
 typedef as_sindex_status (*as_sindex_add_keytype_from_asval_fn)
 (as_val *val, as_sindex_bin * sbin);
 static const as_sindex_add_keytype_from_asval_fn
 			 as_sindex_add_keytype_from_asval[AS_SINDEX_KEY_TYPE_MAX] = {
 	as_sindex_add_long_from_asval,
-	as_sindex_add_digest_from_asval
+	as_sindex_add_digest_from_asval,
+	as_sindex_add_geo2dsphere_from_as_val,
 };
 
 //                             END - ADD KEYTYPE FROM BASIC TYPE ASVAL

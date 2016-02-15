@@ -50,8 +50,8 @@ ifneq ($(USE_SEC),1)
   BASE_SOURCES += security_stubs.c
 endif
 
-FABRIC_HEADERS += hb.h fabric.h fb_health.h migrate.h paxos.h
-FABRIC_SOURCES += hb.c fabric.c fb_health.c migrate.c partition.c paxos.c
+FABRIC_HEADERS += hb.h fabric.h migrate.h paxos.h
+FABRIC_SOURCES += hb.c fabric.c migrate.c partition.c paxos.c
 
 GEOSPATIAL_HEADERS += geospatial.h
 GEOSPATIAL_SOURCES += geospatial.cc geojson.cc

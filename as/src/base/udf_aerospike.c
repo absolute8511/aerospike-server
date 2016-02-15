@@ -554,16 +554,20 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 		// be backed out.
 		// TODO: Add backout logic would work till very first create call of LDT end up crossing over
 		// record boundary
-		if (as_ldt_record_is_parent(rd->r)) {
+		if (rd->ns->ldt_enabled && as_ldt_record_is_parent(rd->r)) {
 			int rv = as_ldt_parent_storage_set_version(rd, urecord->lrecord->version, urecord->end_particle_data, __FILE__, __LINE__);
 			if (rv < 0) {
 				cf_warning(AS_LDT, "udf_aerospike__apply_update_atomic: Internal Error "
 							" [Failed to set the version on storage rv=%d]... Fail",rv);
 				goto Rollback;
 			}
+			// TODO - if size check below fails, won't write to device -
+			// different behavior than write_to_device flag - OK?
+			is_record_dirty = true;
 		}
 
 		if (! as_storage_record_size_and_check(rd)) {
+			cf_warning(AS_UDF, "record failed storage size check, will not be updated");
 			failmax = (int)urecord->nupdates;
 			goto Rollback;
 		}
@@ -578,11 +582,7 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 	if (is_record_dirty 
 			|| is_record_flag_dirty
 			|| (urecord->flag & UDF_RECORD_FLAG_METADATA_UPDATED)) {
-		// Set updated flag to true
-		urecord->flag |= UDF_RECORD_FLAG_HAS_UPDATES;
-
-		// Set up record to be flushed to storage
-		urecord->rd->write_to_device = true;
+		urecord->flag |= UDF_RECORD_FLAG_HAS_UPDATES; // will write to storage
 	}
 	urecord->ldt_rectype_bit_update = 0;
 

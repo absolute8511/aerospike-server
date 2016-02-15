@@ -83,15 +83,6 @@ extern void as_fabric_msg_queue_dump();
 extern msg *as_fabric_msg_get(msg_type t);
 extern void as_fabric_msg_put(msg *);
 
-// Allows the setting of tuning parameters on a node-by-node basis
-//
-// Passing 'null' as the pointer always gives you the system default
-// passing null as the node allows you to set the system default
-
-#define AS_FABRIC_PARAMETER_GATHER_USEC	1	// pass a uint32_t * which is the max number of usec to hold a message
-#define AS_FABRIC_PARAMETER_MSG_SIZE 	2	// pass a uint32_t * which is the desired write message size
-
-extern int as_fabric_set_node_parameter(cf_node node, int parameter, void *value);
 
 //
 // Return the ms in the past when I last heard from a node in question

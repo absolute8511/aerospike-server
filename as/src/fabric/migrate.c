@@ -170,7 +170,6 @@
 // Turn on MESSAGE DUMP
 // #define DEBUG_MSG 1
 // #define EXTRA_CHECKS 1
-// #define USE_NETWORK_POLICY
 
 // Template for migrate messages
 #define MIG_FIELD_OP 0
@@ -979,95 +978,8 @@ migrate_send_reliable(migration *mig, msg *m)
 }
 
 
-#ifdef USE_NETWORK_POLICY
-
-void
-migrate_start_network_policy(cf_node node)
-{
-	// tell the fabric to go into high-throughput mode
-	uint32_t val = 500;
-	as_fabric_set_node_parameter(node, AS_FABRIC_PARAMETER_GATHER_USEC, &val);
-	val = 2000;
-	as_fabric_set_node_parameter(node, AS_FABRIC_PARAMETER_MSG_SIZE, &val);
-}
-
-
-typedef struct {
-	uint	n_in_progress;
-	cf_node node;
-} migrate_network_policy_reduce;
-
-// this code is a little tricky - it is only looking for the first time there's a migrate in progress,
-// so it can return as soon as it finds the right node.
-
-int
-migrate_done_network_policy_rch_reduce(void *key, uint32_t key_len, void *object, void *udata)
-{
-	migrate_network_policy_reduce *mnpr = (migrate_network_policy_reduce *) udata;
-	migrate_recv_control_index *mc_i = (migrate_recv_control_index *) key;
-	// migrate_recv_control *mc = (migrate_recv_control *) object;
-	if (mc_i->source_node == mnpr->node) {
-		mnpr->n_in_progress++;
-		return(-1);
-	}
-	return(0);
-}
-
-int
-migrate_done_network_policy_mh_reduce(void *key, uint32_t key_len, void *object, void *udata)
-{
-	migrate_network_policy_reduce *mnpr = (migrate_network_policy_reduce *) udata;
-	migration *mig = (migration *) object;
-	// migrate_recv_control *mc = (migrate_recv_control *) object;
-	for (uint i = 0; i < mig->dst_nodes_sz; i++) {
-		if (mig->dst_nodes[i] == mnpr->node) {
-			mnpr->n_in_progress++;
-			return(-1);
-		}
-	}
-	return(0);
-}
-
-
-void
-migrate_done_network_policy(cf_node node)
-{
-	// short circut
-	if ((rchash_get_size(g_migrate_recv_control_hash) == 0) &&
-			(rchash_get_size(g_migrate_hash) == RCHASH_OK) ) {
-		// No more migrates,
-//		cf_debug(AS_MIGRATE, "migrate_done: set fabric to low-latency %"PRIx64,node);
-		as_fabric_set_node_parameter(node, AS_FABRIC_PARAMETER_GATHER_USEC, 0);
-		return;
-	}
-
-	migrate_network_policy_reduce mnpr;
-	mnpr.n_in_progress = 0;
-	mnpr.node = node;
-	rchash_reduce(g_migrate_recv_control_hash, migrate_done_network_policy_rch_reduce, &mnpr);
-
-	if (mnpr.n_in_progress == 0)
-		rchash_reduce(g_migrate_hash, migrate_done_network_policy_mh_reduce, &mnpr);
-
-	if (mnpr.n_in_progress == 0) {
-//		cf_debug(AS_MIGRATE, "migrate_done: set fabric to low-latency %"PRIx64,node);
-		as_fabric_set_node_parameter(node, AS_FABRIC_PARAMETER_GATHER_USEC, 0);
-	}
-	else {
-		// migrates still in progress - reset to be sure
-//		cf_debug(AS_MIGRATE, "migrate_done: others still going, reset to high-throughput %"PRIx64,node);
-		migrate_start_network_policy(node);
-	}
-	return;
-
-}
-
-#endif // USE_NETWORK_POLICY
-
 // This thread will poll the transaction hash and retransmit anything old
 // (also need to get
-
-
 int
 migrate_retransmit_reduce_fn(void *key, void *data, void *udata)
 {
@@ -1223,35 +1135,32 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				c.void_time     = void_time;
 				c.rec_props     = rec_props;
 
-				// TODO - should have inline wrapper to peek pickled bin count.
-				if (*(uint16_t *)c.record_buf == 0) {
-					cf_warning_digest(AS_MIGRATE, key, "migration received binless pickle ");
-					migrate_recv_control_release(mc);
-					goto Done;
-				}
-
 				if (as_ldt_get_migrate_info(mc, &c, m, key)) {
 					cf_debug_digest(AS_MIGRATE, key, "LDT_MIGRATE: sub-record received out of order ");
 					migrate_recv_control_release(mc);
 					goto Done;
 				}
 
-				// Default it to local node winner
-				int winner_idx  = -1;
-				// cf_info(AS_MIGRATE, "migrate rx: flatten insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
-				int rv = as_record_flatten(&mc->rsv, key, 1, &c, &winner_idx);
-				if (rv) {
-					if (rv != -3) {
-						// -3 is not a failure. It is get_create failure inside as_record_flatten which is
-						// possible in case of race.
-						cf_warning_digest(AS_MIGRATE, key, "migrate: record flatten failed %d", rv);
-						migrate_recv_control_release(mc);
-						goto Done;
+				// TODO - should have inline wrapper to peek pickled bin count.
+				if (*(uint16_t *)c.record_buf == 0) {
+					cf_warning_digest(AS_MIGRATE, key, "migration received binless pickle, dropping digest: ");
+				}
+				else {
+					// Default it to local node winner
+					int winner_idx  = -1;
+					// cf_info(AS_MIGRATE, "migrate rx: flatten insert %"PRIx64" gen %d",*(uint64_t*)key,generation);
+					int rv = as_record_flatten(&mc->rsv, key, 1, &c, &winner_idx);
+					if (rv) {
+						if (rv != -3) {
+							// -3 is not a failure. It is get_create failure inside as_record_flatten which is
+							// possible in case of race.
+							cf_warning_digest(AS_MIGRATE, key, "migrate: record flatten failed %d", rv);
+							migrate_recv_control_release(mc);
+							goto Done;
+						}
 					}
 				}
-
 				migrate_recv_control_release(mc);
-
 			}
 
 			// ack it
@@ -1267,7 +1176,7 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 			msg_set_unset(m, MIG_FIELD_VOID_TIME);
 			msg_set_uint32(m, MIG_FIELD_OP, OPERATION_ACK);
 			msg_set_unset(m, MIG_FIELD_REC_PROPS);
-			if (0 != as_fabric_send(id, m, AS_FABRIC_PRIORITY_HIGH)) {
+			if (0 != as_fabric_send(id, m, AS_FABRIC_PRIORITY_LOW)) {
 				cf_info(AS_MIGRATE, "insert-ack-send-failed!!!!");
 			}
 			else {
@@ -1327,7 +1236,7 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				migrate_recv_control_release(mc);
 				// Do not fail, sender may be from an advanced cluster key.
 				msg_set_uint32(m, MIG_FIELD_OP, OPERATION_START_ACK_EAGAIN);
-				if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_HIGH)) {
+				if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_MEDIUM)) {
 					m = 0;
 				}
 				goto Done;
@@ -1364,21 +1273,21 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 					cf_debug(AS_MIGRATE, "recv: partition refused migrate: mig %d {%s:%d}", mig_id, ns->name, part_id);
 					migrate_recv_control_release(mc);
 					msg_set_uint32(m, MIG_FIELD_OP, OPERATION_START_ACK_FAIL);
-					if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_HIGH)) m = 0;
+					if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_MEDIUM)) m = 0;
 					goto Done;
 
 				case AS_MIGRATE_AGAIN:
 					cf_debug(AS_MIGRATE, "recv: partition says not now, waiting for retry: mig %d {%s:%d}", mig_id, ns->name, part_id);
 					migrate_recv_control_release(mc);
 					msg_set_uint32(m, MIG_FIELD_OP, OPERATION_START_ACK_EAGAIN);
-					if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_HIGH)) m = 0;
+					if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_MEDIUM)) m = 0;
 					goto Done;
 
 				case AS_MIGRATE_ALREADY_DONE:
 					cf_debug(AS_MIGRATE, "recv: partition says already done: mig %d {%s:%d}", mig_id, ns->name, part_id);
 					migrate_recv_control_release(mc);
 					msg_set_uint32(m, MIG_FIELD_OP, OPERATION_START_ACK_ALREADY_DONE);
-					if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_HIGH)) m = 0;
+					if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_MEDIUM)) m = 0;
 					goto Done;
 
 				case AS_MIGRATE_OK:
@@ -1394,7 +1303,7 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				mc->rsv.p = 0;
 				migrate_recv_control_release(mc);
 				msg_set_uint32(m, MIG_FIELD_OP, OPERATION_START_ACK_FAIL);
-				if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_HIGH))     m = 0;
+				if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_MEDIUM))     m = 0;
 				goto Done;
 			}
 
@@ -1403,7 +1312,7 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 				as_migrate_print2_cluster_key("START_ACK_FAIL", mc->cluster_key);
 				migrate_recv_control_release(mc);
 				msg_set_uint32(m, MIG_FIELD_OP, OPERATION_START_ACK_EAGAIN);
-				if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_HIGH))     m = 0;
+				if (0 == as_fabric_send(id, m, AS_FABRIC_PRIORITY_MEDIUM))     m = 0;
 				goto Done;
 			}
 
@@ -1436,10 +1345,6 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 
 				// Record the time of the first START received.
 				mc->start_recv_ms = cf_getms();
-#ifdef USE_NETWORK_POLICY
-				migrate_start_network_policy(id);
-#endif
-
 			}
 			else {
 				// can't insert, means we're already started, so free what we were trying to put in
@@ -1592,12 +1497,6 @@ migrate_msg_fn(cf_node id, msg *m, void *udata)
 					m = 0;
 				}
 			}
-
-#ifdef USE_NETWORK_POLICY
-			// Check to see the correct network policy
-			migrate_done_network_policy(id);
-#endif
-
 		}
 		break;
 
@@ -2182,12 +2081,6 @@ migrate_xmit_fn(void *arg)
 		cf_rc_reserve(mig);
 		rchash_put(g_migrate_hash, (void *) &mig->id , sizeof(mig->id), (void *) mig);
 
-#ifdef USE_NETWORK_POLICY
-		// Puts the fabric into a different policy - throughput over delay
-		for (uint i = 0; i < mig->dst_nodes_sz; i++)
-			migrate_start_network_policy(mig->dst_nodes[i]);
-#endif
-
 		/*
 		 * Check in case the migrate is obsolete - new key has been set
 		 * due to a new paxos vote.
@@ -2410,14 +2303,9 @@ FinishedMigrate:
 		mig->txstate = AS_PARTITION_MIG_TX_STATE_NONE;
 		mig->rsv.p->current_outgoing_ldt_version = 0;
 		cf_detail(AS_MIGRATE, "LDT_MIGRATION: Finished Sending Migration !! %s:%d:%d:%d",
-				  mig->rsv.ns->name, mig->rsv.p->partition_id, mig->rsv.p->vp->elements, mig->rsv.p->sub_vp->elements);
+				mig->rsv.ns->name, mig->rsv.p->partition_id, mig->rsv.p->vp->elements, mig->rsv.p->sub_vp->elements);
 
 		rchash_delete(g_migrate_hash, (void *) &mig->id , sizeof(mig->id));
-
-#ifdef USE_NETWORK_POLICY
-		for (uint i = 0; i < mig->dst_nodes_sz; i++)
-			migrate_done_network_policy(mig->dst_nodes[i]);
-#endif
 
 		// free mig
 		migrate_migrate_release(mig);

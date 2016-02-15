@@ -162,7 +162,6 @@ as_scan(as_transaction *tr)
 
 	if ((result = get_scan_ns(&tr->msgp->msg, &ns)) != 0 ||
 		(result = get_scan_set_id(&tr->msgp->msg, ns, &set_id)) != 0) {
-		cf_free(tr->msgp);
 		return result;
 	}
 
@@ -180,10 +179,6 @@ as_scan(as_transaction *tr)
 		cf_warning(AS_SCAN, "can't identify scan type");
 		result = AS_PROTO_RESULT_FAIL_PARAMETER;
 		break;
-	}
-
-	if (result != AS_PROTO_RESULT_OK) {
-		cf_free(tr->msgp);
 	}
 
 	return result;
@@ -617,7 +612,7 @@ basic_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	}
 
 	as_job_init(_job, &basic_scan_job_vtable, &g_scan_manager, RSV_WRITE,
-			tr->trid, ns, set_id, options.priority);
+			as_transaction_trid(tr), ns, set_id, options.priority);
 
 	int result;
 
@@ -919,7 +914,7 @@ aggr_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	}
 
 	as_job_init(_job, &aggr_scan_job_vtable, &g_scan_manager, RSV_WRITE,
-			tr->trid, ns, set_id, options.priority);
+			as_transaction_trid(tr), ns, set_id, options.priority);
 
 	job->msgp = tr->msgp;
 
@@ -1246,7 +1241,7 @@ udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	}
 
 	as_job_init(_job, &udf_bg_scan_job_vtable, &g_scan_manager, RSV_WRITE,
-			tr->trid, ns, set_id, options.priority);
+			as_transaction_trid(tr), ns, set_id, options.priority);
 
 	job->msgp = tr->msgp;
 	job->n_active_tr = 0;

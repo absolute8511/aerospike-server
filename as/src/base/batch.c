@@ -58,7 +58,7 @@ typedef struct {
 	cf_digest keyd;
 	uint8_t repeat;
 	uint8_t info1;
-	uint8_t pad[2];
+	uint16_t n_fields;
 	uint16_t n_ops;
 } __attribute__((__packed__)) as_batch_input;
 
@@ -694,7 +694,7 @@ as_batch_queue_task(as_transaction* btr)
 		as_msg_swap_field(mf);
 		end = as_msg_field_get_next(mf);
 
-		if (mf->type == AS_MSG_FIELD_TYPE_BATCH) {
+		if (mf->type == AS_MSG_FIELD_TYPE_BATCH || mf->type == AS_MSG_FIELD_TYPE_BATCH_WITH_SET) {
 			bf = mf;
 		}
 		mf = end;
@@ -815,10 +815,15 @@ as_batch_queue_task(as_transaction* btr)
 			out->msg.generation = 0;
 			out->msg.record_ttl = 0;
 			out->msg.transaction_ttl = bmsg->transaction_ttl; // already swapped
-			// n_fields just contains namespace field.
-			out->msg.n_fields = 1;
-			// n_ops is in exact same place on both input/output, but the value still
+			// n_fields/n_ops is in exact same place on both input/output, but the value still
 			// needs to be swapped.
+			out->msg.n_fields = cf_swap_from_be16(in->n_fields);
+
+			// Older clients sent zero, but always sent namespace.  Adjust this.
+			if (out->msg.n_fields == 0) {
+				out->msg.n_fields = 1;
+			}
+
 			out->msg.n_ops = cf_swap_from_be16(in->n_ops);
 
 			// Namespace input is same as namespace field, so just leave in place and swap.
@@ -830,6 +835,13 @@ as_batch_queue_task(as_transaction* btr)
 				should_inline = ns && ns->storage_data_in_memory;
 			}
 			mf = as_msg_field_get_next(mf);
+
+			// Swap remaining fields.
+			for (uint16_t j = 1; j < out->msg.n_fields; j++) {
+				as_msg_swap_field(mf);
+				mf = as_msg_field_get_next(mf);
+			}
+
 			data = (uint8_t*)mf;
 
 			if (data > limit) {

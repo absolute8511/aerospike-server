@@ -67,7 +67,7 @@
 #define PROXY_FIELD_OP 0
 #define PROXY_FIELD_TID 1
 #define PROXY_FIELD_DIGEST 2
-#define PROXY_FIELD_REDIRECT 3
+#define PROXY_FIELD_REDIRECT 3 // deprecated
 #define PROXY_FIELD_AS_PROTO 4 // request as_proto - currently contains only as_msg's
 #define PROXY_FIELD_CLUSTER_KEY 5
 #define PROXY_FIELD_TIMEOUT_MS 6
@@ -77,7 +77,7 @@
 
 #define PROXY_OP_REQUEST 1
 #define PROXY_OP_RESPONSE 2
-#define PROXY_OP_REDIRECT 3
+#define PROXY_OP_RETURN_TO_SENDER 3
 
 msg_template proxy_mt[] = {
 	{ PROXY_FIELD_OP, M_FT_UINT32 },
@@ -519,10 +519,20 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 				return 0;
 			}
 			cl_msg *msgp;
-			size_t as_msg_sz = 0;
-			if (0 != msg_get_buf(m, PROXY_FIELD_AS_PROTO, (byte **) &msgp, &as_msg_sz, MSG_GET_COPY_MALLOC)) {
+			sz = 0;
+			if (0 != msg_get_buf(m, PROXY_FIELD_AS_PROTO, (byte **) &msgp, &sz, MSG_GET_COPY_MALLOC)) {
 				cf_info(AS_PROXY, "proxy msg function: no as msg, problem");
 				as_fabric_msg_put(m);
+				return 0;
+			}
+
+			// Sanity check as_proto fields.
+			as_proto *proto = &msgp->proto;
+			if (! as_proto_wrapped_is_valid(proto, sz)) {
+				cf_warning(AS_PROXY, "proxyee got unusable proto: version %u, type %u, sz %lu [%lu]",
+						proto->version, proto->type, proto->sz, sz);
+				as_proxy_send_response(id, m, AS_PROTO_RESULT_FAIL_UNKNOWN,
+						0, 0, NULL, NULL, 0, NULL, 0, NULL);
 				return 0;
 			}
 
@@ -537,13 +547,11 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 			// to 0 if it doesn't exist.
 			uint32_t timeout_ms = 0;
 			msg_get_uint32(m, PROXY_FIELD_TIMEOUT_MS, &timeout_ms);
-//			cf_info(AS_PROXY, "proxy msg: received timeout_ms of %d",timeout_ms);
 
 			// Put the as_msg on the normal queue for processing.
 			// INIT_TR
 			as_transaction tr;
 			as_transaction_init(&tr, key, msgp);
-			tr.incoming_cluster_key = cluster_key;
 			tr.end_time             = (timeout_ms != 0) ? ((uint64_t)timeout_ms * 1000000) + tr.start_time : 0;
 			tr.proxy_node           = id;
 			tr.proxy_msg            = m;
@@ -555,7 +563,7 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 				tr.flag |= AS_TRANSACTION_FLAG_SHIPPED_OP;
 				cf_detail_digest(AS_PROXY, &tr.keyd, "SHIPPED_OP WINNER Operation Received");
 			} else {
-				cf_detail_digest(AS_PROXY, &tr.keyd, "Received Proxy Request digest tid(%d)", tr.trid);
+				cf_detail_digest(AS_PROXY, &tr.keyd, "Received Proxy Request digest ");
 			}
 
 			MICROBENCHMARK_RESET();
@@ -680,15 +688,8 @@ SendFin:
 		}
 		break;
 
-		case PROXY_OP_REDIRECT:
+		case PROXY_OP_RETURN_TO_SENDER:
 		{
-			// Sometimes the destination we proxied a request to isn't able to
-			// satisfy it (for example, their copy of the partition in question
-			// might be desync).
-			cf_node new_dst = 0;
-			msg_get_uint64(m, PROXY_FIELD_REDIRECT, &new_dst);
-			cf_detail(AS_PROXY, "proxy redirect message: transaction %d to node %"PRIx64, transaction_id, new_dst);
-
 			// Look in the proxy retransmit hash for the tid.
 			proxy_request *pr;
 			pthread_mutex_t *pr_lock;
@@ -699,64 +700,46 @@ SendFin:
 				return -1;
 			}
 
-			if (g_config.self_node == new_dst) {
-
-				// Although we don't know we're the final destination, undo the
-				// proxy-nature and put back on the main queue. Dangerous, as it
-				// leaves open the possibility of a looping message.
-
-				cf_digest *key;
-				size_t sz = 0;
-				if (0 != msg_get_buf(pr->fab_msg, PROXY_FIELD_DIGEST, (byte **) &key, &sz, MSG_GET_DIRECT)) {
-					cf_warning(AS_PROXY, "op_redirect: proxy msg function: no digest, problem");
-					pthread_mutex_unlock(pr_lock);
-					as_fabric_msg_put(m);
-					return -1;
-				}
-
-				cl_msg *msgp;
-				sz = 0;
-				if (0 != msg_get_buf(pr->fab_msg, PROXY_FIELD_AS_PROTO, (byte **) &msgp, &sz, MSG_GET_COPY_MALLOC)) {
-					cf_warning(AS_PROXY, "op_redirect: proxy msg function: no as proto, problem");
-					pthread_mutex_unlock(pr_lock);
-					as_fabric_msg_put(m);
-					return -1;
-				}
-
-				// Put the as_msg on the normal queue for processing.
-				// INIT_TR
-				as_transaction tr;
-				as_transaction_init(&tr, key, msgp);
-				tr.start_time = pr->start_time; // start time
-				tr.end_time   = pr->end_time;
-				tr.proto_fd_h = pr->fd_h;
-				tr.batch_shared = pr->batch_shared;
-				tr.batch_index = pr->batch_index;
-
-				MICROBENCHMARK_RESET();
-
-				thr_tsvc_enqueue(&tr);
-
-				as_fabric_msg_put(pr->fab_msg);
-				shash_delete_lockfree(g_proxy_hash, &transaction_id);
+			cf_digest *key;
+			size_t sz = 0;
+			if (0 != msg_get_buf(pr->fab_msg, PROXY_FIELD_DIGEST, (byte **) &key, &sz, MSG_GET_DIRECT)) {
+				cf_warning(AS_PROXY, "op_redirect: proxy msg function: no digest, problem");
+				pthread_mutex_unlock(pr_lock);
+				as_fabric_msg_put(m);
+				return -1;
 			}
-			else {
-				// Change the destination, update the retransmit time.
-				pr->dest = new_dst;
-				pr->xmit_ms = cf_getms() + 1;
 
-				// Send it.
-				msg_incr_ref(pr->fab_msg);
-				if (0 != (rv = as_fabric_send(pr->dest, pr->fab_msg, AS_FABRIC_PRIORITY_MEDIUM))) {
-					cf_debug(AS_PROXY, "redirect: change destination: %"PRIx64" send error %d", pr->dest, rv);
-					as_fabric_msg_put(pr->fab_msg);
-				}
+			cl_msg *msgp;
+			sz = 0;
+			if (0 != msg_get_buf(pr->fab_msg, PROXY_FIELD_AS_PROTO, (byte **) &msgp, &sz, MSG_GET_COPY_MALLOC)) {
+				cf_warning(AS_PROXY, "op_redirect: proxy msg function: no as proto, problem");
+				pthread_mutex_unlock(pr_lock);
+				as_fabric_msg_put(m);
+				return -1;
 			}
+
+			// Put the as_msg on the normal queue for processing.
+			as_transaction tr;
+			as_transaction_init(&tr, key, msgp);
+			tr.start_time = pr->start_time; // start time
+			tr.end_time   = pr->end_time;
+			tr.proto_fd_h = pr->fd_h;
+			tr.batch_shared = pr->batch_shared;
+			tr.batch_index = pr->batch_index;
+
+			MICROBENCHMARK_RESET();
+
+			thr_tsvc_enqueue(&tr);
+
+			as_fabric_msg_put(pr->fab_msg);
+			shash_delete_lockfree(g_proxy_hash, &transaction_id);
 
 			pthread_mutex_unlock(pr_lock);
+
+			as_fabric_msg_put(m);
 		}
-		as_fabric_msg_put(m);
 		break;
+
 		default:
 			cf_debug(AS_PROXY, "proxy_msg_fn: received unknown, unsupported message %d from remote endpoint", op);
 			msg_dump(m, "proxy received unknown msg");
@@ -770,20 +753,25 @@ SendFin:
 
 // Send a redirection message - consumes the message.
 int
-as_proxy_send_redirect(cf_node dst, msg *m, cf_node rdst)
+as_proxy_return_to_sender(const as_transaction *tr)
 {
 	int rv;
 	uint32_t tid;
-	msg_get_uint32(m, PROXY_FIELD_TID, &tid);
 
-	msg_reset(m);
-	msg_set_uint32(m, PROXY_FIELD_OP, PROXY_OP_REDIRECT);
-	msg_set_uint32(m, PROXY_FIELD_TID, tid);
-	msg_set_uint64(m, PROXY_FIELD_REDIRECT, rdst);
+	cf_debug(AS_PROXY, "return proxy to sender: (%"PRIx64") :", tr->proxy_node);
 
-	if (0 != (rv = as_fabric_send(dst, m, AS_FABRIC_PRIORITY_MEDIUM))) {
+	msg_get_uint32(tr->proxy_msg, PROXY_FIELD_TID, &tid);
+
+	msg_reset(tr->proxy_msg);
+	msg_set_uint32(tr->proxy_msg, PROXY_FIELD_OP, PROXY_OP_RETURN_TO_SENDER);
+	msg_set_uint32(tr->proxy_msg, PROXY_FIELD_TID, tid);
+	// Redirect field no longer used, set for backwards compatibility.
+	msg_set_uint64(tr->proxy_msg, PROXY_FIELD_REDIRECT, tr->proxy_node);
+
+	if (0 != (rv = as_fabric_send(tr->proxy_node, tr->proxy_msg,
+			AS_FABRIC_PRIORITY_MEDIUM))) {
 		cf_debug(AS_PROXY, "sending redirection failed: fabric send error %d", rv);
-		as_fabric_msg_put(m);
+		as_fabric_msg_put(tr->proxy_msg);
 	}
 
 	return 0;

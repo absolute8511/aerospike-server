@@ -146,6 +146,11 @@ as_paxos_set_cluster_key(uint64_t cluster_key)
 			pthread_mutex_unlock(&p->lock);
 		}
 	}
+
+	// Prior migrations are unable to decrement migrate_num_incoming due to
+	// cluster_key checking. Additionally migrations originating from a
+	// departed node are unable to decrement this value for obvious reasons.
+	cf_atomic_int_set(&g_config.migrate_num_incoming, 0);
 }
 
 // Get the cluster key
@@ -1855,10 +1860,9 @@ as_paxos_msg_unwrap(msg *m, as_paxos_transaction *t)
 static int
 as_paxos_send_to_sl(int cmd, as_paxos_transaction *tr, msg *px_msg, int priority)
 {
-	int rv = 0;
 	as_node_list nl;
 	as_paxos *p = g_config.paxos;
-	int succ_list_len = 0, succ_list_num_alive = 0, sent_count = 0;
+	int succ_list_len = 0, succ_list_num_alive = 0;
 
 	nl.sz = 1;
 	nl.nodes[0] = g_config.self_node;
@@ -1880,35 +1884,7 @@ as_paxos_send_to_sl(int cmd, as_paxos_transaction *tr, msg *px_msg, int priority
 
 	cf_debug(AS_PAXOS, "Paxos succession list length %d ; num. alive %d", succ_list_len, succ_list_num_alive);
 
-	if (nl.sz == 1) {
-		if (!(rv = as_fabric_send(nl.nodes[0], px_msg, priority))) {
-			sent_count++;
-		}
-		goto Done;
-	}
-
-	// careful with the ref count here: need to increment before every
-	// send except the last
-	for (int i = 0; i < nl.sz ; i++) {
-		if (i != nl.sz - 1) {
-			msg_incr_ref(px_msg);
-		}
-		if (!(rv = as_fabric_send(nl.nodes[i], px_msg, priority))) {
-			sent_count++;
-		} else {
-			goto Cleanup;
-		}
-	}
-	goto Done;
-
-Cleanup:
-	as_fabric_msg_put(px_msg);
-
-Done:
-	cf_debug(AS_PAXOS, "sent Paxos command %s for transaction [%d]@%"PRIx64" to %d of %d nodes",
-			as_paxos_cmd_name[cmd], tr->gen.sequence, g_config.self_node, sent_count, nl.sz);
-
-	return rv;
+	return as_fabric_send_list(nl.nodes, nl.sz, px_msg, priority);
 }
 
 /* as_paxos_spark
@@ -2569,10 +2545,6 @@ as_paxos_process_retransmit_check()
 			as_paxos_log_succession_list("Paxos List", p->succession);
 			as_paxos_log_succession_list("Node List", succ_list[i]);
 
-			if (g_config.auto_dun) {
-				as_hb_set_is_node_dunned(succ_list_index[i], true, "paxos");
-			}
-
 			cluster_integrity_fault = true;
 			as_paxos_add_missing_nodes(missing_nodes, succ_list[i], &are_nodes_not_dunned);
 		}
@@ -2769,7 +2741,7 @@ as_paxos_thr(void *arg)
 
 		cf_debug(AS_PAXOS, "Popping paxos queue 0x%x", p->msgq);
 
-		static const int Q_WAIT_MS = 400; // TODO - what to do with this?
+		static const int Q_WAIT_MS = 1; // TODO - what to do with this?
 
 		if (Q_WAIT_MS >= (g_config.paxos_retransmit_period * 1000)) {
 			cf_crash(AS_PAXOS, "paxos_retransmit_period %d s is less than paxos msgq wait %d ms.",

@@ -53,7 +53,6 @@
 
 #include "base/cfg.h"
 #include "fabric/fabric.h"
-#include "fabric/fb_health.h"
 
 
 /* SYNOPSIS
@@ -870,24 +869,6 @@ as_hb_set_are_nodes_dunned(char *nodes_str, int nodes_str_len, bool is_dunned)
 	}
 
 	return 0;
-}
-
-int
-as_hb_fb_health_cb(cf_node node, fb_health_status status, void *udata) {
-	switch (status) {
-		case FB_HEALTH_OK:
-			if (g_config.auto_undun) {
-				as_hb_set_is_node_dunned(node, false, "fabric health");
-			}
-			break;
-		case FB_HEALTH_BAD_NODE:
-		case FB_HEALTH_BAD_CLUSTER:
-			if (g_config.auto_dun) {
-				as_hb_set_is_node_dunned(node, true, "fabric health");
-			}
-			break;
-	}
-	return (0);
 }
 
 /*
@@ -2716,8 +2697,6 @@ as_hb_start()
 	/* Mandatory pause for twice the timeout interval to prevent flapping */
 	while (cf_getms() - g_hb.time_start < (2 * g_config.hb_interval * g_config.hb_timeout))
 		usleep(50 * 1000);
-
-	as_fb_health_register_cb_fn(as_hb_fb_health_cb, NULL);
 
 	/* Start transmissions */
 	if (0 != pthread_create(&tid, 0, as_hb_thr, &g_hb))

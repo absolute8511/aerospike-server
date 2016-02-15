@@ -29,6 +29,7 @@
 #include <stdint.h>
 
 #include "citrusleaf/alloc.h"
+#include "citrusleaf/cf_byte_order.h"
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_digest.h"
 
@@ -179,8 +180,6 @@ typedef struct as_transaction_s {
 	cf_digest 	      keyd;
 	/* generation to send to the user */
 	uint32_t          generation;
-	/* transaction id passed in by the client (Optional) */
-	uint64_t	      trid;
 
 	/* result code to send to user */
 	int               result_code;
@@ -200,6 +199,9 @@ typedef struct as_transaction_s {
 	uint64_t          start_time;
 	uint64_t          end_time; // client requested end time, same time base as start
 
+	// to collect microbenchmarks
+	uint64_t          microbenchmark_time;
+
 	/******************** 64 bytes *****************/
 	// Make sure rsv starts aligned at the cacheline
 	/* the reservation of the partition (and thus tree) I'm acting against */
@@ -216,12 +218,6 @@ typedef struct as_transaction_s {
 	   first user is Scan UDF */
 	ureq_data         udata;
 
-	// to collect microbenchmarks
-	uint64_t          microbenchmark_time;
-
-	/* incoming cluster key passed in a proxy request */
-	uint64_t          incoming_cluster_key;
-
 	// Batch
 	struct as_batch_shared* batch_shared;
 	uint32_t batch_index;
@@ -236,6 +232,16 @@ typedef struct as_query_transaction_s as_query_transaction;
 extern int as_transaction_prepare(as_transaction *tr);
 extern void as_transaction_init(as_transaction *tr, cf_digest *, cl_msg *);
 extern int as_transaction_digest_validate(as_transaction *tr);
+
+// For now it's not worth storing the trid in the as_transaction struct since we
+// only parse it from the msg once per transaction anyway.
+static inline uint64_t
+as_transaction_trid(const as_transaction *tr)
+{
+	as_msg_field *f = as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_TRID);
+
+	return f ? cf_swap_from_be64(*(uint64_t*)f->data) : 0;
+}
 
 struct udf_call_s; // forward declaration for udf_call, defined in udf_rw.h
 
@@ -253,4 +259,6 @@ typedef struct tr_create_data {
 
 extern int   as_transaction_create_internal(as_transaction *tr, tr_create_data * data);
 
+void as_transaction_demarshal_error(as_transaction* tr, uint32_t error_code);
+void as_transaction_error_unswapped(as_transaction* tr, uint32_t error_code);
 void as_transaction_error(as_transaction* tr, uint32_t error_code);

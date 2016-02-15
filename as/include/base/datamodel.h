@@ -516,6 +516,11 @@ as_partition_vinfo_same(as_partition_vinfo *v1, as_partition_vinfo *v2) {
 	return (true);
 }
 
+typedef enum {
+	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_UNDEF = 0,
+	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION = 1,
+	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_TTL = 2
+} conflict_resolution_pol;
 
 /* Record function declarations */
 // special - get_create returns 1 if created, 0 if just gotten, -1 if fail
@@ -533,7 +538,7 @@ extern void as_record_done(as_index_ref *r_ref, as_namespace *ns);
 
 extern void as_record_allocate_key(as_record* r, const uint8_t* key, uint32_t key_size);
 extern void as_record_remove_key(as_record* r);
-
+extern int as_record_resolve_conflict(conflict_resolution_pol policy, uint16_t l_generation, uint32_t l_void_time, uint16_t r_generation, uint32_t r_void_time);
 extern int as_record_pickle(as_record *r, as_storage_rd *rd, uint8_t **buf_r, size_t *len_r);
 extern int as_record_pickle_a_delete(byte **buf_r, size_t *len_r);
 extern uint32_t as_record_buf_get_stack_particles_sz(uint8_t *buf);
@@ -850,12 +855,6 @@ void as_partition_map_dump();
 
 struct as_sindex_s;
 struct as_sindex_config_s;
-
-typedef enum {
-	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_UNDEF = 0,
-	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION = 1,
-	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_TTL = 2
-} conflict_resolution_pol;
 
 #define AS_SET_MAX_COUNT 0x3FF	// ID's 10 bits worth minus 1 (ID 0 means no set)
 #define AS_BINID_HAS_SINDEX_SIZE  MAX_BIN_NAMES / ( sizeof(uint32_t) * CHAR_BIT )
