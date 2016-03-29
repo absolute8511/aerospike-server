@@ -818,7 +818,8 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	if (tr->msgp) {
 		// Set the set name to index and close record if the setting the set name
 		// is not successful
-		int rv_set = as_record_set_set_from_msg(r_ref->r, tr->rsv.ns, &tr->msgp->msg);
+		int rv_set = as_transaction_has_set(tr) ?
+				as_record_set_set_from_msg(r_ref->r, tr->rsv.ns, &tr->msgp->msg) : 0;
 		if (rv_set != 0) {
 			cf_warning(AS_UDF, "udf_aerospike_rec_create: Failed to set setname");
 			if (is_create) {
@@ -841,7 +842,7 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 		urecord->r_ref->r, urecord->rd);
 
 	// If the message has a key, apply it to the record.
-	if (! get_msg_key(&tr->msgp->msg, rd)) {
+	if (! get_msg_key(tr, rd)) {
 		cf_warning(AS_UDF, "udf_aerospike_rec_create: Can't store key");
 		if (is_create) {
 			as_index_delete(tree, &tr->keyd);

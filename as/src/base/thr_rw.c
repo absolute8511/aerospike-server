@@ -181,13 +181,11 @@ write_request_create(void) {
 	wr->dest_msg = 0;
 	wr->proxy_msg = 0;
 	wr->msgp = 0;
+	wr->msg_fields = 0;
 	wr->pickled_buf = 0;
 	as_rec_props_clear(&wr->pickled_rec_props);
 	wr->respond_client_on_master_completion = false;
 	wr->replication_fire_and_forget = false;
-	// Set the initial limit on wr lifetime to guarantee finite life-span.
-	// (Will be reset relative to the transaction end time if/when the wr goes ready.)
-	cf_atomic64_set(&(wr->end_time), cf_getns() + g_config.transaction_max_ns);
 
 	// Initialize with the default consistency guarantee levels.
 	// (These will be re-set later according to combining the server's namespace
@@ -207,7 +205,7 @@ write_request_create(void) {
 	wr->shipped_op_initiator = false;
 
 	wr->dest_sz = 0;
-	UREQ_DATA_INIT(&wr->udata);
+	wr->iudf_orig = NULL;
 	memset((void *) & (wr->dup_msg[0]), 0, sizeof(wr->dup_msg));
 
 	wr->batch_shared = 0;
@@ -219,7 +217,7 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	// INIT_TR
 	write_request *wr = (write_request *) wreq;
 	tr->start_time = wr->start_time;
-	tr->end_time = cf_atomic64_get(wr->end_time);
+	tr->end_time = wr->end_time; // useless if we requeue transaction
 
 	// In case wr->proto_fd_h is set it is considered to be case system is
 	// bailing out to set it to NULL once it has been handed over to transaction
@@ -233,8 +231,8 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 	// Partition reservation and msg are freed when the write request is destroyed
 	as_partition_reservation_copy(&tr->rsv, &wr->rsv);
 	tr->msgp = wr->msgp;
+	tr->msg_fields = wr->msg_fields;
 	tr->result_code = AS_PROTO_RESULT_OK;
-	tr->preprocessed = true;
 	tr->flag = 0;
 
 	tr->generation = wr->generation;
@@ -243,8 +241,8 @@ int write_request_init_tr(as_transaction *tr, void *wreq) {
 
 	if (wr->shipped_op)
 		tr->flag |= AS_TRANSACTION_FLAG_SHIPPED_OP;
-	UREQ_DATA_COPY(&tr->udata, &wr->udata);
-	UREQ_DATA_RESET(&wr->udata);
+	tr->iudf_orig = wr->iudf_orig;
+	wr->iudf_orig = NULL;
 	tr->microbenchmark_time = wr->microbenchmark_time;
 	tr->batch_shared = wr->batch_shared;
 	tr->batch_index = wr->batch_index;
@@ -269,12 +267,11 @@ void write_request_destructor(void *object) {
 	wr_track_destroy(wr);
 #endif
 
-	if (udf_rw_needcomplete_wr(wr)) {
+	if (wr->iudf_orig) {
 		as_transaction tr;
 		write_request_init_tr(&tr, wr);
-		cf_warning(AS_RW,
-				"UDF request not complete ... Completing it nonetheless !!!");
-		udf_rw_complete(&tr, 0, __FILE__, __LINE__);
+		cf_warning(AS_RW, "UDF request not complete ... Completing it nonetheless !!!");
+		tr.iudf_orig->cb(&tr, 0);
 	}
 
 	if (wr->dest_msg)
@@ -325,29 +322,6 @@ void write_request_destructor(void *object) {
 	return;
 }
 
-void rw_request_dump(write_request *wr, char *msg) {
-	cf_info(AS_RW, "Dump write request: tid %d : %p %s", wr->tid, wr, msg);
-	pthread_mutex_lock(&wr->lock);
-	cf_info(AS_RW,
-			" %p: ready %d isread %d trans_c %d dupl_trans_c %d rsv_valid %d : %s",
-			wr, wr->ready, wr->is_read, wr->trans_complete, wr->dupl_trans_complete, wr->rsv_valid, ((wr->wait_queue_head == 0) ? "" : "QUEUE"));
-	cf_info(AS_RW, " %p: protofd %p proxynode %"PRIx64" proxymsg %p",
-			wr, wr->proto_fd_h, wr->proxy_node, wr->proxy_msg);
-
-	cf_info(AS_RW, " %p: dest sz %d", wr->dest_sz);
-	for (int i = 0; i < wr->dest_sz; i++)
-		cf_info(AS_RW,
-				" %p: dest: %d node %"PRIx64" complete %d dupmsg %p dup_rc %d",
-				wr, i, wr->dest_nodes[i], wr->dest_complete[i], wr->dup_msg[i], wr->dup_result_code[i]);
-
-	pthread_mutex_unlock(&wr->lock);
-}
-
-int rw_dump_reduce(void *key, uint32_t keylen, void *data, void *udata) {
-	write_request *wr = data;
-	rw_request_dump(wr, "");
-	return (0);
-}
 
 /*
  * An in-flight transaction has dependencies on proles - send
@@ -398,7 +372,7 @@ void send_messages(write_request *wr) {
 }
 
 void as_rw_set_stat_counters(bool is_read, int rv, as_transaction *tr) {
-	int result_code = tr ? tr->result_code : 0;
+	uint8_t result_code = tr ? tr->result_code : 0;
 	if (is_read) {
 		if (rv == 0) {
 			if (result_code == AS_PROTO_RESULT_FAIL_NOTFOUND)
@@ -894,52 +868,54 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						"internal_rw_start: XDR is enabled but XDR digest pipe is not open.");
 				rv = -1;
 			} else {
-				// see if we have scripts to execute
-				udf_call *call = cf_malloc(sizeof(udf_call));
-				int uret;
-				if (tr->udata.req_udata) {
-					uret = udf_rw_call_init_internal(call, tr);
-				} else {
-					uret = udf_rw_call_init_from_msg(call, &tr->msgp->msg);
-					call->tr = tr;
-				}
-
-				if (!uret) {
+				if (tr->iudf_orig || as_transaction_is_udf(tr)) {
+					// <><><><><><><><><><>   Apply a UDF   <><><><><><><><><><>
 					wr->has_udf = true;
 
-					rv = udf_rw_local(call, wr, &op);
+					udf_def def;
+					udf_call stack_call = { &def, tr };
+					udf_call *call = tr->iudf_orig ?
+							udf_rw_call_def_init_internal(&stack_call, tr) :
+							udf_rw_call_def_init_from_msg(&stack_call, tr);
 
-					if (UDF_OP_IS_DELETE(op)) {
-						tr->msgp->msg.info2 |= AS_MSG_INFO2_DELETE;
-						is_delete = true;
-						// Counteract earlier increments -- don't count UDF
-						// deletes as writes.
-						cf_atomic_int_decr(&g_config.write_master);
-						cf_atomic_int_decr(&g_config.stat_write_reqs);
-					} else if (UDF_OP_IS_READ(op) || op == UDF_OPTYPE_NONE) {
-						// update stats to move from normal to uDF requests
-						as_rw_update_stat(wr);
-						// return early if the record was not updated
+					if (call) {
+						rv = udf_rw_local(call, wr, &op);
+
 						udf_rw_call_destroy(call);
-						cf_free(call);
-						call = NULL;
-						if (udf_rw_needcomplete(tr)) {
-							udf_rw_complete(tr, tr->result_code, __FILE__,
-									__LINE__);
+
+						if (UDF_OP_IS_DELETE(op)) {
+							tr->msgp->msg.info2 |= AS_MSG_INFO2_DELETE;
+							is_delete = true;
+							// Counteract earlier increments -- don't count UDF
+							// deletes as writes.
+							cf_atomic_int_decr(&g_config.write_master);
+							cf_atomic_int_decr(&g_config.stat_write_reqs);
+						} else if (UDF_OP_IS_READ(op) || op == UDF_OPTYPE_NONE) {
+							// update stats to move from normal to uDF requests
+							as_rw_update_stat(wr);
+							// return early if the record was not updated
+							if (tr->iudf_orig) {
+								tr->iudf_orig->cb(tr, tr->result_code);
+								tr->iudf_orig = NULL;
+							}
+							rw_cleanup(wr, tr, first_time, false, __LINE__);
+							as_rw_set_stat_counters(true, rv, tr);
+							*delete = true;
+							return 0;
+						} else {
+							// Temporary debugging clause...
+							if ((tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) == 0 && ! wr->pickled_buf && ! UDF_OP_IS_LDT(op)) {
+								cf_warning(AS_RW, "non-LDT UDF write completed with AS_MSG_INFO2_DELETE not set and no pickled buffer (%d) rv=%d", op, rv);
+							}
 						}
-						rw_cleanup(wr, tr, first_time, false, __LINE__);
-						as_rw_set_stat_counters(true, rv, tr);
-						*delete = true;
-						return 0;
 					} else {
-						// Temporary debugging clause...
-						if ((tr->msgp->msg.info2 & AS_MSG_INFO2_DELETE) == 0 && ! wr->pickled_buf && ! UDF_OP_IS_LDT(op)) {
-							cf_warning(AS_RW, "non-LDT UDF write completed with AS_MSG_INFO2_DELETE not set and no pickled buffer (%d) rv=%d", op, rv);
-						}
+						cf_warning(AS_RW, "transaction failed udf_call init");
+						tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
+						rv = -1;
 					}
 				} else {
+					// <><><><><><><><><><>   Write Local   <><><><><><><><><><>
 					wr->has_udf = false;
-					cf_free(call);
 
 					rv = write_local(tr, &wr->pickled_buf, &wr->pickled_sz,
 							&wr->pickled_rec_props, &wr->response_db);
@@ -950,6 +926,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 						cf_warning(AS_RW, "write_local() completed with no pickled buffer");
 					}
 				}
+
 				if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP) {
 					cf_detail(AS_RW,
 							"[Digest %"PRIx64" Shipped OP] Finished Transaction ret = %d",
@@ -1094,7 +1071,7 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 		rw_complete(wr, tr, NULL);
 		tr->proto_fd_h = NULL;
 		tr->proxy_msg = NULL;
-		UREQ_DATA_RESET(&wr->udata);
+		wr->iudf_orig = NULL; // ???
 
 		// if fire and forget, we're done, get out
 		if (wr->replication_fire_and_forget) {
@@ -1121,7 +1098,8 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 	wr->generation = tr->generation;
 	wr->void_time = tr->void_time;
 
-	UREQ_DATA_COPY(&wr->udata, &tr->udata);
+	wr->iudf_orig = tr->iudf_orig;
+	tr->iudf_orig = NULL;
 
 	if (first_time == true) {
 		as_partition_reservation_move(&wr->rsv, &tr->rsv);
@@ -1130,9 +1108,6 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 		tr->msgp = 0;
 		wr->xmit_ms = cf_getms() + g_config.transaction_retry_ms;
 		wr->retry_interval_ms = g_config.transaction_retry_ms;
-		wr->start_time = tr->start_time;
-		cf_atomic64_set(&(wr->end_time),
-				(tr->end_time != 0) ? tr->end_time : wr->start_time + g_config.transaction_max_ns);
 		wr->ready = true;
 		WR_TRACK_INFO(wr, "internal_rw_start: first time - tr->wr ");
 	}
@@ -1142,7 +1117,9 @@ internal_rw_start(as_transaction *tr, write_request *wr, bool *delete)
 	msg_dump(wr->dest_msg, "rw start outoing msg");
 #endif
 
-	wr->microbenchmark_time = cf_getns();
+	if (g_config.microbenchmarks) {
+		wr->microbenchmark_time = cf_getns();
+	}
 
 	if (tr->flag & AS_TRANSACTION_FLAG_SHIPPED_OP)
 		cf_detail(AS_RW, "[Digest %"PRIx64" Shipped OP] Replication Initiated",
@@ -1233,7 +1210,10 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 	cf_debug_digest(AS_RW, &(tr->keyd), "[PROCESS KEY] {%s:%u} Self(%"PRIx64") Read(%d):",
 			ns->name, tr->rsv.p->partition_id, g_config.self_node, is_read );
 
+	wr->msg_fields = tr->msg_fields;
 	wr->keyd = tr->keyd;
+	wr->start_time = tr->start_time;
+	wr->end_time = tr->end_time;
 
 	// Transaction Consistency Guarantees:
 	//   Use the client's requested guarantee level for this transaction
@@ -1310,7 +1290,6 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 				cf_crash(AS_RW, "cf_malloc");
 			}
 			e->tr.start_time = tr->start_time;
-			e->tr.end_time = tr->end_time;
 			e->tr.proto_fd_h = tr->proto_fd_h;
 			tr->proto_fd_h = 0;
 			e->tr.proxy_node = tr->proxy_node;
@@ -1321,9 +1300,10 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 			e->tr.result_code = AS_PROTO_RESULT_OK;
 			e->tr.msgp = tr->msgp;
 			tr->msgp = 0;
-			e->tr.preprocessed = true;
+			e->tr.msg_fields = tr->msg_fields;
 			e->tr.flag = 0;
-			UREQ_DATA_COPY(&e->tr.udata, &tr->udata);
+			e->tr.iudf_orig = tr->iudf_orig;
+			tr->iudf_orig = NULL;
 			e->tr.batch_shared = tr->batch_shared;
 			e->tr.batch_index = tr->batch_index;
 
@@ -1364,8 +1344,6 @@ int as_rw_start(as_transaction *tr, bool is_read) {
 				"as_write_start:  unknown reason %d can't put unique? {%s.%d} (%d:%p) %"PRIx64"",
 				rv, ns->name, tr->rsv.pid, tr->proto_fd_h ? tr->proto_fd_h->fd : 0, tr->proxy_msg, *(uint64_t*)&tr->keyd);
 		WR_TRACK_INFO(wr, "as_rw_start: 701");
-		udf_rw_complete(tr, -2, __FILE__, __LINE__);
-		UREQ_DATA_RESET(&tr->udata);
 		WR_RELEASE(wr);
 		cf_atomic_int_incr(&g_config.err_rw_cant_put_unique);
 		return (-2);
@@ -1541,7 +1519,6 @@ finish_rw_process_prole_ack(write_request *wr, uint32_t result_code)
 	// the response is built before another writer changes the value, in cases
 	// where the transaction included read requests.
 
-	tr.microbenchmark_time = wr->microbenchmark_time;
 	MICROBENCHMARK_HIST_INSERT_AND_RESET(wt_master_wait_prole_hist);
 
 	tr.microbenchmark_is_resolve = false;
@@ -1724,7 +1701,6 @@ finish_rw_process_dup_ack(write_request *wr)
 		MICROBENCHMARK_HIST_INSERT_AND_RESET(wt_resolve_wait_hist);
 	}
 
-	MICROBENCHMARK_RESET();
 	tr.microbenchmark_is_resolve = true;
 
 	bool must_delete = true;
@@ -2035,14 +2011,17 @@ write_complete(write_request *wr, as_transaction *tr)
 {
 	if (wr->response_db.buf) {
 		ops_complete(tr, &wr->response_db);
+		// Note - UDF with response gets here, but not trying to make request
+		// callback for now, since callback is mutually exclusive with response.
 
 		MICROBENCHMARK_HIST_INSERT_P(wt_net_hist);
 
 		return;
 	}
 
-	if (udf_rw_needcomplete(tr)) {
-		udf_rw_complete(tr, tr->result_code, __FILE__, __LINE__);
+	if (tr->iudf_orig) {
+		tr->iudf_orig->cb(tr, tr->result_code);
+		tr->iudf_orig = NULL;
 	}
 	else if (tr->proto_fd_h) {
 		if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
@@ -2736,6 +2715,8 @@ write_process(cf_node node, msg *m, bool respond)
 		// INIT_TR
 		as_transaction tr;
 		as_transaction_init(&tr, keyd, msgp);
+		// Don't bother with msg_fields since we currently don't look for any
+		// fields in msgp here - tr is just a container, will not be processed.
 
 		/* NB need to use the _migrate variant here so we can write into desync
 		 * partitions - and that never fails */
@@ -2799,7 +2780,7 @@ write_process(cf_node node, msg *m, bool respond)
 					cf_atomic_int_incr(&g_config.err_write_fail_prole_delete);
 				} else {
 					cf_info_digest(AS_RW, &(tr.keyd),
-							"rw prole operation: failed, ns(%s) rv(%d) result code(%d) : ",
+							"rw prole operation: failed, ns(%s) rv(%d) result code(%u) : ",
 							ns->name, rv, tr.result_code);
 				}
 			}
@@ -2916,22 +2897,11 @@ Out:
 	return (0);
 }
 
-bool
-msg_has_key(as_msg* m)
-{
-	return as_msg_field_get(m, AS_MSG_FIELD_TYPE_KEY) != NULL;
-}
-
+// Caller must have checked that key is present in message.
 bool
 check_msg_key(as_msg* m, as_storage_rd* rd)
 {
 	as_msg_field* f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_KEY);
-
-	if (! f) {
-		cf_warning(AS_RW, "no key sent for key check");
-		return false;
-	}
-
 	uint32_t key_size = as_msg_field_get_value_sz(f);
 	uint8_t* key = f->data;
 
@@ -3037,7 +3007,7 @@ delete_local(as_transaction *tr)
 		return -1;
 	}
 
-	bool check_key = msg_has_key(m);
+	bool check_key = as_transaction_has_key(tr);
 
 	if (ns->storage_data_in_memory || check_key) {
 		as_storage_rd rd;
@@ -3202,33 +3172,29 @@ apply_journaled_delete(as_namespace *ns, as_index_tree *tree, cf_digest *keyd)
 // Utilities used by write_local() and UDF code.
 //
 
+// Caller must have checked that set is present in message.
 int
 as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m)
 {
 	as_msg_field* f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
+	size_t name_len = (size_t)as_msg_field_get_value_sz(f);
 
-	if (! f || as_msg_field_get_value_sz(f) == 0) {
+	if (name_len == 0) {
 		return 0;
 	}
 
-	size_t msg_set_name_len = as_msg_field_get_value_sz(f);
-	char msg_set_name[msg_set_name_len + 1];
-
-	memcpy((void*)msg_set_name, (const void*)f->data, msg_set_name_len);
-	msg_set_name[msg_set_name_len] = 0;
-
 	// Given the name, find/assign the set-ID and write it in the as_index.
-	return as_index_set_set(r, ns, msg_set_name, true);
+	return as_index_set_set_w_len(r, ns, (const char*)f->data, name_len, true);
 }
 
 bool
-get_msg_key(as_msg* m, as_storage_rd* rd)
+get_msg_key(as_transaction *tr, as_storage_rd* rd)
 {
-	as_msg_field* f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_KEY);
-
-	if (! f) {
+	if (! as_transaction_has_key(tr)) {
 		return true;
 	}
+
+	as_msg_field* f = as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_KEY);
 
 	if (rd->ns->single_bin && rd->ns->storage_data_in_memory) {
 		// For now we just ignore the key - should we fail out of write_local()?
@@ -3393,7 +3359,7 @@ write_local_failed(as_transaction* tr, as_index_ref* r_ref,
 		break;
 	}
 
-	tr->result_code = result_code;
+	tr->result_code = (uint8_t)result_code;
 }
 
 int
@@ -3431,7 +3397,8 @@ write_local_preprocessing(as_transaction *tr, bool *is_done)
 
 	// Fail if disallow_null_setname is true and set name is absent or empty.
 	if (ns->disallow_null_setname) {
-		as_msg_field *f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
+		as_msg_field *f = as_transaction_has_set(tr) ?
+				as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET) : NULL;
 
 		if (! f || as_msg_field_get_value_sz(f) == 0) {
 			cf_info(AS_RW, "write_local: null/empty set name not allowed for namespace %s", ns->name);
@@ -3453,13 +3420,14 @@ write_local_preprocessing(as_transaction *tr, bool *is_done)
 }
 
 static bool
-check_msg_set_name(as_msg* m, const char* set_name)
+check_msg_set_name(as_transaction *tr, const char* set_name)
 {
-	as_msg_field* f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
+	as_msg_field* f = as_transaction_has_set(tr) ?
+			as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_SET) : NULL;
 
 	if (! f || as_msg_field_get_value_sz(f) == 0) {
 		if (set_name) {
-			cf_warning(AS_RW, "op overwriting record in set '%s' has no set name",
+			cf_warning_digest(AS_RW, &tr->keyd, "op overwriting record in set '%s' has no set name ",
 					set_name);
 		}
 
@@ -3476,7 +3444,7 @@ check_msg_set_name(as_msg* m, const char* set_name)
 		memcpy((void*)msg_set_name, (const void*)f->data, msg_set_name_len);
 		msg_set_name[msg_set_name_len] = 0;
 
-		cf_warning(AS_RW, "op overwriting record in set '%s' has different set name '%s'",
+		cf_warning_digest(AS_RW, &tr->keyd, "op overwriting record in set '%s' has different set name '%s' ",
 				set_name ? set_name : "(null)", msg_set_name);
 		return false;
 	}
@@ -3644,18 +3612,18 @@ write_local_handle_msg_key(as_transaction *tr, as_storage_rd *rd)
 		}
 
 		// Check the client-sent key, if any, against the stored key.
-		if (msg_has_key(m) && ! check_msg_key(m, rd)) {
+		if (as_transaction_has_key(tr) && ! check_msg_key(m, rd)) {
 			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: key mismatch ", ns->name);
 			return AS_PROTO_RESULT_FAIL_KEY_MISMATCH;
 		}
 	}
 	// If we got a key without a digest, it's an old client, not a cue to store
 	// the key. (Remove this check when we're sure all old C clients are gone.)
-	else if (as_msg_field_get(m, AS_MSG_FIELD_TYPE_DIGEST_RIPE)) {
+	else if (as_transaction_has_digest(tr)) {
 		// Key not stored for this record - store one if sent from client. For
 		// data-in-memory, don't allocate the key until we reach the point of no
 		// return. Also don't set AS_INDEX_FLAG_KEY_STORED flag until then.
-		if (! get_msg_key(m, rd)) {
+		if (! get_msg_key(tr, rd)) {
 			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: can't store key ", ns->name);
 			return AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
 		}
@@ -4829,7 +4797,8 @@ write_local(as_transaction *tr, uint8_t **pickled_buf, size_t *pickled_sz,
 
 	// If creating record, write set-ID into index.
 	if (record_created) {
-		int rv_set = as_record_set_set_from_msg(r, ns, m);
+		int rv_set = as_transaction_has_set(tr) ?
+				as_record_set_set_from_msg(r, ns, m) : 0;
 
 		if (rv_set == -1) {
 			cf_warning_digest(AS_RW, &tr->keyd, "{%s} write_local: set can't be added ", ns->name);
@@ -4846,7 +4815,7 @@ write_local(as_transaction *tr, uint8_t **pickled_buf, size_t *pickled_sz,
 	const char* set_name = as_index_get_set_name(r, ns);
 
 	// If record existed, check that as_msg set name matches.
-	if (! record_created && ! check_msg_set_name(m, set_name)) {
+	if (! record_created && ! check_msg_set_name(tr, set_name)) {
 		write_local_failed(tr, &r_ref, record_created, tree, 0, AS_PROTO_RESULT_FAIL_PARAMETER);
 		return -1;
 	}
@@ -5119,7 +5088,7 @@ int as_write_journal_apply(as_partition_reservation *prsv) {
 	return (0);
 }
 
-int
+uint32_t
 write_process_op(as_transaction *tr, cl_msg *msgp, bool is_subrec, cf_node node)
 {
 	as_namespace *ns = tr->rsv.ns;
@@ -5142,7 +5111,7 @@ write_process_op(as_transaction *tr, cl_msg *msgp, bool is_subrec, cf_node node)
 			cf_atomic_int_incr(&g_config.err_write_fail_prole_delete);
 		} else {
 			cf_info(AS_RW,
-					"rw prole operation: failed, ns %s rv %d result code %d, "
+					"rw prole operation: failed, ns %s rv %d result code %u, "
 					"digest %"PRIx64"",
 					ns->name, rv, tr->result_code, *(uint64_t*)&tr->keyd);
 		}
@@ -5281,6 +5250,8 @@ write_process_new(cf_node node, msg *m, as_partition_reservation *rsvp, bool f_r
 		// INIT_TR
 		as_transaction tr;
 		as_transaction_init(&tr, keyd, msgp);
+		// Don't bother with msg_fields since we currently don't look for any
+		// fields in msgp here - tr is just a container, will not be processed.
 
 		tr.rsv = *rsvp;
 
@@ -5464,36 +5435,30 @@ rw_retransmit_reduce_fn(void *key, uint32_t keylen, void *data, void *udata)
 	write_request *wr = data;
 	now_times *p_now = (now_times*)udata;
 
-	if (p_now->now_ns > cf_atomic64_get(wr->end_time)) {
+	if (! wr->ready) {
+		return 0;
+	}
 
-		if (!wr->ready) {
-			cf_detail(AS_RW, "Timing out never-ready wr %p", wr);
-
-			if (!(wr->proto_fd_h)) {
-				cf_detail(AS_RW, "No proto_fd_h on wr %p", wr);
-			}
-		}
-
+	if (p_now->now_ns > wr->end_time) {
 		cf_atomic_int_incr(&g_config.stat_rw_timeout);
-		if (wr->ready) {
-			if ( ! wr->has_udf ) {
-				cf_hist_track_insert_data_point(g_config.wt_hist, wr->start_time);
-			}
+
+		if (! wr->has_udf) {
+			cf_hist_track_insert_data_point(g_config.wt_hist, wr->start_time);
 		}
 
 		pthread_mutex_lock(&wr->lock);
-		if (udf_rw_needcomplete_wr(wr)) {
+		if (wr->iudf_orig) {
 			// TODO - this is temporary defensive code!
 			if (wr->batch_shared) {
-				cf_warning(AS_RW, "rw_retransmit_reduce_fn(): udf_rw_needcomplete_wr() RETURNS TRUE FOR BATCH.");
+				cf_warning(AS_RW, "rw_retransmit_reduce_fn(): request callback exists for batch.");
 			}
 
 			as_transaction tr;
 			write_request_init_tr(&tr, wr);
-			udf_rw_complete(&tr, AS_PROTO_RESULT_FAIL_TIMEOUT, __FILE__, __LINE__);
+			tr.iudf_orig->cb(&tr, AS_PROTO_RESULT_FAIL_TIMEOUT);
+
 			if (tr.proto_fd_h) {
-				as_end_of_transaction_ok(tr.proto_fd_h);
-				tr.proto_fd_h = 0;
+				as_end_of_transaction_force_close(tr.proto_fd_h);
 			}
 		} else {
 			if (wr->batch_shared) {
@@ -5511,11 +5476,6 @@ rw_retransmit_reduce_fn(void *key, uint32_t keylen, void *data, void *udata)
 		pthread_mutex_unlock(&wr->lock);
 
 		return (RCHASH_REDUCE_DELETE);
-	}
-
-	// cases where the wr is inserted in the table but all structures are not ready yet
-	if (wr->ready == false) {
-		return (0);
 	}
 
 	if (wr->xmit_ms < p_now->now_ms) {
@@ -5539,8 +5499,7 @@ rw_retransmit_reduce_fn(void *key, uint32_t keylen, void *data, void *udata)
 void *
 rw_retransmit_fn(void *unused)
 {
-	while (1) {
-
+	while (true) {
 		usleep(130 * 1000);
 
 		now_times now;
@@ -5548,17 +5507,9 @@ rw_retransmit_fn(void *unused)
 		now.now_ms = now.now_ns / 1000000;
 
 		rchash_reduce(g_write_hash, rw_retransmit_reduce_fn, &now);
+	}
 
-#ifdef DEBUG
-		// SUPER DEBUG --- catching some kind of leak of rchash
-		if ( rchash_get_size(g_write_hash) > 1000) {
-
-			rchash_reduce( g_write_hash, rw_dump_reduce, 0);
-		}
-#endif
-
-	};
-	return (0);
+	return 0;
 }
 
 //
@@ -5807,9 +5758,8 @@ void
 single_transaction_response(as_transaction *tr, as_namespace *ns,
 		as_msg_op **ops, as_bin **response_bins, uint16_t n_bins,
 		as_generation generation, uint32_t void_time, uint *written_sz,
-		char *setname)
+		const char *setname)
 {
-
 	cf_detail_digest(AS_RW, NULL, "[ENTER] NS(%s)", ns->name );
 
 	if (tr->proto_fd_h) {
@@ -5821,7 +5771,7 @@ single_transaction_response(as_transaction *tr, as_namespace *ns,
 			if (0 != as_msg_send_reply(tr->proto_fd_h, tr->result_code,
 					generation, void_time, ops, response_bins, n_bins, ns,
 					written_sz, as_transaction_trid(tr), setname)) {
-				cf_info(AS_RW, "rw: can't send reply, fd %d rc %d",
+				cf_info(AS_RW, "rw: can't send reply, fd %d rc %u",
 						tr->proto_fd_h->fd, tr->result_code);
 			}
 		}
@@ -5891,7 +5841,7 @@ dump_rw_reduce_fn(void *key, uint32_t keylen, void *data,
 	pthread_mutex_lock(&wr->lock);
 	cf_info(AS_RW,
 			"gwh[%d]: wr %p rc %d ready %d et %ld xm %ld (delta %ld) ri %d pb %p |wq| %d",
-			*counter, wr, cf_rc_count(wr), wr->ready, cf_atomic64_get(wr->end_time) / 1000000,
+			*counter, wr, cf_rc_count(wr), wr->ready, wr->end_time / 1000000,
 			wr->xmit_ms, wr->xmit_ms - g_now, wr->retry_interval_ms, wr->pickled_buf, wq_len(wr->wait_queue_head));
 	pthread_mutex_unlock(&wr->lock);
 
@@ -5938,7 +5888,7 @@ read_local_done(as_transaction* tr, as_index_ref* r_ref, as_storage_rd* rd,
 		as_record_done(r_ref, tr->rsv.ns);
 	}
 
-	tr->result_code = result_code;
+	tr->result_code = (uint8_t)result_code;
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_cleanup_hist);
 
@@ -5990,7 +5940,7 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 
 	// Check the key if required.
 	// Note - for data-not-in-memory "exists" ops, key check is expensive!
-	if (msg_has_key(m) &&
+	if (as_transaction_has_key(tr) &&
 			as_storage_record_get_key(&rd) && ! check_msg_key(m, &rd)) {
 		read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_KEY_MISMATCH);
 		return;
@@ -6091,16 +6041,58 @@ read_local(as_transaction *tr, as_index_ref *r_ref)
 
 	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_storage_read_hist);
 
-	single_transaction_response(tr, ns, p_ops, response_bins, n_bins,
-			r->generation, r->void_time, &written_sz, (char *)set_name);
+	// Container to allow use of as_msg_send_ops_reply(), until we refactor and
+	// clean up single transaction response handling generally.
+	cf_dyn_buf db = { NULL, false, 0, 0 };
+	uint8_t stack_buf[16 * 1024];
 
-	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
+	if (tr->proto_fd_h && ! tr->batch_shared) {
+		// Single out the client transaction case for now - others don't need
+		// this special handling (as urgently) for various reasons.
+
+		size_t msg_sz = sizeof(stack_buf);
+		uint8_t *msgp = (uint8_t *)as_msg_make_response_msg(tr->result_code,
+				r->generation, r->void_time, p_ops, response_bins, n_bins, ns,
+				(cl_msg *)stack_buf, &msg_sz, as_transaction_trid(tr), set_name);
+
+		if (! msgp)	{
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: failed make response msg ", ns->name);
+			destroy_stack_bins(result_bins, n_result_bins);
+			read_local_done(tr, r_ref, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
+			return;
+		}
+
+		// Stash the message, to be sent just below, outside the record lock.
+		db.buf = msgp;
+		db.is_stack = msgp == stack_buf;
+		db.used_sz = msg_sz;
+	}
+	else {
+		single_transaction_response(tr, ns, p_ops, response_bins, n_bins,
+				r->generation, r->void_time, &written_sz, set_name);
+
+		MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_net_hist);
+	}
 
 	destroy_stack_bins(result_bins, n_result_bins);
 	as_storage_record_close(r, &rd);
 	as_record_done(r_ref, ns);
 
-	MICROBENCHMARK_HIST_INSERT_P(rt_cleanup_hist);
+	MICROBENCHMARK_HIST_INSERT_AND_RESET_P(rt_cleanup_hist);
+
+	// Now that we're not under the record lock, send the message we just built.
+	if (db.buf) {
+		// Using the function for write responses for now.
+		as_msg_send_ops_reply(tr->proto_fd_h, &db);
+
+		MICROBENCHMARK_HIST_INSERT_P(rt_net_hist);
+
+		if (! db.is_stack) {
+			cf_free(db.buf);
+		}
+
+		tr->proto_fd_h = NULL;
+	}
 
 #ifdef HISTOGRAM_OBJECT_LATENCY
 	if (written_sz && (m->info1 & AS_MSG_INFO1_READ) ) {

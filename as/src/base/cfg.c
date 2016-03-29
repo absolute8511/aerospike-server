@@ -125,14 +125,8 @@ cfg_set_defaults()
 	c->ldt_benchmarks = false;
 	c->microbenchmarks = false;
 	c->migrate_max_num_incoming = AS_MIGRATE_DEFAULT_MAX_NUM_INCOMING; // for receiver-side migration flow-control
-	c->migrate_read_priority = 10; // # of rows between a quick context switch? not a great way to tune
-	c->migrate_read_sleep = 500; // # of rows between a quick context switch? not a great way to tune
 	c->migrate_rx_lifetime_ms = AS_MIGRATE_DEFAULT_RX_LIFETIME_MS; // for debouncing re-transmitted migrate start messages
 	c->n_migrate_threads = 1;
-	c->migrate_xmit_hwm = 10; // these are actually far more interesting for tuning parameters
-	c->migrate_xmit_lwm = 5; // because the monitor the queue depth
-	c->migrate_xmit_priority = 40; // # of rows between a quick context switch? not a great way to tune
-	c->migrate_xmit_sleep = 500; // # of rows between a quick context switch? not a great way to tune
 	c->nsup_delete_sleep = 100; // 100 microseconds means a delete rate of 10k TPS
 	c->nsup_period = 120; // run nsup once every 2 minutes
 	c->nsup_startup_evict = true;
@@ -281,15 +275,8 @@ typedef enum {
 	CASE_SERVICE_LOG_LOCAL_TIME,
 	CASE_SERVICE_MICROBENCHMARKS,
 	CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING,
-	CASE_SERVICE_MIGRATE_READ_PRIORITY,
-	CASE_SERVICE_MIGRATE_READ_SLEEP,
 	CASE_SERVICE_MIGRATE_RX_LIFETIME_MS,
 	CASE_SERVICE_MIGRATE_THREADS,
-	CASE_SERVICE_MIGRATE_XMIT_HWM,
-	CASE_SERVICE_MIGRATE_XMIT_LWM,
-	CASE_SERVICE_MIGRATE_PRIORITY, // renamed
-	CASE_SERVICE_MIGRATE_XMIT_PRIORITY,
-	CASE_SERVICE_MIGRATE_XMIT_SLEEP,
 	CASE_SERVICE_NSUP_DELETE_SLEEP,
 	CASE_SERVICE_NSUP_PERIOD,
 	CASE_SERVICE_NSUP_STARTUP_EVICT,
@@ -346,6 +333,13 @@ typedef enum {
 	CASE_SERVICE_FB_HEALTH_GOOD_PCT,
 	CASE_SERVICE_FB_HEALTH_MSG_PER_BURST,
 	CASE_SERVICE_FB_HEALTH_MSG_TIMEOUT,
+	CASE_SERVICE_MIGRATE_READ_PRIORITY,
+	CASE_SERVICE_MIGRATE_READ_SLEEP,
+	CASE_SERVICE_MIGRATE_XMIT_HWM,
+	CASE_SERVICE_MIGRATE_XMIT_LWM,
+	CASE_SERVICE_MIGRATE_PRIORITY, // renamed
+	CASE_SERVICE_MIGRATE_XMIT_PRIORITY,
+	CASE_SERVICE_MIGRATE_XMIT_SLEEP,
 	CASE_SERVICE_NSUP_AUTO_HWM,
 	CASE_SERVICE_NSUP_AUTO_HWM_PCT,
 	CASE_SERVICE_NSUP_MAX_DELETES,
@@ -478,6 +472,8 @@ typedef enum {
 	CASE_NAMESPACE_LDT_GC_RATE,
 	CASE_NAMESPACE_LDT_PAGE_SIZE,
 	CASE_NAMESPACE_MAX_TTL,
+	CASE_NAMESPACE_MIGRATE_ORDER,
+	CASE_NAMESPACE_MIGRATE_SLEEP,
 	CASE_NAMESPACE_OBJ_SIZE_HIST_MAX,
 	CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE,
 	CASE_NAMESPACE_SET_BEGIN,
@@ -875,6 +871,8 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "ldt-gc-rate",					CASE_NAMESPACE_LDT_GC_RATE },
 		{ "ldt-page-size",					CASE_NAMESPACE_LDT_PAGE_SIZE },
 		{ "max-ttl",						CASE_NAMESPACE_MAX_TTL },
+		{ "migrate-order",					CASE_NAMESPACE_MIGRATE_ORDER },
+		{ "migrate-sleep",					CASE_NAMESPACE_MIGRATE_SLEEP},
 		{ "obj-size-hist-max",				CASE_NAMESPACE_OBJ_SIZE_HIST_MAX },
 		{ "read-consistency-level-override", CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE },
 		{ "set",							CASE_NAMESPACE_SET_BEGIN },
@@ -1881,7 +1879,7 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_SERVICE_CLIENT_FD_MAX:
 				cfg_renamed_name_tok(&line, "proto-fd-max");
-				// Intentional fall-through.
+				// No break.
 			case CASE_SERVICE_PROTO_FD_MAX:
 				c->n_proto_fd_max = cfg_int_no_checks(&line);
 				break;
@@ -1937,32 +1935,11 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING:
 				c->migrate_max_num_incoming = cfg_int(&line, 0, INT_MAX);
 				break;
-			case CASE_SERVICE_MIGRATE_READ_PRIORITY:
-				c->migrate_read_priority = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_MIGRATE_READ_SLEEP:
-				c->migrate_read_sleep = cfg_u32_no_checks(&line);
-				break;
 			case CASE_SERVICE_MIGRATE_RX_LIFETIME_MS:
 				c->migrate_rx_lifetime_ms = cfg_int_no_checks(&line);
 				break;
 			case CASE_SERVICE_MIGRATE_THREADS:
 				c->n_migrate_threads = cfg_int(&line, 0, MAX_NUM_MIGRATE_XMIT_THREADS);
-				break;
-			case CASE_SERVICE_MIGRATE_XMIT_HWM:
-				c->migrate_xmit_hwm = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_MIGRATE_XMIT_LWM:
-				c->migrate_xmit_lwm = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_MIGRATE_PRIORITY:
-				cfg_renamed_name_tok(&line, "migrate-xmit-priority");
-				// Intentional fall-through.
-			case CASE_SERVICE_MIGRATE_XMIT_PRIORITY:
-				c->migrate_xmit_priority = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_MIGRATE_XMIT_SLEEP:
-				c->migrate_xmit_sleep = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_NSUP_DELETE_SLEEP:
 				c->nsup_delete_sleep = cfg_u32_no_checks(&line);
@@ -2149,6 +2126,13 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_FB_HEALTH_GOOD_PCT:
 			case CASE_SERVICE_FB_HEALTH_MSG_PER_BURST:
 			case CASE_SERVICE_FB_HEALTH_MSG_TIMEOUT:
+			case CASE_SERVICE_MIGRATE_READ_PRIORITY:
+			case CASE_SERVICE_MIGRATE_READ_SLEEP:
+			case CASE_SERVICE_MIGRATE_XMIT_HWM:
+			case CASE_SERVICE_MIGRATE_XMIT_LWM:
+			case CASE_SERVICE_MIGRATE_PRIORITY:
+			case CASE_SERVICE_MIGRATE_XMIT_PRIORITY:
+			case CASE_SERVICE_MIGRATE_XMIT_SLEEP:
 			case CASE_SERVICE_NSUP_AUTO_HWM:
 			case CASE_SERVICE_NSUP_AUTO_HWM_PCT:
 			case CASE_SERVICE_NSUP_MAX_DELETES:
@@ -2295,7 +2279,7 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NETWORK_SERVICE_EXTERNAL_ADDRESS:
 				cfg_renamed_name_tok(&line, "access-address");
-				// Intentional fall-through.
+				// No break.
 			case CASE_NETWORK_SERVICE_ACCESS_ADDRESS:
 				c->external_address = cfg_strdup_no_checks(&line);
 				c->is_external_address_virtual = strcmp(line.val_tok_2, "virtual") == 0;
@@ -2465,7 +2449,7 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_LIMIT_SIZE:
 				cfg_renamed_name_tok(&line, "memory-size");
-				// Intentional fall-through.
+				// No break.
 			case CASE_NAMESPACE_MEMORY_SIZE:
 				ns->memory_size = cfg_u64_no_checks(&line);
 				break;
@@ -2480,7 +2464,7 @@ as_config_init(const char *config_file)
 					break;
 				case CASE_NAMESPACE_STORAGE_SSD:
 					cfg_renamed_val_tok_1(&line, "device");
-					// Intentional fall-through.
+					// No break.
 				case CASE_NAMESPACE_STORAGE_DEVICE:
 					ns->storage_type = AS_STORAGE_ENGINE_SSD;
 					ns->storage_data_in_memory = false;
@@ -2573,6 +2557,12 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_MAX_TTL:
 				ns->max_ttl = cfg_seconds(&line);
+				break;
+			case CASE_NAMESPACE_MIGRATE_ORDER:
+				ns->migrate_order = cfg_u32(&line, 1, 10);
+				break;
+			case CASE_NAMESPACE_MIGRATE_SLEEP:
+				ns->migrate_sleep = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_OBJ_SIZE_HIST_MAX:
 				ns->obj_size_hist_max = cfg_obj_size_hist_max(cfg_u32_no_checks(&line));
@@ -2694,7 +2684,7 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_MEMORY_ALL:
 				cfg_renamed_name_tok(&line, "data-in-memory");
-				// Intentional fall-through.
+				// No break.
 			case CASE_NAMESPACE_STORAGE_DEVICE_DATA_IN_MEMORY:
 				ns->storage_data_in_memory = cfg_bool(&line);
 				break;

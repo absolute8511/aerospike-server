@@ -433,14 +433,7 @@ udf_record_cache_get(udf_record * urecord, const char * name)
 			udf_record_bin * bin = &(urecord->updates[i]);
 			if ( strncmp(name, bin->name, AS_ID_BIN_SZ) == 0 ) {
 				cf_detail(AS_UDF, "Bin %s found, type(%d)", name, bin->value->type );
-				if ( bin->value->type == AS_NIL ) {
-					cf_detail(AS_UDF, "udf_record_get: %s return NULL", name);
-					return NULL;
-				}
-				else {
-					cf_detail(AS_UDF, "udf_record_get: %s return", name);
-					return bin->value;
-				}
+				return bin->value; // note it's OK if the bin contains a nil
 			}
 		}
 	}

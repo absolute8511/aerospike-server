@@ -1091,7 +1091,7 @@ list_wrapper_from_buf(list_wrapper *p_list_wrapped, const uint8_t *buf, uint32_t
 
 	list_wrapper_init(p_list_wrapped, ele_count);
 
-	uint8_t *new_buf = (uint8_t *)p_list_wrapped + sizeof(list_wrapper) + (ele_count / AS_PACKED_LIST_INDEX_STEP);
+	uint8_t *new_buf = (uint8_t *)p_list_wrapped + sizeof(list_wrapper) + (sizeof(uint32_t) * p_list_wrapped->index.cap);
 
 	memcpy(new_buf, buf, size);
 
@@ -1446,10 +1446,13 @@ packed_list_set(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
+	int32_t new_ele_count = as_packed_list_get_new_element_count(&pl);
+
+	// Add difference in header size and payload size.
+	new_size += as_pack_list_header_get_size(ele_count) - as_pack_list_header_get_size(new_ele_count);
 	new_size += payload->size;
 
-	int32_t new_ele_count = as_packed_list_get_new_element_count(&pl);
-	uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, (uint32_t)new_size, (uint32_t)new_ele_count, uindex, pli);
+	uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, (uint32_t)new_size, (uint32_t)ele_count, uindex, pli);
 
 	if (! ptr) {
 		cf_warning(AS_PARTICLE, "packed_list_set() failed to alloc list particle");

@@ -331,7 +331,7 @@ slot_init(ldt_slot *lslotp, ldt_record *lrecord)
 	c_tr->end_time             = h_tr->end_time;
 
 	// Chunk transaction is always preprocessed
-	c_tr->preprocessed         = true;       // keyd is hence preprocessed
+	c_tr->msg_fields           = h_tr->msg_fields;
 	c_tr->flag                 = 0;
 
 	// Parent reservation cannot go away as long as Chunck needs reservation.

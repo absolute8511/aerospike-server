@@ -31,11 +31,11 @@
 #include <stdint.h>
 
 #include "citrusleaf/cf_digest.h"
+#include "citrusleaf/cf_queue.h"
 
 #include "ai_obj.h"
 #include "dynbuf.h"
 #include "hist.h"
-#include "queue.h"
 
 #include "base/datamodel.h"
 #include "base/monitor.h"

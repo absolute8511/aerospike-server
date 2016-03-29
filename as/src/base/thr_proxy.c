@@ -67,10 +67,10 @@
 #define PROXY_FIELD_OP 0
 #define PROXY_FIELD_TID 1
 #define PROXY_FIELD_DIGEST 2
-#define PROXY_FIELD_REDIRECT 3 // deprecated
+#define PROXY_FIELD_REDIRECT 3
 #define PROXY_FIELD_AS_PROTO 4 // request as_proto - currently contains only as_msg's
 #define PROXY_FIELD_CLUSTER_KEY 5
-#define PROXY_FIELD_TIMEOUT_MS 6
+#define PROXY_FIELD_TIMEOUT_MS 6 // deprecated
 #define PROXY_FIELD_INFO 7
 
 #define PROXY_INFO_SHIPPED_OP 0x0001
@@ -96,6 +96,8 @@ typedef struct {
 	msg		        *fab_msg;    // this is the fabric message in case we have to retransmit
 	cf_clock         xmit_ms;    // the ms time of the NEXT retransmit
 	uint32_t         retry_interval_ms; // number of ms to wait next time
+
+	uint32_t         msg_fields;
 	uint64_t         start_time;
 	uint64_t         end_time;
 
@@ -185,7 +187,6 @@ as_proxy_divert(cf_node dst, as_transaction *tr, as_namespace *ns, uint64_t clus
 	msg_set_type msettype = tr->batch_shared ? MSG_SET_COPY : MSG_SET_HANDOFF_MALLOC;
 	msg_set_buf(m, PROXY_FIELD_AS_PROTO, (void *) tr->msgp, as_proto_size_get(&tr->msgp->proto), msettype);
 	msg_set_uint64(m, PROXY_FIELD_CLUSTER_KEY, cluster_key);
-	msg_set_uint32(m, PROXY_FIELD_TIMEOUT_MS, tr->msgp->msg.transaction_ttl);
 
 	tr->msgp = 0;
 
@@ -194,8 +195,9 @@ as_proxy_divert(cf_node dst, as_transaction *tr, as_namespace *ns, uint64_t clus
 	// Fill out a retransmit structure, insert into the retransmit hash.
 	msg_incr_ref(m);
 	proxy_request pr;
+	pr.msg_fields = tr->msg_fields;
 	pr.start_time = tr->start_time;
-	pr.end_time = (tr->end_time != 0) ? tr->end_time : pr.start_time + g_config.transaction_max_ns;
+	pr.end_time = tr->end_time;
 	pr.fd_h = tr->proto_fd_h;
 	tr->proto_fd_h = 0;
 	pr.fab_msg = m;
@@ -248,7 +250,6 @@ as_proxy_shipop(cf_node dst, write_request *wr)
 	msg_set_buf(m, PROXY_FIELD_DIGEST, (void *) &wr->keyd, sizeof(cf_digest), MSG_SET_COPY);
 	msg_set_buf(m, PROXY_FIELD_AS_PROTO, (void *) wr->msgp, as_proto_size_get(&wr->msgp->proto), MSG_SET_HANDOFF_MALLOC);
 	msg_set_uint64(m, PROXY_FIELD_CLUSTER_KEY, as_paxos_get_cluster_key());
-	msg_set_uint32(m, PROXY_FIELD_TIMEOUT_MS, wr->msgp->msg.transaction_ttl);
 	wr->msgp = 0;
 
 	// If it is shipped op.
@@ -262,8 +263,9 @@ as_proxy_shipop(cf_node dst, write_request *wr)
 	// Fill out a retransmit structure, insert into the retransmit hash.
 	msg_incr_ref(m);
 	proxy_request pr;
+	pr.msg_fields  = wr->msg_fields;
 	pr.start_time  = wr->start_time;
-	pr.end_time    = (wr->end_time != 0) ? wr->end_time : pr.start_time + g_config.transaction_max_ns;
+	pr.end_time    = wr->end_time;
 	cf_rc_reserve(wr);
 	pr.wr          = wr;
 	pr.fab_msg     = m;
@@ -448,19 +450,17 @@ as_proxy_shipop_response_hdlr(msg *m, proxy_request *pr, bool *free_msg)
 			// will be cleaned up by then
 			cf_detail_digest(AS_PROXY, &wr->keyd, "SHIPPED_OP ORIG Missing proto_fd ");
 
-			// Note: This may be needed if this is node where internal scan or query
-			// UDF is initiated where it happens so that there is migration is going
-			// on and the request get routed to the remote node which is winning node
-			// This request may need the req_cb to be called.
-			if (udf_rw_needcomplete_wr(wr)) {
+			// Note: currently it should be impossible to have a callback here,
+			// since internal UDFs don't proxy.
+			if (wr->iudf_orig) {
 				// TODO - this is temporary defensive code!
 				if (pr->batch_shared) {
-					cf_warning(AS_PROXY, "as_proxy_shipop_response_hdlr(): udf_rw_needcomplete_wr() RETURNS TRUE FOR BATCH.");
+					cf_warning(AS_PROXY, "as_proxy_shipop_response_hdlr(): request callback exists for batch.");
 				}
 
 				as_transaction tr;
 				write_request_init_tr(&tr, wr);
-				udf_rw_complete(&tr, 0, __FILE__, __LINE__);
+				tr.iudf_orig->cb(&tr, 0);
 			}
 		}
 		pthread_mutex_unlock(&wr->lock);
@@ -543,18 +543,25 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 				return 0;
 			}
 
-			// This is allowed to fail - this is a new field, and gets defaulted
-			// to 0 if it doesn't exist.
-			uint32_t timeout_ms = 0;
-			msg_get_uint32(m, PROXY_FIELD_TIMEOUT_MS, &timeout_ms);
-
 			// Put the as_msg on the normal queue for processing.
 			// INIT_TR
 			as_transaction tr;
 			as_transaction_init(&tr, key, msgp);
-			tr.end_time             = (timeout_ms != 0) ? ((uint64_t)timeout_ms * 1000000) + tr.start_time : 0;
-			tr.proxy_node           = id;
-			tr.proxy_msg            = m;
+			// msgp might not have digest - batch sub-transactions, old clients.
+			// For old clients, will compute it again from msgp key and set.
+
+			tr.start_time = cf_getns();
+			MICROBENCHMARK_SET_TO_START();
+
+			tr.proxy_node = id;
+			tr.proxy_msg = m;
+			as_transaction_proxyee_prepare(&tr);
+
+			// For batch sub-transactions, make sure we flag them so they're not
+			// mistaken for multi-record transactions (which never proxy).
+			if (as_transaction_has_no_key_or_digest(&tr)) {
+				tr.flag |= AS_TRANSACTION_FLAG_BATCH_SUB;
+			}
 
 			// Check here if this is shipped op.
 			uint32_t info = 0;
@@ -565,8 +572,6 @@ proxy_msg_fn(cf_node id, msg *m, void *udata)
 			} else {
 				cf_detail_digest(AS_PROXY, &tr.keyd, "Received Proxy Request digest ");
 			}
-
-			MICROBENCHMARK_RESET();
 
 			thr_tsvc_enqueue(&tr);
 		}
@@ -700,6 +705,30 @@ SendFin:
 				return -1;
 			}
 
+			cf_node redirect_node;
+			if (0 == msg_get_uint64(m, PROXY_FIELD_REDIRECT, &redirect_node)
+					&& redirect_node != g_config.self_node
+					&& redirect_node != (cf_node)0) {
+				// If this node was a "random" node, i.e. neither acting nor
+				// eventual master, it diverts to the eventual master (the best
+				// it can do.) The eventual master must inform this node about
+				// the acting master.
+				pr->dest = redirect_node;
+				pr->xmit_ms = cf_getms() + g_config.transaction_retry_ms;
+
+				msg_incr_ref(pr->fab_msg);
+
+				if (0 != (rv = as_fabric_send(pr->dest, pr->fab_msg, AS_FABRIC_PRIORITY_MEDIUM))) {
+					as_fabric_msg_put(pr->fab_msg);
+				}
+
+				pthread_mutex_unlock(pr_lock);
+
+				as_fabric_msg_put(m);
+
+				return rv == 0 ? 0 : -1;
+			}
+
 			cf_digest *key;
 			size_t sz = 0;
 			if (0 != msg_get_buf(pr->fab_msg, PROXY_FIELD_DIGEST, (byte **) &key, &sz, MSG_GET_DIRECT)) {
@@ -721,8 +750,11 @@ SendFin:
 			// Put the as_msg on the normal queue for processing.
 			as_transaction tr;
 			as_transaction_init(&tr, key, msgp);
-			tr.start_time = pr->start_time; // start time
-			tr.end_time   = pr->end_time;
+			// msgp might not have digest - batch sub-transactions, old clients.
+			// For old clients, will compute it again from msgp key and set.
+
+			tr.msg_fields = pr->msg_fields;
+			tr.start_time = pr->start_time;
 			tr.proto_fd_h = pr->fd_h;
 			tr.batch_shared = pr->batch_shared;
 			tr.batch_index = pr->batch_index;
@@ -753,7 +785,7 @@ SendFin:
 
 // Send a redirection message - consumes the message.
 int
-as_proxy_return_to_sender(const as_transaction *tr)
+as_proxy_return_to_sender(const as_transaction *tr, cf_node redirect_node)
 {
 	int rv;
 	uint32_t tid;
@@ -765,8 +797,8 @@ as_proxy_return_to_sender(const as_transaction *tr)
 	msg_reset(tr->proxy_msg);
 	msg_set_uint32(tr->proxy_msg, PROXY_FIELD_OP, PROXY_OP_RETURN_TO_SENDER);
 	msg_set_uint32(tr->proxy_msg, PROXY_FIELD_TID, tid);
-	// Redirect field no longer used, set for backwards compatibility.
-	msg_set_uint64(tr->proxy_msg, PROXY_FIELD_REDIRECT, tr->proxy_node);
+	msg_set_uint64(tr->proxy_msg, PROXY_FIELD_REDIRECT,
+			redirect_node == (cf_node)0 ? tr->proxy_node : redirect_node);
 
 	if (0 != (rv = as_fabric_send(tr->proxy_node, tr->proxy_msg,
 			AS_FABRIC_PRIORITY_MEDIUM))) {
@@ -880,22 +912,20 @@ proxy_retransmit_reduce_fn(void *key, void *data, void *udata)
 				cf_detail_digest(AS_PROXY, &pr->wr->keyd, "SHIPPED_OP Proxy Retransmit Timeout ...");
 				cf_atomic_int_incr(&g_config.ldt_proxy_timeout);
 				pthread_mutex_lock(&pr->wr->lock);
-				// Note: This may be needed if this is node where internal scan or query
-				// UDF is initiated where it happens so that there is migration is going
-				// on and the request get routed to the remote node which is winning node
-				// This request may need the req_cb to be called.
-				if (udf_rw_needcomplete_wr(pr->wr)) {
+				// Note: currently it should be impossible to have a callback here,
+				// since internal UDFs don't proxy.
+				if (pr->wr->iudf_orig) {
 					// TODO - this is temporary defensive code!
 					if (pr->batch_shared) {
-						cf_warning(AS_PROXY, "proxy_retransmit_reduce_fn(): udf_rw_needcomplete_wr() RETURNS TRUE FOR BATCH.");
+						cf_warning(AS_PROXY, "proxy_retransmit_reduce_fn(): request callback exists for batch.");
 					}
 
 					as_transaction tr;
 					write_request_init_tr(&tr, pr->wr);
-					udf_rw_complete(&tr, 0, __FILE__, __LINE__);
+					tr.iudf_orig->cb(&tr, AS_PROTO_RESULT_FAIL_TIMEOUT);
+
 					if (tr.proto_fd_h) {
-						as_end_of_transaction_ok(tr.proto_fd_h);
-						tr.proto_fd_h = NULL;
+						as_end_of_transaction_force_close(tr.proto_fd_h);
 					}
 				}
 				pthread_mutex_unlock(&pr->wr->lock);
@@ -975,17 +1005,21 @@ Retry:
 				size_t sz = 0;
 				msg_get_buf(pr->fab_msg, PROXY_FIELD_DIGEST, (byte **) &keyp, &sz, MSG_GET_DIRECT);
 
+				cl_msg *msgp;
+				sz = 0;
+				msg_get_buf(pr->fab_msg, PROXY_FIELD_AS_PROTO, (byte **) &msgp, &sz, MSG_GET_COPY_MALLOC);
+
 				// INIT_TR
 				as_transaction tr;
-				as_transaction_init(&tr, keyp, NULL);
-				// TODO - why not pr.start_time?
-				tr.end_time   = pr->end_time;
+				as_transaction_init(&tr, keyp, msgp);
+				// msgp might not have digest - batch sub-transactions, old clients.
+				// For old clients, will compute it again from msgp key and set.
+
+				tr.msg_fields = pr->msg_fields;
+				tr.start_time   = pr->start_time;
 				tr.proto_fd_h = pr->fd_h;
 				tr.batch_shared = pr->batch_shared;
 				tr.batch_index = pr->batch_index;
-
-				sz = 0;
-				msg_get_buf(pr->fab_msg, PROXY_FIELD_AS_PROTO, (byte **) & (tr.msgp), &sz, MSG_GET_COPY_MALLOC);
 
 				cf_atomic_int_incr(&g_config.proxy_unproxy);
 

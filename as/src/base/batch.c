@@ -27,14 +27,15 @@
 #include "citrusleaf/cf_byte_order.h"
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_digest.h"
+#include "citrusleaf/cf_queue.h"
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/proto.h"
 #include "base/security.h"
 #include "base/thr_tsvc.h"
+#include "base/transaction.h"
 #include "jem.h"
-#include "queue.h"
 #include <errno.h>
 
 //---------------------------------------------------------
@@ -766,12 +767,10 @@ as_batch_queue_task(as_transaction* btr)
 	as_transaction_init(&tr, 0, 0);
 	tr.proto_fd_h = btr->proto_fd_h;
 	tr.start_time = btr->start_time;
+	MICROBENCHMARK_SET_TO_START();
 	tr.batch_shared = shared;
-	tr.preprocessed = true;
-
-	if (bmsg->transaction_ttl) {
-		tr.end_time = tr.start_time + ((uint64_t)bmsg->transaction_ttl * 1000000);
-	}
+	tr.flag |= AS_TRANSACTION_FLAG_BATCH_SUB;
+	as_transaction_set_msg_field_flag(&tr, AS_MSG_FIELD_TYPE_NAMESPACE);
 
 	// Read batch keys and initialize generic transactions.
 	as_batch_input* in;
@@ -838,6 +837,10 @@ as_batch_queue_task(as_transaction* btr)
 
 			// Swap remaining fields.
 			for (uint16_t j = 1; j < out->msg.n_fields; j++) {
+				if (mf->type == AS_MSG_FIELD_TYPE_SET) {
+					as_transaction_set_msg_field_flag(&tr, AS_MSG_FIELD_TYPE_SET);
+				}
+
 				as_msg_swap_field(mf);
 				mf = as_msg_field_get_next(mf);
 			}
@@ -902,8 +905,8 @@ TranEnd:
 }
 
 void
-as_batch_add_result(as_transaction* tr, as_namespace* ns, char* setname, uint32_t generation,
-	uint32_t void_time, uint16_t n_bins, as_bin** bins, as_msg_op** ops)
+as_batch_add_result(as_transaction* tr, as_namespace* ns, const char* setname, uint32_t generation,
+		uint32_t void_time, uint16_t n_bins, as_bin** bins, as_msg_op** ops)
 {
 	// Always clear this transaction's msgp so calling code does not free it.
 	tr->msgp = 0;

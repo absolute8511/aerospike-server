@@ -47,16 +47,30 @@
 // Microbenchmark macros.
 //
 
+#define MICROBENCHMARK_SET_TO_START() \
+{ \
+	if (g_config.microbenchmarks) { \
+		tr.microbenchmark_time = tr.start_time; \
+	} \
+}
+
+#define MICROBENCHMARK_SET_TO_START_P() \
+{ \
+	if (g_config.microbenchmarks) { \
+		tr->microbenchmark_time = tr->start_time; \
+	} \
+}
+
 #define MICROBENCHMARK_HIST_INSERT(__hist_name) \
 { \
-	if (g_config.microbenchmarks && tr.microbenchmark_time) { \
+	if (g_config.microbenchmarks && tr.microbenchmark_time != 0) { \
 		histogram_insert_data_point(g_config.__hist_name, tr.microbenchmark_time); \
 	} \
 }
 
 #define MICROBENCHMARK_HIST_INSERT_P(__hist_name) \
 { \
-	if (g_config.microbenchmarks && tr->microbenchmark_time) { \
+	if (g_config.microbenchmarks && tr->microbenchmark_time != 0) { \
 		histogram_insert_data_point(g_config.__hist_name, tr->microbenchmark_time); \
 	} \
 }
@@ -78,20 +92,24 @@
 #define MICROBENCHMARK_HIST_INSERT_AND_RESET(__hist_name) \
 { \
 	if (g_config.microbenchmarks) { \
-		if (tr.microbenchmark_time) { \
-			histogram_insert_data_point(g_config.__hist_name, tr.microbenchmark_time); \
+		if (tr.microbenchmark_time != 0) { \
+			tr.microbenchmark_time = histogram_insert_data_point(g_config.__hist_name, tr.microbenchmark_time); \
 		} \
-		tr.microbenchmark_time = cf_getns(); \
+		else { \
+			tr.microbenchmark_time = cf_getns(); \
+		} \
 	} \
 }
 
 #define MICROBENCHMARK_HIST_INSERT_AND_RESET_P(__hist_name) \
 { \
 	if (g_config.microbenchmarks) { \
-		if (tr->microbenchmark_time) { \
-			histogram_insert_data_point(g_config.__hist_name, tr->microbenchmark_time); \
+		if (tr->microbenchmark_time != 0) { \
+			tr->microbenchmark_time = histogram_insert_data_point(g_config.__hist_name, tr->microbenchmark_time); \
 		} \
-		tr->microbenchmark_time = cf_getns(); \
+		else { \
+			tr->microbenchmark_time = cf_getns(); \
+		} \
 	} \
 }
 
@@ -121,46 +139,13 @@ void as_end_of_transaction(as_file_handle *proto_fd_h, bool force_close);
 void as_end_of_transaction_ok(as_file_handle *proto_fd_h);
 void as_end_of_transaction_force_close(as_file_handle *proto_fd_h);
 
-struct as_transaction_s;
-typedef int (*ureq_cb)(struct as_transaction_s *tr, int retcode);
-typedef int (*ures_cb)(struct as_transaction_s *tr, int retcode);
-
-typedef enum {
-	UDF_UNDEF_REQUEST = -1,
-	UDF_SCAN_REQUEST  = 0,
-	UDF_QUERY_REQUEST = 1
-} udf_request_type;
-
-typedef struct udf_request_data {
-	void *				req_udata;
-	ureq_cb				req_cb;		// callback called at completion with request structure
-	void *				res_udata;
-	ures_cb				res_cb;		// callback called at completion with response structure
-	udf_request_type	req_type;
-} ureq_data;
-
-#define UREQ_DATA_INIT(ureq)	\
-	(ureq)->req_cb    = NULL;	\
-	(ureq)->req_udata = NULL;	\
-	(ureq)->res_cb    = NULL;	\
-	(ureq)->res_udata = NULL;   \
-	(ureq)->req_type  = UDF_UNDEF_REQUEST;
-
-#define UREQ_DATA_RESET UREQ_DATA_INIT
-
-#define UREQ_DATA_COPY(dest, src)			\
-	(dest)->req_cb    = (src)->req_cb;		\
-	(dest)->req_udata = (src)->req_udata;	\
-	(dest)->res_cb    = (src)->res_cb;		\
-	(dest)->res_udata = (src)->res_udata;   \
-	(dest)->req_type  = (src)->req_type;
-
 #define AS_TRANSACTION_FLAG_NSUP_DELETE     0x0001
-#define AS_TRANSACTION_FLAG_INTERNAL        0x0002
+#define AS_TRANSACTION_FLAG_BATCH_SUB       0x0002 // was INTERNAL
 #define AS_TRANSACTION_FLAG_SHIPPED_OP      0x0004
 #define AS_TRANSACTION_FLAG_UNUSED_8        0x0008 // deprecated LDT_SUB
 #define AS_TRANSACTION_FLAG_SINDEX_TOUCHED  0x0010
 
+struct iudf_origin_s;
 struct as_batch_shared;
 
 /* as_transaction
@@ -176,23 +161,19 @@ typedef struct as_transaction_s {
 	/************ Frequently accessed fields *************/
 	/* The message describing the action */
 	cl_msg          * msgp;
+	/* Bit field showing which message fields are present */
+	uint32_t		  msg_fields;
 	/* and the digest to apply it to */
 	cf_digest 	      keyd;
-	/* generation to send to the user */
-	as_generation          generation;
 
-	/* result code to send to user */
-	int               result_code;
+	uint16_t          generation;
 	// set to true in duplicate resolution phase
 	bool              microbenchmark_is_resolve;
-	/* has the transaction been 'prepared' by as_prepare_transaction? This
-	   means that the incoming msg has been translated and the corresponding
-	   transaction structure has been set up */
-	bool              preprocessed;
 	// By default we store the key if the client sends it. However some older
 	// clients send the key without a digest, without intent to store the key.
 	// In such cases, we set this flag false and don't store the key.
 	uint8_t           flag;
+	uint8_t           result_code;
 
 	// INTERNAL INTERNAL INTERNAL
 	/* start time of the transaction at the running node */
@@ -216,7 +197,7 @@ typedef struct as_transaction_s {
 
 	/* User data corresponding to the internally created transaction
 	   first user is Scan UDF */
-	ureq_data         udata;
+	struct iudf_origin_s * iudf_orig;
 
 	// Batch
 	struct as_batch_shared* batch_shared;
@@ -229,36 +210,96 @@ typedef struct as_transaction_s {
 
 typedef struct as_query_transaction_s as_query_transaction;
 
-extern int as_transaction_prepare(as_transaction *tr);
 extern void as_transaction_init(as_transaction *tr, cf_digest *, cl_msg *);
-extern int as_transaction_digest_validate(as_transaction *tr);
+
+bool as_transaction_set_msg_field_flag(as_transaction *tr, uint8_t type);
+bool as_transaction_demarshal_prepare(as_transaction *tr);
+void as_transaction_proxyee_prepare(as_transaction *tr);
+
+static inline bool
+as_transaction_is_batch_sub(const as_transaction *tr)
+{
+	return (tr->flag & AS_TRANSACTION_FLAG_BATCH_SUB) != 0;
+}
+
+static inline bool
+as_transaction_has_set(const as_transaction *tr)
+{
+	return (tr->msg_fields & AS_MSG_FIELD_BIT_SET) != 0;
+}
+
+static inline bool
+as_transaction_has_key(const as_transaction *tr)
+{
+	return (tr->msg_fields & AS_MSG_FIELD_BIT_KEY) != 0;
+}
+
+static inline bool
+as_transaction_has_digest(const as_transaction *tr)
+{
+	return (tr->msg_fields & AS_MSG_FIELD_BIT_DIGEST_RIPE) != 0;
+}
+
+static inline bool
+as_transaction_has_no_key_or_digest(const as_transaction *tr)
+{
+	return (tr->msg_fields & (AS_MSG_FIELD_BIT_KEY | AS_MSG_FIELD_BIT_DIGEST_RIPE)) == 0;
+}
+
+static inline bool
+as_transaction_is_multi_record(const as_transaction *tr)
+{
+	return	(tr->msg_fields & (AS_MSG_FIELD_BIT_KEY | AS_MSG_FIELD_BIT_DIGEST_RIPE)) == 0 &&
+			(tr->flag & AS_TRANSACTION_FLAG_BATCH_SUB) == 0;
+}
+
+static inline bool
+as_transaction_is_batch_direct(const as_transaction *tr)
+{
+	// Assumes we're already multi-record.
+	return (tr->msg_fields & AS_MSG_FIELD_BIT_DIGEST_RIPE_ARRAY) != 0;
+}
+
+static inline bool
+as_transaction_is_query(const as_transaction *tr)
+{
+	// Assumes we're already multi-record.
+	return (tr->msg_fields & AS_MSG_FIELD_BIT_INDEX_RANGE) != 0;
+}
+
+static inline bool
+as_transaction_is_udf(const as_transaction *tr)
+{
+	return (tr->msg_fields & AS_MSG_FIELD_BIT_UDF_FILENAME) != 0;
+}
+
+static inline bool
+as_transaction_has_udf_op(const as_transaction *tr)
+{
+	return (tr->msg_fields & AS_MSG_FIELD_BIT_UDF_OP) != 0;
+}
+
+static inline bool
+as_transaction_has_scan_options(const as_transaction *tr)
+{
+	return (tr->msg_fields & AS_MSG_FIELD_BIT_SCAN_OPTIONS) != 0;
+}
 
 // For now it's not worth storing the trid in the as_transaction struct since we
 // only parse it from the msg once per transaction anyway.
 static inline uint64_t
 as_transaction_trid(const as_transaction *tr)
 {
+	if ((tr->msg_fields & AS_MSG_FIELD_BIT_TRID) == 0) {
+		return 0;
+	}
+
 	as_msg_field *f = as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_TRID);
 
-	return f ? cf_swap_from_be64(*(uint64_t*)f->data) : 0;
+	return cf_swap_from_be64(*(uint64_t*)f->data);
 }
 
-struct udf_call_s; // forward declaration for udf_call, defined in udf_rw.h
-
-// Data needed for creation of a transaction, add more fields here later.
-typedef struct tr_create_data {
-	cf_digest			digest;
-	as_namespace *		ns;
-	char				set[AS_SET_NAME_MAX_SIZE];
-	struct udf_call_s *	call;
-	uint				msg_type;	/* Which type of msg is it -- maybe make it default? */
-	as_file_handle *	fd_h;		/* fd of the parent scan job */
-	uint64_t			trid;		/* transaction id of the parent job -- if any */
-	void *				udata;		/* udata to be passed on to the new transaction */
-} tr_create_data;
-
-extern int   as_transaction_create_internal(as_transaction *tr, tr_create_data * data);
+int as_transaction_init_iudf(as_transaction *tr, as_namespace *ns, cf_digest *keyd);
 
 void as_transaction_demarshal_error(as_transaction* tr, uint32_t error_code);
-void as_transaction_error_unswapped(as_transaction* tr, uint32_t error_code);
 void as_transaction_error(as_transaction* tr, uint32_t error_code);

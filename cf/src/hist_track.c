@@ -349,10 +349,10 @@ cf_hist_track_dump(cf_hist_track* this)
 //------------------------------------------------
 // Pass-through to base histogram.
 //
-void
+uint64_t
 cf_hist_track_insert_data_point(cf_hist_track* this, uint64_t start_ns)
 {
-	histogram_insert_data_point((histogram*)this, start_ns);
+	return histogram_insert_data_point((histogram*)this, start_ns);
 }
 
 //------------------------------------------------

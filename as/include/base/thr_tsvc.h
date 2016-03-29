@@ -77,15 +77,3 @@ extern int thr_tsvc_queue_get_size();
 
 // Initialize the queues and start the handler threads.
 extern void as_tsvc_init();
-
-typedef struct {
-	int n_sz;
-	char n_name[AS_ID_NAMESPACE_SZ];
-	int queue_offset;
-	int n_devices;
-} tsvc_namespace_devices;
-
-extern tsvc_namespace_devices *g_tsvc_devices_a;
-
-extern int g_tsvc_n_namespaces;
-

@@ -58,7 +58,7 @@ as_security_check(const as_file_handle* fd_h, as_sec_perm perm)
 
 // Security is an enterprise feature - here, allow all operations.
 bool
-as_security_check_data_op(as_transaction* tr, as_msg* m, as_namespace* ns,
+as_security_check_data_op(as_transaction* tr, as_namespace* ns,
 		as_sec_perm perm)
 {
 	return true;
@@ -94,7 +94,7 @@ as_security_refresh(as_file_handle* fd_h)
 // client here, quickly return AS_SEC_ERR_NOT_SUPPORTED. The client may choose
 // to continue using this (unsecured) socket.
 void
-as_security_transact(as_transaction *tr)
+as_security_transact(as_transaction* tr)
 {
 	// We don't need the request, since we're ignoring it.
 	cf_free(tr->msgp);

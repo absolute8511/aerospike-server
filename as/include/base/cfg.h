@@ -36,11 +36,11 @@
 
 #include "aerospike/mod_lua_config.h"
 #include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_queue.h"
 
 #include "hist.h"
 #include "hist_track.h"
 #include "olock.h"
-#include "queue.h"
 #include "socket.h"
 #include "util.h"
 
@@ -268,13 +268,6 @@ typedef struct as_config_s {
 	/* Currently-active Paxos recovery policy. */
 	paxos_recovery_policy_enum	paxos_recovery_policy;
 
-	/* number of records between an enforced context switch --- 1 is lowest possible priority, 10000 would be full-speed */
-	uint32_t			migrate_xmit_priority;
-	uint32_t			migrate_xmit_sleep;
-	uint32_t			migrate_read_priority;
-	uint32_t			migrate_read_sleep;
-	uint32_t			migrate_xmit_hwm;
-	uint32_t			migrate_xmit_lwm;
 	// For receiver-side migration flow control:
 	int					migrate_max_num_incoming;
 	cf_atomic_int		migrate_num_incoming;
@@ -298,16 +291,16 @@ typedef struct as_config_s {
 	uint64_t		sindex_data_max_memory;   // Maximum memory for secondary index trees
 	cf_atomic64	    sindex_data_memory_used;  // Maximum memory for secondary index trees
 	cf_atomic_int   sindex_gc_timedout;           // Number of time sindex gc iteration timed out waiting for partition lock
-	uint64_t        sindex_gc_inactivity_dur;     // Commulative sum of sindex GC thread inactivity.
-	uint64_t        sindex_gc_activity_dur;       // Commulative sum of sindex gc thread activity.
-	uint64_t        sindex_gc_list_creation_time; // Commulative sum of list creation phase in sindex GC
-	uint64_t        sindex_gc_list_deletion_time; // Commulative sum of list deletion phase in sindex GC
+	uint64_t        sindex_gc_inactivity_dur;     // Cumulative sum of sindex GC thread inactivity.
+	uint64_t        sindex_gc_activity_dur;       // Cumulative sum of sindex gc thread activity.
+	uint64_t        sindex_gc_list_creation_time; // Cumulative sum of list creation phase in sindex GC
+	uint64_t        sindex_gc_list_deletion_time; // Cumulative sum of list deletion phase in sindex GC
 	uint64_t        sindex_gc_garbage_found;      // Amount of garbage found during list creation phase
 	uint64_t        sindex_gc_garbage_cleaned;    // Amount of garbage deleted during list deletion phase
-	uint64_t        sindex_gc_objects_validated;  // Commulative sum of sindex objects validated
+	uint64_t        sindex_gc_objects_validated;  // Cumulative sum of sindex objects validated
 	bool            sindex_gc_enable_histogram;
 	histogram      *_sindex_gc_validate_obj_hist; // Histogram to track time taken to validate sindex object
-	histogram      *_sindex_gc_delete_obj_hist;   // Histogram to track time taken to delelte sindex object by GC
+	histogram      *_sindex_gc_delete_obj_hist;   // Histogram to track time taken to delete sindex object by GC
 	histogram      *_sindex_gc_pimd_rlock_hist;   // HIstogram to track time spent under pimd rlock by sindex GC
 	histogram      *_sindex_gc_pimd_wlock_hist;   // Histogram to track time spent under pimd wlock by sindex GC
 
@@ -362,15 +355,12 @@ typedef struct as_config_s {
 	cf_atomic_int		fabric_read_long;
 	cf_atomic_int		migrate_msgs_sent;
 	cf_atomic_int		migrate_msgs_rcvd;
-	cf_atomic_int		migrate_inserts_sent;
-	cf_atomic_int		migrate_inserts_rcvd;
-	cf_atomic_int		migrate_acks_sent;
-	cf_atomic_int		migrate_acks_rcvd;
 	cf_atomic_int		migrate_progress_send;
 	cf_atomic_int		migrate_progress_recv;
-	cf_atomic_int		migrate_reads;
 	cf_atomic_int		migrate_num_incoming_accepted;
 	cf_atomic_int		migrate_num_incoming_refused; // For receiver-side migration flow control.
+	cf_atomic_int		migrate_tx_object_count;
+	cf_atomic_int		migrate_rx_object_count;
 	cf_atomic_int		proto_transactions;
 	cf_atomic_int		proxy_initiate; // initiated
 	cf_atomic_int		ldt_proxy_initiate; // initiated
@@ -415,8 +405,6 @@ typedef struct as_config_s {
 	cf_atomic_int		global_record_lock_count;
 	cf_atomic_int		global_tree_count;
 	cf_atomic_int		write_req_object_count;
-	cf_atomic_int		migrate_tx_object_count;
-	cf_atomic_int		migrate_rx_object_count;
 	cf_atomic_int		nsup_tree_count;
 	cf_atomic_int		nsup_subtree_count;
 	cf_atomic_int		scan_tree_count;

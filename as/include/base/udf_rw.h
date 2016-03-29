@@ -25,9 +25,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <aerospike/as_list.h>
-#include <aerospike/as_result.h>
-#include <citrusleaf/cf_digest.h>
+#include "aerospike/as_list.h"
+#include "aerospike/as_result.h"
+#include "citrusleaf/cf_digest.h"
 
 #include "util.h"
 
@@ -48,14 +48,24 @@ typedef struct udf_def_s {
 } udf_def;
 
 typedef struct udf_call_s {
-	udf_def          def;
+	udf_def         *def;
 	as_transaction	*tr;
 } udf_call;
 
-typedef struct udf_response_udata_s {
-	udf_call	*call;
-	as_result	*res;
-} udf_response_udata;
+typedef int (*iudf_cb)(as_transaction *tr, int retcode);
+
+typedef enum {
+	UDF_UNDEF_REQUEST = -1,
+	UDF_SCAN_REQUEST  = 0,
+	UDF_QUERY_REQUEST = 1
+} iudf_type;
+
+typedef struct iudf_origin_s {
+	udf_def		def;
+	iudf_type	type;
+	iudf_cb		cb;
+	void *		udata;
+} iudf_origin;
 
 typedef enum {
 	UDF_OPTYPE_NONE,
@@ -88,15 +98,8 @@ int      udf_rw_local(udf_call *call, write_request *wr, udf_optype *optype);
 
 // UDF_CALL related functions
 // **************************************************************************************************
-int      udf_rw_call_init_internal(udf_call *, as_transaction *);
-int      udf_rw_call_init_from_msg(udf_call *, as_msg *);
-void     udf_rw_call_destroy(udf_call *);
+udf_call *udf_rw_call_def_init_internal(udf_call * call, as_transaction *tr);
+udf_call *udf_rw_call_def_init_from_msg(udf_call *call, as_transaction *tr);
+udf_def *udf_def_init_from_msg(udf_def *def, const as_transaction *tr);
+void udf_rw_call_destroy(udf_call *call);
 // **************************************************************************************************
-
-// **************************************************************************************************
-bool     udf_rw_needcomplete(as_transaction *tr);
-bool     udf_rw_needcomplete_wr(write_request *wr);
-void     udf_rw_complete(as_transaction *tr, int retcode, char *filename, int lineno);
-// **************************************************************************************************
-
-

@@ -47,4 +47,4 @@ extern void as_dump_wr();
 extern void single_transaction_response(as_transaction *tr, as_namespace *ns,
 		as_msg_op **ops, as_bin **response_bins, uint16_t n_bins,
 		as_generation generation, uint32_t void_time, uint *written_sz,
-		char *setname);
+		const char *setname);

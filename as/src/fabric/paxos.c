@@ -40,11 +40,11 @@
 #include <unistd.h>
 
 #include "citrusleaf/alloc.h"
+#include "citrusleaf/cf_queue_priority.h"
 #include "citrusleaf/cf_random.h"
 
 #include "fault.h"
 #include "msg.h"
-#include "queue.h"
 #include "util.h"
 
 #include "base/cfg.h"
@@ -769,7 +769,7 @@ as_paxos_partition_sync_msg_apply(msg *m)
 	e += msg_get_uint32(m, AS_PAXOS_MSG_GENERATION_SEQUENCE, &gen.sequence);
 	// Older versions handled unused AS_PAXOS_MSG_GENERATION_PROPOSAL here.
 	if (gen.sequence != p->gen.sequence) {
-		cf_warning(AS_PAXOS, "sequence do not match. partition sync message not applied");
+		cf_detail(AS_PAXOS, "sequence do not match. partition sync message not applied");
 		return -1;
 	}
 
@@ -3270,7 +3270,7 @@ as_paxos_thr(void *arg)
 				 */
 
 				if (0 != as_paxos_partition_sync_msg_apply(qm->m)) {
-					cf_warning(AS_PAXOS, "unable to apply partition sync message state");
+					cf_detail(AS_PAXOS, "unable to apply partition sync message state");
 					break;
 				}
 

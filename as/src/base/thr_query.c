@@ -120,8 +120,8 @@
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "base/udf_memtracker.h"
-#include "base/udf_rw.h"
 #include "base/udf_record.h"
+#include "base/udf_rw.h"
 #include "fabric/fabric.h"
 #include "geospatial/geospatial.h"
 
@@ -251,8 +251,8 @@ struct as_query_transaction_s {
 	* NB: Read Only or Single threaded
 	*/
 	struct ai_obj            bkey;
-	udf_call                 call;     // Record UDF Details
 	as_aggr_call             agg_call; // Stream UDF Details
+	iudf_origin              origin;   // Record UDF Details
 	as_sindex_qctx           qctx;     // Secondary Index details
 	as_partition_reservation * rsv;
 };
@@ -266,7 +266,7 @@ struct as_query_transaction_s {
 // **************************************************************************************************
 typedef enum {
 	QUERY_WORK_TYPE_NONE   = -1, // Request for I/O
-	QUERY_WORK_TYPE_LOOKUP     =  0, // Request for I/O
+	QUERY_WORK_TYPE_LOOKUP =  0, // Request for I/O
 	QUERY_WORK_TYPE_AGG    =  1, // Request for Aggregation
 	QUERY_WORK_TYPE_UDF_BG =  2, // Request for running UDF on query result
 } query_work_type;
@@ -1298,51 +1298,85 @@ query_match_string_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key 
 	return true;
 }
 
+static bool
+query_match_geojson_fromval(as_query_transaction * qtr, as_val *v, as_sindex_key *skey)
+{
+	as_sindex_bin_data *start = &qtr->srange->start;
+	as_sindex_bin_data *end   = &qtr->srange->end;
+
+	if ((AS_PARTICLE_TYPE_GEOJSON != as_sindex_pktype(qtr->si->imd))
+			|| (AS_PARTICLE_TYPE_GEOJSON != start->type)
+			|| (AS_PARTICLE_TYPE_GEOJSON != end->type)) {
+		cf_debug(AS_QUERY, "query_record_matches: Type mismatch %d!=%d!=%d!=%d  binname=%s index=%s",
+				AS_PARTICLE_TYPE_GEOJSON, start->type, end->type,
+				as_sindex_pktype(qtr->si->imd), qtr->si->imd->bname,
+				qtr->si->imd->iname);
+		return false;
+	}
+
+	return as_particle_geojson_match_asval(v, qtr->srange->cellid,
+			qtr->srange->region, qtr->ns->geo2dsphere_within_strict);
+}
+
 // If the value matches foreach should stop iterating the
 bool
 query_match_mapkeys_foreach(const as_val * key, const as_val * val, void * udata)
 {
 	qtr_skey * q_s = (qtr_skey *)udata;
-	if (key->type == AS_STRING) {
+	switch (key->type) {
+	case AS_STRING:
 		// If matches return false
 		return !query_match_string_fromval(q_s->qtr, (as_val *)key, q_s->skey);
-	}
-	else if (key->type == AS_INTEGER) {
+	case AS_INTEGER:
 		// If matches return false
 		return !query_match_integer_fromval(q_s->qtr,(as_val *) key, q_s->skey);
+	case AS_GEOJSON:
+		// If matches return false
+		return !query_match_geojson_fromval(q_s->qtr,(as_val *) key, q_s->skey);
+	default:
+		// All others don't match
+		return true;
 	}
-	return true;
 }
 
 static bool
 query_match_mapvalues_foreach(const as_val * key, const as_val * val, void * udata)
 {
 	qtr_skey * q_s = (qtr_skey *)udata;
-	if (val->type == AS_STRING) {
+	switch (val->type) {
+	case AS_STRING:
 		// If matches return false
 		return !query_match_string_fromval(q_s->qtr, (as_val *)val, q_s->skey);
-	}
-	else if (val->type == AS_INTEGER) {
+	case AS_INTEGER:
 		// If matches return false
 		return !query_match_integer_fromval(q_s->qtr, (as_val *)val, q_s->skey);
+	case AS_GEOJSON:
+		// If matches return false
+		return !query_match_geojson_fromval(q_s->qtr, (as_val *)val, q_s->skey);
+	default:
+		// All others don't match
+		return true;
 	}
-	return true;
-
 }
 
 static bool
 query_match_listele_foreach(as_val * val, void * udata)
 {
 	qtr_skey * q_s = (qtr_skey *)udata;
-	if (val->type == AS_STRING) {
+	switch (val->type) {
+	case AS_STRING:
 		// If matches return false
 		return !query_match_string_fromval(q_s->qtr, val, q_s->skey);
-	}
-	else if (val->type == AS_INTEGER) {
+	case AS_INTEGER:
 		// If matches return false
 		return !query_match_integer_fromval(q_s->qtr, val, q_s->skey);
+	case AS_GEOJSON:
+		// If matches return false
+		return !query_match_geojson_fromval(q_s->qtr, val, q_s->skey);
+	default:
+		// All others don't match
+		return true;
 	}
-	return true;
 }
 /*
  * Validate record based on its content and query make sure it indeed should
@@ -1434,18 +1468,17 @@ query_record_matches(as_query_transaction *qtr, as_storage_rd *rd, as_sindex_key
 				return false;
 			}
 
-			bool iswithin =
-				as_bin_particle_geojson_match(
-				    b,
-					qtr->srange->cellid,
-					qtr->srange->region,
+			bool iswithin = as_particle_geojson_match(b->particle,
+					qtr->srange->cellid, qtr->srange->region,
 					qtr->ns->geo2dsphere_within_strict);
 
 			// We either found a valid point or a false positive.
-			if (iswithin)
+			if (iswithin) {
 				cf_atomic_int_incr(&g_config.geo_region_query_points);
-			else
+			}
+			else {
 				cf_atomic_int_incr(&g_config.geo_region_query_falsepos);
+			}
 
 			return iswithin;
 		}
@@ -1785,7 +1818,7 @@ const as_aggr_hooks query_aggr_hooks = {
 int
 query_udf_bg_tr_complete(as_transaction *tr, int retcode)
 {
-	as_query_transaction *qtr = (as_query_transaction *)tr->udata.req_udata;
+	as_query_transaction *qtr = (as_query_transaction *)tr->iudf_orig->udata;
 	if (!qtr) {
 		cf_warning(AS_QUERY, "Complete called with invalid job id");
 		return AS_QUERY_ERR;
@@ -1803,32 +1836,20 @@ query_udf_bg_tr_complete(as_transaction *tr, int retcode)
 int
 query_udf_bg_tr_start(as_query_transaction *qtr, cf_digest *keyd)
 {
-	tr_create_data d;
-
-	d.digest   = *keyd;
-	d.ns       = qtr->ns;
-	d.set[0]   = 0;   // What set ??
-	d.call     = &qtr->call;
-	d.msg_type = AS_MSG_INFO2_WRITE;
-	d.fd_h     = NULL;
-	d.trid     = 0;
-
 	as_transaction tr;
 
-	if (as_transaction_create_internal(&tr, &d)) {
+	if (as_transaction_init_iudf(&tr, qtr->ns, keyd)) {
 		qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
 		return AS_QUERY_OK;
 	}
 
-	tr.udata.req_cb     = query_udf_bg_tr_complete;
-	tr.udata.req_udata  = qtr;
-	tr.udata.req_type   = UDF_QUERY_REQUEST;
+	tr.iudf_orig = &qtr->origin;
 
 	qtr_reserve(qtr, __FILE__, __LINE__);
 	cf_atomic32_incr(&qtr->n_udf_tr_queued);
-	// Reset start time
-	tr.start_time = cf_getns();
+
 	thr_tsvc_enqueue(&tr);
+
 	return AS_QUERY_OK;
 }
 
@@ -1930,7 +1951,8 @@ query_process_ioreq(query_work *qio)
 				goto Cleanup;
 			}
 
-			if (cf_atomic64_get(qtr->n_result_records) % qtr->priority == 0)
+			int64_t nresults = cf_atomic64_get(qtr->n_result_records);
+			if (nresults > 0 && (nresults % qtr->priority == 0))
 			{
 				usleep(g_config.query_sleep_us);
 				query_check_timeout(qtr);
@@ -2582,27 +2604,22 @@ query_th(void* q_to_wait_on)
 query_type
 query_get_type(as_transaction* tr)
 {
-	as_msg_field *filename_f = as_msg_field_get(&tr->msgp->msg,
-			AS_MSG_FIELD_TYPE_UDF_FILENAME);
-
-	if (! filename_f && ! tr->udata.req_udata) {
+	if (! as_transaction_is_udf(tr)) {
 		return QUERY_TYPE_LOOKUP;
 	}
 
-	as_msg_field *udf_op_f = as_msg_field_get(&tr->msgp->msg,
-			AS_MSG_FIELD_TYPE_UDF_OP);
+	as_msg_field *udf_op_f = as_transaction_has_udf_op(tr) ?
+			as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_UDF_OP) : NULL;
 
 	if (udf_op_f && *udf_op_f->data == (uint8_t)AS_UDF_OP_AGGREGATE) {
 		return QUERY_TYPE_AGGR;
 	}
 
-	if (tr->udata.req_udata || (udf_op_f &&
-			*udf_op_f->data == (uint8_t)AS_UDF_OP_BACKGROUND)) {
+	if (udf_op_f && *udf_op_f->data == (uint8_t)AS_UDF_OP_BACKGROUND) {
 		return QUERY_TYPE_UDF_BG;
 	}
 /*
-	if (tr->udata.req_udata || (udf_op_f &&
-			*udf_op_f->data == (uint8_t)AS_UDF_OP_FOREGROUND)) {
+	if (udf_op_f && *udf_op_f->data == (uint8_t)AS_UDF_OP_FOREGROUND) {
 		return QUERY_TYPE_UDF_FG;
 	}
 */
@@ -2613,24 +2630,14 @@ query_get_type(as_transaction* tr)
  * Function aggr_query_init
  */
 int
-aggr_query_init(as_aggr_call * call, as_msg *msg, as_query_transaction *qtr)
+aggr_query_init(as_aggr_call * call, as_transaction *tr)
 {
-	if (udf_rw_call_init_from_msg((udf_call *)call, msg))
+	if (! udf_def_init_from_msg(&call->def, tr)) {
 		return AS_QUERY_ERR;
+	}
 
 	call->aggr_hooks    = &query_aggr_hooks;
 	return AS_QUERY_OK;
-}
-
-
-int
-udf_query_init(udf_call *call, as_transaction *tr)
-{
-	if (udf_rw_call_init_from_msg(call, &tr->msgp->msg)) {
-		return -1;
-	}
-	call->tr = tr;
-	return 0;
 }
 
 static int
@@ -2641,14 +2648,14 @@ query_setup_udf_call(as_query_transaction *qtr, as_transaction *tr)
 			cf_atomic64_incr(&g_config.n_lookup);
 			break;
 		case QUERY_TYPE_AGGR:
-			if (aggr_query_init(&qtr->agg_call, &tr->msgp->msg, qtr) != AS_QUERY_OK) {
+			if (aggr_query_init(&qtr->agg_call, tr) != AS_QUERY_OK) {
 				tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
 				return AS_QUERY_ERR;
 			}
 			cf_atomic64_incr(&g_config.n_aggregation);
 			break;
 		case QUERY_TYPE_UDF_BG:
-			if (udf_query_init(&qtr->call, tr) != AS_QUERY_OK) {
+			if (! udf_def_init_from_msg(&qtr->origin.def, tr)) {
 				tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
 				return AS_QUERY_ERR;
 			}
@@ -2689,7 +2696,7 @@ query_setup_fd(as_query_transaction *qtr, as_transaction *tr)
  *
  */
 static int
-query_setup(as_transaction *tr, as_query_transaction **qtrp)
+query_setup(as_transaction *tr, as_namespace *ns, as_query_transaction **qtrp)
 {
 
 #if defined(USE_SYSTEMTAP)
@@ -2709,21 +2716,6 @@ query_setup(as_transaction *tr, as_query_transaction **qtrp)
 	char *setname           = NULL;
 	as_query_transaction *qtr = NULL;
 
-	as_msg_field *nsfp = as_msg_field_get(&tr->msgp->msg,
-			AS_MSG_FIELD_TYPE_NAMESPACE);
-	if (!nsfp) {
-		cf_debug(AS_QUERY,
-				"Query must have namespace, client error");
-		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
-		goto Cleanup;
-	}
-	as_namespace *ns = as_namespace_get_bymsgfield(nsfp);
-	if (!ns) {
-		cf_debug(AS_QUERY, "Query with unavailable namespace");
-		tr->result_code = AS_PROTO_RESULT_FAIL_PARAMETER;
-		goto Cleanup;
-	}
-
 	bool has_sindex   = as_sindex_ns_has_sindex(ns);
 	if (!has_sindex) {
 		tr->result_code = AS_PROTO_RESULT_FAIL_INDEX_NOTFOUND;
@@ -2731,6 +2723,7 @@ query_setup(as_transaction *tr, as_query_transaction **qtrp)
 		goto Cleanup;
 	}
 
+	// TODO - still lots of redundant msg field parsing (e.g. for set) - fix.
 	if ((si = as_sindex_from_msg(ns, &tr->msgp->msg)) == NULL) {
 		cf_debug(AS_QUERY, "No Index Defined in the Query");
 	}
@@ -2746,7 +2739,8 @@ query_setup(as_transaction *tr, as_query_transaction **qtrp)
 
 	ASD_SINDEX_MSGRANGE_FINISHED(nodeid, trid);
 	// get optional set
-	as_msg_field *sfp = as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_SET);
+	as_msg_field *sfp = as_transaction_has_set(tr) ?
+			as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_SET) : NULL;
 	if (sfp && as_msg_field_get_value_sz(sfp) > 0) {
 		setname = cf_strndup((const char *)sfp->data, as_msg_field_get_value_sz(sfp));
 	}
@@ -2819,6 +2813,12 @@ query_setup(as_transaction *tr, as_query_transaction **qtrp)
 
 	query_setup_fd(qtr, tr);
 
+	if (qtr->job_type == QUERY_TYPE_UDF_BG) {
+		qtr->origin.type   = UDF_QUERY_REQUEST;
+		qtr->origin.cb     = query_udf_bg_tr_complete;
+		qtr->origin.udata  = (void *)qtr;
+	}
+
 	// Consume everything from tr rest will be picked up in init
 	qtr->trid                = as_transaction_trid(tr);
 	qtr->ns                  = ns;
@@ -2866,14 +2866,14 @@ Cleanup:
  * 		Either call query_transaction_done or Cleanup to free the msgp
  */
 int
-as_query(as_transaction *tr)
+as_query(as_transaction *tr, as_namespace *ns)
 {
 	if (tr) {
 		QUERY_HIST_INSERT_DATA_POINT(query_txn_q_wait_hist, tr->start_time);
 	}
 
 	as_query_transaction *qtr;
-	int rv = query_setup(tr, &qtr);
+	int rv = query_setup(tr, ns, &qtr);
 
 	if (rv == AS_QUERY_DONE) {
 		// Send FIN packet to client to ignore this.
@@ -3189,13 +3189,6 @@ as_query_get_jobstat_all(int * size)
 	rchash_reduce(g_query_job_hash, as_mon_query_jobstat_reduce_fn, &job_pool);
 	*size              = job_pool.index;
 	return job_stats;
-}
-
-udf_call *
-as_query_get_udf_call(void *ptr)
-{
-	as_query_transaction *qtr = (as_query_transaction *)ptr;
-	return &qtr->call;
 }
 
 void

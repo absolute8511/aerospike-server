@@ -281,8 +281,8 @@
 #include "base/thr_proxy.h"
 #include "base/udf_rw.h"
 
-#include <aerospike/as_types.h>
-#include <aerospike/as_msgpack.h>
+#include "aerospike/as_types.h"
+#include "aerospike/as_msgpack.h"
 
 // Use this to turn on/off debug sections
 #define DEBUG false

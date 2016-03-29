@@ -125,6 +125,8 @@ as_namespace_create(char *name, uint16_t replication_factor)
 	ns->ldt_page_size = 8192; // default ldt page size is 8192
 	ns->ldt_gc_sleep_us = 500; // Default is sleep for .5Ms. This translates to constant 2k Subrecord
 							   // GC per second.
+	ns->migrate_order = 5;
+	ns->migrate_sleep = 1;
 	ns->obj_size_hist_max = OBJ_SIZE_HIST_NUM_BUCKETS;
 	ns->single_bin = false;
 	ns->stop_writes_pct = 0.9; // stop writes when 90% of either memory or disk is used
@@ -340,13 +342,6 @@ as_namespace_get_bymsgfield(as_msg_field *fp)
 }
 
 
-as_namespace *
-as_namespace_get_bymsgfield_unswap(as_msg_field *fp)
-{
-	return as_namespace_get_bybuf((byte *)fp->data, as_msg_field_get_value_sz_unswap(fp));
-}
-
-
 as_namespace_id
 as_namespace_getid_bymsgfield(as_msg_field *fp)
 {
@@ -464,21 +459,8 @@ as_namespace_eval_write_state(as_namespace *ns, bool *hwm_breached, bool *stop_w
 	}
 }
 
-/* as_namespace_bless
- * Bless a namespace: set all its partitions to be consistent */
-void
-as_namespace_bless(as_namespace *ns)
-{
-	if (NULL == ns) {
-		return;
-	}
-
-	for (int i = 0; i < AS_PARTITIONS; i++) {
-		as_partition_bless(&ns->partitions[i]);
-	}
-}
-
-const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id)
+const char *
+as_namespace_get_set_name(as_namespace *ns, uint16_t set_id)
 {
 	// Note that set_id is 1-based, but cf_vmap index is 0-based.
 	// (This is because 0 in the index structure means 'no set'.)
@@ -493,7 +475,8 @@ const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id)
 			p_set->name : NULL;
 }
 
-uint16_t as_namespace_get_set_id(as_namespace *ns, const char *set_name)
+uint16_t
+as_namespace_get_set_id(as_namespace *ns, const char *set_name)
 {
 	uint32_t idx;
 
@@ -502,7 +485,8 @@ uint16_t as_namespace_get_set_id(as_namespace *ns, const char *set_name)
 }
 
 // At the moment this is only used by the enterprise build security feature.
-uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name)
+uint16_t
+as_namespace_get_create_set_id(as_namespace *ns, const char *set_name)
 {
 	if (! set_name) {
 		// Should be impossible.
@@ -559,50 +543,59 @@ uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name)
 	return INVALID_SET_ID;
 }
 
-int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool apply_restrictions)
+int
+as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool apply_restrictions)
 {
-	if (! set_name) {
-		// Should be impossible.
-		cf_warning(AS_NAMESPACE, "null set name");
-		return -1;
-	}
+	cf_assert(set_name, AS_NAMESPACE, CF_CRITICAL, "null set name");
+
+	return as_namespace_get_create_set_w_len(ns, set_name, strlen(set_name),
+			p_set_id, apply_restrictions);
+}
+
+int
+as_namespace_get_create_set_w_len(as_namespace *ns, const char *set_name, size_t len, uint16_t *p_set_id, bool apply_restrictions)
+{
+	cf_assert(set_name, AS_NAMESPACE, CF_CRITICAL, "null set name");
+	cf_assert(len != 0, AS_NAMESPACE, CF_CRITICAL, "empty set name");
 
 	uint32_t idx;
-	cf_vmapx_err result = cf_vmapx_get_index(ns->p_sets_vmap, set_name, &idx);
+	cf_vmapx_err result = cf_vmapx_get_index_w_len(ns->p_sets_vmap, set_name, len, &idx);
 	bool already_in_vmap = false;
 
 	if (result == CF_VMAPX_OK) {
 		already_in_vmap = true;
 	}
 	else if (result == CF_VMAPX_ERR_NAME_NOT_FOUND) {
-		as_set set;
-
-		memset(&set, 0, sizeof(set));
-
 		// Check name length just once, here at insertion. (Other vmap calls are
 		// safe if name is too long - they return CF_VMAPX_ERR_NAME_NOT_FOUND.)
-		strncpy(set.name, set_name, AS_SET_NAME_MAX_SIZE);
+		if (len >= AS_SET_NAME_MAX_SIZE) {
+			char bad_name[AS_SET_NAME_MAX_SIZE];
 
-		if (set.name[AS_SET_NAME_MAX_SIZE - 1]) {
-			set.name[AS_SET_NAME_MAX_SIZE - 1] = 0;
+			memcpy(bad_name, set_name, AS_SET_NAME_MAX_SIZE - 1);
+			bad_name[AS_SET_NAME_MAX_SIZE - 1] = 0;
 
-			cf_info(AS_NAMESPACE, "set name %s... too long", set.name);
+			cf_warning(AS_NAMESPACE, "set name %s... too long", bad_name);
 			return -1;
 		}
 
+		as_set set;
+
+		memset(&set, 0, sizeof(set)); // paranoia - vmap null-terminates
+
+		memcpy(set.name, set_name, len);
 		set.num_elements = 1;
-		result = cf_vmapx_put_unique(ns->p_sets_vmap, &set, &idx);
+		result = cf_vmapx_put_unique_w_len(ns->p_sets_vmap, &set, len, &idx);
 
 		if (result == CF_VMAPX_ERR_NAME_EXISTS) {
 			already_in_vmap = true;
 		}
 		else if (result == CF_VMAPX_ERR_FULL) {
-			cf_info(AS_NAMESPACE, "at set names limit, can't add %s", set.name);
+			cf_warning(AS_NAMESPACE, "at set names limit, can't add %s", set.name);
 			return -1;
 		}
 		else if (result != CF_VMAPX_OK) {
 			// Currently, remaining errors are all some form of out-of-memory.
-			cf_info(AS_NAMESPACE, "error %d, can't add %s", result, set.name);
+			cf_warning(AS_NAMESPACE, "error %d, can't add %s", result, set.name);
 			return -1;
 		}
 	}
@@ -635,7 +628,8 @@ int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t
 	return 0;
 }
 
-as_set *as_namespace_init_set(as_namespace *ns, const char *set_name)
+as_set *
+as_namespace_init_set(as_namespace *ns, const char *set_name)
 {
 	if (! set_name) {
 		return NULL;
@@ -730,7 +724,8 @@ append_set_props(as_set *p_set, cf_dyn_buf *db)
 	cf_dyn_buf_append_char(db, ';');
 }
 
-void as_namespace_get_set_info(as_namespace *ns, const char *set_name, cf_dyn_buf *db)
+void
+as_namespace_get_set_info(as_namespace *ns, const char *set_name, cf_dyn_buf *db)
 {
 	as_set *p_set;
 
@@ -775,7 +770,8 @@ as_namespace_adjust_set_memory(as_namespace *ns, uint16_t set_id,
 	}
 }
 
-void as_namespace_release_set_id(as_namespace *ns, uint16_t set_id)
+void
+as_namespace_release_set_id(as_namespace *ns, uint16_t set_id)
 {
 	if (set_id == INVALID_SET_ID) {
 		return;

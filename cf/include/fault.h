@@ -175,6 +175,8 @@ extern void cf_fault_sink_logroll(void);
 extern void cf_fault_use_local_time(bool val);
 extern bool cf_fault_is_using_local_time();
 
+extern cf_fault_severity cf_fault_filter[];
+
 // Define the mechanism that we'll use to write into the Server Log.
 // cf_fault_event() is "regular" logging
 extern void cf_fault_event(const cf_fault_context,
@@ -198,15 +200,19 @@ extern void cf_fault_event_nostack(const cf_fault_context,
 #define __FILENAME__ ""
 #endif
 
-// The "no stack" versions.
-#define cf_assert_nostack(a, context, severity, __msg, ...) \
-		((void)((a) ? (void)0 : cf_fault_event_nostack((context), (severity), __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__)))
-#define cf_crash_nostack(context, __msg, ...) \
-		(cf_fault_event_nostack((context), CF_CRITICAL, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__))
-
 // The "regular" version.
 #define cf_assert(a, context, severity, __msg, ...) \
-	((void)((a) ? (void)0 : cf_fault_event((context), (severity), __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__)))
+		((a) || severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_event((context), (severity), __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__))
+
+// The "no stack" versions.
+#define cf_assert_nostack(a, context, severity, __msg, ...) \
+		((a) || severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_event_nostack((context), (severity), __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__))
+#define cf_crash_nostack(context, __msg, ...) \
+		cf_fault_event_nostack((context), CF_CRITICAL, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__)
 
 #define MAX_BACKTRACE_DEPTH 50
 
@@ -232,16 +238,18 @@ do { \
 // The "regular" versions.
 // Note that we use the function name ONLY in crash(), debug() and detail(),
 // as this information is relevant mostly to the Aerospike software engineers.
+#define __SEVLOG(severity, context, __msg, ...) \
+		(severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_event((context), severity, __FILENAME__, NULL, __LINE__, (__msg), ##__VA_ARGS__))
+
 #define cf_crash(context, __msg, ...) \
-	(cf_fault_event((context), CF_CRITICAL, __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__))
-#define cf_warning(context, __msg, ...) \
-	(cf_fault_event((context), CF_WARNING, __FILENAME__, NULL, __LINE__, (__msg), ##__VA_ARGS__))
-#define cf_info(context, __msg, ...) \
-	(cf_fault_event((context), CF_INFO, __FILENAME__, NULL, __LINE__, (__msg), ##__VA_ARGS__))
-#define cf_debug(context, __msg, ...) \
-	(cf_fault_event((context), CF_DEBUG, __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__))
-#define cf_detail(context, __msg, ...) \
-	(cf_fault_event((context), CF_DETAIL, __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__))
+		cf_fault_event((context), CF_CRITICAL, __FILENAME__, NULL, __LINE__, (__msg), ##__VA_ARGS__)
+
+#define cf_warning(...) __SEVLOG(CF_WARNING, ##__VA_ARGS__)
+#define cf_info(...) __SEVLOG(CF_INFO, ##__VA_ARGS__)
+#define cf_debug(...) __SEVLOG(CF_DEBUG, ##__VA_ARGS__)
+#define cf_detail(...) __SEVLOG(CF_DETAIL, ##__VA_ARGS__)
 
 // In addition to the existing LOG calls, we will now add a new mechanism
 // that will the ability to print out a BINARY ARRAY, in a general manner, at
@@ -249,31 +257,34 @@ do { \
 // This is a general mechanism that can be used to express a binary array as
 // a hex or Base64 value, but we'll often use it to print a full Digest Value,
 // in either Hex format or Base64 format.
+#define __BINARY_SEVLOG(severity, context, ptr, len, DT, __msg, ...) \
+		(severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_event2((context), severity, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
+
 #define cf_crash_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_warning_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_WARNING, __FILENAME__, NULL, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_info_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_INFO, __FILENAME__, NULL, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_debug_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_DEBUG, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_detail_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_DETAIL, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
+		cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__)
+
+#define cf_warning_binary(...) __BINARY_SEVLOG(CF_WARNING, ##__VA_ARGS__)
+#define cf_info_binary(...) __BINARY_SEVLOG(CF_INFO, ##__VA_ARGS__)
+#define cf_debug_binary(...) __BINARY_SEVLOG(CF_DEBUG, ##__VA_ARGS__)
+#define cf_detail_binary(...) __BINARY_SEVLOG(CF_DETAIL, ##__VA_ARGS__)
 
 // This set of log calls specifically handles DIGEST values.
 // Note that we use the function name ONLY in crash(), debug() and detail(),
 // as this information is relevant mostly to the Aerospike software engineers.
-#define cf_crash_digest(context, ptr,__msg, ...) \
-	(cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_warning_digest(context, ptr, __msg, ...) \
-	(cf_fault_event2((context), CF_WARNING, __FILENAME__, NULL,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_info_digest(context, ptr, __msg, ...) \
-	(cf_fault_event2((context), CF_INFO, __FILENAME__, NULL,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_debug_digest(context, ptr, __msg, ...) \
-	(cf_fault_event2((context), CF_DEBUG, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_detail_digest(context, ptr, __msg, ...) \
-	(cf_fault_event2((context), CF_DETAIL, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
+#define __DIGEST_SEVLOG(severity, context, ptr,__msg, ...) \
+		(severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_event2((context), severity, __FILENAME__, __func__, __LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
 
+#define cf_crash_digest(context, ptr,__msg, ...) \
+		cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __func__, __LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__)
+
+#define cf_warning_digest(...)  __DIGEST_SEVLOG(CF_WARNING, ##__VA_ARGS__)
+#define cf_info_digest(...)  __DIGEST_SEVLOG(CF_INFO, ##__VA_ARGS__)
+#define cf_debug_digest(...)  __DIGEST_SEVLOG(CF_DEBUG, ##__VA_ARGS__)
+#define cf_detail_digest(...)  __DIGEST_SEVLOG(CF_DETAIL, ##__VA_ARGS__)
 
 // strerror override. GP claims standard strerror has a rare but existant concurrency hole, this fixes that hole
 extern char *cf_strerror(const int err);

@@ -191,4 +191,3 @@ Please refer to the full documentation on the Aerospike web site,
 `www.aerospike.com`, for more detailed information about configuring
 and running the Aerospike Database Server, as well as the about the
 Aerospike client API packages for popular programming languages.
-

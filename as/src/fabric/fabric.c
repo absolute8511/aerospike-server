@@ -46,11 +46,12 @@
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_ll.h"
+#include "citrusleaf/cf_queue.h"
+#include "citrusleaf/cf_queue_priority.h"
 #include "citrusleaf/cf_shash.h"
 
 #include "fault.h"
 #include "msg.h"
-#include "queue.h"
 #include "socket.h"
 #include "util.h"
 
@@ -1936,7 +1937,7 @@ int
 as_fabric_send(cf_node node, msg *m, int priority )
 {
 	if (g_fabric_args == 0) {
-		cf_debug(AS_FABRIC, "fabric send without initilaized fabric, BOO!");
+		cf_debug(AS_FABRIC, "fabric send without initialized fabric, BOO!");
 		return(AS_FABRIC_ERR_UNINITIALIZED);
 	}
 
@@ -1950,7 +1951,7 @@ as_fabric_send(cf_node node, msg *m, int priority )
 
 	cf_detail(AS_FABRIC, "fabric send: m %p to node %"PRIx64, m, node);
 
-	// Short circut for self!
+	// Short circuit for self!
 	if (g_config.self_node == node) {
 
 		// statistic!
@@ -1987,7 +1988,7 @@ as_fabric_send(cf_node node, msg *m, int priority )
 	do {
 		rv = cf_queue_pop(fne->xmit_buffer_queue, &fb, CF_QUEUE_NOWAIT);
 		if ((CF_QUEUE_OK == rv) && (fb->fd == -1 || fb->failed)) {
-			cf_warning(AS_FABRIC, "releasing fb: %p with fne: %p and fd: %d (%s)", fb, fb->fne, fb->fd, fb->failed ? "Failed" : "Missing");
+			cf_detail(AS_FABRIC, "releasing fb: %p with fne: %p and fd: %d (%s)", fb, fb->fne, fb->fd, fb->failed ? "Failed" : "Missing");
 			fabric_buffer_release(fb);
 			fb = 0;
 		}

@@ -20,9 +20,9 @@
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
 
-#include <aerospike/as_list.h>
-#include <aerospike/as_list_iterator.h>
-#include <aerospike/as_msgpack.h>
+#include "aerospike/as_list.h"
+#include "aerospike/as_list_iterator.h"
+#include "aerospike/as_msgpack.h"
 
 #include "base/udf_arglist.h"
 #include "base/proto.h"

@@ -36,10 +36,10 @@
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_digest.h"
+#include "citrusleaf/cf_queue.h"
 
 #include "dynbuf.h"
 #include "hist.h"
-#include "queue.h"
 #include "util.h"
 
 #include "base/cfg.h"
@@ -355,7 +355,7 @@ as_batch_direct_init()
 
 // Put batch request on a separate batch queue.
 int
-as_batch_direct_queue_task(as_transaction* tr)
+as_batch_direct_queue_task(as_transaction* tr, as_namespace *ns)
 {
 	cf_atomic_int_incr(&g_config.batch_initiate);
 
@@ -365,12 +365,6 @@ as_batch_direct_queue_task(as_transaction* tr)
 	}
 
 	as_msg* msg = &tr->msgp->msg;
-
-	as_msg_field* nsfp = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_NAMESPACE);
-	if (! nsfp) {
-		cf_warning(AS_BATCH, "Batch namespace is required.");
-		return AS_PROTO_RESULT_FAIL_NAMESPACE;
-	}
 
 	as_msg_field* dfp = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_DIGEST_RIPE_ARRAY);
 	if (! dfp) {
@@ -390,12 +384,7 @@ as_batch_direct_queue_task(as_transaction* tr)
 	btr.end_time = tr->end_time;
 	btr.get_data = !(msg->info1 & AS_MSG_INFO1_GET_NOBINDATA);
 	btr.complete = false;
-
-	btr.ns = as_namespace_get_bymsgfield(nsfp);
-	if (! btr.ns) {
-		cf_warning(AS_BATCH, "Batch namespace is required.");
-		return AS_PROTO_RESULT_FAIL_NAMESPACE;
-	}
+	btr.ns = ns;
 
 	// Create the master digest table.
 	btr.digests = (batch_digests*) cf_malloc(sizeof(batch_digests) + (sizeof(batch_digest) * n_digests));

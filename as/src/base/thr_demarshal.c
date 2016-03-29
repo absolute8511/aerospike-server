@@ -37,11 +37,11 @@
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
+#include "citrusleaf/cf_queue.h"
 
 #include "fault.h"
 #include "jem.h"
 #include "hist.h"
-#include "queue.h"
 #include "socket.h"
 
 #include "base/as_stap.h"
@@ -359,7 +359,7 @@ thr_demarshal(void *arg)
 					// ignore the accept error and move on.
 					if ((errno == EMFILE) || (errno == ENFILE)) {
 						if (last_fd_print != (cf_getms() / 1000L)) {
-							cf_info(AS_DEMARSHAL, " warning: hit OS file descript limit (EMFILE on accept), consider raising limit");
+							cf_warning(AS_DEMARSHAL, "Hit OS file descriptor limit (EMFILE on accept). Consider raising limit for uid %d", g_config.uid);
 							last_fd_print = cf_getms() / 1000L;
 						}
 						continue;
@@ -684,7 +684,6 @@ thr_demarshal(void *arg)
 					has_extra_ref   = true;
 					tr.proto_fd_h   = fd_h;
 					tr.start_time   = now_ns; // set transaction start time
-					tr.preprocessed = false;
 
 					if (! as_proto_is_valid_type(proto_p)) {
 						cf_warning(AS_DEMARSHAL, "unsupported proto message type %u", proto_p->type);
@@ -751,14 +750,22 @@ thr_demarshal(void *arg)
 						goto NextEvent;
 					}
 
-					ASD_TRANS_DEMARSHAL(nodeid, (uint64_t) tr.msgp);
-
 					// Fast path for batch requests.
 					if (tr.msgp->msg.info1 & AS_MSG_INFO1_BATCH) {
 						as_batch_queue_task(&tr);
 						cf_atomic_int_incr(&g_config.proto_transactions);
 						goto NextEvent;
 					}
+
+					// Swap as_msg fields and bin-ops to host order, and flag
+					// which fields are present, to reduce re-parsing.
+					if (! as_transaction_demarshal_prepare(&tr)) {
+						as_transaction_demarshal_error(&tr, AS_PROTO_RESULT_FAIL_PARAMETER);
+						cf_atomic_int_incr(&g_config.proto_transactions);
+						goto NextEvent;
+					}
+
+					ASD_TRANS_DEMARSHAL(nodeid, (uint64_t) tr.msgp, as_transaction_trid(&tr));
 
 					// Either process the transaction directly in this thread,
 					// or queue it for processing by another thread (tsvc/info).

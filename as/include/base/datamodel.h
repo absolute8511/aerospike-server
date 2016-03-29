@@ -35,11 +35,11 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <aerospike/as_val.h>
-#include <citrusleaf/cf_atomic.h>
-#include <citrusleaf/cf_clock.h>
-#include <citrusleaf/cf_digest.h>
-#include <citrusleaf/cf_shash.h>
+#include "aerospike/as_val.h"
+#include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_clock.h"
+#include "citrusleaf/cf_digest.h"
+#include "citrusleaf/cf_shash.h"
 
 #include "arenax.h"
 #include "dynbuf.h"
@@ -289,8 +289,9 @@ extern uint32_t as_bin_particle_string_ptr(const as_bin *b, char **p_value);
 typedef void * geo_region_t;
 #define MAX_REGION_CELLS    32
 #define MAX_REGION_LEVELS   30
-extern size_t as_bin_particle_geojson_cellids(as_bin *b, uint64_t **pp_cells); // TODO - will we ever need this?
-extern bool as_bin_particle_geojson_match(as_bin *b, uint64_t cellid, geo_region_t region, bool is_strict);
+extern size_t as_bin_particle_geojson_cellids(const as_bin *b, uint64_t **pp_cells);
+extern bool as_particle_geojson_match(as_particle *p, uint64_t cellid, geo_region_t region, bool is_strict);
+extern bool as_particle_geojson_match_asval(const as_val *val, uint64_t cellid, geo_region_t region, bool is_strict);
 
 // list:
 struct cdt_payload_s;
@@ -476,6 +477,7 @@ as_bin_get_particle_type(const as_bin *b) {
 /* Bin function declarations */
 extern int16_t as_bin_get_id(as_namespace *ns, const char *name);
 extern uint16_t as_bin_get_or_assign_id(as_namespace *ns, const char *name);
+extern uint16_t as_bin_get_or_assign_id_w_len(as_namespace *ns, const char *name, size_t len);
 extern const char* as_bin_get_name_from_id(as_namespace *ns, uint16_t id);
 extern bool as_bin_name_within_quota(as_namespace *ns, const char *name);
 extern uint16_t as_bin_get_n_bins(as_record *r, as_storage_rd *rd);
@@ -678,7 +680,7 @@ struct as_partition_s {
 
 	size_t n_dupl;
 	cf_node dupl_nodes[AS_CLUSTER_SZ];
-	bool waiting_for_master;
+	uint8_t master_wait_state;
 	as_partition_vinfo primary_version_info; // the version of the primary partition in the cluster
 	as_partition_vinfo version_info;         // the version of my partition here and now
 
@@ -766,12 +768,11 @@ typedef struct as_partition_states_s {
 /* Partition function declarations */
 extern void as_partition_init(as_partition *p, as_namespace *ns, int pid);
 extern void as_partition_reinit(as_partition *p, as_namespace *ns, int pid);
-extern void as_partition_bless(as_partition *p);
 extern bool is_partition_null(as_partition_vinfo *vinfo);
 extern cf_node as_partition_getreplica_read(as_namespace *ns, as_partition_id p);
 extern int as_partition_getreplica_readall(as_namespace *ns, as_partition_id p, cf_node *nv);
 extern cf_node as_partition_getreplica_write(as_namespace *ns, as_partition_id p);
-#define as_partition_isconsistent(_n, _p) (SYNC == ((_n)->consistency[(_p)]))
+cf_node as_partition_proxyee_redirect(as_namespace *ns, as_partition_id pid);
 
 // reserve_query - 
 extern int as_partition_reserve_query(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv);
@@ -800,8 +801,6 @@ extern void as_partition_getreplica_master_str(cf_dyn_buf *db);
 extern void as_partition_get_replicas_all_str(cf_dyn_buf *db);
 extern void as_partition_getinfo_str(cf_dyn_buf *db);
 extern void as_partition_getstates(as_partition_states *ps);
-
-extern void as_partition_getreplica_write_node(as_namespace *ns, cf_node *node_a);
 
 extern void as_partition_balance();
 extern void as_partition_balance_init();
@@ -956,6 +955,8 @@ struct as_namespace_s {
 #endif
 
 	/* Replication management */
+	uint32_t					migrate_order;
+	uint32_t					migrate_sleep;
 	uint16_t					replication_factor;
 	uint16_t					cfg_replication_factor;
 	conflict_resolution_pol		conflict_resolution_policy;
@@ -1022,6 +1023,10 @@ struct as_namespace_s {
 	float cache_read_pct;
 
 	void *storage_private;
+
+	// TODO - could use n_devices in general, if we set it during config parse.
+	int n_devices; // if using queue-per-device, store the number of devices used by this namespace
+	int dev_q_offset; // if using queue-per-device, where this namespace's transaction queues are
 
 	/* data store management */
 	uint64_t	memory_size;
@@ -1172,11 +1177,7 @@ as_set_stop_writes(as_set *p_set) {
 static inline void
 as_bin_set_id_from_name_buf(as_namespace *ns, as_bin *b, byte *buf, int len) {
 	if (! ns->single_bin) {
-		char name[len + 1];
-
-		memcpy(name, buf, len);
-		name[len] = 0;
-		b->id = as_bin_get_or_assign_id(ns, name);
+		b->id = as_bin_get_or_assign_id_w_len(ns, (const char *)buf, len);
 	}
 }
 
@@ -1212,12 +1213,11 @@ extern bool as_namespace_configure_sets(as_namespace *ns);
 extern as_namespace *as_namespace_get_byname(char *name);
 extern as_namespace *as_namespace_get_byid(uint id);
 extern as_namespace *as_namespace_get_bymsgfield(struct as_msg_field_s *fp);
-extern as_namespace *as_namespace_get_bymsgfield_unswap(struct as_msg_field_s *fp);
 extern as_namespace *as_namespace_get_bybuf(uint8_t *name, size_t len);
 extern as_namespace_id as_namespace_getid_bymsgfield(struct as_msg_field_s *fp);
 extern void as_namespace_eval_write_state(as_namespace *ns, bool *hwm_breached, bool *stop_writes);
-extern void as_namespace_bless(as_namespace *ns);
 extern int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool apply_restrictions);
+extern int as_namespace_get_create_set_w_len(as_namespace *ns, const char *set_name, size_t len, uint16_t *p_set_id, bool apply_restrictions);
 extern as_set * as_namespace_init_set(as_namespace *ns, const char *set_name);
 extern const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id);
 extern uint16_t as_namespace_get_set_id(as_namespace *ns, const char *set_name);

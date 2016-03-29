@@ -22,9 +22,10 @@
 
 #pragma once
 
+#include "base/datamodel.h"
 #include "base/transaction.h"
 
 int as_batch_direct_init();
-int as_batch_direct_queue_task(as_transaction* tr);
+int as_batch_direct_queue_task(as_transaction* tr, as_namespace *ns);
 int as_batch_direct_queue_size();
 int as_batch_direct_threads_resize(uint32_t threads);

@@ -2379,7 +2379,7 @@ static int as_smd_delete_external_metadata_reduce_fn(void *key, uint32_t keylen,
 	as_smd_t *smd = (as_smd_t *) udata;
 
 	rchash_reduce(module_obj->external_metadata, as_smd_reduce_delete_fn, smd);
-	cf_debug(AS_SMD, "All the entries in the scoreboard has been deleted");
+	cf_debug(AS_SMD, "All the entries in the scoreboard have been deleted");
 
 	return 0;
 }
@@ -3044,7 +3044,10 @@ int as_smd_majority_consensus_merge(char *module, as_smd_item_list_t **merged_li
 
 			// Note: The value (not key) of the metadata item is used as the key in merge_hash.
 			char  key[AS_SMD_MAJORITY_CONSENSUS_KEYSIZE] = {"\0"};
-			if (!(curitem->value) || !(strlen(curitem->value))) {
+			if (!curitem) {
+				cf_warning(AS_SMD, "In SMD module \"%s\", in metadata item list %d, skipping invalid NULL item %d during merge resolution", module, i, j);
+				continue;
+			} else if (!(curitem->value) || !(strlen(curitem->value))) {
 				cf_warning(AS_SMD, "In SMD module \"%s\", in metadata item list %d from node %016lX, item %d, key \"%s\" has an invalid NULL value ~~ skipping it for consideration during merge resolution", curitem->module_name, i, curitem->node_id, j, curitem->key);
 				continue;
 			}

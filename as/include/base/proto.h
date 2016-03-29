@@ -32,9 +32,9 @@
 #include <string.h>
 #include <netinet/in.h>
 
-#include <aerospike/as_val.h>
-#include <citrusleaf/cf_digest.h>
-#include <citrusleaf/cf_vector.h>
+#include "aerospike/as_val.h"
+#include "citrusleaf/cf_digest.h"
+#include "citrusleaf/cf_vector.h"
 
 #include "dynbuf.h"
 
@@ -45,6 +45,7 @@ struct as_index_s;
 struct as_storage_rd_s;
 struct as_namespace_s;
 struct as_file_handle_s;
+struct as_transaction_s;
 
 // These numbers match with cl_types.h on the client
 
@@ -210,23 +211,27 @@ typedef struct as_msg_field_s {
 	uint8_t data[];
 } __attribute__((__packed__)) as_msg_field;
 
-typedef struct map_args_t {
-	int    argc;
-	char **kargv;
-	char **vargv;
-} map_args_t;
+// For as_transaction::field_types, a bit-field to mark which fields are in the
+// as_msg.
+#define AS_MSG_FIELD_BIT_NAMESPACE			0x00000001
+#define AS_MSG_FIELD_BIT_SET				0x00000002
+#define AS_MSG_FIELD_BIT_KEY				0x00000004
+#define AS_MSG_FIELD_BIT_DIGEST_RIPE		0x00000008
+#define AS_MSG_FIELD_BIT_DIGEST_RIPE_ARRAY	0x00000010
+#define AS_MSG_FIELD_BIT_TRID				0x00000020
+#define AS_MSG_FIELD_BIT_SCAN_OPTIONS		0x00000040
+#define AS_MSG_FIELD_BIT_INDEX_NAME			0x00000080
+#define	AS_MSG_FIELD_BIT_INDEX_RANGE		0x00000100
+#define AS_MSG_FIELD_BIT_INDEX_TYPE  		0x00000200
+#define AS_MSG_FIELD_BIT_UDF_FILENAME		0x00000400
+#define AS_MSG_FIELD_BIT_UDF_FUNCTION		0x00000800
+#define AS_MSG_FIELD_BIT_UDF_ARGLIST		0x00001000
+#define AS_MSG_FIELD_BIT_UDF_OP				0x00002000
+#define AS_MSG_FIELD_BIT_QUERY_BINLIST		0x00004000
+#define AS_MSG_FIELD_BIT_BATCH				0x00008000
+#define AS_MSG_FIELD_BIT_BATCH_WITH_SET		0x00010000
 
-typedef struct index_metadata_t {
-	char     *iname;
-	int       ilen;
-	char     *bname;
-	int       blen;
-	char     *type;
-	int       tlen;
-	int       msg_sz;
-	uint8_t   isuniq;
-	uint8_t   istime;
-} index_metadata_t;
+// as_msg ops
 
 #define AS_MSG_OP_READ 1			// read the value in question
 #define AS_MSG_OP_WRITE 2			// write the value in question
@@ -388,10 +393,17 @@ as_msg_field_get_next_unswap(as_msg_field *mf)
 	return (as_msg_field*)(((uint8_t*)mf) + sizeof(mf->field_sz) + ntohl(mf->field_sz));
 }
 
+static inline uint8_t *
+as_msg_field_skip(as_msg_field *mf)
+{
+	// At least 1 byte always follow field_sz.
+	return mf->field_sz == 0 ? NULL : (uint8_t*)mf + sizeof(mf->field_sz) + mf->field_sz;
+}
+
 /* as_msg_field_get
  * Retrieve a specific field from a message */
 static inline as_msg_field *
-as_msg_field_get(as_msg *msg, uint8_t type)
+as_msg_field_get(const as_msg *msg, uint8_t type)
 {
 	uint16_t n;
 	as_msg_field *fp = NULL;
@@ -419,6 +431,13 @@ static inline as_msg_op *
 as_msg_op_get_next(as_msg_op *op)
 {
 	return (as_msg_op*)(((uint8_t*)op) + sizeof(uint32_t) + op->op_sz);
+}
+
+static inline uint8_t *
+as_msg_op_skip(as_msg_op *op)
+{
+	// At least 4 bytes always follow op_sz.
+	return op->op_sz < 4 ? NULL : (uint8_t*)op + sizeof(op->op_sz) + op->op_sz;
 }
 
 /* as_msg_field_getnext
@@ -480,10 +499,7 @@ as_proto_wrapped_is_valid(const as_proto *proto, size_t size)
 extern void as_proto_swap(as_proto *m);
 extern void as_msg_swap_header(as_msg *m);
 extern void as_msg_swap_field(as_msg_field *mf);
-extern int as_msg_swap_fields(as_msg *m, void *limit);
 extern void as_msg_swap_op(as_msg_op *op);
-extern int as_msg_swap_ops(as_msg *m, void *limit);
-extern int as_msg_swap_fields_and_ops(as_msg *m, void *limit);
 extern int as_msg_send_reply(struct as_file_handle_s *fd_h, uint32_t result_code,
 		uint32_t generation, uint32_t void_time, as_msg_op **ops,
 		struct as_bin_s **bins, uint16_t bin_count, struct as_namespace_s *ns,
@@ -507,19 +523,18 @@ extern int as_msg_make_val_response_bufbuilder(const as_val *val, cf_buf_builder
 extern int as_msg_send_response(int fd, uint8_t* buf, size_t len, int flags);
 extern int as_msg_send_fin(int fd, uint32_t result_code);
 
-extern bool as_msg_peek_data_in_memory(cl_msg *msgp);
+extern bool as_msg_peek_data_in_memory(const as_msg *m);
 
 // To find out key things about the message before actually reading it.
 typedef struct {
 	int       info1;
-	int       info2;
 	cf_digest keyd;
 	int       ns_queue_offset;
 	int       ns_n_devices;
 } proto_peek;
 
 // Always succeeds, sometimes finds nothing.
-extern void as_msg_peek(cl_msg *m, proto_peek *peek);
+extern void as_msg_peek(const struct as_transaction_s *tr, proto_peek *peek);
 
 extern uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
 		const char *set, int set_len, const cf_digest *d, cf_digest *d_ret,
@@ -529,12 +544,12 @@ extern uint8_t * as_msg_write_header(uint8_t *buf, size_t msg_sz, uint info1,
 		uint info2, uint info3, uint32_t generation, uint32_t record_ttl,
 		uint32_t transaction_ttl, uint32_t n_fields, uint32_t n_ops);
 
-// Async IO 
+// Async IO
 typedef int (* as_netio_finish_cb) (void *udata, int retcode);
 typedef int (* as_netio_start_cb) (void *udata, int seq);
 typedef struct as_netio_s {
 	as_netio_finish_cb         finish_cb;
-	as_netio_start_cb          start_cb;	
+	as_netio_start_cb          start_cb;
 	void                     * data;
 	// fd and buffer
 	struct as_file_handle_s  * fd_h;
@@ -550,8 +565,8 @@ int as_netio_send(as_netio *io, void *q, bool);
 
 #define AS_NETIO_OK        0
 #define AS_NETIO_CONTINUE  1
-#define AS_NETIO_ERR       2 
-#define AS_NETIO_IO_ERR    3 
+#define AS_NETIO_ERR       2
+#define AS_NETIO_IO_ERR    3
 
 // These values correspond to client protocol values - do not change them!
 typedef enum as_udf_op {

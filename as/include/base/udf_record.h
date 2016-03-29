@@ -26,10 +26,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <aerospike/as_rec.h>
-#include <aerospike/as_hashmap.h>
-#include <aerospike/as_val.h>
-#include <citrusleaf/cf_atomic.h>
+#include "aerospike/as_rec.h"
+#include "aerospike/as_hashmap.h"
+#include "aerospike/as_val.h"
+#include "citrusleaf/cf_atomic.h"
 
 #include "base/datamodel.h"
 #include "base/rec_props.h"

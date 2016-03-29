@@ -27,7 +27,7 @@
 #pragma once
 
 #include <stdint.h>
-#include <aerospike/as_memtracker.h>
+#include "aerospike/as_memtracker.h"
 
 typedef enum {
 	MEM_RESERVE	= 0,

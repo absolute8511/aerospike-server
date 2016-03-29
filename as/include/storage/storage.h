@@ -32,8 +32,7 @@
 #include <stdint.h>
 
 #include "citrusleaf/cf_digest.h"
-
-#include "queue.h"
+#include "citrusleaf/cf_queue.h"
 
 #include "base/datamodel.h"
 #include "base/rec_props.h"

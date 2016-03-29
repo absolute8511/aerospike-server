@@ -72,8 +72,6 @@
  */
 as_aerospike g_as_aerospike;
 
-extern udf_call *as_query_get_udf_call(void *ptr);
-
 
 // UDF Network Send Interface
 // **************************************************************************************************
@@ -89,10 +87,10 @@ extern udf_call *as_query_get_udf_call(void *ptr);
  * 					 response to client
  */
 int
-send_response(udf_call *call, const char *bin_name, const as_val *val)
+process_response(udf_call *call, const char *bin_name, const as_val *val, cf_dyn_buf *db)
 {
 	// NO response if background UDF
-	if (call->def.type == AS_UDF_OP_BACKGROUND) {
+	if (call->def->type == AS_UDF_OP_BACKGROUND) {
 		return 0;
 	}
 	// Note - this function quietly handles a null val. The response call will
@@ -122,33 +120,57 @@ send_response(udf_call *call, const char *bin_name, const as_val *val)
 	as_bin_init(ns, bin, bin_name);
 	as_bin_particle_stack_from_asval(bin, particle_buf, val);
 
-	single_transaction_response(tr, ns, NULL, &bin, 1, tr->generation, tr->void_time, NULL, NULL);
+	if (db) {
+		size_t msg_sz = 0;
+		uint8_t *msgp = (uint8_t *)as_msg_make_response_msg(tr->result_code,
+				tr->generation, tr->void_time, NULL, &bin, 1, ns, NULL, &msg_sz,
+				as_transaction_trid(tr), NULL);
+
+		if (! msgp)	{
+			cf_warning_digest(AS_RW, &tr->keyd, "{%s} UDF failed to make response msg ", ns->name);
+
+			if (particle_buf != stack_particle) {
+				cf_free(particle_buf);
+			}
+
+			return -1;
+		}
+
+		// Stash the message, to be sent later.
+		db->buf = msgp;
+		db->is_stack = false;
+		db->alloc_sz = msg_sz;
+		db->used_sz = msg_sz;
+	}
+	else {
+		single_transaction_response(tr, ns, NULL, &bin, 1, tr->generation, tr->void_time, NULL, NULL);
+	}
 
 	if (particle_buf != stack_particle) {
 		cf_free(particle_buf);
 	}
 
 	return 0;
-} // end send_response()
-
-static inline int
-send_failure(udf_call *call, const as_val *val)
-{
-	return send_response(call, "FAILURE", val);
 }
 
 static inline int
-send_failure_str(udf_call *call, const char *err_str, size_t len)
+process_failure(udf_call *call, const as_val *val, cf_dyn_buf *db)
+{
+	return process_response(call, "FAILURE", val, db);
+}
+
+static inline int
+process_failure_str(udf_call *call, const char *err_str, size_t len, cf_dyn_buf *db)
 {
 	if (! err_str) {
 		// Better than sending an as_string with null value.
-		return send_failure(call, NULL);
+		return process_failure(call, NULL, db);
 	}
 
 	as_string stack_s;
 	as_string_init_wlen(&stack_s, (char *)err_str, len, false);
 
-	return send_failure(call, as_string_toval(&stack_s));
+	return process_failure(call, as_string_toval(&stack_s), db);
 }
 
 /**
@@ -160,7 +182,7 @@ send_failure_str(udf_call *call, const char *err_str, size_t len)
  * All other errors get the generic 100 (UDF FAIL) code.
  */
 static inline int
-send_udf_failure(udf_call *call, const as_string *s)
+process_udf_failure(udf_call *call, const as_string *s, cf_dyn_buf *db)
 {
 	char *val = as_string_tostring(s);
 	size_t vlen = as_string_len((as_string *)s); // TODO - make as_string_len() take const
@@ -171,11 +193,31 @@ send_udf_failure(udf_call *call, const as_string *s)
 		if (error_code == AS_PROTO_RESULT_FAIL_NOTFOUND ||
 			error_code == AS_PROTO_RESULT_FAIL_COLLECTION_ITEM_NOT_FOUND) {
 
-			call->tr->result_code = error_code;
+			call->tr->result_code = (uint8_t)error_code;
 			// Send an "empty" response, with no failure bin.
 			as_transaction *    tr          = call->tr;
-			single_transaction_response(tr, tr->rsv.ns, NULL/*ops*/,
-					NULL /*bin*/, 0 /*nbins*/, 0, 0, NULL, NULL);
+
+			if (db) {
+				size_t msg_sz = 0;
+				uint8_t *msgp = (uint8_t *)as_msg_make_response_msg(
+						tr->result_code, 0, 0, NULL, NULL, 0, tr->rsv.ns, NULL,
+						&msg_sz, as_transaction_trid(tr), NULL);
+
+				if (! msgp)	{
+					cf_warning_digest(AS_RW, &tr->keyd, "{%s} LDT UDF failed to make response msg ", tr->rsv.ns->name);
+					return -1;
+				}
+
+				// Stash the message, to be sent later.
+				db->buf = msgp;
+				db->is_stack = false;
+				db->alloc_sz = msg_sz;
+				db->used_sz = msg_sz;
+			}
+			else {
+				single_transaction_response(tr, tr->rsv.ns, NULL/*ops*/,
+						NULL /*bin*/, 0 /*nbins*/, 0, 0, NULL, NULL);
+			}
 			return 0;
 		}
 	}
@@ -183,14 +225,14 @@ send_udf_failure(udf_call *call, const as_string *s)
 	cf_debug(AS_UDF, "Non-special LDT or General UDF Error(%s)", (char *) val);
 
 	call->tr->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
-	return send_failure(call, as_string_toval(s));
+	return process_failure(call, as_string_toval(s), db);
 }
 
 static inline int
-send_success(udf_call *call, const as_val *val)
+process_success(udf_call *call, const as_val *val, cf_dyn_buf *db)
 {
-	// TODO - could check result and switch to send_failure()?
-	return send_response(call, "SUCCESS", val);
+	// TODO - could check result and switch to process_failure()?
+	return process_response(call, "SUCCESS", val, db);
 }
 
 /*
@@ -199,7 +241,7 @@ send_success(udf_call *call, const as_val *val)
  * 					  value translation.
  */
 void
-send_result(as_result * res, udf_call * call)
+process_result(const as_result * res, udf_call * call, cf_dyn_buf *db )
 {
 	as_val * v = res->value;
 	if ( res->is_success ) {
@@ -210,17 +252,17 @@ send_result(as_result * res, udf_call * call)
 			cf_free(str);
 		}
 
-		send_success(call, v);
+		process_success(call, v, db);
 
 	} else { // Else -- NOT success
 		if (as_val_type(v) == AS_STRING) {
-			send_udf_failure(call, as_string_fromval(v));
+			process_udf_failure(call, as_string_fromval(v), db);
 		} else {
 			char lua_err_str[1024];
-			size_t len = (size_t)sprintf(lua_err_str, "%s:0: in function %s() - error() argument type not handled", call->def.filename, call->def.function);
+			size_t len = (size_t)sprintf(lua_err_str, "%s:0: in function %s() - error() argument type not handled", call->def->filename, call->def->function);
 
 			call->tr->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
-			send_failure_str(call, lua_err_str, len);
+			process_failure_str(call, lua_err_str, len, db);
 		}
 	}
 }
@@ -233,80 +275,67 @@ send_result(as_result * res, udf_call * call)
 // **************************************************************************************************
 
 /**
- * Initialize UDF from tr->udata. It is for internal UDF transactions
- * 
- * Returns:
- * 		0 on if found 
- * 		-1 if not found
+ * Get UDF call object pointer from parent job via tr->udata.
  */
-int
-udf_rw_call_init_internal(udf_call * call, as_transaction * tr)
+udf_call *
+udf_rw_call_def_init_internal(udf_call * call, as_transaction * tr)
 {
-	udf_call *ucall = NULL;
-	if (tr->udata.req_type == UDF_SCAN_REQUEST) {
-		ucall = as_scan_get_udf_call(tr->udata.req_udata);
-	} else if (tr->udata.req_type == UDF_QUERY_REQUEST) {
-		ucall = as_query_get_udf_call(tr->udata.req_udata);
+	call->def = &tr->iudf_orig->def;
+
+	if (tr->iudf_orig->type == UDF_SCAN_REQUEST) {
+		cf_atomic_int_incr(&g_config.udf_scan_rec_reqs);
+	}
+	else if (tr->iudf_orig->type == UDF_QUERY_REQUEST) {
+		cf_atomic_int_incr(&g_config.udf_query_rec_reqs);
 	}
 
-	if (ucall) {
-		strncpy (call->def.filename, ucall->def.filename, sizeof(ucall->def.filename));
-		strncpy (call->def.function, ucall->def.function, sizeof(ucall->def.function));
-		call->tr          = tr;
-		call->def.arglist = ucall->def.arglist;
-		call->def.type    = ucall->def.type;
-		if (tr->udata.req_type == UDF_SCAN_REQUEST) {
-			cf_atomic_int_incr(&g_config.udf_scan_rec_reqs);
-		} else if (tr->udata.req_type == UDF_QUERY_REQUEST) {
-			cf_atomic_int_incr(&g_config.udf_query_rec_reqs);
-		}
-		return 0;
-	} 
-	return -1;
+	return call;
 }
 
 /**
- * Initialize udf_call data structure from the msg over the wire
- *
- * Returns:
- * 		0 on success
- * 		-1 on failure
+ * Initialize udf_call data structure from the transaction over the wire.
  */
-int
-udf_rw_call_init_from_msg(udf_call * call, as_msg *msg)
+udf_call *
+udf_rw_call_def_init_from_msg(udf_call * call, as_transaction * tr)
 {
-	call->def.type = AS_UDF_OP_KVS;
-	as_msg_field *  filename = NULL;
-	as_msg_field *  function = NULL;
-	as_msg_field *  arglist =  NULL;
+	return udf_def_init_from_msg(call->def, tr) ? call : NULL;
+}
 
-	// Check the type of udf
-	as_msg_field *  op = NULL;
-	op = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_UDF_OP);
-	if ( op ) {
-		memcpy(&call->def.type, (byte *)op->data, sizeof(as_udf_op));
+/**
+ * Initialize udf_def data structure from the transaction over the wire.
+ */
+udf_def *
+udf_def_init_from_msg(udf_def * def, const as_transaction * tr)
+{
+	as_msg *m = &tr->msgp->msg;
+	as_msg_field *filename = as_msg_field_get(m, AS_MSG_FIELD_TYPE_UDF_FILENAME);
+
+	if (! filename) {
+		return NULL;
 	}
 
-	filename = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_UDF_FILENAME);
-	if ( filename ) {
-		function = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_UDF_FUNCTION);
-		if ( function ) {
-			arglist = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_UDF_ARGLIST);
-			if ( arglist ) {
-				as_msg_field_get_strncpy(filename, &call->def.filename[0], sizeof(call->def.filename));
-				as_msg_field_get_strncpy(function, &call->def.function[0], sizeof(call->def.function));
-				call->def.arglist = arglist;
-				return 0;
-			}
-		}
+	as_msg_field *function = as_msg_field_get(m, AS_MSG_FIELD_TYPE_UDF_FUNCTION);
+
+	if (! function) {
+		return NULL;
 	}
 
-	call->tr = NULL;
-	call->def.filename[0] = 0;
-	call->def.function[0] = 0;
-	call->def.arglist = NULL;
+	as_msg_field *arglist = as_msg_field_get(m, AS_MSG_FIELD_TYPE_UDF_ARGLIST);
 
-	return -1;
+	if (! arglist) {
+		return NULL;
+	}
+
+	as_msg_field_get_strncpy(filename, def->filename, sizeof(def->filename));
+	as_msg_field_get_strncpy(function, def->function, sizeof(def->function));
+	def->arglist = arglist;
+
+	as_msg_field *op = as_transaction_has_udf_op(tr) ?
+			as_msg_field_get(m, AS_MSG_FIELD_TYPE_UDF_OP) : NULL;
+
+	def->type = op ? *op->data : AS_UDF_OP_KVS;
+
+	return def;
 }
 
 /*
@@ -317,8 +346,8 @@ udf_rw_call_init_from_msg(udf_call * call, as_msg *msg)
 void
 udf_rw_call_destroy(udf_call * call)
 {
+	call->def = NULL;
 	call->tr = NULL;
-	call->def.arglist = NULL;
 }
 // **************************************************************************************************
 
@@ -378,7 +407,7 @@ getop(udf_record *urecord, udf_optype *urecord_op)
 static void
 write_udf_post_processing(as_transaction *tr, as_storage_rd *rd,
 		uint8_t **pickled_buf, size_t *pickled_sz,
-		as_rec_props *p_pickled_rec_props, int64_t memory_bytes)
+		as_rec_props *p_pickled_rec_props)
 {
 	update_metadata_in_index(tr, true, rd->r);
 
@@ -393,8 +422,6 @@ write_udf_post_processing(as_transaction *tr, as_storage_rd *rd,
 
 	tr->generation = rd->r->generation;
 	tr->void_time = rd->r->void_time;
-
-	as_storage_record_adjust_mem_stats(rd, memory_bytes);
 }
 
 /* Internal Function: Does the post processing for the UDF record after the
@@ -454,8 +481,7 @@ post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set_id)
 		}
 
 		write_udf_post_processing(tr, rd, &urecord->pickled_buf,
-			&urecord->pickled_sz, &urecord->pickled_rec_props,
-			urecord->starting_memory_bytes);
+			&urecord->pickled_sz, &urecord->pickled_rec_props);
 
 		// Now ok to accommodate a new stored key...
 		if (! as_index_is_flag_set(r_ref->r, AS_INDEX_FLAG_KEY_STORED) && rd->key) {
@@ -473,6 +499,8 @@ post_processing(udf_record *urecord, udf_optype *urecord_op, uint16_t set_id)
 
 			as_index_clear_flags(r_ref->r, AS_INDEX_FLAG_KEY_STORED);
 		}
+
+		as_storage_record_adjust_mem_stats(rd, urecord->starting_memory_bytes);
 	}
 
 	// Collect the record information (for XDR) before closing the record
@@ -654,11 +682,7 @@ end_time(time_tracker *tt)
 	if (!lr) return -1;
 	udf_record *r   = (udf_record *) as_rec_source(lr->h_urec);
 	if (!r)  return -1;
-	// If user has not specified timeout pick the max on server
-	// side
-	return (r->tr->end_time)
-		   ? r->tr->end_time
-		   : r->tr->start_time + g_config.transaction_max_ns;
+	return r->tr->end_time;
 }
 
 /*
@@ -677,7 +701,7 @@ int
 udf_apply_record(udf_call * call, as_rec *rec, as_result *res)
 {
 	as_list         arglist;
-	as_list_init(&arglist, call->def.arglist, &udf_arglist_hooks);
+	as_list_init(&arglist, call->def->arglist, &udf_arglist_hooks);
 
 	// Setup time tracker
 	time_tracker udf_timer_tracker = {
@@ -696,7 +720,7 @@ udf_apply_record(udf_call * call, as_rec *rec, as_result *res)
 
 	uint64_t now = cf_getns();
 	int ret_value = as_module_apply_record(&mod_lua, &ctx,
-			call->def.filename, call->def.function, rec, &arglist, res);
+			call->def->filename, call->def->function, rec, &arglist, res);
 	cf_hist_track_insert_data_point(g_config.ut_hist, now);
 	if (g_config.ldt_benchmarks) {
 		ldt_record *lrecord = (ldt_record *)as_rec_source(rec);
@@ -708,48 +732,6 @@ udf_apply_record(udf_call * call, as_rec *rec, as_result *res)
 	as_list_destroy(&arglist);
 
 	return ret_value;
-}
-
-/*
- *
- * UDF Callback response interface 
- */
-// **************************************************************************************************
-
-/*
- * Current send response call back for the UDF execution
- *
- * Side effect : Will clean up response udata and data in it.
- *               caller should not refer to it after this
- */
-int response_cb(as_transaction *tr, int retcode)
-{
-	udf_call      * call = ((udf_response_udata *)tr->udata.res_udata)->call;
-	as_result     * res  = ((udf_response_udata *)tr->udata.res_udata)->res;
-	tr->result_code      = retcode;
-	call->tr             = tr;
-	send_result(res, call);
-	as_result_destroy(res);
-	udf_rw_call_destroy(call);
-	cf_free(call);
-	cf_free(tr->udata.res_udata);
-	return 0;
-}
-
-/*
- * Function to set up the response callback functions
- * See udf_rw_complete for the details of logic
- */
-static inline int 
-set_response_cb(as_transaction *tr, void *udata)
-{
-	if (!tr) {
-		cf_warning(AS_UDF, "Invalid Transaction");
-		return -1;
-	}
-	tr->udata.res_cb    = response_cb;
-	tr->udata.res_udata = udata;
-	return 0;
 }
 // **************************************************************************************************
 
@@ -783,12 +765,14 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 {
 	*op = UDF_OPTYPE_NONE;
 
-	// Step 1: Setup UDF Record and LDT record
 	as_transaction *tr = call->tr;
-	as_index_ref    r_ref;
+	as_namespace *ns = tr->rsv.ns;
+
+	// Step 1: Setup UDF Record and LDT record
+	as_index_ref r_ref;
 	r_ref.skip_lock = false;
 
-	as_storage_rd  rd;
+	as_storage_rd rd;
 
 	udf_record urecord;
 	udf_record_init(&urecord, true);
@@ -799,7 +783,8 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 	urecord.tr                 = tr;
 	urecord.r_ref              = &r_ref;
 	urecord.rd                 = &rd;
-	as_rec          urec;
+
+	as_rec urec;
 	as_rec_init(&urec, &urecord, &udf_record_hooks);
 
 	// NB: rec needs to be in the heap. Once passed in to the lua scope if
@@ -819,12 +804,19 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 	uint32_t set_id = INVALID_SET_ID;
 
 	// Step 2: Setup Storage Record
-	int rec_rv = as_record_get(tr->rsv.tree, &tr->keyd, &r_ref, tr->rsv.ns);
+	int rec_rv = as_record_get(tr->rsv.tree, &tr->keyd, &r_ref, ns);
 
 	if (rec_rv == 0 && as_record_is_expired(r_ref.r)) {
 		// If record is expired, pretend it was not found.
-		as_record_done(&r_ref, tr->rsv.ns);
+		as_record_done(&r_ref, ns);
 		rec_rv = -1;
+	}
+
+	if (rec_rv == -1 && tr->iudf_orig) {
+		// Internal UDFs must not create records.
+		call->tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
+		process_failure(call, NULL, NULL);
+		goto Cleanup;
 	}
 
 	if (rec_rv == 0) {
@@ -836,7 +828,7 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 		if (rec_rv == -1) {
 			udf_record_close(&urecord);
 			call->tr->result_code = AS_PROTO_RESULT_FAIL_BIN_NAME; // overloaded... add bin_count error?
-			send_failure(call, NULL);
+			process_failure(call, NULL, NULL);
 			goto Cleanup;
 		}
 
@@ -844,19 +836,19 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 
 		// If both the record and the message have keys, check them.
 		if (rd.key) {
-			if (msg_has_key(m) && ! check_msg_key(m, &rd)) {
+			if (as_transaction_has_key(tr) && ! check_msg_key(m, &rd)) {
 				udf_record_close(&urecord);
 				call->tr->result_code = AS_PROTO_RESULT_FAIL_KEY_MISMATCH;
-				send_failure(call, NULL);
+				process_failure(call, NULL, NULL);
 				goto Cleanup;
 			}
 		}
 		else {
 			// If the message has a key, apply it to the record.
-			if (! get_msg_key(m, &rd)) {
+			if (! get_msg_key(tr, &rd)) {
 				udf_record_close(&urecord);
 				call->tr->result_code = AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
-				send_failure(call, NULL);
+				process_failure(call, NULL, NULL);
 				goto Cleanup;
 			}
 			urecord.flag |= UDF_RECORD_FLAG_METADATA_UPDATED;
@@ -877,12 +869,11 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 
 
 	// Step 3: Run UDF
-	as_result       *res = as_result_new();
+	as_result result;
+	as_result_init(&result);
+
 	as_val_reserve(lrec);
-	int ret_value        = udf_apply_record(call, lrec, res);
-	as_namespace *  ns   = tr->rsv.ns;
-	// Capture the success of the Lua call to use below
-	bool success = res->is_success;
+	int ret_value = udf_apply_record(call, lrec, &result);
 
 	if (ret_value == 0) {
 
@@ -895,31 +886,27 @@ udf_rw_local(udf_call * call, write_request *wr, udf_optype *op)
 			cf_warning(AS_UDF, "Investigate rw_finish() result");
 		}
 
-		if (!success) {
-			ldt_update_err_stats(ns, res->value);
+		if (! result.is_success) {
+			ldt_update_err_stats(ns, result.value);
 		}
 
 		if (UDF_OP_IS_READ(*op) || *op == UDF_OPTYPE_NONE) {
-			send_result(res, call);
-			as_result_destroy(res);
+			process_result(&result, call, NULL);
 		} else {
-			udf_response_udata *udata = cf_malloc(sizeof(udf_response_udata));
-			udata->call               =  call;
-			udata->res                =  res;
-			cf_detail(AS_UDF, "Setting UDF Request Response data=%p with udf op %d", udata, op);
-			set_response_cb(tr, udata);
+			process_result(&result, call, &wr->response_db);
 		}
 
 	} else {
 		udf_record_close(&urecord);
 		char *rs = as_module_err_string(ret_value);
 		call->tr->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
-		send_failure_str(call, rs, strlen(rs));
+		process_failure_str(call, rs, strlen(rs), NULL);
 		cf_free(rs);
-		as_result_destroy(res);
 	}
 
-	update_stats(ns, *op, ret_value, success, (lrecord.udf_context & UDF_CONTEXT_LDT));
+	update_stats(ns, *op, ret_value, result.is_success, (lrecord.udf_context & UDF_CONTEXT_LDT));
+
+	as_result_destroy(&result);
 
 Cleanup:
 	// free everything we created - the rec destroy with ldt_record hooks
@@ -928,103 +915,6 @@ Cleanup:
 	as_rec_destroy(lrec);
 
 	return 0;
-}
-
-/*
- * Function called to determine if needs to call udf_rw_complete.
- * See the definition below for detail
- *
- * NB: Callers needs to hold necessary protection
- */
-bool
-udf_rw_needcomplete_wr( write_request *wr )
-{
-	if (!wr) {
-		cf_warning(AS_UDF, "Invalid write request");
-		return false;
-	}
-	ureq_data *ureq = (ureq_data *)&wr->udata;
-	if (ureq->req_cb && ureq->req_udata) {
-		return true;
-	}
-	if (ureq->res_cb && ureq->res_udata) {
-		return true;
-	}
-	return false;
-}
-
-/*
- * Function called to determine if needs to call udf_rw_complete.
- * See the definition below for detail
- *
- * NB: Callers needs to hold necessary protection
- */
-bool
-udf_rw_needcomplete( as_transaction *tr )
-{
-	if (!tr) {
-		cf_warning(AS_UDF, "Invalid write request");
-		return false;
-	}
-	ureq_data *ureq = (ureq_data *)&tr->udata;
-	if (ureq->req_cb && ureq->req_udata) {
-		return true;
-	}
-	if (ureq->res_cb && ureq->res_udata) {
-		return true;
-	}
-	return false;
-}
-
-/*
- * Function called when the transaction performing UDF finishes.
- * It looks at the request and response callback set with the request
- * and response udata.
- *
- * Request Callback:  It is set by special request to be run at the end
- * 					  of a request. Current user is UDF scan which sets
- * 					  it up in the internal transaction to perform run
- * 					  UDF of scanned data.
- * Response Callback: It is set for sending response to client at the
- * 					  end of the transaction. Currently used by UDF
- * 					  to send back special results after the replication
- * 					  has finished.
- *
- * NB: Callback function is response to make sure the data is intact
- *     and properly handled. And its synchronization if required.
- *
- * Returns : Nothing
- *
- * Caller:
- * 		proxy_msg_fn
- * 		proxy_retransmit_reduce_fn
- * 		write_request_destructor
- * 		internal_rw_start
- * 		as_rw_start
- * 		rw_retransmit_reduce_fn
- * 		thr_tsvc_read
- * 		udf_rw_complete
- * 		process_request
- */
-void
-udf_rw_complete(as_transaction *tr, int retcode, char *filename, int lineno )
-{
-	cf_debug(AS_UDF, "[ENTER] file(%s) line(%d)", filename, lineno );
-
-	if ( !tr ) {
-		cf_warning(AS_UDF, "Invalid internal request");
-	}
-	ureq_data *ureq = &tr->udata;
-	if (ureq->req_cb && ureq->req_udata) {
-		ureq->req_cb( tr, retcode );
-	}
-
-	if (ureq->res_cb && ureq->res_udata) {
-		ureq->res_cb( tr, retcode);
-	}
-	cf_detail(AS_UDF, "UDF_COMPLETED:[%s:%d] %p %p %p %p %p",
-			filename, lineno, tr , ureq->req_cb, ureq->req_udata, ureq->res_cb, ureq->res_udata);
-	UREQ_DATA_RESET(&tr->udata);
 }
 
 static const cf_fault_severity as_level_map[5] = {

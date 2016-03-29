@@ -258,7 +258,7 @@ msb(uint64_t n)
 //		4		8 to 16 (more exactly, 15.999)
 //		etc.
 //
-void
+uint64_t
 histogram_insert_data_point(histogram *h, uint64_t start_ns)
 {
 	uint64_t end_ns = cf_getns();
@@ -279,6 +279,8 @@ histogram_insert_data_point(histogram *h, uint64_t start_ns)
 	}
 
 	cf_atomic64_incr(&h->counts[bucket]);
+
+	return end_ns;
 }
 
 //------------------------------------------------

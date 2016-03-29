@@ -1,7 +1,7 @@
 /*
  * index.h
  *
- * Copyright (C) 2008-2014 Aerospike, Inc.
+ * Copyright (C) 2008-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -24,6 +24,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "citrusleaf/cf_atomic.h"
@@ -52,7 +53,7 @@ typedef struct as_index_s {
 	// offset: 24
 	cf_arenax_handle right_h;
 	cf_arenax_handle left_h;
-	cf_arenax_handle parent_h;
+	uint32_t unused_but_reserved;
 
 	// offset: 36
 	// Don't use the free bits here for record info - this is accessed outside
@@ -118,7 +119,7 @@ uint32_t as_index_size_get(as_namespace *ns)
 	return (uint32_t)sizeof(as_index);
 }
 
-// Clear the record portion of as_index - excluding variable part, for speed.
+// Fast way to clear the record portion of as_index.
 // Note - relies on current layout and size of as_index!
 static inline
 void as_index_clear_record_info(as_index *index) {
@@ -238,6 +239,21 @@ int as_index_set_set(as_index *index, as_namespace *ns, const char *set_name,
 }
 
 static inline
+int as_index_set_set_w_len(as_index *index, as_namespace *ns,
+		const char *set_name, size_t len, bool apply_restrictions) {
+	uint16_t set_id;
+	int rv = as_namespace_get_create_set_w_len(ns, set_name, len, &set_id,
+			apply_restrictions);
+
+	if (rv != 0) {
+		return rv;
+	}
+
+	as_index_set_set_id(index, set_id);
+	return 0;
+}
+
+static inline
 const char *as_index_get_set_name(as_index *index, as_namespace *ns) {
 	// TODO - don't really need this check - remove?
 	if (! as_index_has_set(index)) {
@@ -276,7 +292,6 @@ typedef struct as_index_tree_s {
 	as_index			*root;
 	cf_arenax_handle	root_h;
 
-	as_index			*sentinel;
 	cf_arenax_handle	sentinel_h;
 
 	as_index_value_destructor destructor;
@@ -285,7 +300,6 @@ typedef struct as_index_tree_s {
 	cf_arenax			*arena; // where we allocate and free to
 
 	uint32_t			elements; // not making this atomic, it's not very exact
-	uint16_t			data_inmemory;
 } as_index_tree;
 
 
@@ -293,47 +307,26 @@ typedef struct as_index_tree_s {
 // as_index_tree public API.
 //
 
-// When inserting, the reference count of the value is *consumed* by the insert
-// if it succeeds.
-//
-// Except for get-insert, which is a little weird. If a value is returned (thus
-// a different value is gotten), its ref-count is increased. If the value is
-// inserted (and not returned), the ref-count is consumed.
-
-extern int as_index_ref_initialize(as_index_tree *tree, cf_digest *key, as_index_ref *index_ref, bool create_p, as_namespace *ns);
-
-// 1 = new, 0 = found, -1 = error.
-extern int as_index_get_insert_vlock(as_index_tree *tree, cf_digest *key, as_index_ref *index_ref);
-
-// This call is more unusual. It does not take the object lock but does take the
-// ref-count. Thus, the caller (as_record_get) must take the o_lock.
-extern int as_index_get_vlock(as_index_tree *tree, cf_digest *key, as_index_ref *index_ref);
-
-extern int as_index_exists(as_index_tree *tree, cf_digest *key);
-
-// 0 is ok, -1 is fail, -2 is key not found.
-extern int as_index_delete(as_index_tree *tree, cf_digest *key);
-
 extern as_index_tree *as_index_tree_create(cf_arenax *arena, as_index_value_destructor destructor, void *destructor_udata, as_treex *p_treex);
 extern as_index_tree *as_index_tree_resume(cf_arenax *arena, as_index_value_destructor destructor, void *destructor_udata, as_treex *p_treex);
-
-#define as_index_tree_reserve(_t) cf_atomic32_incr(&(_t)->rc)
 extern int as_index_tree_release(as_index_tree *tree, void *destructor_udata);
+extern uint32_t as_index_tree_size(as_index_tree *tree);
+
+typedef void (*as_index_reduce_fn) (as_index_ref *value, void *udata);
+typedef void (*as_index_reduce_sync_fn) (as_index *value, void *udata);
+
+extern void as_index_reduce(as_index_tree *tree, as_index_reduce_fn cb, void *udata);
+extern void as_index_reduce_partial(as_index_tree *tree, uint32_t sample_count, as_index_reduce_fn cb, void *udata);
+extern void as_index_reduce_sync(as_index_tree *tree, as_index_reduce_sync_fn cb, void *udata);
+
+extern int as_index_exists(as_index_tree *tree, cf_digest *keyd);
+extern int as_index_get_vlock(as_index_tree *tree, cf_digest *keyd, as_index_ref *index_ref);
+extern int as_index_get_insert_vlock(as_index_tree *tree, cf_digest *keyd, as_index_ref *index_ref);
+extern int as_index_delete(as_index_tree *tree, cf_digest *keyd);
 
 #define as_index_reserve(_r) cf_atomic32_incr(&(_r->rc))
 #define as_index_release(_r) cf_atomic32_decr(&(_r->rc))
 
-// Number of elements in the tree.
-extern uint32_t as_index_tree_size(as_index_tree *tree);
-
-// These reduce functions give a reference count of the value: you must release
-// it and it contains, internally, code to not block the tree lock - so you can
-// spend as much time in the reduce function as you want.
-typedef void (*as_index_reduce_fn) (as_index_ref *value, void *udata);
-extern void as_index_reduce(as_index_tree *tree, as_index_reduce_fn cb, void *udata);
-extern void as_index_reduce_partial(as_index_tree *tree, uint32_t sample_count, as_index_reduce_fn cb, void *udata);
-
-// as_index_reduce_sync() doesn't take a reference, and holds the tree lock.
-typedef void (*as_index_reduce_sync_fn) (as_index *value, void *udata);
-extern void as_index_reduce_sync(as_index_tree *tree, as_index_reduce_sync_fn cb, void *udata);
-
+#ifdef USE_KV
+extern int as_index_ref_initialize(as_index_tree *tree, cf_digest *key, as_index_ref *index_ref, bool create_p, as_namespace *ns);
+#endif

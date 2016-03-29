@@ -10,7 +10,7 @@ endif
 
 HEADERS += arenax.h cf_str.h dynbuf.h
 HEADERS += enhanced_alloc.h fault.h hist.h hist_track.h mem_count.h
-HEADERS += meminfo.h msg.h olock.h queue.h rchash.h socket.h util.h
+HEADERS += meminfo.h msg.h olock.h rchash.h socket.h util.h
 HEADERS += vmapx.h
 
 SOURCES += alloc.c arenax.c cf_str.c daemon.c dynbuf.c fault.c

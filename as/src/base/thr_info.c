@@ -41,6 +41,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "citrusleaf/cf_queue.h"
 #include "citrusleaf/cf_shash.h"
 #include "citrusleaf/cf_vector.h"
 
@@ -50,7 +51,6 @@
 #include "dynbuf.h"
 #include "jem.h"
 #include "meminfo.h"
-#include "queue.h"
 
 #include "ai_obj.h"
 #include "ai_btree.h"
@@ -2211,18 +2211,6 @@ info_service_config_get(cf_dyn_buf *db)
 	cf_dyn_buf_append_int(db, g_config.transaction_pending_limit);
 	cf_dyn_buf_append_string(db, ";migrate-threads=");
 	cf_dyn_buf_append_int(db, g_config.n_migrate_threads);
-	cf_dyn_buf_append_string(db, ";migrate-xmit-priority=");
-	cf_dyn_buf_append_int(db, g_config.migrate_xmit_priority);
-	cf_dyn_buf_append_string(db, ";migrate-xmit-sleep=");
-	cf_dyn_buf_append_int(db, g_config.migrate_xmit_sleep);
-	cf_dyn_buf_append_string(db, ";migrate-read-priority=");
-	cf_dyn_buf_append_int(db, g_config.migrate_read_priority);
-	cf_dyn_buf_append_string(db, ";migrate-read-sleep=");
-	cf_dyn_buf_append_int(db, g_config.migrate_read_sleep);
-	cf_dyn_buf_append_string(db, ";migrate-xmit-hwm=");
-	cf_dyn_buf_append_int(db, g_config.migrate_xmit_hwm);
-	cf_dyn_buf_append_string(db, ";migrate-xmit-lwm=");
-	cf_dyn_buf_append_int(db, g_config.migrate_xmit_lwm);
 	cf_dyn_buf_append_string(db, ";migrate-max-num-incoming=");
 	cf_dyn_buf_append_int(db, g_config.migrate_max_num_incoming);
 	cf_dyn_buf_append_string(db, ";migrate-rx-lifetime-ms=");
@@ -2466,6 +2454,12 @@ info_namespace_config_get(char* context, cf_dyn_buf *db)
 
 	cf_dyn_buf_append_string(db, ";write-commit-level-override=");
 	cf_dyn_buf_append_string(db, NS_WRITE_COMMIT_LEVEL_NAME());
+
+	cf_dyn_buf_append_string(db, ";migrate-order=");
+	cf_dyn_buf_append_uint32(db, ns->migrate_order);
+
+	cf_dyn_buf_append_string(db, ";migrate-sleep=");
+	cf_dyn_buf_append_uint32(db, ns->migrate_sleep);
 
 	cf_dyn_buf_append_string(db, ";migrate-tx-partitions-initial=");
 	cf_dyn_buf_append_uint64(db, ns->migrate_tx_partitions_initial);
@@ -2795,31 +2789,7 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 		goto Error;
 	if (strcmp(context, "service") == 0) {
 		context_len = sizeof(context);
-		if (0 == as_info_parameter_get(params, "migrate-xmit-priority", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val))
-				goto Error;
-			cf_info(AS_INFO, "Changing value of migrate-xmit-priority from %d to %d ", g_config.migrate_xmit_priority, val);
-			g_config.migrate_xmit_priority = val;
-		}
-		else if (0 == as_info_parameter_get(params, "migrate-xmit-sleep", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val))
-				goto Error;
-			cf_info(AS_INFO, "Changing value of migrate-xmit-sleep from %d to %d ", g_config.migrate_xmit_sleep, val);
-			g_config.migrate_xmit_sleep = val;
-		}
-		else if (0 == as_info_parameter_get(params, "migrate-read-priority", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val))
-				goto Error;
-			cf_info(AS_INFO, "Changing value of migrate-read-priority from %d to %d ", g_config.migrate_read_priority, val);
-			g_config.migrate_read_priority = val;
-		}
-		else if (0 == as_info_parameter_get(params, "migrate-read-sleep", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val))
-				goto Error;
-			cf_info(AS_INFO, "Changing value of migrate-read-sleep from %d to %d ", g_config.migrate_read_sleep, val);
-			g_config.migrate_read_sleep = val;
-		}
-		else if (0 == as_info_parameter_get(params, "transaction-retry-ms", context, &context_len)) {
+		if (0 == as_info_parameter_get(params, "transaction-retry-ms", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val))
 				goto Error;
 			if (val == 0)
@@ -3034,18 +3004,6 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			if (0 > as_paxos_set_recovery_policy(policy))
 				goto Error;
 			cf_info(AS_INFO, "Changing value of paxos-recovery-policy to %s", context);
-		}
-		else if (0 == as_info_parameter_get(params, "migrate-xmit-hwm", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val))
-				goto Error;
-			cf_info(AS_INFO, "Changing value of migrate-xmit-hwm from %d to %d ", g_config.migrate_xmit_hwm, val);
-			g_config.migrate_xmit_hwm = val;
-		}
-		else if (0 == as_info_parameter_get(params, "migrate-xmit-lwm", context, &context_len)) {
-			if (0 != cf_str_atoi(context, &val))
-				goto Error;
-			cf_info(AS_INFO, "Changing value of migrate-xmit-lwm from %d to %d ", g_config.migrate_xmit_lwm, val);
-			g_config.migrate_xmit_lwm = val;
 		}
 		else if (0 == as_info_parameter_get(params, "migrate-max-num-incoming", context, &context_len)) {
 			if (0 != cf_str_atoi(context, &val) || (0 > val))
@@ -3588,6 +3546,20 @@ info_command_config_set(char *name, char *params, cf_dyn_buf *db)
 			}
 			cf_info(AS_INFO, "Changing value of max-ttl memory of ns %s from %"PRIu64" to %"PRIu64" ", ns->name, ns->max_ttl, val);
 			ns->max_ttl = val;
+		}
+		else if (0 == as_info_parameter_get(params, "migrate-order", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val) || val < 1 || val > 10) {
+				goto Error;
+			}
+			cf_info(AS_INFO, "Changing value of migrate-order of ns %s from %u to %d", ns->name, ns->migrate_order, val);
+			ns->migrate_order = (uint32_t)val;
+		}
+		else if (0 == as_info_parameter_get(params, "migrate-sleep", context, &context_len)) {
+			if (0 != cf_str_atoi(context, &val)) {
+				goto Error;
+			}
+			cf_info(AS_INFO, "Changing value of migrate-sleep of ns %s from %u to %d", ns->name, ns->migrate_sleep, val);
+			ns->migrate_sleep = (uint32_t)val;
 		}
 		else if (0 == as_info_parameter_get(params, "obj-size-hist-max", context, &context_len)) {
 			uint32_t hist_max = (uint32_t)atoi(context);

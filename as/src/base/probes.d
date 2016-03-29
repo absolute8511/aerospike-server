@@ -1,6 +1,5 @@
 provider asd {
-   probe trans__demarshal(uint64_t, uint64_t);
-   probe trans__prepare(uint64_t, uint64_t, uint64_t);
+   probe trans__demarshal(uint64_t, uint64_t, uint64_t);
    probe query__starting(uint64_t, uint64_t);
    probe query__qtrsetup_starting(uint64_t, uint64_t);
    probe query__qtrsetup_finished(uint64_t, uint64_t);

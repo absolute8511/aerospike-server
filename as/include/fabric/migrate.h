@@ -54,6 +54,10 @@
  */
 #define MAX_NUM_MIGRATE_XMIT_THREADS  (100)
 
+#define TX_FLAGS_NONE           ((uint32_t) 0x0)
+#define TX_FLAGS_ACTING_MASTER  ((uint32_t) 0x1)
+#define TX_FLAGS_REQUEST        ((uint32_t) 0x2)
+
 typedef enum as_migrate_state_e {
 	AS_MIGRATE_STATE_DONE,
 	AS_MIGRATE_STATE_START,
@@ -80,35 +84,18 @@ typedef enum as_migrate_result_e {
 
 // A data structure for temporarily en-queuing partition migrations.
 typedef struct partition_migrate_record_s {
-	cf_node *dest;
-	uint dest_sz;
+	cf_node dest;
 	as_namespace *ns;
 	as_partition_id pid;
 	uint64_t cluster_key;
 	uint32_t tx_flags;
 } partition_migrate_record;
 
-// Listen for migration messages
+// Public API.
 void as_migrate_init();
-
-// Set the number of migrate xmit threads.
-int as_migrate_set_num_xmit_threads(int n_threads);
-
-bool
-as_migrate_is_incoming(cf_digest *subrec_digest, uint64_t version, as_partition_id partition_id, int state);
-
-// migrate a tree to a node
-// and find out when it's done
-int as_migrate(const partition_migrate_record *pmr, bool is_migrate_state_done);
-
-// 0 if successfully found a migrate to cancel
-// -1 if failed for unknown reasons
-// -2 if failed because the migrate was not found
-int as_migrate_cancel(cf_node dst, as_namespace *ns, as_partition_id partition);
-
-/*
- *  Print information about migration to the log.
- */
+void as_migrate_emigrate(const partition_migrate_record *pmr, bool is_migrate_state_done);
+bool as_migrate_is_incoming(cf_digest *subrec_digest, uint64_t version, as_partition_id partition_id, int state);
+void as_migrate_set_num_xmit_threads(int n_threads);
 void as_migrate_dump(bool verbose);
 
 as_migrate_result as_partition_migrate_rx(as_migrate_state s,
@@ -117,9 +104,3 @@ as_migrate_result as_partition_migrate_rx(as_migrate_state s,
 as_migrate_result as_partition_migrate_tx(as_migrate_state s,
 		as_namespace *ns, as_partition_id pid, uint64_t orig_cluster_key,
 		uint32_t tx_flags);
-
-/*
- * Check and return if passed in version is found in migration incoming ldt version hash
- */
-int
-as_migrate_is_incoming_version(uint64_t version, uint64_t *found_version);

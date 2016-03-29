@@ -26,8 +26,7 @@
 #include <sys/sdt.h>
 #include "probes.h"
 #else
-#define ASD_TRANS_DEMARSHAL(arg1,arg2)
-#define ASD_TRANS_PREPARE(arg1,arg2,arg3)
+#define ASD_TRANS_DEMARSHAL(arg1,arg2,arg3)
 #define ASD_QUERY_STARTING(arg1,arg2)
 #define ASD_QUERY_QTRSETUP_STARTING(arg1,arg2)
 #define ASD_QUERY_QTRSETUP_FINISHED(arg1,arg2)

@@ -31,8 +31,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <aerospike/as_aerospike.h>
-#include <aerospike/as_rec.h>
+#include "aerospike/as_aerospike.h"
+#include "aerospike/as_rec.h"
 
 #include "base/index.h"
 #include "base/transaction.h"

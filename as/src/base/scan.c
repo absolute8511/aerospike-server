@@ -61,6 +61,7 @@
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "base/udf_memtracker.h"
+#include "base/udf_rw.h"
 
 
 
@@ -114,10 +115,9 @@ typedef struct scan_options_s {
 	uint32_t	sample_pct;
 } scan_options;
 
-int get_scan_ns(as_msg* m, as_namespace** p_ns);
-int get_scan_set_id(as_msg* m, as_namespace* ns, uint16_t* p_set_id);
+int get_scan_set_id(as_transaction* tr, as_namespace* ns, uint16_t* p_set_id);
 scan_type get_scan_type(as_transaction* tr);
-bool get_scan_options(as_msg* m, scan_options* options);
+bool get_scan_options(as_transaction* tr, scan_options* options);
 void set_blocking(int fd, bool block);
 size_t send_blocking_response_chunk(int fd, uint8_t* buf, size_t size);
 size_t send_blocking_response_fin(int fd, int result_code);
@@ -154,14 +154,12 @@ as_scan_init()
 }
 
 int
-as_scan(as_transaction *tr)
+as_scan(as_transaction *tr, as_namespace *ns)
 {
 	int result;
-	as_namespace* ns = NULL;
 	uint16_t set_id = INVALID_SET_ID;
 
-	if ((result = get_scan_ns(&tr->msgp->msg, &ns)) != 0 ||
-		(result = get_scan_set_id(&tr->msgp->msg, ns, &set_id)) != 0) {
+	if ((result = get_scan_set_id(tr, ns, &set_id)) != 0) {
 		return result;
 	}
 
@@ -252,32 +250,11 @@ as_scan_change_job_priority(uint64_t trid, uint32_t priority)
 //
 
 int
-get_scan_ns(as_msg* m, as_namespace** p_ns)
-{
-	as_msg_field *f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_NAMESPACE);
-
-	if (! f) {
-		cf_warning(AS_SCAN, "scan msg has no namespace");
-		return AS_PROTO_RESULT_FAIL_NAMESPACE;
-	}
-
-	as_namespace* ns = as_namespace_get_bymsgfield(f);
-
-	if (! ns) {
-		cf_warning(AS_SCAN, "scan msg has unrecognized namespace");
-		return AS_PROTO_RESULT_FAIL_NAMESPACE;
-	}
-
-	*p_ns = ns;
-
-	return AS_PROTO_RESULT_OK;
-}
-
-int
-get_scan_set_id(as_msg* m, as_namespace* ns, uint16_t* p_set_id)
+get_scan_set_id(as_transaction* tr, as_namespace* ns, uint16_t* p_set_id)
 {
 	uint16_t set_id = INVALID_SET_ID;
-	as_msg_field *f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
+	as_msg_field *f = as_transaction_has_set(tr) ?
+			as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_SET) : NULL;
 
 	if (f && as_msg_field_get_value_sz(f) != 0) {
 		uint32_t set_name_len = as_msg_field_get_value_sz(f);
@@ -301,10 +278,7 @@ get_scan_set_id(as_msg* m, as_namespace* ns, uint16_t* p_set_id)
 scan_type
 get_scan_type(as_transaction* tr)
 {
-	as_msg_field *filename_f = as_msg_field_get(&tr->msgp->msg,
-			AS_MSG_FIELD_TYPE_UDF_FILENAME);
-
-	if (! filename_f) {
+	if (! as_transaction_is_udf(tr)) {
 		return SCAN_TYPE_BASIC;
 	}
 
@@ -323,23 +297,26 @@ get_scan_type(as_transaction* tr)
 }
 
 bool
-get_scan_options(as_msg* m, scan_options* options)
+get_scan_options(as_transaction* tr, scan_options* options)
 {
-	as_msg_field *f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SCAN_OPTIONS);
-
-	if (f) {
-		if (as_msg_field_get_value_sz(f) != 2) {
-			cf_warning(AS_SCAN, "scan msg options field size not 2");
-			return false;
-		}
-
-		options->priority = AS_MSG_FIELD_SCAN_PRIORITY(f->data[0]);
-		options->fail_on_cluster_change =
-				(AS_MSG_FIELD_SCAN_FAIL_ON_CLUSTER_CHANGE & f->data[0]) != 0;
-		options->include_ldt_data =
-				(AS_MSG_FIELD_SCAN_INCLUDE_LDT_DATA & f->data[0]) != 0;
-		options->sample_pct = f->data[1];
+	if (! as_transaction_has_scan_options(tr)) {
+		return true;
 	}
+
+	as_msg_field *f = as_msg_field_get(&tr->msgp->msg,
+			AS_MSG_FIELD_TYPE_SCAN_OPTIONS);
+
+	if (as_msg_field_get_value_sz(f) != 2) {
+		cf_warning(AS_SCAN, "scan msg options field size not 2");
+		return false;
+	}
+
+	options->priority = AS_MSG_FIELD_SCAN_PRIORITY(f->data[0]);
+	options->fail_on_cluster_change =
+			(AS_MSG_FIELD_SCAN_FAIL_ON_CLUSTER_CHANGE & f->data[0]) != 0;
+	options->include_ldt_data =
+			(AS_MSG_FIELD_SCAN_INCLUDE_LDT_DATA & f->data[0]) != 0;
+	options->sample_pct = f->data[1];
 
 	return true;
 }
@@ -606,7 +583,7 @@ basic_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 
 	scan_options options = { 0, false, false, 100 };
 
-	if (! get_scan_options(&tr->msgp->msg, &options)) {
+	if (! get_scan_options(tr, &options)) {
 		cf_free(job);
 		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
@@ -875,7 +852,7 @@ typedef struct aggr_scan_slice_s {
 	as_partition_reservation*	rsv;
 } aggr_scan_slice;
 
-bool aggr_scan_init(as_aggr_call* call, as_msg* msg);
+bool aggr_scan_init(as_aggr_call* call, const as_transaction* tr);
 void aggr_scan_job_reduce_cb(as_index_ref* r_ref, void* udata);
 bool aggr_scan_add_digest(cf_ll* ll, cf_digest* keyd);
 as_partition_reservation* aggr_scan_ptn_reserve(void* udata, as_namespace* ns, as_partition_id pid, as_partition_reservation* rsv);
@@ -908,7 +885,7 @@ aggr_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 
 	scan_options options = { 0, false, false, 100 };
 
-	if (! get_scan_options(&tr->msgp->msg, &options)) {
+	if (! get_scan_options(tr, &options)) {
 		cf_free(job);
 		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
@@ -918,7 +895,7 @@ aggr_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 
 	job->msgp = tr->msgp;
 
-	if (! aggr_scan_init(&job->aggr_call, &tr->msgp->msg)) {
+	if (! aggr_scan_init(&job->aggr_call, tr)) {
 		cf_warning(AS_SCAN, "aggregation scan job failed call init");
 		job->msgp = NULL;
 		as_job_destroy(_job);
@@ -971,14 +948,17 @@ aggr_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 	as_index_reduce(tree, aggr_scan_job_reduce_cb, (void*)&slice);
 
 	if (cf_ll_size(&ll) != 0) {
-		as_result* res = as_result_new();
-		int ret = as_aggr_process(_job->ns, &job->aggr_call, &ll, (void*)&slice, res);
+		as_result result;
+		as_result_init(&result);
+
+		int ret = as_aggr_process(_job->ns, &job->aggr_call, &ll, (void*)&slice,
+				&result);
 
 		if (ret != 0) {
 			char* rs = as_module_err_string(ret);
 
-			if (res->value) {
-				as_string* lua_s = as_string_fromval(res->value);
+			if (result.value) {
+				as_string* lua_s = as_string_fromval(result.value);
 				char* lua_err = (char*)as_string_tostring(lua_s);
 
 				if (lua_err) {
@@ -997,6 +977,8 @@ aggr_scan_job_slice(as_job* _job, as_partition_reservation* rsv)
 			as_job_manager_abandon_job(_job->mgr, _job,
 					AS_PROTO_RESULT_FAIL_UNKNOWN);
 		}
+
+		as_result_destroy(&result);
 	}
 
 	cf_ll_reduce(&ll, true, as_index_keys_ll_reduce_fn, NULL);
@@ -1048,9 +1030,9 @@ aggr_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 //
 
 bool
-aggr_scan_init(as_aggr_call* call, as_msg* msg)
+aggr_scan_init(as_aggr_call* call, const as_transaction* tr)
 {
-	if (udf_rw_call_init_from_msg((udf_call*)call, msg) != 0) {
+	if (! udf_def_init_from_msg(&call->def, tr)) {
 		return false;
 	}
 
@@ -1183,7 +1165,7 @@ typedef struct udf_bg_scan_job_s {
 
 	// Derived class data:
 	cl_msg*			msgp;
-	udf_call		call;
+	iudf_origin		origin;
 	cf_atomic32		n_active_tr;
 
 	cf_atomic64		n_successful_tr;
@@ -1202,21 +1184,8 @@ const as_job_vtable udf_bg_scan_job_vtable = {
 		udf_bg_scan_job_info
 };
 
-bool udf_scan_init(udf_call* call, as_transaction* tr);
 void udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata);
 int udf_bg_scan_tr_complete(as_transaction *tr, int retcode);
-
-//----------------------------------------------------------
-// as_scan public API for udf_bg_scan_job.
-//
-
-udf_call*
-as_scan_get_udf_call(void* req_udata)
-{
-	udf_bg_scan_job* job = (udf_bg_scan_job*)req_udata;
-
-	return &job->call;
-}
 
 //----------------------------------------------------------
 // udf_bg_scan_job public API.
@@ -1235,7 +1204,7 @@ udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 
 	scan_options options = { 0, false, false, 100 };
 
-	if (! get_scan_options(&tr->msgp->msg, &options)) {
+	if (! get_scan_options(tr, &options)) {
 		cf_free(job);
 		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
@@ -1248,12 +1217,16 @@ udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	job->n_successful_tr = 0;
 	job->n_failed_tr = 0;
 
-	if (! udf_scan_init(&job->call, tr)) {
-		cf_warning(AS_SCAN, "udf-bg scan job failed call init");
+	if (! udf_def_init_from_msg(&job->origin.def, tr)) {
+		cf_warning(AS_SCAN, "udf-bg scan job failed def init");
 		job->msgp = NULL;
 		as_job_destroy(_job);
 		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
+
+	job->origin.type = UDF_SCAN_REQUEST;
+	job->origin.cb = udf_bg_scan_tr_complete;
+	job->origin.udata = (void*)job;
 
 	cf_info(AS_SCAN, "starting udf-bg scan job %lu {%s:%s} priority %u",
 			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
@@ -1333,7 +1306,7 @@ udf_bg_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 	char *extra = stat->jdata + strlen(stat->jdata);
 
 	sprintf(extra, ":udf-filename=%s:udf-function=%s:udf-active=%u:udf-success=%lu:udf-failed=%lu",
-			job->call.def.filename, job->call.def.function,
+			job->origin.def.filename, job->origin.def.function,
 			cf_atomic32_get(job->n_active_tr),
 			cf_atomic64_get(job->n_successful_tr),
 			cf_atomic64_get(job->n_failed_tr));
@@ -1342,18 +1315,6 @@ udf_bg_scan_job_info(as_job* _job, as_mon_jobstat* stat)
 //----------------------------------------------------------
 // udf_bg_scan_job utilities.
 //
-
-bool
-udf_scan_init(udf_call* call, as_transaction* tr)
-{
-	if (udf_rw_call_init_from_msg(call, &tr->msgp->msg)) {
-		return false;
-	}
-
-	call->tr = tr;
-
-	return true;
-}
 
 void
 udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
@@ -1374,15 +1335,8 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 		return;
 	}
 
-	tr_create_data d;
-
-	d.digest	= r->key;
-	d.ns		= ns;
-	d.set[0]	= 0;				// TODO - transfer set name ???
-	d.call		= &job->call;
-	d.msg_type	= AS_MSG_INFO2_WRITE;
-	d.fd_h		= NULL;
-	d.trid		= 0;				// TODO - transfer trid ???
+	// Save this before releasing record.
+	cf_digest d = r->key;
 
 	// Release record lock before enqueuing transaction.
 	as_record_done(r_ref, ns);
@@ -1395,14 +1349,12 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	as_transaction tr;
 
-	if (as_transaction_create_internal(&tr, &d) != 0) {
+	if (as_transaction_init_iudf(&tr, ns, &d) != 0) {
 		as_job_manager_abandon_job(_job->mgr, _job, AS_JOB_FAIL_UNKNOWN);
 		return;
 	}
 
-	tr.udata.req_cb		= udf_bg_scan_tr_complete;
-	tr.udata.req_udata	= (void*)job;
-	tr.udata.req_type	= UDF_SCAN_REQUEST;
+	tr.iudf_orig = &job->origin;
 
 	cf_atomic64_incr(&_job->n_records_read);
 	cf_atomic32_incr(&job->n_active_tr);
@@ -1413,7 +1365,7 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 int
 udf_bg_scan_tr_complete(as_transaction *tr, int retcode)
 {
-	udf_bg_scan_job* job = (udf_bg_scan_job*)tr->udata.req_udata;
+	udf_bg_scan_job* job = (udf_bg_scan_job*)tr->iudf_orig->udata;
 
 	cf_atomic32_decr(&job->n_active_tr);
 	cf_atomic64_incr(retcode == 0 ? &job->n_successful_tr : &job->n_failed_tr);

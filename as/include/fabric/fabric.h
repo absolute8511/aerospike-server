@@ -33,7 +33,6 @@
 #include <stdint.h>
 
 #include "msg.h"
-#include "queue.h"
 #include "rchash.h"
 #include "util.h"
 
@@ -127,14 +126,14 @@ extern int as_fabric_init();
 // maybe someday we'll have more messages to register for? I hope not, those would
 // become messages
 
-extern int as_fabric_register_event_fn( as_fabric_event_fn event_cb, void *udata_event );
+extern int as_fabric_register_event_fn(as_fabric_event_fn event_cb, void *udata_event );
 
 //
 // Register for incoming message types. All messages of this type will be handed to this
 // one handler. Right now there is only one handlers - but it's really cheap to have multiple
 // handlers, if we wanted, because of the reference counting system.
 
-extern int as_fabric_register_msg_fn(	msg_type type, const msg_template *mt, size_t mt_sz,  as_fabric_msg_fn msg_cb, void *udata_msg);
+extern int as_fabric_register_msg_fn(msg_type type, const msg_template *mt, size_t mt_sz,  as_fabric_msg_fn msg_cb, void *udata_msg);
 
 // Call this once your register functions are all done and ready (or ready enough)
 

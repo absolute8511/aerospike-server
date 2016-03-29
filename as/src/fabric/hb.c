@@ -41,13 +41,13 @@
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
+#include "citrusleaf/cf_queue.h"
 #include "citrusleaf/cf_shash.h"
 
 #include "cf_str.h"
 #include "dynbuf.h"
 #include "fault.h"
 #include "msg.h"
-#include "queue.h"
 #include "socket.h"
 #include "util.h"
 
@@ -436,7 +436,7 @@ init_discovered_node_conn(discovered_node_conn_t * ap_conn)
 	}
 }
 
-static void 
+static void
 init_discovered_node_hval(discovered_node_hval_t * ap_hval)
 {
 	if(ap_hval) {
@@ -990,6 +990,10 @@ as_hb_snub(cf_node node, cf_clock ms)
 			goto Out;
 		}
 	} else { // removing from list
+		if (!l) {
+			// Snub list is empty. Skip remove.
+			goto Out;
+		}
 		for (int i = 0; l[i].node; i++) {
 			if (l[i].node == node) {
 				as_hb_snub_remove(i);
@@ -3012,9 +3016,18 @@ int as_hb_find_new_nodes_reduce(void *key, void *data, void *udata)
  *
  * @return the number of corrective events generated.
  */
-int as_hb_get_corrective_events(cf_node *succession_list,
-								as_fabric_event_node *events)
+int
+as_hb_get_corrective_events(cf_node* succession_list,
+			    as_fabric_event_node* events)
 {
+
+	if (!AS_HB_ENABLED()) {
+		cf_debug(
+		  AS_HB,
+		  "heartbeat disabled ~~ not generating corrective events");
+		return 0;
+	}
+
 	// current event count;
 	int event_count = 0;
 
