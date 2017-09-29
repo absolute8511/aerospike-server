@@ -92,6 +92,51 @@ cf_vmapx_create(cf_vmapx* this, uint32_t value_size, uint32_t max_count,
 	return CF_VMAPX_OK;
 }
 
+// Resume a cf_vmapx object from persistent memory.
+//
+cf_vmapx_err
+cf_vmapx_resume(cf_vmapx* this,  uint32_t hash_size, uint32_t max_name_size)
+{
+	uint32_t value_size;
+	uint32_t max_count;
+	char key[this->key_size];
+
+	value_size = this->value_size;
+	max_count = this->max_count;
+
+	// Value-size needs to be a multiple of 4 bytes for thread safety.
+	if ((value_size & 3) || ! max_count || ! hash_size || ! max_name_size) {
+		return CF_VMAPX_ERR_BAD_PARAM;
+	}
+
+	if (shash_create(&this->p_hash, cf_vmapx_hash_fn, max_name_size,
+			sizeof(uint32_t), hash_size, SHASH_CR_MT_MANYLOCK) != SHASH_OK) {
+		return CF_VMAPX_ERR_UNKNOWN;
+	}
+
+	// resume the hash struct
+	for (int i=0; i<this->count; i++) {
+		strncpy(key, (const char*)cf_vmapx_value_ptr(this, i), this->key_size);
+
+		if (shash_put(this->p_hash, key, &i) != SHASH_OK) {
+			return CF_VMAPX_ERR_UNKNOWN;
+		}
+	}
+
+	this->key_size = max_name_size;
+
+	if (pthread_mutex_init(&this->write_lock, 0) != 0) {
+		shash_destroy(this->p_hash);
+
+		return CF_VMAPX_ERR_UNKNOWN;
+	}
+
+	return CF_VMAPX_OK;
+}
+
+
+//------------------------------------------------
+
 //------------------------------------------------
 // Free internal resources of a cf_vmapx object.
 // Don't call after failed cf_vmapx_create() or

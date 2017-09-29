@@ -123,6 +123,7 @@ cf_vmapx_err cf_vmapx_put_unique(cf_vmapx* _this, const void* p_value,
 //==========================================================
 // Private API - for enterprise separation only
 //
+cf_vmapx_err cf_vmapx_resume(cf_vmapx* _this, uint32_t hash_size, uint32_t max_name_size);
 
 uint32_t cf_vmapx_hash_fn(void* p_key);
 void* cf_vmapx_value_ptr(cf_vmapx* _this, uint32_t index);
