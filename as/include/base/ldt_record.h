@@ -1,7 +1,7 @@
 /*
  * ldt_record.h
  *
- * Copyright (C) 2013-2015 Aerospike, Inc.
+ * Copyright (C) 2013-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -26,13 +26,11 @@
 
 #pragma once
 
-#include "base/feature.h" // turn new AS Features on/off (must be first in line)
-
 #include <stddef.h>
 #include <stdint.h>
 
-#include <aerospike/as_aerospike.h>
-#include <aerospike/as_rec.h>
+#include "aerospike/as_aerospike.h"
+#include "aerospike/as_rec.h"
 
 #include "base/index.h"
 #include "base/transaction.h"

@@ -1,7 +1,7 @@
 /*
  * monitor.c
  *
- * Copyright (C) 2013-2014 Aerospike, Inc.
+ * Copyright (C) 2013-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -258,28 +258,6 @@ as_mon_set_priority(const char *module, uint64_t id, uint32_t priority, cf_dyn_b
 	return retval;
 }
 
-// For backward compatibility - remove eventually:
-static const char *
-old_status_str(const char* new_str)
-{
-	if (strncmp(new_str, "active", 6) == 0) {
-		// Note - we'll treat active(<abandoned-reason>) like active(ok) here.
-		return "IN PROGRESS";
-	}
-
-	if (strcmp(new_str, "done(user-aborted)") == 0) {
-		return "ABORTED";
-	}
-
-	if (strncmp(new_str, "done", 4) == 0) {
-		// Note - other abandonment reasons were never resolved.
-		return "DONE";
-	}
-
-	// Should never get here.
-	return new_str;
-}
-
 /*
  * Calls the callback function to populate the stat of a particular job.
  *
@@ -292,10 +270,6 @@ int
 as_mon_populate_jobstat(as_mon_jobstat * job_stat, cf_dyn_buf *db)
 {
 	cf_dyn_buf_append_string(db, "trid=");
-	cf_dyn_buf_append_uint64(db, job_stat->trid);
-
-	// For backward compatibility - remove eventually:
-	cf_dyn_buf_append_string(db, ":job_id=");
 	cf_dyn_buf_append_uint64(db, job_stat->trid);
 
 	if (job_stat->job_type[0]) {
@@ -317,18 +291,13 @@ as_mon_populate_jobstat(as_mon_jobstat * job_stat, cf_dyn_buf *db)
 	if (job_stat->status[0]) {
 		cf_dyn_buf_append_string(db, ":status=");
 		cf_dyn_buf_append_string(db, job_stat->status);
-
-		// For backward compatibility - remove eventually:
-		cf_dyn_buf_append_string(db, ":job_status=");
-		cf_dyn_buf_append_string(db, old_status_str(job_stat->status));
 	}
 
-	cf_dyn_buf_append_string(db, ":job-progress=");
-	cf_dyn_buf_append_uint32(db, job_stat->progress_pct);
+	char progress_pct[8];
+	sprintf(progress_pct, "%.2f", job_stat->progress_pct);
 
-	// For backward compatibility - remove eventually:
-	cf_dyn_buf_append_string(db, ":job_progress(%)=");
-	cf_dyn_buf_append_uint32(db, job_stat->progress_pct);
+	cf_dyn_buf_append_string(db, ":job-progress=");
+	cf_dyn_buf_append_string(db, progress_pct);
 
 	cf_dyn_buf_append_string(db, ":run-time=");
 	cf_dyn_buf_append_uint64(db, job_stat->run_time);
@@ -339,15 +308,8 @@ as_mon_populate_jobstat(as_mon_jobstat * job_stat, cf_dyn_buf *db)
 	cf_dyn_buf_append_string(db, ":recs-read=");
 	cf_dyn_buf_append_uint64(db, job_stat->recs_read);
 
-	// For backward compatibility - remove eventually:
-	cf_dyn_buf_append_string(db, ":scanned_records=");
-	cf_dyn_buf_append_uint64(db, job_stat->recs_read);
-
 	cf_dyn_buf_append_string(db, ":net-io-bytes=");
 	cf_dyn_buf_append_uint64(db, job_stat->net_io_bytes);
-
-	cf_dyn_buf_append_string(db, ":mem-usage=");
-	cf_dyn_buf_append_uint64(db, job_stat->mem);
 
 	//	char cpu_data[100];
 	//	sprintf(cpu_data, "%f", job_stat->cpu);

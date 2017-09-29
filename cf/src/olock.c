@@ -37,6 +37,11 @@
 #include <citrusleaf/alloc.h>
 
 
+// This ruins the notion that olocks are a generic class, but...
+// (Perhaps better in index.c or record.c, if we ever make a record.h?)
+olock *g_record_locks;
+
+
 // an interesting detail: since this digest is used to choose among
 // servers, you must use different bits to choose which OLOCK
 

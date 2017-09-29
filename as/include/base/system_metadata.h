@@ -34,7 +34,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "util.h" // For "cf_node"
+#include "node.h"
 
 
 /* Declare Public System Metadata Types */
@@ -65,10 +65,6 @@ typedef struct as_smd_item_s {
  *  Type for a list of metadata items for a particular node.
  */
 typedef struct as_smd_item_list_s {
-	char *module_name;       // All the items in this list belong to this module if module is not NULL.
-							 // (The module name is only NULL when a node submits all of its local
-							 //   metadata to the Paxos principal after a cluster state change.)
-	cf_node node_id;         // Node providing this metadata
 	size_t num_items;        // Number of metadata items
 	as_smd_item_t *item[];   // Array of pointers to metadata items
 } as_smd_item_list_t;
@@ -77,6 +73,11 @@ typedef struct as_smd_item_list_s {
  *  Opaque type representing the state of the System Metadata module.
  */
 typedef struct as_smd_s as_smd_t;
+
+/*
+ *  SMD is a singleton, though many class methods are passed an object pointer.
+ */
+extern as_smd_t *g_smd;
 
 /*
  *  Type for mutually-disjoint flag values passed by SMD to the module's accept callback
@@ -110,7 +111,16 @@ typedef int (*as_smd_get_cb)(char *module, as_smd_item_list_t *items, void *udat
  *    Alternative merge policies:  highest generation, latest timestamp
  *    Configurable via registering a per-module callback function.
  */
-typedef int (*as_smd_merge_cb)(char *module, as_smd_item_list_t **item_list_out, as_smd_item_list_t **item_lists_in, size_t num_lists, void *udata);
+typedef int (*as_smd_merge_cb)(const char *module, as_smd_item_list_t **item_list_out, as_smd_item_list_t **item_lists_in, size_t num_lists, void *udata);
+
+/*
+ *  Callback function type for metadata merge item conflict resolution functions.
+ *    Use only if not using custom as_smd_merge_cb
+ *    Default item conflict resolution picks greater SMD generation/timestamp
+ *    Configurable via registering a per-module callback function.
+ *    Return true to choose existing_item, false to choose new_item.
+ */
+typedef bool (*as_smd_conflict_cb)(char *module, as_smd_item_t *existing_item, as_smd_item_t *new_item, void *udata);
 
 /*
  *  Callback function type for metadata acceptance policy functions.
@@ -174,8 +184,11 @@ int as_smd_shutdown(as_smd_t *smd);
  *  Create a container for the named module's metadata and register the policy callback functions.
  *  (Pass a NULL callback function pointer to select the default policy.)
  */
-int as_smd_create_module(char *module, as_smd_merge_cb merge_cb, void *merge_udata, as_smd_accept_cb accept_cb,
-						 void *accept_udata, as_smd_can_accept_cb can_accept_cb, void *can_accept_udata);
+int as_smd_create_module(char *module,
+						 as_smd_merge_cb merge_cb, void *merge_udata,
+						 as_smd_conflict_cb conflict_cb, void *conflict_udata,
+						 as_smd_accept_cb accept_cb, void *accept_udata,
+						 as_smd_can_accept_cb can_accept_cb, void *can_accept_udata);
 
 /*
  *  Destroy the container for the named module's metadata, releasing all of its metadata.
@@ -219,5 +232,5 @@ void as_smd_info_cmd(char *cmd, cf_node node_id, char *module, char *key, char *
 /*
  *  Merge callback function implementing the majority consensus merge policy.
  */
-int as_smd_majority_consensus_merge(char *module, as_smd_item_list_t **item_list_out,
+int as_smd_majority_consensus_merge(const char *module, as_smd_item_list_t **item_list_out,
 									as_smd_item_list_t **item_lists_in, size_t num_lists, void *udata);

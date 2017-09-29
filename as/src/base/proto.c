@@ -33,8 +33,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <asm/byteorder.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include "aerospike/as_val.h"
 #include "citrusleaf/alloc.h"
@@ -44,15 +42,15 @@
 
 #include "dynbuf.h"
 #include "fault.h"
-#include "jem.h"
+#include "socket.h"
 
 #include "base/as_stap.h"
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
-#include "base/udf_rw.h"
 #include "storage/storage.h"
+
 
 void
 as_proto_swap(as_proto *p)
@@ -65,30 +63,11 @@ as_proto_swap(as_proto *p)
 	p->type = type;
 }
 
-#if 0 // if you don't have that nice linux swap
-void
-as_proto_swap_header(as_proto *p)
-{
-	uint8_t *buf = (uint8_t *)p;
-	uint8_t _t;
-	_t = buf[2];
-	buf[2] = buf[7];
-	buf[7] = _t;
-	_t = buf[3];
-	buf[3] = buf[6];
-	buf[6] = _t;
-	_t = buf[4];
-	buf[4] = buf[5];
-	buf[5] = _t;
-}
-#endif
-
-
 void
 as_msg_swap_header(as_msg *m)
 {
 	m->generation = ntohl(m->generation);
-	m->record_ttl =  ntohl(m->record_ttl);
+	m->record_ttl = ntohl(m->record_ttl);
 	m->transaction_ttl = ntohl(m->transaction_ttl);
 	m->n_fields = ntohs(m->n_fields);
 	m->n_ops = ntohs(m->n_ops);
@@ -100,64 +79,10 @@ as_msg_swap_op(as_msg_op *op)
 	op->op_sz = ntohl(op->op_sz);
 }
 
-// fields better be swapped before you call this
-
-int
-as_msg_swap_ops(as_msg *m, void *limit)
-{
-	as_msg_op *op = 0;
-	int *n = 0; // 0ing actually not necessary
-
-	while ((op = as_msg_op_iterate(m, op, n))) {
-		if ((void*)op >= limit) return(-1);
-		as_msg_swap_op(op);
-	}
-	return(0);
-}
-
 void
 as_msg_swap_field(as_msg_field *mf)
 {
 	mf->field_sz = ntohl(mf->field_sz);
-}
-
-// swaps all the fields but nothing else
-
-int
-as_msg_swap_fields(as_msg *m, void *limit)
-{
-	as_msg_field *mf = (as_msg_field *) m->data;
-
-	for (int i = 0; i < m->n_fields; i++) {
-		if ((void *)mf >= limit)	return(-1);
-		as_msg_swap_field(mf);
-		mf = as_msg_field_get_next(mf);
-	}
-	return(0);
-}
-
-int
-as_msg_swap_fields_and_ops(as_msg *m, void *limit)
-{
-	as_msg_field *mf = (as_msg_field *) m->data;
-
-	for (int i = 0; i < m->n_fields; i++) {
-		if ((void *)mf >= limit) {
-			return(-1);
-		}
-		as_msg_swap_field(mf);
-		mf = as_msg_field_get_next(mf);
-	}
-
-	as_msg_op *op = (as_msg_op *)mf;
-	for (int i = 0; i < m->n_ops; i++) {
-		if ((void *)op >= limit) {
-			return -1;
-		}
-		as_msg_swap_op(op);
-		op = as_msg_op_get_next(op);
-	}
-	return(0);
 }
 
 //
@@ -303,45 +228,21 @@ as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 int
 as_msg_send_ops_reply(as_file_handle *fd_h, cf_dyn_buf *db)
 {
-	int rv = 0;
-
-	if (fd_h->fd == 0) {
-		cf_crash(AS_PROTO, "fd is 0");
+	if (! cf_socket_exists(&fd_h->sock)) {
+		cf_crash(AS_PROTO, "fd is NULL");
 	}
 
-	uint8_t *msgp = db->buf;
-	size_t msg_sz = db->used_sz;
-	size_t pos = 0;
-
-	while (pos < msg_sz) {
-		int result = send(fd_h->fd, msgp + pos, msg_sz - pos, MSG_NOSIGNAL);
-
-		if (result > 0) {
-			pos += result;
-		}
-		else if (result < 0) {
-			if (errno != EWOULDBLOCK) {
-				// Common when a client aborts.
-				cf_debug(AS_PROTO, "protocol write fail: fd %d sz %zd pos %zd rv %d errno %d", fd_h->fd, msg_sz, pos, rv, errno);
-				as_end_of_transaction_force_close(fd_h);
-				rv = -1;
-				goto Exit;
-			}
-
-			usleep(1); // yield
-		}
-		else {
-			cf_info(AS_PROTO, "protocol write fail zero return: fd %d sz %d pos %d ", fd_h->fd, msg_sz, pos);
-			as_end_of_transaction_force_close(fd_h);
-			rv = -1;
-			goto Exit;
-		}
+	if (cf_socket_send_all(&fd_h->sock, db->buf, db->used_sz, MSG_NOSIGNAL,
+			CF_SOCKET_TIMEOUT) < 0) {
+		// Common when a client aborts.
+		cf_debug(AS_PROTO, "protocol write fail: fd %d sz %zu errno %d",
+				CSFD(&fd_h->sock), db->used_sz, errno);
+		as_end_of_transaction_force_close(fd_h);
+		return -1;
 	}
 
 	as_end_of_transaction_ok(fd_h);
-
-Exit:
-	return rv;
+	return 0;
 }
 
 
@@ -584,11 +485,7 @@ int as_msg_make_response_bufbuilder(as_record *r, as_storage_rd *rd,
 	as_msg_field *mf = (as_msg_field *) buf;
 	mf->field_sz = sizeof(cf_digest) + 1;
 	mf->type = AS_MSG_FIELD_TYPE_DIGEST_RIPE;
-	if (rd) {
-		memcpy(mf->data, &rd->keyd, sizeof(cf_digest));
-	} else {
-		memcpy(mf->data, &r->key, sizeof(cf_digest));
-	}
+	memcpy(mf->data, &r->keyd, sizeof(cf_digest));
 	as_msg_swap_field(mf);
 	buf += sizeof(as_msg_field) + sizeof(cf_digest);
 
@@ -722,6 +619,7 @@ as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code, cf_buf_b
 	mf->type = AS_MSG_FIELD_TYPE_DIGEST_RIPE;
 	memcpy(mf->data, keyd, sizeof(cf_digest));
 	as_msg_swap_field(mf);
+
 	buf += sizeof(as_msg_field) + sizeof(cf_digest);
 
 	mf = (as_msg_field *) buf;
@@ -729,7 +627,6 @@ as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code, cf_buf_b
 	mf->type = AS_MSG_FIELD_TYPE_NAMESPACE;
 	memcpy(mf->data, nsname, ns_len);
 	as_msg_swap_field(mf);
-	buf += sizeof(as_msg_field) + ns_len;
 
 	return(0);
 }
@@ -748,12 +645,10 @@ as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code, cf_buf_b
 int
 as_msg_send_reply(as_file_handle *fd_h, uint32_t result_code, uint32_t generation,
 		uint32_t void_time, as_msg_op **ops, as_bin **bins, uint16_t bin_count,
-		as_namespace *ns, uint *written_sz, uint64_t trid, const char *setname)
+		as_namespace *ns, uint64_t trid, const char *setname)
 {
-	int rv = 0;
-
 	// most cases are small messages - try to stack alloc if we can
-	byte fb[MSG_STACK_BUFFER_SZ];
+	uint8_t fb[MSG_STACK_BUFFER_SZ];
 	size_t msg_sz = sizeof(fb);
 //	memset(fb,0xff,msg_sz);  // helpful to see what you might not be setting
 
@@ -763,172 +658,52 @@ as_msg_send_reply(as_file_handle *fd_h, uint32_t result_code, uint32_t generatio
 
 	if (!msgp)	return(-1);
 
-	if (fd_h->fd == 0) {
-		cf_warning(AS_PROTO, "write to fd 0 internal error");
-		cf_crash(AS_PROTO, "send reply: can't write to fd 0");
+	if (! cf_socket_exists(&fd_h->sock)) {
+		cf_warning(AS_PROTO, "write to NULL fd internal error");
+		cf_crash(AS_PROTO, "send reply: can't write to NULL fd");
 	}
 
 //	cf_detail(AS_PROTO, "write fd %d",fd);
+	int rv;
 
-	size_t pos = 0;
-	while (pos < msg_sz) {
-		int rv = send(fd_h->fd, msgp + pos, msg_sz - pos, MSG_NOSIGNAL);
-		if (rv > 0) {
-			pos += rv;
-		}
-		else if (rv < 0) {
-			if (errno != EWOULDBLOCK) {
-				// common message when a client aborts
-				cf_debug(AS_PROTO, "protocol write fail: fd %d sz %zd pos %zd rv %d errno %d", fd_h->fd, msg_sz, pos, rv, errno);
-				as_end_of_transaction_force_close(fd_h);
-				rv = -1;
-				goto Exit;
-			}
-			usleep(1); // Yield
-		} else {
-			cf_info(AS_PROTO, "protocol write fail zero return: fd %d sz %d pos %d ", fd_h->fd, msg_sz, pos);
-			as_end_of_transaction_force_close(fd_h);
-			rv = -1;
-			goto Exit;
-		}
+	if (cf_socket_send_all(&fd_h->sock, msgp, msg_sz, MSG_NOSIGNAL,
+			CF_SOCKET_TIMEOUT) < 0) {
+		// Common when a client aborts.
+		cf_debug(AS_PROTO, "protocol write fail: fd %d sz %zu",
+				CSFD(&fd_h->sock), msg_sz);
+		as_end_of_transaction_force_close(fd_h);
+		rv = -1;
+	}
+	else {
+		as_end_of_transaction_ok(fd_h);
+		rv = 0;
 	}
 
-	// good for stats as a higher layer
-	if (written_sz) *written_sz = msg_sz;
-
-	as_end_of_transaction_ok(fd_h);
-
-Exit:
-	if ((uint8_t *)msgp != fb)
+	if (msgp != fb)
 		cf_free(msgp);
 
 	return(rv);
 }
 
 bool
-as_msg_peek_data_in_memory(cl_msg *msgp)
+as_msg_peek_data_in_memory(const as_msg *m)
 {
-	if (! msgp ||
-			msgp->proto.version != PROTO_VERSION ||
-			msgp->proto.type != PROTO_TYPE_AS_MSG) {
-		return false;
-	}
-
-	as_msg_field *f = as_msg_field_get(&msgp->msg, AS_MSG_FIELD_TYPE_NAMESPACE);
+	as_msg_field *f = as_msg_field_get(m, AS_MSG_FIELD_TYPE_NAMESPACE);
 
 	if (! f) {
+		// Should never happen, but don't bark here.
 		return false;
 	}
 
-	as_namespace *ns = as_namespace_get_bymsgfield_unswap(f);
+	as_namespace *ns = as_namespace_get_bymsgfield(f);
 
+	// If ns is null, don't be the first to bark.
 	return ns && ns->storage_data_in_memory;
 }
 
-/*
-** this function works on unswapped data
-*/
-
-void
-as_msg_peek( cl_msg *msgp, proto_peek *peek )
-{
-	memset(peek, 0, sizeof(proto_peek));
-
-	if (msgp == 0) return;
-
-	if (msgp->proto.version != PROTO_VERSION ||
-			msgp->proto.type != PROTO_TYPE_AS_MSG) {
-		return;
-	}
-
-	as_msg *m = &msgp->msg;
-	peek->info1 = m->info1;
-	peek->info2 = m->info2;
-
-	if (m->n_fields == 0) {
-		return;
-	}
-
-	int n_fields = m->n_fields;
-	bool swap = n_fields < 10 ? false : true;
-	if (swap) n_fields = ntohs(n_fields);
-
-	as_msg_field *kdfp = 0;
-	as_msg_field *sfp = 0;
-	as_msg_field *kfp = 0;
-	as_msg_field *nfp = 0;
-
-	// over all the fields
-	as_msg_field *mf = (as_msg_field *) m->data;
-	uint i = 0;
-	for (; i < n_fields ; i++) {
-		switch (mf->type) {
-			case AS_MSG_FIELD_TYPE_DIGEST_RIPE:
-				kdfp = mf;
-				break;
-			case AS_MSG_FIELD_TYPE_SET:
-				sfp = mf;
-				break;
-			case AS_MSG_FIELD_TYPE_KEY:
-				kfp = mf;
-				break;
-			case AS_MSG_FIELD_TYPE_NAMESPACE:
-				nfp = mf;
-				break;
-		}
-		if (swap)
-			mf = as_msg_field_get_next_unswap(mf);
-		else
-			mf = as_msg_field_get_next(mf);
-	}
-
-	// find the key
-	if (kdfp) {
-		peek->keyd = *(cf_digest *)kdfp->data;
-	}
-	else {
-		if (kfp) {
-			if (sfp == 0 || as_msg_field_get_value_sz(sfp) == 0) {
-				int ksz = swap ? as_msg_field_get_value_sz_unswap(kfp) : as_msg_field_get_value_sz(kfp);
-				cf_digest_compute(kfp->data, ksz, &peek->keyd);
-			}
-			else {
-				int ksz = swap ? as_msg_field_get_value_sz_unswap(kfp) : as_msg_field_get_value_sz(kfp);
-				int ssz = swap ? as_msg_field_get_value_sz_unswap(sfp) : as_msg_field_get_value_sz(sfp);
-				cf_digest_compute2(sfp->data, ssz, kfp->data, ksz, &peek->keyd);
-			}
-		}
-	}
-
-	// find the namespace
-	if (nfp) {
-		uint32_t nsz = swap ? as_msg_field_get_value_sz_unswap(nfp) : as_msg_field_get_value_sz(nfp);
-		if (nsz >= AS_ID_NAMESPACE_SZ) goto no_ns; // this should be illegal
-		for (int i = 0; i < g_config.n_namespaces; i++) {
-			tsvc_namespace_devices *ndev = &g_tsvc_devices_a[i];
-			if (ndev->n_sz != nsz) continue;
-			if (0 == memcmp(ndev->n_name, nfp->data, nsz)) {
-				peek->ns_queue_offset = ndev->queue_offset;
-				peek->ns_n_devices = ndev->n_devices;
-				/*
-				if (peek->info1 & AS_MSG_INFO1_READ) {
-					cf_info(AS_PROTO, "read peek %s gives ofst %d n_dev %d",ndev->n_name,peek->ns_queue_offset,peek->ns_n_devices);
-				} else {
-					cf_info(AS_PROTO, "write peek %s gives ofst %d n_dev %d",ndev->n_name,peek->ns_queue_offset,peek->ns_n_devices);
-				}
-				*/
-				break;
-			}
-		}
-	}
-no_ns:
-
-	return;
-}
-
 uint8_t *
-as_msg_write_header(uint8_t *buf, size_t msg_sz, uint info1, uint info2,
-		uint info3, uint32_t generation, uint32_t record_ttl,
+as_msg_write_header(uint8_t *buf, size_t msg_sz, uint8_t info1, uint8_t info2,
+		uint8_t info3, uint32_t generation, uint32_t record_ttl,
 		uint32_t transaction_ttl, uint32_t n_fields, uint32_t n_ops)
 {
 	cl_msg *msg = (cl_msg *) buf;
@@ -950,10 +725,8 @@ as_msg_write_header(uint8_t *buf, size_t msg_sz, uint info1, uint info2,
 }
 
 uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
-		const char *set, int set_len, const cf_digest *d, cf_digest *d_ret,
-		uint64_t trid, as_msg_field *scan_param_field, void * c)
+		const char *set, int set_len, const cf_digest *d, uint64_t trid)
 {
-	udf_call * call = (udf_call*) c;
 	// printf("write_fields\n");
 	// lay out the fields
 	as_msg_field *mf = (as_msg_field *) buf;
@@ -968,6 +741,7 @@ uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
 		mf = mf_tmp;
 	}
 
+	// Not currently used, but it's at least plausible we'll do so in future.
 	if (set && set_len != 0) {
 		mf->type = AS_MSG_FIELD_TYPE_SET;
 		mf->field_sz = set_len + 1;
@@ -977,6 +751,7 @@ uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
 		mf = mf_tmp;
 	}
 
+	// Not currently used, but it's at least plausible we'll do so in future.
 	if (trid) {
 		mf->type = AS_MSG_FIELD_TYPE_TRID;
 		//Convert the transaction-id to network byte order (big-endian)
@@ -988,64 +763,15 @@ uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
 		mf = mf_tmp;
 	}
 
-	if (scan_param_field) {
-		mf->type = AS_MSG_FIELD_TYPE_SCAN_OPTIONS;
-		mf->field_sz = sizeof(as_msg_field) + 1;
-		//printf("write_fields: scan: write_fields: %d\n", mf->field_sz);
-		memcpy(mf->data, scan_param_field, sizeof(as_msg_field));
-		mf_tmp = as_msg_field_get_next(mf);
-		mf = mf_tmp;
-	}
-
-	/**
-	 * UDF
-	 */
-	if ( call ) {
-
-		int len = 0;
-
-		// Append filename to message fields
-		len = strlen(call->def.filename) * sizeof(char);
-		mf->type = AS_MSG_FIELD_TYPE_UDF_FILENAME;
-		mf->field_sz =  len + 1;
-		memcpy(mf->data, call->def.filename, len);
-
-		mf_tmp = as_msg_field_get_next(mf);
-		mf = mf_tmp;
-
-		// Append function name to message fields
-		len = strlen(call->def.function) * sizeof(char);
-		mf->type = AS_MSG_FIELD_TYPE_UDF_FUNCTION;
-		mf->field_sz =  len + 1;
-		memcpy(mf->data, call->def.function, len);
-
-		mf_tmp = as_msg_field_get_next(mf);
-		mf = mf_tmp;
-
-		// Append arglist to message fields
-		if (call->def.arglist) {
-			len = call->def.arglist->field_sz * sizeof(char);
-			mf->type = AS_MSG_FIELD_TYPE_UDF_ARGLIST;
-			mf->field_sz = len + 1;
-			memcpy(mf->data, call->def.arglist->data, len);
-
-			mf_tmp = as_msg_field_get_next(mf);
-			mf = mf_tmp;
-		}
-
-	}
 	if (d) {
 		mf->type = AS_MSG_FIELD_TYPE_DIGEST_RIPE;
 		mf->field_sz = sizeof(cf_digest) + 1;
 		memcpy(mf->data, d, sizeof(cf_digest));
 		mf_tmp = as_msg_field_get_next(mf);
-		if (d_ret)
-			memcpy(d_ret, d, sizeof(cf_digest));
-
 		mf = mf_tmp;
-
 	}
-	return ( (uint8_t *) mf_tmp );
+
+	return (uint8_t *) mf_tmp;
 }
 
 const char SUCCESS_BIN_NAME[] = "SUCCESS";
@@ -1102,29 +828,17 @@ as_msg_make_val_response_bufbuilder(const as_val *val, cf_buf_builder **bb_r, in
 }
 
 int
-as_msg_send_response(int fd, uint8_t* buf, size_t len, int flags)
+as_msg_send_response(cf_socket *sock, uint8_t* buf, size_t len, int flags)
 {
-	int rv;
-	int pos = 0;
-
-	while (pos < len) {
-		rv = send(fd, buf + pos, len - pos, flags);
-
-		if (rv <= 0) {
-			if (errno != EAGAIN) {
-				cf_info(AS_PROTO, "send response error returned %d errno %d fd %d", rv, errno, fd);
-				return -1;
-			}
-		}
-		else {
-			pos += rv;
-		}
+	if (cf_socket_send_all(sock, buf, len, flags, CF_SOCKET_TIMEOUT) < 0) {
+		return -1;
 	}
+
 	return 0;
 }
 
 int
-as_msg_send_fin(int fd, uint32_t result_code)
+as_msg_send_fin(cf_socket *sock, uint32_t result_code)
 {
 	cl_msg m;
 	m.proto.version = PROTO_VERSION;
@@ -1144,7 +858,7 @@ as_msg_send_fin(int fd, uint32_t result_code)
 	m.msg.n_ops = 0;
 	as_msg_swap_header(&m.msg);
 
-	return as_msg_send_response(fd, (uint8_t*) &m, sizeof(m), MSG_NOSIGNAL);
+	return as_msg_send_response(sock, (uint8_t*) &m, sizeof(m), MSG_NOSIGNAL);
 }
 
 #define AS_NETIO_MAX_IO_RETRY         5
@@ -1179,10 +893,10 @@ as_netio_send_packet(as_file_handle *fd_h, cf_buf_builder *bb_r, uint32_t *offse
 	int retry = 0;
 	cf_detail(AS_PROTO," Start At %p %d %d", buf, pos, len);
 	while (pos < len) {
-		rv = send(fd_h->fd, buf + pos, len - pos, MSG_NOSIGNAL);
+		rv = cf_socket_send(&fd_h->sock, buf + pos, len - pos, MSG_NOSIGNAL);
 		if (rv <= 0) {
 			if (errno != EAGAIN) {
-				cf_debug(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, fd_h->fd);
+				cf_debug(AS_PROTO, "Packet send response error returned %d errno %d fd %d", rv, errno, CSFD(&fd_h->sock));
 				return AS_NETIO_IO_ERR;
 			}
 			if (!blocking && (retry > AS_NETIO_MAX_IO_RETRY)) {

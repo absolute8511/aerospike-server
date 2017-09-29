@@ -26,8 +26,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <arpa/inet.h>
 #include <asm/byteorder.h>
-#include <netinet/in.h>
 
 #include <citrusleaf/alloc.h>
 
@@ -199,6 +199,73 @@ cf_dyn_buf_free(cf_dyn_buf *db)
 		cf_free(db->buf);
 	}
 }
+
+// Helpers to append name value pairs to a cf_dyn_buf in pattern: name=value;
+
+void
+info_append_bool(cf_dyn_buf *db, const char *name, bool value)
+{
+	cf_dyn_buf_append_string(db, name);
+	cf_dyn_buf_append_char(db, '=');
+	cf_dyn_buf_append_string(db, value ? "true" : "false");
+	cf_dyn_buf_append_char(db, ';');
+}
+
+void
+info_append_int(cf_dyn_buf *db, const char *name, int value)
+{
+	cf_dyn_buf_append_string(db, name);
+	cf_dyn_buf_append_char(db, '=');
+	cf_dyn_buf_append_int(db, value);
+	cf_dyn_buf_append_char(db, ';');
+}
+
+void
+info_append_string(cf_dyn_buf *db, const char *name, const char *value)
+{
+	cf_dyn_buf_append_string(db, name);
+	cf_dyn_buf_append_char(db, '=');
+	cf_dyn_buf_append_string(db, value);
+	cf_dyn_buf_append_char(db, ';');
+}
+
+void
+info_append_string_safe(cf_dyn_buf *db, const char *name, const char *value)
+{
+	cf_dyn_buf_append_string(db, name);
+	cf_dyn_buf_append_char(db, '=');
+	cf_dyn_buf_append_string(db, value ? value : "null");
+	cf_dyn_buf_append_char(db, ';');
+}
+
+void
+info_append_uint32(cf_dyn_buf *db, const char *name, uint32_t value)
+{
+	cf_dyn_buf_append_string(db, name);
+	cf_dyn_buf_append_char(db, '=');
+	cf_dyn_buf_append_uint32(db, value);
+	cf_dyn_buf_append_char(db, ';');
+}
+
+void
+info_append_uint64(cf_dyn_buf *db, const char *name, uint64_t value)
+{
+	cf_dyn_buf_append_string(db, name);
+	cf_dyn_buf_append_char(db, '=');
+	cf_dyn_buf_append_uint64(db, value);
+	cf_dyn_buf_append_char(db, ';');
+}
+
+void
+info_append_uint64_x(cf_dyn_buf *db, const char *name, uint64_t value)
+{
+	cf_dyn_buf_append_string(db, name);
+	cf_dyn_buf_append_char(db, '=');
+	cf_dyn_buf_append_uint64_x(db, value);
+	cf_dyn_buf_append_char(db, ';');
+}
+
+
 
 //
 // Make sure the buf has enough bytes for whatever you're up to.

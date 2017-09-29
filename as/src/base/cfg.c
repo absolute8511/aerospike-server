@@ -1,7 +1,7 @@
 /*
  * cfg.c
  *
- * Copyright (C) 2008-2014 Aerospike, Inc.
+ * Copyright (C) 2008-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -32,42 +32,46 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/resource.h>
-
-#include "xdr_config.h"
 
 #include "aerospike/mod_lua_config.h"
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_shash.h"
+#include "citrusleaf/cf_vector.h"
 
+#include "bits.h"
 #include "cf_str.h"
 #include "dynbuf.h"
 #include "fault.h"
+#include "hardware.h"
 #include "hist.h"
 #include "hist_track.h"
 #include "msg.h"
+#include "node.h"
 #include "olock.h"
-#include "util.h"
+#include "socket.h"
+#include "tls.h"
 
-#include "base/cluster_config.h"
 #include "base/datamodel.h"
 #include "base/ldt.h"
 #include "base/proto.h"
 #include "base/secondary_index.h"
 #include "base/security_config.h"
+#include "base/thr_demarshal.h"
 #include "base/thr_info.h"
+#include "base/thr_info_port.h"
+#include "base/thr_query.h"
+#include "base/thr_sindex.h"
+#include "base/thr_tsvc.h"
 #include "base/transaction_policy.h"
+#include "base/xdr_config.h"
+#include "base/xdr_serverside.h"
+#include "fabric/fabric.h"
 #include "fabric/migrate.h"
-
-
-//==============================================================================
-// Constants.
-//
-
-const char IPV4_ANY_ADDR[] = "0.0.0.0";
-const char IPV4_LOCALHOST_ADDR[] = "127.0.0.1";
+#include "fabric/partition_balance.h"
 
 
 //==========================================================
@@ -82,16 +86,33 @@ as_config g_config;
 // Forward declarations.
 //
 
-void cfg_add_mesh_seed_addr_port(char* addr, int port);
+void init_addr_list(cf_addr_list* addrs);
+void add_addr(const char* name, cf_addr_list* addrs);
+void copy_addrs(const cf_addr_list* from, cf_addr_list* to);
+void default_addrs(cf_addr_list* one, cf_addr_list* two);
+void bind_to_access(const cf_serv_spec* from, cf_addr_list* to);
+void cfg_add_addr_bind(const char* name, cf_serv_spec* spec);
+void cfg_add_addr_std(const char* name, cf_serv_spec* spec);
+void cfg_add_addr_alt(const char* name, cf_serv_spec* spec);
+void cfg_mserv_config_from_addrs(cf_addr_list* addrs, cf_addr_list* bind_addrs, cf_mserv_cfg* serv_cfg, cf_ip_port port, cf_sock_owner owner, uint8_t ttl);
+void cfg_serv_spec_to_bind(const cf_serv_spec* spec, cf_serv_cfg* bind, cf_sock_owner owner);
+void cfg_serv_spec_std_to_access(const cf_serv_spec* spec, cf_addr_list* access);
+void cfg_serv_spec_alt_to_access(const cf_serv_spec* spec, cf_addr_list* access);
+void cfg_add_mesh_seed_addr_port(char* addr, cf_ip_port port);
 as_set* cfg_add_set(as_namespace* ns);
 void cfg_add_storage_file(as_namespace* ns, char* file_name);
 void cfg_add_storage_device(as_namespace* ns, char* device_name, char* shadow_name);
-void cfg_init_si_var(as_namespace* ns);
 uint32_t cfg_obj_size_hist_max(uint32_t hist_max);
+void cfg_set_cluster_name(char* cluster_name);
+void create_and_check_hist_track(cf_hist_track** h, const char* name, histogram_scale scale);
+void create_and_check_hist(histogram** h, const char* name, histogram_scale scale);
 void cfg_create_all_histograms();
-int cfg_reset_self_node(as_config* config_p);
-char* cfg_set_addr(const char* name);
-void cfg_use_hardware_values(as_config* c);
+void cfg_init_serv_spec(cf_serv_spec* spec_p);
+void cfg_resolve_tls_name(as_config* config_p);
+
+void xdr_cfg_add_datacenter(char* dc, uint32_t nsid);
+void xdr_cfg_add_node_addr_port(dc_config_opt *dc_cfg, char* addr, int port);
+void xdr_cfg_add_tls_node(dc_config_opt *dc_cfg, char* addr, char *tls_name, int port);
 
 
 //==========================================================
@@ -101,45 +122,33 @@ void cfg_use_hardware_values(as_config* c);
 void
 cfg_set_defaults()
 {
-	as_config *c = &g_config;
+	as_config* c = &g_config;
 
 	memset(c, 0, sizeof(as_config));
 
-	// Service defaults.
+	cfg_init_serv_spec(&c->service);
+	cfg_init_serv_spec(&c->tls_service);
+	cfg_init_serv_spec(&c->hb_serv_spec);
+	cfg_init_serv_spec(&c->fabric);
+	cfg_init_serv_spec(&c->info);
+
 	c->paxos_single_replica_limit = 1; // by default all clusters obey replication counts
-	c->n_service_threads = 4;
-	c->n_transaction_queues = 4; // calculated when use_queue_per_device is set, see thr_tsvc_queue_init()
-	c->n_transaction_threads_per_queue = 4;
 	c->n_proto_fd_max = 15000;
-	c->allow_inline_transactions = true; // allow data-in-memory namespaces to process transactions in service threads
 	c->n_batch_threads = 4;
 	c->batch_max_buffers_per_queue = 255; // maximum number of buffers allowed in a single queue
 	c->batch_max_requests = 5000; // maximum requests/digests in a single batch
 	c->batch_max_unused_buffers = 256; // maximum number of buffers allowed in batch buffer pool
 	c->batch_priority = 200; // # of rows between a quick context switch?
-	c->n_batch_index_threads = 4;
-	c->n_fabric_workers = 16;
-	c->hist_track_back = 1800;
+	c->clock_skew_max_ms = 1000;
+	c->hist_track_back = 300;
 	c->hist_track_slice = 10;
 	c->n_info_threads = 16;
 	c->ldt_benchmarks = false;
-	c->microbenchmarks = false;
 	c->migrate_max_num_incoming = AS_MIGRATE_DEFAULT_MAX_NUM_INCOMING; // for receiver-side migration flow-control
-	c->migrate_read_priority = 10; // # of rows between a quick context switch? not a great way to tune
-	c->migrate_read_sleep = 500; // # of rows between a quick context switch? not a great way to tune
-	c->migrate_rx_lifetime_ms = AS_MIGRATE_DEFAULT_RX_LIFETIME_MS; // for debouncing re-transmitted migrate start messages
 	c->n_migrate_threads = 1;
-	c->migrate_xmit_hwm = 10; // these are actually far more interesting for tuning parameters
-	c->migrate_xmit_lwm = 5; // because the monitor the queue depth
-	c->migrate_xmit_priority = 40; // # of rows between a quick context switch? not a great way to tune
-	c->migrate_xmit_sleep = 500; // # of rows between a quick context switch? not a great way to tune
 	c->nsup_delete_sleep = 100; // 100 microseconds means a delete rate of 10k TPS
 	c->nsup_period = 120; // run nsup once every 2 minutes
 	c->nsup_startup_evict = true;
-	c->paxos_max_cluster_size = AS_CLUSTER_DEFAULT_SZ; // default the maximum cluster size to a "reasonable" value
-	c->paxos_protocol = AS_PAXOS_PROTOCOL_V3; // default to 3.0 "sindex" paxos protocol version
-	c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_MANUAL; // default to the manual paxos recovery policy
-	c->paxos_retransmit_period = 5; // run paxos retransmit once every 5 seconds
 	c->proto_fd_idle_ms = 60000; // 1 minute reaping of proto file descriptors
 	c->proto_slow_netio_sleep_ms = 1; // 1 ms sleep between retry for slow queries
 	c->run_as_daemon = true; // set false only to run in debugger & see console output
@@ -147,47 +156,53 @@ cfg_set_defaults()
 	c->scan_max_done = 100;
 	c->scan_max_udf_transactions = 32;
 	c->scan_threads = 4;
-	c->storage_benchmarks = false;
 	c->ticker_interval = 10;
 	c->transaction_max_ns = 1000 * 1000 * 1000; // 1 second
 	c->transaction_pending_limit = 20;
 	c->transaction_repeatable_read = false;
-	c->transaction_retry_ms = 1000;
+	c->transaction_retry_ms = 1000 + 2; // 1 second + epsilon, so default timeout happens first
+	c->n_transaction_threads_per_queue = 4;
 	as_sindex_gconfig_default(c);
 	as_query_gconfig_default(c);
 	c->work_directory = "/opt/aerospike";
+	c->debug_allocations = CF_ALLOC_DEBUG_NONE;
 	c->fabric_dump_msgs = false;
 	c->max_msgs_per_type = -1; // by default, the maximum number of "msg" objects per type is unlimited
-	c->memory_accounting = false;
-	c->asmalloc_enabled = true;
-
-	// Network service defaults.
-	c->socket.proto = SOCK_STREAM; // not configurable, but addr and port are
-	c->localhost_socket.proto = SOCK_STREAM; // not configurable
-	c->socket.addr = (char*)IPV4_ANY_ADDR; // by default listen on any IPv4 address
-	c->socket_reuse_addr = true;
-
-	// Fabric TCP socket keepalive defaults.
-	c->fabric_keepalive_enabled = true;
-	c->fabric_keepalive_time = 1; // seconds
-	c->fabric_keepalive_intvl = 1; // seconds
-	c->fabric_keepalive_probes = 10; // tries
 
 	// Network heartbeat defaults.
-	c->hb_mode = AS_HB_MODE_UNDEF; // must supply heartbeat mode in the configuration file
-	c->hb_interval = 150;
-	c->hb_timeout = 10;
-	c->hb_mesh_rw_retry_timeout = 500;
-	c->hb_protocol = AS_HB_PROTOCOL_V2; // default to the latest heartbeat protocol version
+	c->hb_config.mode = AS_HB_MODE_UNDEF;
+	c->hb_config.tx_interval = 150;
+	c->hb_config.max_intervals_missed = 10;
+	c->hb_config.protocol = AS_HB_PROTOCOL_V3;
+	c->hb_config.override_mtu = 0;
+
+	// Fabric defaults.
+	c->n_fabric_channel_fds[AS_FABRIC_CHANNEL_BULK] = 2;
+	c->n_fabric_channel_recv_threads[AS_FABRIC_CHANNEL_BULK] = 4;
+	c->n_fabric_channel_fds[AS_FABRIC_CHANNEL_CTRL] = 1;
+	c->n_fabric_channel_recv_threads[AS_FABRIC_CHANNEL_CTRL] = 4;
+	c->n_fabric_channel_fds[AS_FABRIC_CHANNEL_META] = 1;
+	c->n_fabric_channel_recv_threads[AS_FABRIC_CHANNEL_META] = 4;
+	c->n_fabric_channel_fds[AS_FABRIC_CHANNEL_RW] = 8;
+	c->n_fabric_channel_recv_threads[AS_FABRIC_CHANNEL_RW] = 16;
+	c->fabric_keepalive_enabled = true;
+	c->fabric_keepalive_intvl = 1; // seconds
+	c->fabric_keepalive_probes = 10; // tries
+	c->fabric_keepalive_time = 1; // seconds
+	c->fabric_latency_max_ms = 5; // assume a one way latency of 5 milliseconds by default
+	c->fabric_recv_rearm_threshold = 1024;
+	c->n_fabric_send_threads = 8;
+
+	// Clustering defaults.
+	c->clustering_config.cluster_size_min = 1;
+	c->clustering_config.clique_based_eviction_enabled = true;
 
 	// XDR defaults.
-	xdr_config_defaults(&(c->xdr_cfg));
-
-	for (int i = 0; i < g_config.paxos_max_cluster_size; i++) {
-		c->xdr_lastship[i].node = 0;
+	for (int i = 0; i < AS_CLUSTER_SZ ; i++) {
+		c->xdr_peers_lst[i].node = 0;
 
 		for (int j = 0; j < DC_MAX_NUM; j++) {
-			c->xdr_lastship[i].time[j] = 0;
+			c->xdr_peers_lst[i].time[j] = 0;
 		}
 
 		c->xdr_clmap[i] = 0;
@@ -203,31 +218,13 @@ cfg_set_defaults()
 	strcpy(c->mod_lua.system_path, "/opt/aerospike/sys/udf/lua");
 	strcpy(c->mod_lua.user_path, "/opt/aerospike/usr/udf/lua");
 
-	// Cluster Topology: With the new Rack Aware feature, we allow the customers
-	// to define their nodes and groups with THEIR names, and thus overrule the
-	// autogenerate node ID based on MAC address and port (i.e. Hardware
-	// config). The DEFAULT value for "cluster mode" will be the old style -->
-	// No Topology. We have to see a CLUSTER definition of "static" or "dynamic"
-	// in the config file in order to change to the new mode.
-	c->cluster_mode = CL_MODE_NO_TOPOLOGY;
-
 	// TODO - security set default config API?
 	c->sec_cfg.privilege_refresh_period = 60 * 5; // refresh socket privileges every 5 minutes
 	c->sec_cfg.syslog_local = AS_SYSLOG_NONE;
-
-	// TODO - not sure why these are in configuration - just to be global?
-	cf_atomic_int_set(&c->migrate_num_incoming, 0);
-	cf_atomic_int_set(&c->migrate_num_incoming_accepted, 0);
-	cf_atomic_int_set(&c->migrate_num_incoming_refused, 0);
-	c->start_ms = cf_getms();
-	c->record_locks = olock_create(16 * 1024, true); // TODO - configurable number of locks?
-
-	c->n_namespaces = 0;
 }
 
-
 //==========================================================
-// All configuration items must have a switch() case
+// All configuration items must have a switch case
 // identifier somewhere in this enum. The order is not
 // important, other than for organizational sanity.
 //
@@ -236,21 +233,22 @@ typedef enum {
 	// Generic:
 	// Token not found:
 	CASE_NOT_FOUND,
+	// Start of parsing context:
+	CASE_CONTEXT_BEGIN,
 	// End of parsing context:
 	CASE_CONTEXT_END,
 
 	// Top-level options:
 	// In canonical configuration file order:
 	CASE_SERVICE_BEGIN,
-	CASE_LOG_BEGIN,
+	CASE_LOGGING_BEGIN,
 	CASE_NETWORK_BEGIN,
 	CASE_NAMESPACE_BEGIN,
-	// For XDR only:
-	CASE_XDR_BEGIN,
-	// Recent (non-2.x) functionality:
 	CASE_MOD_LUA_BEGIN,
 	CASE_CLUSTER_BEGIN,
+	// Enterprise-only:
 	CASE_SECURITY_BEGIN,
+	CASE_XDR_BEGIN,
 
 	// Service options:
 	// Normally visible, in canonical configuration file order:
@@ -258,80 +256,78 @@ typedef enum {
 	CASE_SERVICE_GROUP,
 	CASE_SERVICE_PAXOS_SINGLE_REPLICA_LIMIT,
 	CASE_SERVICE_PIDFILE,
-	CASE_SERVICE_SERVICE_THREADS,
-	CASE_SERVICE_TRANSACTION_QUEUES,
-	CASE_SERVICE_TRANSACTION_THREADS_PER_QUEUE,
 	CASE_SERVICE_CLIENT_FD_MAX, // renamed
 	CASE_SERVICE_PROTO_FD_MAX,
 	// Normally hidden:
-	CASE_SERVICE_ALLOW_INLINE_TRANSACTIONS,
+	CASE_SERVICE_ADVERTISE_IPV6,
+	CASE_SERVICE_AUTO_PIN,
 	CASE_SERVICE_BATCH_THREADS,
 	CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE,
 	CASE_SERVICE_BATCH_MAX_REQUESTS,
 	CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS,
 	CASE_SERVICE_BATCH_PRIORITY,
 	CASE_SERVICE_BATCH_INDEX_THREADS,
-	CASE_SERVICE_FABRIC_WORKERS,
-	CASE_SERVICE_GENERATION_DISABLE,
+	CASE_SERVICE_CLOCK_SKEW_MAX_MS,
+	CASE_SERVICE_CLUSTER_NAME,
+	CASE_SERVICE_ENABLE_BENCHMARKS_FABRIC,
+	CASE_SERVICE_ENABLE_BENCHMARKS_SVC,
+	CASE_SERVICE_ENABLE_HIST_INFO,
 	CASE_SERVICE_HIST_TRACK_BACK,
 	CASE_SERVICE_HIST_TRACK_SLICE,
 	CASE_SERVICE_HIST_TRACK_THRESHOLDS,
 	CASE_SERVICE_INFO_THREADS,
 	CASE_SERVICE_LDT_BENCHMARKS,
 	CASE_SERVICE_LOG_LOCAL_TIME,
-	CASE_SERVICE_MICROBENCHMARKS,
+	CASE_SERVICE_LOG_MILLIS,
 	CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING,
-	CASE_SERVICE_MIGRATE_READ_PRIORITY,
-	CASE_SERVICE_MIGRATE_READ_SLEEP,
-	CASE_SERVICE_MIGRATE_RX_LIFETIME_MS,
 	CASE_SERVICE_MIGRATE_THREADS,
-	CASE_SERVICE_MIGRATE_XMIT_HWM,
-	CASE_SERVICE_MIGRATE_XMIT_LWM,
-	CASE_SERVICE_MIGRATE_PRIORITY, // renamed
-	CASE_SERVICE_MIGRATE_XMIT_PRIORITY,
-	CASE_SERVICE_MIGRATE_XMIT_SLEEP,
+	CASE_SERVICE_MIN_CLUSTER_SIZE,
+	CASE_SERVICE_NODE_ID_INTERFACE,
 	CASE_SERVICE_NSUP_DELETE_SLEEP,
 	CASE_SERVICE_NSUP_PERIOD,
 	CASE_SERVICE_NSUP_STARTUP_EVICT,
-	CASE_SERVICE_PAXOS_MAX_CLUSTER_SIZE,
-	CASE_SERVICE_PAXOS_PROTOCOL,
-	CASE_SERVICE_PAXOS_RECOVERY_POLICY,
-	CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD,
 	CASE_SERVICE_PROTO_FD_IDLE_MS,
 	CASE_SERVICE_QUERY_BATCH_SIZE,
+	CASE_SERVICE_QUERY_BUFPOOL_SIZE,
 	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD,
+	CASE_SERVICE_QUERY_LONG_Q_MAX_SIZE,
 	CASE_SERVICE_QUERY_PRE_RESERVE_PARTITIONS,
 	CASE_SERVICE_QUERY_PRIORITY,
 	CASE_SERVICE_QUERY_PRIORITY_SLEEP_US,
+	CASE_SERVICE_QUERY_REC_COUNT_BOUND,
+	CASE_SERVICE_QUERY_REQ_IN_QUERY_THREAD,
+	CASE_SERVICE_QUERY_REQ_MAX_INFLIGHT,
+	CASE_SERVICE_QUERY_SHORT_Q_MAX_SIZE,
+	CASE_SERVICE_QUERY_THREADS,
 	CASE_SERVICE_QUERY_THRESHOLD,
 	CASE_SERVICE_QUERY_UNTRACKED_TIME_MS,
-	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET,
+	CASE_SERVICE_QUERY_WORKER_THREADS,
 	CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION,
 	CASE_SERVICE_RUN_AS_DAEMON,
 	CASE_SERVICE_SCAN_MAX_ACTIVE,
 	CASE_SERVICE_SCAN_MAX_DONE,
 	CASE_SERVICE_SCAN_MAX_UDF_TRANSACTIONS,
 	CASE_SERVICE_SCAN_THREADS,
-	CASE_SERVICE_SINDEX_DATA_MAX_MEMORY,
-	CASE_SERVICE_SNUB_NODES,
-	CASE_SERVICE_STORAGE_BENCHMARKS,
+	CASE_SERVICE_SERVICE_THREADS,
+	CASE_SERVICE_SINDEX_BUILDER_THREADS,
+	CASE_SERVICE_SINDEX_GC_MAX_RATE,
+	CASE_SERVICE_SINDEX_GC_PERIOD,
 	CASE_SERVICE_TICKER_INTERVAL,
-	CASE_SERVICE_TRANSACTION_DUPLICATE_THREADS,
 	CASE_SERVICE_TRANSACTION_MAX_MS,
 	CASE_SERVICE_TRANSACTION_PENDING_LIMIT,
+	CASE_SERVICE_TRANSACTION_QUEUES,
 	CASE_SERVICE_TRANSACTION_REPEATABLE_READ,
 	CASE_SERVICE_TRANSACTION_RETRY_MS,
-	CASE_SERVICE_UDF_RUNTIME_MAX_GMEMORY,
-	CASE_SERVICE_UDF_RUNTIME_MAX_MEMORY,
-	CASE_SERVICE_USE_QUEUE_PER_DEVICE,
+	CASE_SERVICE_TRANSACTION_THREADS_PER_QUEUE,
 	CASE_SERVICE_WORK_DIRECTORY,
 	CASE_SERVICE_WRITE_DUPLICATE_RESOLUTION_DISABLE,
 	// For special debugging or bug-related repair:
-	CASE_SERVICE_ASMALLOC_ENABLED,
+	CASE_SERVICE_DEBUG_ALLOCATIONS,
 	CASE_SERVICE_FABRIC_DUMP_MSGS,
 	CASE_SERVICE_MAX_MSGS_PER_TYPE,
-	CASE_SERVICE_MEMORY_ACCOUNTING,
 	CASE_SERVICE_PROLE_EXTRA_TTL,
+	// Obsoleted:
+	CASE_SERVICE_ALLOW_INLINE_TRANSACTIONS,
 	// Deprecated:
 	CASE_SERVICE_AUTO_DUN,
 	CASE_SERVICE_AUTO_UNDUN,
@@ -342,10 +338,20 @@ typedef enum {
 	CASE_SERVICE_DEFRAG_QUEUE_LWM,
 	CASE_SERVICE_DEFRAG_QUEUE_PRIORITY,
 	CASE_SERVICE_DUMP_MESSAGE_ABOVE_SIZE,
+	CASE_SERVICE_FABRIC_WORKERS,
 	CASE_SERVICE_FB_HEALTH_BAD_PCT,
 	CASE_SERVICE_FB_HEALTH_GOOD_PCT,
 	CASE_SERVICE_FB_HEALTH_MSG_PER_BURST,
 	CASE_SERVICE_FB_HEALTH_MSG_TIMEOUT,
+	CASE_SERVICE_GENERATION_DISABLE,
+	CASE_SERVICE_MIGRATE_READ_PRIORITY,
+	CASE_SERVICE_MIGRATE_READ_SLEEP,
+	CASE_SERVICE_MIGRATE_RX_LIFETIME_MS,
+	CASE_SERVICE_MIGRATE_XMIT_HWM,
+	CASE_SERVICE_MIGRATE_XMIT_LWM,
+	CASE_SERVICE_MIGRATE_PRIORITY, // renamed
+	CASE_SERVICE_MIGRATE_XMIT_PRIORITY,
+	CASE_SERVICE_MIGRATE_XMIT_SLEEP,
 	CASE_SERVICE_NSUP_AUTO_HWM,
 	CASE_SERVICE_NSUP_AUTO_HWM_PCT,
 	CASE_SERVICE_NSUP_MAX_DELETES,
@@ -355,24 +361,32 @@ typedef enum {
 	CASE_SERVICE_NSUP_REDUCE_PRIORITY,
 	CASE_SERVICE_NSUP_REDUCE_SLEEP,
 	CASE_SERVICE_NSUP_THREADS,
+	CASE_SERVICE_PAXOS_MAX_CLUSTER_SIZE,
+	CASE_SERVICE_PAXOS_PROTOCOL,
+	CASE_SERVICE_PAXOS_RECOVERY_POLICY,
+	CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD,
+	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET,
 	CASE_SERVICE_SCAN_MEMORY,
 	CASE_SERVICE_SCAN_PRIORITY,
 	CASE_SERVICE_SCAN_RETRANSMIT,
 	CASE_SERVICE_SCHEDULER_PRIORITY,
 	CASE_SERVICE_SCHEDULER_TYPE,
+	CASE_SERVICE_TRANSACTION_DUPLICATE_THREADS,
 	CASE_SERVICE_TRIAL_ACCOUNT_KEY,
+	CASE_SERVICE_UDF_RUNTIME_MAX_GMEMORY,
+	CASE_SERVICE_UDF_RUNTIME_MAX_MEMORY,
+	CASE_SERVICE_USE_QUEUE_PER_DEVICE,
 
-	// Service paxos protocol options (value tokens):
-	CASE_SERVICE_PAXOS_PROTOCOL_V1,
-	CASE_SERVICE_PAXOS_PROTOCOL_V2,
-	CASE_SERVICE_PAXOS_PROTOCOL_V3,
-	CASE_SERVICE_PAXOS_PROTOCOL_V4,
+	// Service auto-pin options (value tokens):
+	CASE_SERVICE_AUTO_PIN_NONE,
+	CASE_SERVICE_AUTO_PIN_CPU,
+	CASE_SERVICE_AUTO_PIN_NUMA,
 
-	// Service paxos recovery policy options (value tokens):
-	CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_ALL,
-	CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_MASTER,
-	CASE_SERVICE_PAXOS_RECOVERY_AUTO_RESET_MASTER,
-	CASE_SERVICE_PAXOS_RECOVERY_MANUAL,
+	// Service debug-allocations options (value tokens):
+	CASE_SERVICE_DEBUG_ALLOCATIONS_NONE,
+	CASE_SERVICE_DEBUG_ALLOCATIONS_TRANSIENT,
+	CASE_SERVICE_DEBUG_ALLOCATIONS_PERSISTENT,
+	CASE_SERVICE_DEBUG_ALLOCATIONS_ALL,
 
 	// Logging options:
 	// Normally visible:
@@ -383,14 +397,10 @@ typedef enum {
 	// Logging file options:
 	// Normally visible:
 	CASE_LOG_FILE_CONTEXT,
-	// Not supported:
-	CASE_LOG_FILE_SPECIFIC,
 
 	// Logging console options:
 	// Normally visible:
 	CASE_LOG_CONSOLE_CONTEXT,
-	// Not supported:
-	CASE_LOG_CONSOLE_SPECIFIC,
 
 	// Network options:
 	// In canonical configuration file order:
@@ -406,44 +416,80 @@ typedef enum {
 	// Normally hidden:
 	CASE_NETWORK_SERVICE_EXTERNAL_ADDRESS, // renamed
 	CASE_NETWORK_SERVICE_ACCESS_ADDRESS,
+	CASE_NETWORK_SERVICE_ACCESS_PORT,
+	CASE_NETWORK_SERVICE_ALTERNATE_ACCESS_ADDRESS,
+	CASE_NETWORK_SERVICE_ALTERNATE_ACCESS_PORT,
+	CASE_NETWORK_SERVICE_TLS_ACCESS_ADDRESS,
+	CASE_NETWORK_SERVICE_TLS_ACCESS_PORT,
+	CASE_NETWORK_SERVICE_TLS_ADDRESS,
+	CASE_NETWORK_SERVICE_TLS_ALTERNATE_ACCESS_ADDRESS,
+	CASE_NETWORK_SERVICE_TLS_ALTERNATE_ACCESS_PORT,
+	CASE_NETWORK_SERVICE_TLS_CAFILE,
+	CASE_NETWORK_SERVICE_TLS_CAPATH,
+	CASE_NETWORK_SERVICE_TLS_CERT_BLACKLIST,
+	CASE_NETWORK_SERVICE_TLS_CERTFILE,
+	CASE_NETWORK_SERVICE_TLS_CIPHER_SUITE,
+	CASE_NETWORK_SERVICE_TLS_KEYFILE,
+	CASE_NETWORK_SERVICE_TLS_MODE,
+	CASE_NETWORK_SERVICE_TLS_NAME,
+	CASE_NETWORK_SERVICE_TLS_PORT,
+	CASE_NETWORK_SERVICE_TLS_PROTOCOLS,
+	// Obsoleted:
 	CASE_NETWORK_SERVICE_ALTERNATE_ADDRESS,
 	CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME,
+	// Deprecated:
 	CASE_NETWORK_SERVICE_REUSE_ADDRESS,
+
+	// Network service tls-mode options (value tokens):
+	CASE_NETWORK_SERVICE_TLS_MODE_AUTHENTICATE_BOTH,
+	CASE_NETWORK_SERVICE_TLS_MODE_AUTHENTICATE_SERVER,
+	CASE_NETWORK_SERVICE_TLS_MODE_ENCRYPT_ONLY,
 
 	// Network heartbeat options:
 	// Normally visible, in canonical configuration file order:
 	CASE_NETWORK_HEARTBEAT_MODE,
 	CASE_NETWORK_HEARTBEAT_ADDRESS,
+	CASE_NETWORK_HEARTBEAT_MULTICAST_GROUP,
 	CASE_NETWORK_HEARTBEAT_PORT,
-	CASE_NETWORK_HEARTBEAT_MESH_ADDRESS,
-	CASE_NETWORK_HEARTBEAT_MESH_PORT,
 	CASE_NETWORK_HEARTBEAT_MESH_SEED_ADDRESS_PORT,
 	CASE_NETWORK_HEARTBEAT_INTERVAL,
 	CASE_NETWORK_HEARTBEAT_TIMEOUT,
 	// Normally hidden:
-	CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS,
-	CASE_NETWORK_HEARTBEAT_MCAST_TTL,
-	CASE_NETWORK_HEARTBEAT_MESH_RW_RETRY_TIMEOUT,
+	CASE_NETWORK_HEARTBEAT_MTU,
+	CASE_NETWORK_HEARTBEAT_MCAST_TTL, // renamed
+	CASE_NETWORK_HEARTBEAT_MULTICAST_TTL,
 	CASE_NETWORK_HEARTBEAT_PROTOCOL,
+	// Obsoleted:
+	CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS,
 
 	// Network heartbeat mode options (value tokens):
 	CASE_NETWORK_HEARTBEAT_MODE_MESH,
 	CASE_NETWORK_HEARTBEAT_MODE_MULTICAST,
 
 	// Network heartbeat protocol options (value tokens):
-	CASE_NETWORK_HEARTBEAT_PROTOCOL_RESET,
-	CASE_NETWORK_HEARTBEAT_PROTOCOL_V1,
-	CASE_NETWORK_HEARTBEAT_PROTOCOL_V2,
+	CASE_NETWORK_HEARTBEAT_PROTOCOL_NONE,
+	CASE_NETWORK_HEARTBEAT_PROTOCOL_V3,
 
 	// Network fabric options:
 	// Normally visible, in canonical configuration file order:
 	CASE_NETWORK_FABRIC_ADDRESS,
 	CASE_NETWORK_FABRIC_PORT,
-	// Normally hidden, in canonical configuration file order:
+	// Normally hidden:
+	CASE_NETWORK_FABRIC_CHANNEL_BULK_FDS,
+	CASE_NETWORK_FABRIC_CHANNEL_BULK_RECV_THREADS,
+	CASE_NETWORK_FABRIC_CHANNEL_CTRL_FDS,
+	CASE_NETWORK_FABRIC_CHANNEL_CTRL_RECV_THREADS,
+	CASE_NETWORK_FABRIC_CHANNEL_META_FDS,
+	CASE_NETWORK_FABRIC_CHANNEL_META_RECV_THREADS,
+	CASE_NETWORK_FABRIC_CHANNEL_RW_FDS,
+	CASE_NETWORK_FABRIC_CHANNEL_RW_RECV_THREADS,
 	CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED,
-	CASE_NETWORK_FABRIC_KEEPALIVE_TIME,
 	CASE_NETWORK_FABRIC_KEEPALIVE_INTVL,
 	CASE_NETWORK_FABRIC_KEEPALIVE_PROBES,
+	CASE_NETWORK_FABRIC_KEEPALIVE_TIME,
+	CASE_NETWORK_FABRIC_LATENCY_MAX_MS,
+	CASE_NETWORK_FABRIC_RECV_REARM_THRESHOLD,
+	CASE_NETWORK_FABRIC_SEND_THREADS,
 
 	// Network info options:
 	// Normally visible, in canonical configuration file order:
@@ -471,6 +517,13 @@ typedef enum {
 	CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY,
 	CASE_NAMESPACE_DATA_IN_INDEX,
 	CASE_NAMESPACE_DISALLOW_NULL_SETNAME,
+	CASE_NAMESPACE_ENABLE_BENCHMARKS_BATCH_SUB,
+	CASE_NAMESPACE_ENABLE_BENCHMARKS_READ,
+	CASE_NAMESPACE_ENABLE_BENCHMARKS_UDF,
+	CASE_NAMESPACE_ENABLE_BENCHMARKS_UDF_SUB,
+	CASE_NAMESPACE_ENABLE_BENCHMARKS_WRITE,
+	CASE_NAMESPACE_ENABLE_HIST_PROXY,
+	CASE_NAMESPACE_EVICT_HIST_BUCKETS,
 	CASE_NAMESPACE_EVICT_TENTHS_PCT,
 	CASE_NAMESPACE_HIGH_WATER_DISK_PCT,
 	CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT,
@@ -478,14 +531,21 @@ typedef enum {
 	CASE_NAMESPACE_LDT_GC_RATE,
 	CASE_NAMESPACE_LDT_PAGE_SIZE,
 	CASE_NAMESPACE_MAX_TTL,
+	CASE_NAMESPACE_MIGRATE_ORDER,
+	CASE_NAMESPACE_MIGRATE_RETRANSMIT_MS,
+	CASE_NAMESPACE_MIGRATE_SLEEP,
 	CASE_NAMESPACE_OBJ_SIZE_HIST_MAX,
+	CASE_NAMESPACE_PARTITION_TREE_LOCKS,
+	CASE_NAMESPACE_PARTITION_TREE_SPRIGS,
+	CASE_NAMESPACE_RACK_ID,
 	CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE,
 	CASE_NAMESPACE_SET_BEGIN,
-	CASE_NAMESPACE_SI_BEGIN,
 	CASE_NAMESPACE_SINDEX_BEGIN,
 	CASE_NAMESPACE_GEO2DSPHERE_WITHIN_BEGIN,
 	CASE_NAMESPACE_SINGLE_BIN,
 	CASE_NAMESPACE_STOP_WRITES_PCT,
+	CASE_NAMESPACE_TOMB_RAIDER_ELIGIBLE_AGE,
+	CASE_NAMESPACE_TOMB_RAIDER_PERIOD,
 	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE,
 	// Deprecated:
 	CASE_NAMESPACE_ALLOW_VERSIONS,
@@ -493,10 +553,11 @@ typedef enum {
 	CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER,
 	CASE_NAMESPACE_HIGH_WATER_PCT,
 	CASE_NAMESPACE_LOW_WATER_PCT,
+	CASE_NAMESPACE_SI_BEGIN,
 
 	// Namespace conflict-resolution-policy options (value tokens):
 	CASE_NAMESPACE_CONFLICT_RESOLUTION_GENERATION,
-	CASE_NAMESPACE_CONFLICT_RESOLUTION_TTL,
+	CASE_NAMESPACE_CONFLICT_RESOLUTION_LAST_UPDATE_TIME,
 
 	// Namespace read consistency level options:
 	CASE_NAMESPACE_READ_CONSISTENCY_ALL,
@@ -512,7 +573,6 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_MEMORY,
 	CASE_NAMESPACE_STORAGE_SSD,
 	CASE_NAMESPACE_STORAGE_DEVICE,
-	CASE_NAMESPACE_STORAGE_KV,
 
 	// Namespace storage-engine device options:
 	// Normally visible, in canonical configuration file order:
@@ -530,12 +590,14 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_SLEEP,
 	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_STARTUP_MINIMUM,
 	CASE_NAMESPACE_STORAGE_DEVICE_DISABLE_ODIRECT,
+	CASE_NAMESPACE_STORAGE_DEVICE_ENABLE_BENCHMARKS_STORAGE,
 	CASE_NAMESPACE_STORAGE_DEVICE_ENABLE_OSYNC,
 	CASE_NAMESPACE_STORAGE_DEVICE_FLUSH_MAX_MS,
 	CASE_NAMESPACE_STORAGE_DEVICE_FSYNC_MAX_SEC,
 	CASE_NAMESPACE_STORAGE_DEVICE_MAX_WRITE_CACHE,
 	CASE_NAMESPACE_STORAGE_DEVICE_MIN_AVAIL_PCT,
 	CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE,
+	CASE_NAMESPACE_STORAGE_DEVICE_TOMB_RAIDER_SLEEP,
 	CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS,
 	// Deprecated:
 	CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_MAX_BLOCKS,
@@ -545,14 +607,6 @@ typedef enum {
 	CASE_NAMESPACE_STORAGE_DEVICE_READONLY,
 	CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE,
 	CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD,
-
-	// Namespace storage-engine kv options:
-	CASE_NAMESPACE_STORAGE_KV_DEVICE,
-	CASE_NAMESPACE_STORAGE_KV_FILESIZE,
-	CASE_NAMESPACE_STORAGE_KV_READ_BLOCK_SIZE,
-	CASE_NAMESPACE_STORAGE_KV_WRITE_BLOCK_SIZE,
-	CASE_NAMESPACE_STORAGE_KV_NUM_WRITE_BLOCKS,
-	CASE_NAMESPACE_STORAGE_KV_COND_WRITE,
 
 	// Namespace set options:
 	CASE_NAMESPACE_SET_DISABLE_EVICTION,
@@ -570,38 +624,27 @@ typedef enum {
 	CASE_NAMESPACE_SET_ENABLE_XDR_TRUE,
 
 	// Namespace secondary-index options:
+	// Deprecated:
 	CASE_NAMESPACE_SI_GC_PERIOD,
 	CASE_NAMESPACE_SI_GC_MAX_UNITS,
-	CASE_NAMESPACE_SI_DATA_MAX_MEMORY,
 	CASE_NAMESPACE_SI_HISTOGRAM,
 	CASE_NAMESPACE_SI_IGNORE_NOT_SYNC,
 
 	// Namespace sindex options:
-	CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY,
 	CASE_NAMESPACE_SINDEX_NUM_PARTITIONS,
 
-    // Namespace geo2dsphere within options:
-    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_STRICT,
-    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MIN_LEVEL,
-    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_LEVEL,
-    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_CELLS,
-    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_LEVEL_MOD,
-    CASE_NAMESPACE_GEO2DSPHERE_WITHIN_EARTH_RADIUS_METERS,
+	// Namespace geo2dsphere within options:
+	CASE_NAMESPACE_GEO2DSPHERE_WITHIN_STRICT,
+	CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MIN_LEVEL,
+	CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_LEVEL,
+	CASE_NAMESPACE_GEO2DSPHERE_WITHIN_MAX_CELLS,
+	CASE_NAMESPACE_GEO2DSPHERE_WITHIN_LEVEL_MOD,
+	CASE_NAMESPACE_GEO2DSPHERE_WITHIN_EARTH_RADIUS_METERS,
 
 	// Mod-lua options:
 	CASE_MOD_LUA_CACHE_ENABLED,
 	CASE_MOD_LUA_SYSTEM_PATH,
 	CASE_MOD_LUA_USER_PATH,
-
-	// Cluster options:
-	CASE_CLUSTER_SELF_NODE_ID,
-	CASE_CLUSTER_SELF_GROUP_ID,
-	CASE_CLUSTER_GROUP_BEGIN,
-	CASE_CLUSTER_MODE,
-
-	// Cluster group options:
-	CASE_CLUSTER_GROUP_NODE_ID,
-	CASE_CLUSTER_GROUP_GROUP_ATTR,
 
 	// Security options:
 	CASE_SECURITY_ENABLE_SECURITY,
@@ -622,7 +665,56 @@ typedef enum {
 	CASE_SECURITY_SYSLOG_REPORT_DATA_OP,
 	CASE_SECURITY_SYSLOG_REPORT_SYS_ADMIN,
 	CASE_SECURITY_SYSLOG_REPORT_USER_ADMIN,
-	CASE_SECURITY_SYSLOG_REPORT_VIOLATION
+	CASE_SECURITY_SYSLOG_REPORT_VIOLATION,
+
+	// XDR options:
+	// Normally visible, in canonical configuration file order:
+	CASE_XDR_ENABLE_XDR,
+	CASE_XDR_DIGESTLOG_PATH,
+	CASE_XDR_DATACENTER_BEGIN,
+	// Normally hidden:
+	CASE_XDR_CLIENT_THREADS,
+	CASE_XDR_COMPRESSION_THRESHOLD,
+	CASE_XDR_DELETE_SHIPPING_ENABLED,
+	CASE_XDR_DIGESTLOG_IOWAIT_MS,
+	CASE_XDR_FORWARD_XDR_WRITES,
+	CASE_XDR_HOTKEY_TIME_MS,
+	CASE_XDR_INFO_PORT,
+	CASE_XDR_INFO_TIMEOUT,
+	CASE_XDR_MAX_SHIP_BANDWIDTH,
+	CASE_XDR_MAX_SHIP_THROUGHPUT,
+	CASE_XDR_NSUP_DELETES_ENABLED,
+	CASE_XDR_READ_THREADS,
+	CASE_XDR_SHIP_BINS,
+	CASE_XDR_SHIP_DELAY,
+	CASE_XDR_SHIPPING_ENABLED,
+	CASE_XDR_WRITE_TIMEOUT,
+
+	// XDR (remote) datacenter options:
+	// Normally visible, in canonical configuration file order:
+	CASE_XDR_DATACENTER_DC_NODE_ADDRESS_PORT,
+	// Normally hidden:
+	CASE_XDR_DATACENTER_DC_CONNECTIONS,
+	CASE_XDR_DATACENTER_DC_CONNECTIONS_IDLE_MS,
+	CASE_XDR_DATACENTER_DC_INT_EXT_IPMAP,
+	CASE_XDR_DATACENTER_DC_SECURITY_CONFIG_FILE,
+	CASE_XDR_DATACENTER_DC_USE_ALTERNATE_SERVICES,
+	CASE_XDR_DATACENTER_TLS_CAFILE,
+	CASE_XDR_DATACENTER_TLS_CAPATH,
+	CASE_XDR_DATACENTER_TLS_CERT_BLACKLIST,
+	CASE_XDR_DATACENTER_TLS_CERTFILE,
+	CASE_XDR_DATACENTER_TLS_KEYFILE,
+	CASE_XDR_DATACENTER_TLS_NODE,
+
+	// Used parsing separate file, but share this enum:
+
+	// XDR security top-level options:
+	XDR_SEC_CASE_CREDENTIALS_BEGIN,
+
+	// XDR security credentials options:
+	// Normally visible, in canonical configuration file order:
+	XDR_SEC_CASE_CREDENTIALS_USERNAME,
+	XDR_SEC_CASE_CREDENTIALS_PASSWORD
 
 } cfg_case_id;
 
@@ -640,13 +732,13 @@ typedef struct cfg_opt_s {
 
 const cfg_opt GLOBAL_OPTS[] = {
 		{ "service",						CASE_SERVICE_BEGIN },
-		{ "logging",						CASE_LOG_BEGIN },
+		{ "logging",						CASE_LOGGING_BEGIN },
 		{ "network",						CASE_NETWORK_BEGIN },
 		{ "namespace",						CASE_NAMESPACE_BEGIN },
-		{ "xdr",							CASE_XDR_BEGIN },
 		{ "mod-lua",						CASE_MOD_LUA_BEGIN },
 		{ "cluster",						CASE_CLUSTER_BEGIN },
-		{ "security",						CASE_SECURITY_BEGIN }
+		{ "security",						CASE_SECURITY_BEGIN },
+		{ "xdr",							CASE_XDR_BEGIN }
 };
 
 const cfg_opt SERVICE_OPTS[] = {
@@ -654,78 +746,75 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "group",							CASE_SERVICE_GROUP },
 		{ "paxos-single-replica-limit",		CASE_SERVICE_PAXOS_SINGLE_REPLICA_LIMIT },
 		{ "pidfile",						CASE_SERVICE_PIDFILE },
-		{ "service-threads",				CASE_SERVICE_SERVICE_THREADS },
-		{ "transaction-queues",				CASE_SERVICE_TRANSACTION_QUEUES },
-		{ "transaction-threads-per-queue",	CASE_SERVICE_TRANSACTION_THREADS_PER_QUEUE },
 		{ "client-fd-max",					CASE_SERVICE_CLIENT_FD_MAX },
 		{ "proto-fd-max",					CASE_SERVICE_PROTO_FD_MAX },
-		{ "allow-inline-transactions",		CASE_SERVICE_ALLOW_INLINE_TRANSACTIONS },
+		{ "advertise-ipv6",					CASE_SERVICE_ADVERTISE_IPV6 },
+		{ "auto-pin",						CASE_SERVICE_AUTO_PIN },
 		{ "batch-threads",					CASE_SERVICE_BATCH_THREADS },
 		{ "batch-max-buffers-per-queue",	CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE },
 		{ "batch-max-requests",				CASE_SERVICE_BATCH_MAX_REQUESTS },
 		{ "batch-max-unused-buffers",		CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS },
 		{ "batch-priority",					CASE_SERVICE_BATCH_PRIORITY },
 		{ "batch-index-threads",			CASE_SERVICE_BATCH_INDEX_THREADS },
-		{ "fabric-workers",					CASE_SERVICE_FABRIC_WORKERS },
-		{ "generation-disable",				CASE_SERVICE_GENERATION_DISABLE },
+		{ "clock-skew-max-ms",				CASE_SERVICE_CLOCK_SKEW_MAX_MS },
+		{ "cluster-name",					CASE_SERVICE_CLUSTER_NAME },
+		{ "enable-benchmarks-fabric",		CASE_SERVICE_ENABLE_BENCHMARKS_FABRIC },
+		{ "enable-benchmarks-svc",			CASE_SERVICE_ENABLE_BENCHMARKS_SVC },
+		{ "enable-hist-info",				CASE_SERVICE_ENABLE_HIST_INFO },
 		{ "hist-track-back",				CASE_SERVICE_HIST_TRACK_BACK },
 		{ "hist-track-slice",				CASE_SERVICE_HIST_TRACK_SLICE },
 		{ "hist-track-thresholds",			CASE_SERVICE_HIST_TRACK_THRESHOLDS },
 		{ "info-threads",					CASE_SERVICE_INFO_THREADS },
 		{ "ldt-benchmarks",					CASE_SERVICE_LDT_BENCHMARKS },
 		{ "log-local-time",					CASE_SERVICE_LOG_LOCAL_TIME },
-		{ "microbenchmarks",				CASE_SERVICE_MICROBENCHMARKS },
+		{ "log-millis",						CASE_SERVICE_LOG_MILLIS},
 		{ "migrate-max-num-incoming",		CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING },
-		{ "migrate-read-priority",			CASE_SERVICE_MIGRATE_READ_PRIORITY },
-		{ "migrate-read-sleep",				CASE_SERVICE_MIGRATE_READ_SLEEP },
-		{ "migrate-rx-lifetime-ms",			CASE_SERVICE_MIGRATE_RX_LIFETIME_MS },
 		{ "migrate-threads",				CASE_SERVICE_MIGRATE_THREADS },
-		{ "migrate-xmit-hwm",				CASE_SERVICE_MIGRATE_XMIT_HWM },
-		{ "migrate-xmit-lwm",				CASE_SERVICE_MIGRATE_XMIT_LWM },
-		{ "migrate-priority",				CASE_SERVICE_MIGRATE_PRIORITY },
-		{ "migrate-xmit-priority",			CASE_SERVICE_MIGRATE_XMIT_PRIORITY },
-		{ "migrate-xmit-sleep",				CASE_SERVICE_MIGRATE_XMIT_SLEEP },
+		{ "min-cluster-size",				CASE_SERVICE_MIN_CLUSTER_SIZE },
+		{ "node-id-interface",				CASE_SERVICE_NODE_ID_INTERFACE },
 		{ "nsup-delete-sleep",				CASE_SERVICE_NSUP_DELETE_SLEEP },
 		{ "nsup-period",					CASE_SERVICE_NSUP_PERIOD },
 		{ "nsup-startup-evict",				CASE_SERVICE_NSUP_STARTUP_EVICT },
-		{ "paxos-max-cluster-size",			CASE_SERVICE_PAXOS_MAX_CLUSTER_SIZE },
-		{ "paxos-protocol",					CASE_SERVICE_PAXOS_PROTOCOL },
-		{ "paxos-recovery-policy",			CASE_SERVICE_PAXOS_RECOVERY_POLICY },
-		{ "paxos-retransmit-period",		CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD },
 		{ "proto-fd-idle-ms",				CASE_SERVICE_PROTO_FD_IDLE_MS },
 		{ "query-batch-size",				CASE_SERVICE_QUERY_BATCH_SIZE },
+		{ "query-bufpool-size",				CASE_SERVICE_QUERY_BUFPOOL_SIZE },
 		{ "query-in-transaction-thread",	CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD },
+		{ "query-long-q-max-size",			CASE_SERVICE_QUERY_LONG_Q_MAX_SIZE },
 		{ "query-pre-reserve-partitions",   CASE_SERVICE_QUERY_PRE_RESERVE_PARTITIONS },
 		{ "query-priority", 				CASE_SERVICE_QUERY_PRIORITY },
 		{ "query-priority-sleep-us", 		CASE_SERVICE_QUERY_PRIORITY_SLEEP_US },
+		{ "query-rec-count-bound",			CASE_SERVICE_QUERY_REC_COUNT_BOUND },
+		{ "query-req-in-query-thread",		CASE_SERVICE_QUERY_REQ_IN_QUERY_THREAD },
+		{ "query-req-max-inflight",			CASE_SERVICE_QUERY_REQ_MAX_INFLIGHT },
+		{ "query-short-q-max-size",			CASE_SERVICE_QUERY_SHORT_Q_MAX_SIZE },
+		{ "query-threads",					CASE_SERVICE_QUERY_THREADS },
 		{ "query-threshold", 				CASE_SERVICE_QUERY_THRESHOLD },
 		{ "query-untracked-time-ms",		CASE_SERVICE_QUERY_UNTRACKED_TIME_MS },
-		{ "replication-fire-and-forget",	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET },
+		{ "query-worker-threads",			CASE_SERVICE_QUERY_WORKER_THREADS },
 		{ "respond-client-on-master-completion", CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION },
 		{ "run-as-daemon",					CASE_SERVICE_RUN_AS_DAEMON },
 		{ "scan-max-active",				CASE_SERVICE_SCAN_MAX_ACTIVE },
 		{ "scan-max-done",					CASE_SERVICE_SCAN_MAX_DONE },
 		{ "scan-max-udf-transactions",		CASE_SERVICE_SCAN_MAX_UDF_TRANSACTIONS },
 		{ "scan-threads",					CASE_SERVICE_SCAN_THREADS },
-		{ "sindex-data-max-memory",			CASE_SERVICE_SINDEX_DATA_MAX_MEMORY },
-		{ "snub-nodes",						CASE_SERVICE_SNUB_NODES },
-		{ "storage-benchmarks",				CASE_SERVICE_STORAGE_BENCHMARKS },
+		{ "service-threads",				CASE_SERVICE_SERVICE_THREADS },
+		{ "sindex-builder-threads",			CASE_SERVICE_SINDEX_BUILDER_THREADS },
+		{ "sindex-gc-max-rate",				CASE_SERVICE_SINDEX_GC_MAX_RATE },
+		{ "sindex-gc-period",				CASE_SERVICE_SINDEX_GC_PERIOD },
 		{ "ticker-interval",				CASE_SERVICE_TICKER_INTERVAL },
-		{ "transaction-duplicate-threads",	CASE_SERVICE_TRANSACTION_DUPLICATE_THREADS },
 		{ "transaction-max-ms",				CASE_SERVICE_TRANSACTION_MAX_MS },
 		{ "transaction-pending-limit",		CASE_SERVICE_TRANSACTION_PENDING_LIMIT },
+		{ "transaction-queues",				CASE_SERVICE_TRANSACTION_QUEUES },
 		{ "transaction-repeatable-read",	CASE_SERVICE_TRANSACTION_REPEATABLE_READ },
 		{ "transaction-retry-ms",			CASE_SERVICE_TRANSACTION_RETRY_MS },
-		{ "udf-runtime-max-gmemory",		CASE_SERVICE_UDF_RUNTIME_MAX_GMEMORY },
-		{ "udf-runtime-max-memory",			CASE_SERVICE_UDF_RUNTIME_MAX_MEMORY },
-		{ "use-queue-per-device",			CASE_SERVICE_USE_QUEUE_PER_DEVICE },
+		{ "transaction-threads-per-queue",	CASE_SERVICE_TRANSACTION_THREADS_PER_QUEUE },
 		{ "work-directory",					CASE_SERVICE_WORK_DIRECTORY },
 		{ "write-duplicate-resolution-disable", CASE_SERVICE_WRITE_DUPLICATE_RESOLUTION_DISABLE },
-		{ "asmalloc-enabled",				CASE_SERVICE_ASMALLOC_ENABLED },
+		{ "debug-allocations",				CASE_SERVICE_DEBUG_ALLOCATIONS },
 		{ "fabric-dump-msgs",				CASE_SERVICE_FABRIC_DUMP_MSGS },
 		{ "max-msgs-per-type",				CASE_SERVICE_MAX_MSGS_PER_TYPE },
-		{ "memory-accounting",				CASE_SERVICE_MEMORY_ACCOUNTING },
 		{ "prole-extra-ttl",				CASE_SERVICE_PROLE_EXTRA_TTL },
+		{ "allow-inline-transactions",		CASE_SERVICE_ALLOW_INLINE_TRANSACTIONS },
 		{ "auto-dun",						CASE_SERVICE_AUTO_DUN },
 		{ "auto-undun",						CASE_SERVICE_AUTO_UNDUN },
 		{ "batch-retransmit",				CASE_SERVICE_BATCH_RETRANSMIT },
@@ -735,10 +824,20 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "defrag-queue-lwm",				CASE_SERVICE_DEFRAG_QUEUE_LWM },
 		{ "defrag-queue-priority",			CASE_SERVICE_DEFRAG_QUEUE_PRIORITY },
 		{ "dump-message-above-size",		CASE_SERVICE_DUMP_MESSAGE_ABOVE_SIZE },
+		{ "fabric-workers",					CASE_SERVICE_FABRIC_WORKERS },
 		{ "fb-health-bad-pct",				CASE_SERVICE_FB_HEALTH_BAD_PCT },
 		{ "fb-health-good-pct",				CASE_SERVICE_FB_HEALTH_GOOD_PCT },
 		{ "fb-health-msg-per-burst",		CASE_SERVICE_FB_HEALTH_MSG_PER_BURST },
 		{ "fb-health-msg-timeout",			CASE_SERVICE_FB_HEALTH_MSG_TIMEOUT },
+		{ "generation-disable",				CASE_SERVICE_GENERATION_DISABLE },
+		{ "migrate-read-priority",			CASE_SERVICE_MIGRATE_READ_PRIORITY },
+		{ "migrate-read-sleep",				CASE_SERVICE_MIGRATE_READ_SLEEP },
+		{ "migrate-rx-lifetime-ms",			CASE_SERVICE_MIGRATE_RX_LIFETIME_MS },
+		{ "migrate-xmit-hwm",				CASE_SERVICE_MIGRATE_XMIT_HWM },
+		{ "migrate-xmit-lwm",				CASE_SERVICE_MIGRATE_XMIT_LWM },
+		{ "migrate-priority",				CASE_SERVICE_MIGRATE_PRIORITY },
+		{ "migrate-xmit-priority",			CASE_SERVICE_MIGRATE_XMIT_PRIORITY },
+		{ "migrate-xmit-sleep",				CASE_SERVICE_MIGRATE_XMIT_SLEEP },
 		{ "nsup-auto-hwm",					CASE_SERVICE_NSUP_AUTO_HWM },
 		{ "nsup-auto-hwm-pct",				CASE_SERVICE_NSUP_AUTO_HWM_PCT },
 		{ "nsup-max-deletes",				CASE_SERVICE_NSUP_MAX_DELETES },
@@ -748,27 +847,35 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "nsup-reduce-priority",			CASE_SERVICE_NSUP_REDUCE_PRIORITY },
 		{ "nsup-reduce-sleep",				CASE_SERVICE_NSUP_REDUCE_SLEEP },
 		{ "nsup-threads",					CASE_SERVICE_NSUP_THREADS },
+		{ "paxos-max-cluster-size",			CASE_SERVICE_PAXOS_MAX_CLUSTER_SIZE },
+		{ "paxos-protocol",					CASE_SERVICE_PAXOS_PROTOCOL },
+		{ "paxos-recovery-policy",			CASE_SERVICE_PAXOS_RECOVERY_POLICY },
+		{ "paxos-retransmit-period",		CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD },
+		{ "replication-fire-and-forget",	CASE_SERVICE_REPLICATION_FIRE_AND_FORGET },
 		{ "scan-memory",					CASE_SERVICE_SCAN_MEMORY },
 		{ "scan-priority",					CASE_SERVICE_SCAN_PRIORITY },
 		{ "scan-retransmit",				CASE_SERVICE_SCAN_RETRANSMIT },
 		{ "scheduler-priority",				CASE_SERVICE_SCHEDULER_PRIORITY },
 		{ "scheduler-type",					CASE_SERVICE_SCHEDULER_TYPE },
+		{ "transaction-duplicate-threads",	CASE_SERVICE_TRANSACTION_DUPLICATE_THREADS },
 		{ "trial-account-key",				CASE_SERVICE_TRIAL_ACCOUNT_KEY },
+		{ "udf-runtime-max-gmemory",		CASE_SERVICE_UDF_RUNTIME_MAX_GMEMORY },
+		{ "udf-runtime-max-memory",			CASE_SERVICE_UDF_RUNTIME_MAX_MEMORY },
+		{ "use-queue-per-device",			CASE_SERVICE_USE_QUEUE_PER_DEVICE },
 		{ "}",								CASE_CONTEXT_END }
 };
 
-const cfg_opt SERVICE_PAXOS_PROTOCOL_OPTS[] = {
-		{ "v1",								CASE_SERVICE_PAXOS_PROTOCOL_V1 },
-		{ "v2",								CASE_SERVICE_PAXOS_PROTOCOL_V2 },
-		{ "v3",								CASE_SERVICE_PAXOS_PROTOCOL_V3 },
-		{ "v4",								CASE_SERVICE_PAXOS_PROTOCOL_V4 }
+const cfg_opt SERVICE_AUTO_PIN_OPTS[] = {
+		{ "none",							CASE_SERVICE_AUTO_PIN_NONE },
+		{ "cpu",							CASE_SERVICE_AUTO_PIN_CPU },
+		{ "numa",							CASE_SERVICE_AUTO_PIN_NUMA }
 };
 
-const cfg_opt SERVICE_PAXOS_RECOVERY_OPTS[] = {
-		{ "auto-dun-all",					CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_ALL },
-		{ "auto-dun-master",				CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_MASTER },
-		{ "auto-reset-master",				CASE_SERVICE_PAXOS_RECOVERY_AUTO_RESET_MASTER },
-		{ "manual",							CASE_SERVICE_PAXOS_RECOVERY_MANUAL }
+const cfg_opt SERVICE_DEBUG_ALLOCATIONS_OPTS[] = {
+		{ "none",							CASE_SERVICE_DEBUG_ALLOCATIONS_NONE },
+		{ "transient",						CASE_SERVICE_DEBUG_ALLOCATIONS_TRANSIENT },
+		{ "persistent",						CASE_SERVICE_DEBUG_ALLOCATIONS_PERSISTENT },
+		{ "all",							CASE_SERVICE_DEBUG_ALLOCATIONS_ALL }
 };
 
 const cfg_opt LOGGING_OPTS[] = {
@@ -779,13 +886,11 @@ const cfg_opt LOGGING_OPTS[] = {
 
 const cfg_opt LOGGING_FILE_OPTS[] = {
 		{ "context",						CASE_LOG_FILE_CONTEXT },
-		{ "specific",						CASE_LOG_FILE_SPECIFIC },
 		{ "}",								CASE_CONTEXT_END }
 };
 
 const cfg_opt LOGGING_CONSOLE_OPTS[] = {
 		{ "context",						CASE_LOG_CONSOLE_CONTEXT },
-		{ "specific",						CASE_LOG_CONSOLE_SPECIFIC },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -802,25 +907,49 @@ const cfg_opt NETWORK_SERVICE_OPTS[] = {
 		{ "port",							CASE_NETWORK_SERVICE_PORT },
 		{ "external-address",				CASE_NETWORK_SERVICE_EXTERNAL_ADDRESS },
 		{ "access-address",					CASE_NETWORK_SERVICE_ACCESS_ADDRESS },
+		{ "access-port",					CASE_NETWORK_SERVICE_ACCESS_PORT },
+		{ "alternate-access-address",		CASE_NETWORK_SERVICE_ALTERNATE_ACCESS_ADDRESS },
+		{ "alternate-access-port",			CASE_NETWORK_SERVICE_ALTERNATE_ACCESS_PORT },
+		{ "tls-access-address",				CASE_NETWORK_SERVICE_TLS_ACCESS_ADDRESS },
+		{ "tls-access-port",				CASE_NETWORK_SERVICE_TLS_ACCESS_PORT },
+		{ "tls-address",					CASE_NETWORK_SERVICE_TLS_ADDRESS },
+		{ "tls-alternate-access-address",	CASE_NETWORK_SERVICE_TLS_ALTERNATE_ACCESS_ADDRESS },
+		{ "tls-alternate-access-port",		CASE_NETWORK_SERVICE_TLS_ALTERNATE_ACCESS_PORT },
+		{ "tls-cafile",						CASE_NETWORK_SERVICE_TLS_CAFILE },
+		{ "tls-capath",						CASE_NETWORK_SERVICE_TLS_CAPATH },
+		{ "tls-cert-blacklist",				CASE_NETWORK_SERVICE_TLS_CERT_BLACKLIST },
+		{ "tls-certfile",					CASE_NETWORK_SERVICE_TLS_CERTFILE },
+		{ "tls-cipher-suite",				CASE_NETWORK_SERVICE_TLS_CIPHER_SUITE },
+		{ "tls-keyfile",					CASE_NETWORK_SERVICE_TLS_KEYFILE },
+		{ "tls-mode",						CASE_NETWORK_SERVICE_TLS_MODE },
+		{ "tls-name",						CASE_NETWORK_SERVICE_TLS_NAME },
+		{ "tls-port",						CASE_NETWORK_SERVICE_TLS_PORT },
+		{ "tls-protocols",					CASE_NETWORK_SERVICE_TLS_PROTOCOLS },
 		{ "alternate-address",				CASE_NETWORK_SERVICE_ALTERNATE_ADDRESS },
 		{ "network-interface-name",			CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME },
 		{ "reuse-address",					CASE_NETWORK_SERVICE_REUSE_ADDRESS },
 		{ "}",								CASE_CONTEXT_END }
 };
 
+const cfg_opt NETWORK_SERVICE_TLS_MODE_OPTS[] = {
+		{ "authenticate-both",				CASE_NETWORK_SERVICE_TLS_MODE_AUTHENTICATE_BOTH },
+		{ "authenticate-server",			CASE_NETWORK_SERVICE_TLS_MODE_AUTHENTICATE_SERVER },
+		{ "encrypt-only",					CASE_NETWORK_SERVICE_TLS_MODE_ENCRYPT_ONLY },
+};
+
 const cfg_opt NETWORK_HEARTBEAT_OPTS[] = {
 		{ "mode",							CASE_NETWORK_HEARTBEAT_MODE },
 		{ "address",						CASE_NETWORK_HEARTBEAT_ADDRESS },
+		{ "multicast-group",				CASE_NETWORK_HEARTBEAT_MULTICAST_GROUP },
 		{ "port",							CASE_NETWORK_HEARTBEAT_PORT },
-		{ "mesh-address",					CASE_NETWORK_HEARTBEAT_MESH_ADDRESS },
-		{ "mesh-port",						CASE_NETWORK_HEARTBEAT_MESH_PORT },
 		{ "mesh-seed-address-port",			CASE_NETWORK_HEARTBEAT_MESH_SEED_ADDRESS_PORT },
 		{ "interval",						CASE_NETWORK_HEARTBEAT_INTERVAL },
 		{ "timeout",						CASE_NETWORK_HEARTBEAT_TIMEOUT },
-		{ "interface-address",				CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS },
+		{ "mtu",							CASE_NETWORK_HEARTBEAT_MTU },
 		{ "mcast-ttl",						CASE_NETWORK_HEARTBEAT_MCAST_TTL },
-		{ "mesh-rw-retry-timeout",			CASE_NETWORK_HEARTBEAT_MESH_RW_RETRY_TIMEOUT },
+		{ "multicast-ttl",					CASE_NETWORK_HEARTBEAT_MULTICAST_TTL },
 		{ "protocol",						CASE_NETWORK_HEARTBEAT_PROTOCOL },
+		{ "interface-address",				CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -830,18 +959,28 @@ const cfg_opt NETWORK_HEARTBEAT_MODE_OPTS[] = {
 };
 
 const cfg_opt NETWORK_HEARTBEAT_PROTOCOL_OPTS[] = {
-		{ "reset",							CASE_NETWORK_HEARTBEAT_PROTOCOL_RESET },
-		{ "v1",								CASE_NETWORK_HEARTBEAT_PROTOCOL_V1 },
-		{ "v2",								CASE_NETWORK_HEARTBEAT_PROTOCOL_V2 }
+		{ "none",							CASE_NETWORK_HEARTBEAT_PROTOCOL_NONE },
+		{ "v3",								CASE_NETWORK_HEARTBEAT_PROTOCOL_V3}
 };
 
 const cfg_opt NETWORK_FABRIC_OPTS[] = {
 		{ "address",						CASE_NETWORK_FABRIC_ADDRESS },
 		{ "port",							CASE_NETWORK_FABRIC_PORT },
+		{ "channel-bulk-fds",				CASE_NETWORK_FABRIC_CHANNEL_BULK_FDS },
+		{ "channel-bulk-recv-threads",		CASE_NETWORK_FABRIC_CHANNEL_BULK_RECV_THREADS },
+		{ "channel-ctrl-fds",				CASE_NETWORK_FABRIC_CHANNEL_CTRL_FDS },
+		{ "channel-ctrl-recv-threads",		CASE_NETWORK_FABRIC_CHANNEL_CTRL_RECV_THREADS },
+		{ "channel-meta-fds",				CASE_NETWORK_FABRIC_CHANNEL_META_FDS },
+		{ "channel-meta-recv-threads",		CASE_NETWORK_FABRIC_CHANNEL_META_RECV_THREADS },
+		{ "channel-rw-fds",					CASE_NETWORK_FABRIC_CHANNEL_RW_FDS },
+		{ "channel-rw-recv-threads",		CASE_NETWORK_FABRIC_CHANNEL_RW_RECV_THREADS },
 		{ "keepalive-enabled",				CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED },
-		{ "keepalive-time",					CASE_NETWORK_FABRIC_KEEPALIVE_TIME },
 		{ "keepalive-intvl",				CASE_NETWORK_FABRIC_KEEPALIVE_INTVL },
 		{ "keepalive-probes",				CASE_NETWORK_FABRIC_KEEPALIVE_PROBES },
+		{ "keepalive-time",					CASE_NETWORK_FABRIC_KEEPALIVE_TIME },
+		{ "latency-max-ms",					CASE_NETWORK_FABRIC_LATENCY_MAX_MS },
+		{ "recv-rearm-threshold",			CASE_NETWORK_FABRIC_RECV_REARM_THRESHOLD },
+		{ "send-threads",					CASE_NETWORK_FABRIC_SEND_THREADS },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -868,6 +1007,13 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "conflict-resolution-policy",		CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY },
 		{ "data-in-index",					CASE_NAMESPACE_DATA_IN_INDEX },
 		{ "disallow-null-setname",			CASE_NAMESPACE_DISALLOW_NULL_SETNAME },
+		{ "enable-benchmarks-batch-sub",	CASE_NAMESPACE_ENABLE_BENCHMARKS_BATCH_SUB },
+		{ "enable-benchmarks-read",			CASE_NAMESPACE_ENABLE_BENCHMARKS_READ },
+		{ "enable-benchmarks-udf",			CASE_NAMESPACE_ENABLE_BENCHMARKS_UDF },
+		{ "enable-benchmarks-udf-sub",		CASE_NAMESPACE_ENABLE_BENCHMARKS_UDF_SUB },
+		{ "enable-benchmarks-write",		CASE_NAMESPACE_ENABLE_BENCHMARKS_WRITE },
+		{ "enable-hist-proxy",				CASE_NAMESPACE_ENABLE_HIST_PROXY },
+		{ "evict-hist-buckets",				CASE_NAMESPACE_EVICT_HIST_BUCKETS },
 		{ "evict-tenths-pct",				CASE_NAMESPACE_EVICT_TENTHS_PCT },
 		{ "high-water-disk-pct",			CASE_NAMESPACE_HIGH_WATER_DISK_PCT },
 		{ "high-water-memory-pct",			CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT },
@@ -875,26 +1021,34 @@ const cfg_opt NAMESPACE_OPTS[] = {
 		{ "ldt-gc-rate",					CASE_NAMESPACE_LDT_GC_RATE },
 		{ "ldt-page-size",					CASE_NAMESPACE_LDT_PAGE_SIZE },
 		{ "max-ttl",						CASE_NAMESPACE_MAX_TTL },
+		{ "migrate-order",					CASE_NAMESPACE_MIGRATE_ORDER },
+		{ "migrate-retransmit-ms",			CASE_NAMESPACE_MIGRATE_RETRANSMIT_MS },
+		{ "migrate-sleep",					CASE_NAMESPACE_MIGRATE_SLEEP },
 		{ "obj-size-hist-max",				CASE_NAMESPACE_OBJ_SIZE_HIST_MAX },
+		{ "partition-tree-locks",			CASE_NAMESPACE_PARTITION_TREE_LOCKS },
+		{ "partition-tree-sprigs",			CASE_NAMESPACE_PARTITION_TREE_SPRIGS },
+		{ "rack-id",						CASE_NAMESPACE_RACK_ID },
 		{ "read-consistency-level-override", CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE },
 		{ "set",							CASE_NAMESPACE_SET_BEGIN },
-		{ "si",								CASE_NAMESPACE_SI_BEGIN },
 		{ "sindex",							CASE_NAMESPACE_SINDEX_BEGIN },
 		{ "geo2dsphere-within",				CASE_NAMESPACE_GEO2DSPHERE_WITHIN_BEGIN },
 		{ "single-bin",						CASE_NAMESPACE_SINGLE_BIN },
 		{ "stop-writes-pct",				CASE_NAMESPACE_STOP_WRITES_PCT },
+		{ "tomb-raider-eligible-age",		CASE_NAMESPACE_TOMB_RAIDER_ELIGIBLE_AGE },
+		{ "tomb-raider-period",				CASE_NAMESPACE_TOMB_RAIDER_PERIOD },
 		{ "write-commit-level-override",	CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE },
 		{ "allow-versions",					CASE_NAMESPACE_ALLOW_VERSIONS },
 		{ "demo-read-multiplier",			CASE_NAMESPACE_DEMO_READ_MULTIPLIER },
 		{ "demo-write-multiplier",			CASE_NAMESPACE_DEMO_WRITE_MULTIPLIER },
 		{ "high-water-pct",					CASE_NAMESPACE_HIGH_WATER_PCT },
 		{ "low-water-pct",					CASE_NAMESPACE_LOW_WATER_PCT },
+		{ "si",								CASE_NAMESPACE_SI_BEGIN },
 		{ "}",								CASE_CONTEXT_END }
 };
 
 const cfg_opt NAMESPACE_CONFLICT_RESOLUTION_OPTS[] = {
 		{ "generation",						CASE_NAMESPACE_CONFLICT_RESOLUTION_GENERATION },
-		{ "ttl",							CASE_NAMESPACE_CONFLICT_RESOLUTION_TTL }
+		{ "last-update-time",				CASE_NAMESPACE_CONFLICT_RESOLUTION_LAST_UPDATE_TIME }
 };
 
 const cfg_opt NAMESPACE_READ_CONSISTENCY_OPTS[] = {
@@ -912,8 +1066,7 @@ const cfg_opt NAMESPACE_WRITE_COMMIT_OPTS[] = {
 const cfg_opt NAMESPACE_STORAGE_OPTS[] = {
 		{ "memory",							CASE_NAMESPACE_STORAGE_MEMORY },
 		{ "ssd",							CASE_NAMESPACE_STORAGE_SSD },
-		{ "device",							CASE_NAMESPACE_STORAGE_DEVICE },
-		{ "kv",								CASE_NAMESPACE_STORAGE_KV }
+		{ "device",							CASE_NAMESPACE_STORAGE_DEVICE }
 };
 
 const cfg_opt NAMESPACE_STORAGE_DEVICE_OPTS[] = {
@@ -930,12 +1083,14 @@ const cfg_opt NAMESPACE_STORAGE_DEVICE_OPTS[] = {
 		{ "defrag-sleep",					CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_SLEEP },
 		{ "defrag-startup-minimum",			CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_STARTUP_MINIMUM },
 		{ "disable-odirect",				CASE_NAMESPACE_STORAGE_DEVICE_DISABLE_ODIRECT },
+		{ "enable-benchmarks-storage",		CASE_NAMESPACE_STORAGE_DEVICE_ENABLE_BENCHMARKS_STORAGE },
 		{ "enable-osync",					CASE_NAMESPACE_STORAGE_DEVICE_ENABLE_OSYNC },
 		{ "flush-max-ms",					CASE_NAMESPACE_STORAGE_DEVICE_FLUSH_MAX_MS },
 		{ "fsync-max-sec",					CASE_NAMESPACE_STORAGE_DEVICE_FSYNC_MAX_SEC },
 		{ "max-write-cache",				CASE_NAMESPACE_STORAGE_DEVICE_MAX_WRITE_CACHE },
 		{ "min-avail-pct",					CASE_NAMESPACE_STORAGE_DEVICE_MIN_AVAIL_PCT },
 		{ "post-write-queue",				CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE },
+		{ "tomb-raider-sleep",				CASE_NAMESPACE_STORAGE_DEVICE_TOMB_RAIDER_SLEEP },
 		{ "write-threads",					CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS },
 		{ "defrag-max-blocks",				CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_MAX_BLOCKS },
 		{ "defrag-period",					CASE_NAMESPACE_STORAGE_DEVICE_DEFRAG_PERIOD },
@@ -944,16 +1099,6 @@ const cfg_opt NAMESPACE_STORAGE_DEVICE_OPTS[] = {
 		{ "readonly",						CASE_NAMESPACE_STORAGE_DEVICE_READONLY },
 		{ "signature",						CASE_NAMESPACE_STORAGE_DEVICE_SIGNATURE },
 		{ "write-smoothing-period",			CASE_NAMESPACE_STORAGE_DEVICE_WRITE_SMOOTHING_PERIOD },
-		{ "}",								CASE_CONTEXT_END }
-};
-
-const cfg_opt NAMESPACE_STORAGE_KV_OPTS[] = {
-		{ "device",							CASE_NAMESPACE_STORAGE_KV_DEVICE },
-		{ "filesize",						CASE_NAMESPACE_STORAGE_KV_FILESIZE },
-		{ "read-block-size",				CASE_NAMESPACE_STORAGE_KV_READ_BLOCK_SIZE },
-		{ "write-block-size",				CASE_NAMESPACE_STORAGE_KV_WRITE_BLOCK_SIZE },
-		{ "num-write-blocks",				CASE_NAMESPACE_STORAGE_KV_NUM_WRITE_BLOCKS },
-		{ "cond-write",						CASE_NAMESPACE_STORAGE_KV_COND_WRITE },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -977,14 +1122,12 @@ const cfg_opt NAMESPACE_SET_ENABLE_XDR_OPTS[] = {
 const cfg_opt NAMESPACE_SI_OPTS[] = {
 		{ "si-gc-period",					CASE_NAMESPACE_SI_GC_PERIOD },
 		{ "si-gc-max-units",				CASE_NAMESPACE_SI_GC_MAX_UNITS },
-		{ "si-data-max-memory",				CASE_NAMESPACE_SI_DATA_MAX_MEMORY },
 		{ "si-histogram",					CASE_NAMESPACE_SI_HISTOGRAM },
 		{ "si-ignore-not-sync",				CASE_NAMESPACE_SI_IGNORE_NOT_SYNC },
 		{ "}",								CASE_CONTEXT_END }
 };
 
 const cfg_opt NAMESPACE_SINDEX_OPTS[] = {
-		{ "data-max-memory",				CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY },
 		{ "num-partitions",					CASE_NAMESPACE_SINDEX_NUM_PARTITIONS },
 		{ "}",								CASE_CONTEXT_END }
 };
@@ -1003,20 +1146,6 @@ const cfg_opt MOD_LUA_OPTS[] = {
 		{ "cache-enabled",					CASE_MOD_LUA_CACHE_ENABLED },
 		{ "system-path",					CASE_MOD_LUA_SYSTEM_PATH },
 		{ "user-path",						CASE_MOD_LUA_USER_PATH },
-		{ "}",								CASE_CONTEXT_END }
-};
-
-const cfg_opt CLUSTER_OPTS[] = {
-		{ "self-node-id",					CASE_CLUSTER_SELF_NODE_ID },
-		{ "self-group-id",					CASE_CLUSTER_SELF_GROUP_ID },
-		{ "group",							CASE_CLUSTER_GROUP_BEGIN },
-		{ "mode",							CASE_CLUSTER_MODE },
-		{ "}",								CASE_CONTEXT_END }
-};
-
-const cfg_opt CLUSTER_GROUP_OPTS[] = {
-		{ "node-id",						CASE_CLUSTER_GROUP_NODE_ID },
-		{ "group-attr",						CASE_CLUSTER_GROUP_GROUP_ATTR },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -1047,15 +1176,70 @@ const cfg_opt SECURITY_SYSLOG_OPTS[] = {
 		{ "}",								CASE_CONTEXT_END }
 };
 
+const cfg_opt XDR_OPTS[] = {
+		{ "{",								CASE_CONTEXT_BEGIN },
+		{ "enable-xdr",						CASE_XDR_ENABLE_XDR },
+		{ "xdr-digestlog-path",				CASE_XDR_DIGESTLOG_PATH },
+		{ "datacenter",						CASE_XDR_DATACENTER_BEGIN },
+		{ "xdr-client-threads",				CASE_XDR_CLIENT_THREADS },
+		{ "xdr-compression-threshold",		CASE_XDR_COMPRESSION_THRESHOLD },
+		{ "xdr-delete-shipping-enabled",	CASE_XDR_DELETE_SHIPPING_ENABLED },
+		{ "xdr-digestlog-iowait-ms",		CASE_XDR_DIGESTLOG_IOWAIT_MS },
+		{ "forward-xdr-writes",				CASE_XDR_FORWARD_XDR_WRITES },
+		{ "xdr-hotkey-time-ms",				CASE_XDR_HOTKEY_TIME_MS },
+		{ "xdr-info-port",					CASE_XDR_INFO_PORT },
+		{ "xdr-info-timeout",				CASE_XDR_INFO_TIMEOUT },
+		{ "xdr-max-ship-bandwidth",			CASE_XDR_MAX_SHIP_BANDWIDTH },
+		{ "xdr-max-ship-throughput",		CASE_XDR_MAX_SHIP_THROUGHPUT },
+		{ "xdr-nsup-deletes-enabled",		CASE_XDR_NSUP_DELETES_ENABLED },
+		{ "xdr-read-threads",				CASE_XDR_READ_THREADS},
+		{ "xdr-ship-bins",					CASE_XDR_SHIP_BINS },
+		{ "xdr-ship-delay",					CASE_XDR_SHIP_DELAY }, // hidden
+		{ "xdr-shipping-enabled",			CASE_XDR_SHIPPING_ENABLED },
+		{ "xdr-write-timeout",				CASE_XDR_WRITE_TIMEOUT },
+		{ "}",								CASE_CONTEXT_END }
+};
+
+const cfg_opt XDR_DATACENTER_OPTS[] = {
+		{ "{",								CASE_CONTEXT_BEGIN },
+		{ "dc-node-address-port",			CASE_XDR_DATACENTER_DC_NODE_ADDRESS_PORT },
+		{ "dc-connections",					CASE_XDR_DATACENTER_DC_CONNECTIONS },
+		{ "dc-connections-idle-ms",			CASE_XDR_DATACENTER_DC_CONNECTIONS_IDLE_MS },
+		{ "dc-int-ext-ipmap",				CASE_XDR_DATACENTER_DC_INT_EXT_IPMAP },
+		{ "dc-security-config-file",		CASE_XDR_DATACENTER_DC_SECURITY_CONFIG_FILE },
+		{ "dc-use-alternate-services",		CASE_XDR_DATACENTER_DC_USE_ALTERNATE_SERVICES },
+		{ "tls-cafile",						CASE_XDR_DATACENTER_TLS_CAFILE },
+		{ "tls-capath",						CASE_XDR_DATACENTER_TLS_CAPATH },
+		{ "tls-cert-blacklist",				CASE_XDR_DATACENTER_TLS_CERT_BLACKLIST },
+		{ "tls-certfile",					CASE_XDR_DATACENTER_TLS_CERTFILE },
+		{ "tls-keyfile",					CASE_XDR_DATACENTER_TLS_KEYFILE },
+		{ "tls-node",						CASE_XDR_DATACENTER_TLS_NODE },
+		{ "}",								CASE_CONTEXT_END }
+};
+
+// Used parsing separate file, but share cfg_case_id enum.
+
+const cfg_opt XDR_SEC_GLOBAL_OPTS[] = {
+		{ "credentials",					XDR_SEC_CASE_CREDENTIALS_BEGIN }
+};
+
+const cfg_opt XDR_SEC_CREDENTIALS_OPTS[] = {
+		{ "{",								CASE_CONTEXT_BEGIN },
+		{ "username",						XDR_SEC_CASE_CREDENTIALS_USERNAME },
+		{ "password",						XDR_SEC_CASE_CREDENTIALS_PASSWORD },
+		{ "}",								CASE_CONTEXT_END }
+};
+
 const int NUM_GLOBAL_OPTS							= sizeof(GLOBAL_OPTS) / sizeof(cfg_opt);
 const int NUM_SERVICE_OPTS							= sizeof(SERVICE_OPTS) / sizeof(cfg_opt);
-const int NUM_SERVICE_PAXOS_PROTOCOL_OPTS			= sizeof(SERVICE_PAXOS_PROTOCOL_OPTS) / sizeof(cfg_opt);
-const int NUM_SERVICE_PAXOS_RECOVERY_OPTS			= sizeof(SERVICE_PAXOS_RECOVERY_OPTS) / sizeof(cfg_opt);
+const int NUM_SERVICE_AUTO_PIN_OPTS					= sizeof(SERVICE_AUTO_PIN_OPTS) / sizeof(cfg_opt);
+const int NUM_SERVICE_DEBUG_ALLOCATIONS_OPTS		= sizeof(SERVICE_DEBUG_ALLOCATIONS_OPTS) / sizeof(cfg_opt);
 const int NUM_LOGGING_OPTS							= sizeof(LOGGING_OPTS) / sizeof(cfg_opt);
 const int NUM_LOGGING_FILE_OPTS						= sizeof(LOGGING_FILE_OPTS) / sizeof(cfg_opt);
 const int NUM_LOGGING_CONSOLE_OPTS					= sizeof(LOGGING_CONSOLE_OPTS) / sizeof(cfg_opt);
 const int NUM_NETWORK_OPTS							= sizeof(NETWORK_OPTS) / sizeof(cfg_opt);
 const int NUM_NETWORK_SERVICE_OPTS					= sizeof(NETWORK_SERVICE_OPTS) / sizeof(cfg_opt);
+const int NUM_NETWORK_SERVICE_TLS_MODE_OPTS			= sizeof(NETWORK_SERVICE_TLS_MODE_OPTS) /sizeof(cfg_opt);
 const int NUM_NETWORK_HEARTBEAT_OPTS				= sizeof(NETWORK_HEARTBEAT_OPTS) / sizeof(cfg_opt);
 const int NUM_NETWORK_HEARTBEAT_MODE_OPTS			= sizeof(NETWORK_HEARTBEAT_MODE_OPTS) / sizeof(cfg_opt);
 const int NUM_NETWORK_HEARTBEAT_PROTOCOL_OPTS		= sizeof(NETWORK_HEARTBEAT_PROTOCOL_OPTS) / sizeof(cfg_opt);
@@ -1067,22 +1251,26 @@ const int NUM_NAMESPACE_READ_CONSISTENCY_OPTS		= sizeof(NAMESPACE_READ_CONSISTEN
 const int NUM_NAMESPACE_WRITE_COMMIT_OPTS			= sizeof(NAMESPACE_WRITE_COMMIT_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_STORAGE_OPTS				= sizeof(NAMESPACE_STORAGE_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_STORAGE_DEVICE_OPTS			= sizeof(NAMESPACE_STORAGE_DEVICE_OPTS) / sizeof(cfg_opt);
-const int NUM_NAMESPACE_STORAGE_KV_OPTS				= sizeof(NAMESPACE_STORAGE_KV_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_SET_OPTS					= sizeof(NAMESPACE_SET_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_SET_ENABLE_XDR_OPTS			= sizeof(NAMESPACE_SET_ENABLE_XDR_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_SI_OPTS						= sizeof(NAMESPACE_SI_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_SINDEX_OPTS					= sizeof(NAMESPACE_SINDEX_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_GEO2DSPHERE_WITHIN_OPTS		= sizeof(NAMESPACE_GEO2DSPHERE_WITHIN_OPTS) / sizeof(cfg_opt);
 const int NUM_MOD_LUA_OPTS							= sizeof(MOD_LUA_OPTS) / sizeof(cfg_opt);
-const int NUM_CLUSTER_OPTS							= sizeof(CLUSTER_OPTS) / sizeof(cfg_opt);
-const int NUM_CLUSTER_GROUP_OPTS					= sizeof(CLUSTER_GROUP_OPTS) / sizeof(cfg_opt);
 const int NUM_SECURITY_OPTS							= sizeof(SECURITY_OPTS) / sizeof(cfg_opt);
 const int NUM_SECURITY_LOG_OPTS						= sizeof(SECURITY_LOG_OPTS) / sizeof(cfg_opt);
 const int NUM_SECURITY_SYSLOG_OPTS					= sizeof(SECURITY_SYSLOG_OPTS) / sizeof(cfg_opt);
+const int NUM_XDR_OPTS								= sizeof(XDR_OPTS) / sizeof(cfg_opt);
+const int NUM_XDR_DATACENTER_OPTS					= sizeof(XDR_DATACENTER_OPTS) / sizeof(cfg_opt);
+
+// Used parsing separate file, but share cfg_case_id enum.
+
+const int NUM_XDR_SEC_GLOBAL_OPTS					= sizeof(XDR_SEC_GLOBAL_OPTS) / sizeof(cfg_opt);
+const int NUM_XDR_SEC_CREDENTIALS_OPTS				= sizeof(XDR_SEC_CREDENTIALS_OPTS) / sizeof(cfg_opt);
 
 
 //==========================================================
-// Configuration value constants not for switch() cases.
+// Configuration value constants not for switch cases.
 //
 
 const char* DEVICE_SCHEDULER_MODES[] = {
@@ -1117,11 +1305,12 @@ typedef enum {
 	SERVICE,
 	LOGGING, LOGGING_FILE, LOGGING_CONSOLE,
 	NETWORK, NETWORK_SERVICE, NETWORK_HEARTBEAT, NETWORK_FABRIC, NETWORK_INFO,
-	NAMESPACE, NAMESPACE_STORAGE_DEVICE, NAMESPACE_STORAGE_KV, NAMESPACE_SET, NAMESPACE_SI, NAMESPACE_SINDEX, NAMESPACE_GEO2DSPHERE_WITHIN,
-	XDR, XDR_DATACENTER,
+	NAMESPACE, NAMESPACE_STORAGE_DEVICE, NAMESPACE_SET, NAMESPACE_SI, NAMESPACE_SINDEX, NAMESPACE_GEO2DSPHERE_WITHIN,
 	MOD_LUA,
-	CLUSTER, CLUSTER_GROUP,
 	SECURITY, SECURITY_LOG, SECURITY_SYSLOG,
+	XDR, XDR_DATACENTER,
+	// Used parsing separate file, but shares this enum:
+	XDR_SEC_CREDENTIALS,
 	// Must be last, use for sanity-checking:
 	PARSER_STATE_MAX_PLUS_1
 } as_config_parser_state;
@@ -1132,16 +1321,19 @@ const char* CFG_PARSER_STATES[] = {
 		"SERVICE",
 		"LOGGING", "LOGGING_FILE", "LOGGING_CONSOLE",
 		"NETWORK", "NETWORK_SERVICE", "NETWORK_HEARTBEAT", "NETWORK_FABRIC", "NETWORK_INFO",
-		"NAMESPACE", "NAMESPACE_STORAGE_DEVICE", "NAMESPACE_STORAGE_KV", "NAMESPACE_SET", "NAMESPACE_SI", "NAMESPACE_SINDEX", "NAMESPACE_GEO2DSPHERE_WITHIN",
-		"XDR", "XDR_DATACENTER",
+		"NAMESPACE", "NAMESPACE_STORAGE_DEVICE", "NAMESPACE_SET", "NAMESPACE_SI", "NAMESPACE_SINDEX", "NAMESPACE_GEO2DSPHERE_WITHIN",
 		"MOD_LUA",
-		"CLUSTER", "CLUSTER_GROUP",
-		"SECURITY", "SECURITY_LOG", "SECURITY_SYSLOG"
+		"SECURITY", "SECURITY_LOG", "SECURITY_SYSLOG",
+		"XDR", "XDR_DATACENTER",
+		// Used parsing separate file, but shares corresponding enum:
+		"XDR_SEC_CREDENTIALS"
 };
+
+#define MAX_STACK_DEPTH 8
 
 typedef struct cfg_parser_state_s {
 	as_config_parser_state	current;
-	as_config_parser_state	stack[8];
+	as_config_parser_state	stack[MAX_STACK_DEPTH];
 	int						depth;
 } cfg_parser_state;
 
@@ -1161,7 +1353,7 @@ cfg_begin_context(cfg_parser_state* p_state, as_config_parser_state context)
 
 	as_config_parser_state prev_context = p_state->stack[p_state->depth];
 
-	if (++p_state->depth >= (int)sizeof(p_state->stack)) {
+	if (++p_state->depth >= MAX_STACK_DEPTH) {
 		cf_crash(AS_CFG, "parsing - context too deep");
 	}
 
@@ -1187,7 +1379,7 @@ cfg_end_context(cfg_parser_state* p_state)
 }
 
 //------------------------------------------------
-// Given a token, return switch() case identifier.
+// Given a token, return switch case identifier.
 //
 
 cfg_case_id
@@ -1202,43 +1394,9 @@ cfg_find_tok(const char* tok, const cfg_opt opts[], int num_opts)
 	return CASE_NOT_FOUND;
 }
 
-xdr_cfg_case_id
-xdr_cfg_find_tok(const char* tok, const xdr_cfg_opt opts[], int num_opts)
-{
-	for (int i = 0; i < num_opts; i++) {
-		if (strcmp(tok, opts[i].tok) == 0) {
-			return opts[i].case_id;
-		}
-	}
-
-	return XDR_CASE_NOT_FOUND;
-}
-
 //------------------------------------------------
 // Value parsing and sanity-checking utilities.
 //
-
-typedef struct cfg_line_s {
-	int		num;
-	char*	name_tok;
-	char*	val_tok_1;
-	char*	val_tok_2;
-} cfg_line;
-
-void
-cfg_future_name_tok(const cfg_line* p_line)
-{
-	// To see this log, change NO_SINKS_LIMIT in fault.c:
-	cf_info(AS_CFG, "line %d :: %s is not yet supported",
-			p_line->num, p_line->name_tok);
-}
-
-void
-cfg_future_val_tok_1(const cfg_line* p_line)
-{
-	cf_warning(AS_CFG, "line %d :: %s value '%s' is not yet supported",
-			p_line->num, p_line->name_tok, p_line->val_tok_1);
-}
 
 void
 cfg_renamed_name_tok(const cfg_line* p_line, const char* new_tok)
@@ -1283,14 +1441,14 @@ cfg_unknown_val_tok_1(const cfg_line* p_line)
 }
 
 void
-cfg_obsolete(const cfg_line* p_line, const char *new_tok)
+cfg_obsolete(const cfg_line* p_line, const char* message)
 {
-	cf_crash_nostack(AS_CFG, "line %d :: '%s' is obsolete - must use '%s'",
-			p_line->num, p_line->name_tok, new_tok);
+	cf_crash_nostack(AS_CFG, "line %d :: '%s' is obsolete%s%s",
+			p_line->num, p_line->name_tok, message ? " - " : "", message);
 }
 
 void
-cfg_not_supported(const cfg_line* p_line, const char *feature)
+cfg_not_supported(const cfg_line* p_line, const char* feature)
 {
 	cf_crash_nostack(AS_CFG, "line %d :: illegal value '%s' for config parameter '%s' - feature %s is not supported",
 			p_line->num, p_line->val_tok_1, p_line->name_tok, feature);
@@ -1366,6 +1524,8 @@ cfg_strdup_one_of(const cfg_line* p_line, const char* toks[], int num_toks)
 
 	char valid_toks[valid_toks_size];
 
+	valid_toks[0] = 0;
+
 	for (int i = 0; i < num_toks; i++) {
 		strcat(valid_toks, toks[i]);
 		strcat(valid_toks, ", ");
@@ -1381,9 +1541,14 @@ cfg_strdup_one_of(const cfg_line* p_line, const char* toks[], int num_toks)
 void
 cfg_strcpy(const cfg_line* p_line, char* p_str, size_t max_size)
 {
-	// TODO - should we check for empty string?
+	size_t tok1_len = strlen(p_line->val_tok_1);
 
-	if (strlen(p_line->val_tok_1) >= max_size) {
+	if (tok1_len == 0) {
+		cf_crash_nostack(AS_CFG, "line %d :: %s must have a value specified",
+				p_line->num, p_line->name_tok);
+	}
+
+	if (tok1_len >= max_size) {
 		cf_crash_nostack(AS_CFG, "line %d :: %s must be < %lu characters long, not %s",
 				p_line->num, p_line->name_tok, max_size, p_line->val_tok_1);
 	}
@@ -1451,6 +1616,12 @@ cfg_i64_val2_no_checks(const cfg_line* p_line)
 }
 
 int64_t
+cfg_i64_val3_no_checks(const cfg_line* p_line)
+{
+	return cfg_i64_anyval_no_checks(p_line, p_line->val_tok_3);
+}
+
+int64_t
 cfg_i64(const cfg_line* p_line, int64_t min, int64_t max)
 {
 	int64_t value = cfg_i64_no_checks(p_line);
@@ -1503,9 +1674,34 @@ cfg_int_val2_no_checks(const cfg_line* p_line)
 }
 
 int
+cfg_int_val3_no_checks(const cfg_line* p_line)
+{
+	int64_t value = cfg_i64_val3_no_checks(p_line);
+
+	if (value < INT_MIN || value > INT_MAX) {
+		cf_crash_nostack(AS_CFG, "line %d :: %s %ld overflows int",
+				p_line->num, p_line->name_tok, value);
+	}
+
+	return (int)value;
+}
+int
 cfg_int_val2(const cfg_line* p_line, int min, int max)
 {
 	int value = cfg_int_val2_no_checks(p_line);
+
+	if (value < min || value > max) {
+		cf_crash_nostack(AS_CFG, "line %d :: %s must be >= %d and <= %d, not %d",
+				p_line->num, p_line->name_tok, min, max, value);
+	}
+
+	return value;
+}
+
+int
+cfg_int_val3(const cfg_line* p_line, int min, int max)
+{
+	int value = cfg_int_val3_no_checks(p_line);
 
 	if (value < min || value > max) {
 		cf_crash_nostack(AS_CFG, "line %d :: %s must be >= %d and <= %d, not %d",
@@ -1596,6 +1792,20 @@ cfg_u32(const cfg_line* p_line, uint32_t min, uint32_t max)
 	return value;
 }
 
+// Note - accepts 0 if min is 0.
+uint32_t
+cfg_u32_power_of_2(const cfg_line* p_line, uint32_t min, uint32_t max)
+{
+	uint32_t value = cfg_u32(p_line, min, max);
+
+	if ((value & (value - 1)) != 0) {
+		cf_crash_nostack(AS_CFG, "line %d :: %s must be an exact power of 2, not %u",
+				p_line->num, p_line->name_tok, value);
+	}
+
+	return value;
+}
+
 uint16_t
 cfg_u16_no_checks(const cfg_line* p_line)
 {
@@ -1660,26 +1870,8 @@ cfg_u8(const cfg_line* p_line, uint8_t min, uint8_t max)
 	return value;
 }
 
-double
-cfg_pct_fraction(const cfg_line* p_line)
-{
-	if (*p_line->val_tok_1 == '\0') {
-		cf_crash_nostack(AS_CFG, "line %d :: %s must specify a numeric value",
-				p_line->num, p_line->name_tok);
-	}
-
-	double value = atof(p_line->val_tok_1);
-
-	if (value < 0.0 || value > 100.0) {
-		cf_crash_nostack(AS_CFG, "line %d :: %s must be >= 0 and <= 100, not %s",
-				p_line->num, p_line->name_tok, p_line->val_tok_1);
-	}
-
-	return value / 100.0;
-}
-
-uint64_t
-cfg_seconds(const cfg_line* p_line)
+uint32_t
+cfg_seconds_no_checks(const cfg_line* p_line)
 {
 	if (*p_line->val_tok_1 == '\0') {
 		cf_crash_nostack(AS_CFG, "line %d :: %s must specify an unsigned integer value with time unit (s, m, h, or d)",
@@ -1688,9 +1880,29 @@ cfg_seconds(const cfg_line* p_line)
 
 	uint64_t value;
 
+	// TODO - should fix this to guard against overflow, give uint32_t.
 	if (0 != cf_str_atoi_seconds(p_line->val_tok_1, &value)) {
 		cf_crash_nostack(AS_CFG, "line %d :: %s must be an unsigned number with time unit (s, m, h, or d), not %s",
 				p_line->num, p_line->name_tok, p_line->val_tok_1);
+	}
+
+	return (uint32_t)value;
+}
+
+uint32_t
+cfg_seconds(const cfg_line* p_line, uint32_t min, uint32_t max)
+{
+	uint32_t value = cfg_seconds_no_checks(p_line);
+
+	if (min == 0) {
+		if (value > max) {
+			cf_crash_nostack(AS_CFG, "line %d :: %s must be <= %u seconds, not %u seconds",
+					p_line->num, p_line->name_tok, max, value);
+		}
+	}
+	else if (value < min || value > max) {
+		cf_crash_nostack(AS_CFG, "line %d :: %s must be >= %u seconds and <= %u seconds, not %u seconds",
+				p_line->num, p_line->name_tok, min, max, value);
 	}
 
 	return value;
@@ -1700,16 +1912,22 @@ cfg_seconds(const cfg_line* p_line)
 const int CFG_MIN_PORT = 1024;
 const int CFG_MAX_PORT = USHRT_MAX;
 
-int
+cf_ip_port
 cfg_port(const cfg_line* p_line)
 {
-	return cfg_int(p_line, CFG_MIN_PORT, CFG_MAX_PORT);
+	return (cf_ip_port)cfg_int(p_line, CFG_MIN_PORT, CFG_MAX_PORT);
 }
 
-int
+cf_ip_port
 cfg_port_val2(const cfg_line* p_line)
 {
-	return cfg_int_val2(p_line, CFG_MIN_PORT, CFG_MAX_PORT);
+	return (cf_ip_port)cfg_int_val2(p_line, CFG_MIN_PORT, CFG_MAX_PORT);
+}
+
+cf_ip_port
+cfg_port_val3(const cfg_line* p_line)
+{
+	return (cf_ip_port)cfg_int_val3(p_line, CFG_MIN_PORT, CFG_MAX_PORT);
 }
 
 //------------------------------------------------
@@ -1725,13 +1943,14 @@ const char CFG_WHITESPACE[] = " \t\n\r\f\v";
 //
 
 as_config*
-as_config_init(const char *config_file)
+as_config_init(const char* config_file)
 {
 	as_config* c = &g_config; // shortcut pointer
 
 	// Set the service context defaults. Values parsed from the config file will
 	// override the defaults.
 	cfg_set_defaults();
+	xdr_config_defaults();
 
 	FILE* FD;
 	char iobuf[256];
@@ -1741,16 +1960,9 @@ as_config_init(const char *config_file)
 	cfg_parser_state_init(&state);
 
 	as_namespace* ns = NULL;
+	dc_config_opt *cur_dc_cfg = NULL;
 	cf_fault_sink* sink = NULL;
 	as_set* p_set = NULL; // local variable used for set initialization
-	as_sindex_config_var si_cfg;
-
-	uint64_t config_val = 0;
-	cc_group_t cluster_group_id = 0; // hold the group name while we process nodes (0 not a valid ID #)
-	cc_node_t cluster_node_id; // capture the node id in a group
-
-	// Flag mutually exclusive configuration options.
-	bool transaction_queues_set = false;
 
 	// Open the configuration file for reading.
 	if (NULL == (FD = fopen(config_file, "r"))) {
@@ -1772,7 +1984,7 @@ as_config_init(const char *config_file)
 		// Find (and null-terminate) up to three whitespace-delimited tokens in
 		// the line, a 'name' token and up to two 'value' tokens.
 
-		cfg_line line = { line_num, NULL, NULL, NULL };
+		cfg_line line = { line_num, NULL, NULL, NULL, NULL };
 
 		line.name_tok = strtok(iobuf, CFG_WHITESPACE);
 
@@ -1793,9 +2005,16 @@ as_config_init(const char *config_file)
 		if (! line.val_tok_2) {
 			line.val_tok_2 = ""; // in case it's used where NULL can't be used
 		}
+		else {
+			line.val_tok_3 = strtok(NULL, CFG_WHITESPACE);
+		}
+
+		if (! line.val_tok_3) {
+			line.val_tok_3 = ""; // in case it's used where NULL can't be used
+		}
 
 		// Note that we can't see this output until a logging sink is specified.
-		cf_detail(AS_CFG, "line %d :: %s %s %s", line_num, line.name_tok, line.val_tok_1, line.val_tok_2);
+		cf_detail(AS_CFG, "line %d :: %s %s %s %s", line_num, line.name_tok, line.val_tok_1, line.val_tok_2, line.val_tok_3);
 
 		// Parse the directive.
 		switch (state.current) {
@@ -1808,7 +2027,7 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_BEGIN:
 				cfg_begin_context(&state, SERVICE);
 				break;
-			case CASE_LOG_BEGIN:
+			case CASE_LOGGING_BEGIN:
 				cfg_begin_context(&state, LOGGING);
 				break;
 			case CASE_NETWORK_BEGIN:
@@ -1816,20 +2035,20 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_BEGIN:
 				// Create the namespace objects.
-				ns = as_namespace_create(line.val_tok_1, 2);
+				ns = as_namespace_create(line.val_tok_1);
 				cfg_begin_context(&state, NAMESPACE);
-				break;
-			case CASE_XDR_BEGIN:
-				cfg_begin_context(&state, XDR);
 				break;
 			case CASE_MOD_LUA_BEGIN:
 				cfg_begin_context(&state, MOD_LUA);
 				break;
-			case CASE_CLUSTER_BEGIN:
-				cfg_begin_context(&state, CLUSTER);
-				break;
 			case CASE_SECURITY_BEGIN:
+				cfg_enterprise_only(&line);
 				cfg_begin_context(&state, SECURITY);
+				break;
+			case CASE_XDR_BEGIN:
+				g_xcfg.xdr_section_configured = true;
+				cfg_enterprise_only(&line);
+				cfg_begin_context(&state, XDR);
 				break;
 			case CASE_NOT_FOUND:
 			default:
@@ -1842,7 +2061,7 @@ as_config_init(const char *config_file)
 		// Parse service context items.
 		//
 		case SERVICE:
-			switch(cfg_find_tok(line.name_tok, SERVICE_OPTS, NUM_SERVICE_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, SERVICE_OPTS, NUM_SERVICE_OPTS)) {
 			case CASE_SERVICE_USER:
 				{
 					struct passwd* pwd;
@@ -1869,24 +2088,31 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_PIDFILE:
 				c->pidfile = cfg_strdup_no_checks(&line);
 				break;
-			case CASE_SERVICE_SERVICE_THREADS:
-				c->n_service_threads = cfg_int(&line, 1, MAX_DEMARSHAL_THREADS);
-				break;
-			case CASE_SERVICE_TRANSACTION_QUEUES:
-				c->n_transaction_queues = cfg_int(&line, 1, MAX_TRANSACTION_QUEUES);
-				transaction_queues_set = true;
-				break;
-			case CASE_SERVICE_TRANSACTION_THREADS_PER_QUEUE:
-				c->n_transaction_threads_per_queue = cfg_int_no_checks(&line);
-				break;
 			case CASE_SERVICE_CLIENT_FD_MAX:
 				cfg_renamed_name_tok(&line, "proto-fd-max");
-				// Intentional fall-through.
+				// No break.
 			case CASE_SERVICE_PROTO_FD_MAX:
 				c->n_proto_fd_max = cfg_int_no_checks(&line);
 				break;
-			case CASE_SERVICE_ALLOW_INLINE_TRANSACTIONS:
-				c->allow_inline_transactions = cfg_bool(&line);
+			case CASE_SERVICE_ADVERTISE_IPV6:
+				cf_socket_set_advertise_ipv6(cfg_bool(&line));
+				break;
+			case CASE_SERVICE_AUTO_PIN:
+				switch (cfg_find_tok(line.val_tok_1, SERVICE_AUTO_PIN_OPTS, NUM_SERVICE_AUTO_PIN_OPTS)) {
+				case CASE_SERVICE_AUTO_PIN_NONE:
+					c->auto_pin = CF_TOPO_AUTO_PIN_NONE;
+					break;
+				case CASE_SERVICE_AUTO_PIN_CPU:
+					c->auto_pin = CF_TOPO_AUTO_PIN_CPU;
+					break;
+				case CASE_SERVICE_AUTO_PIN_NUMA:
+					c->auto_pin = CF_TOPO_AUTO_PIN_NUMA;
+					break;
+				case CASE_NOT_FOUND:
+				default:
+					cfg_unknown_val_tok_1(&line);
+					break;
+				}
 				break;
 			case CASE_SERVICE_BATCH_THREADS:
 				c->n_batch_threads = cfg_int(&line, 0, MAX_BATCH_THREADS);
@@ -1904,13 +2130,22 @@ as_config_init(const char *config_file)
 				c->batch_priority = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_BATCH_INDEX_THREADS:
-				c->n_batch_index_threads = cfg_int(&line, 1, MAX_BATCH_THREADS);
+				c->n_batch_index_threads = cfg_u32(&line, 1, MAX_BATCH_THREADS);
 				break;
-			case CASE_SERVICE_FABRIC_WORKERS:
-				c->n_fabric_workers = cfg_int(&line, 1, MAX_FABRIC_WORKERS);
+			case CASE_SERVICE_CLOCK_SKEW_MAX_MS:
+				c->clock_skew_max_ms = cfg_u32_no_checks(&line);
 				break;
-			case CASE_SERVICE_GENERATION_DISABLE:
-				c->generation_disable = cfg_bool(&line);
+			case CASE_SERVICE_CLUSTER_NAME:
+				cfg_set_cluster_name(line.val_tok_1);
+				break;
+			case CASE_SERVICE_ENABLE_BENCHMARKS_FABRIC:
+				c->fabric_benchmarks_enabled = cfg_bool(&line);
+				break;
+			case CASE_SERVICE_ENABLE_BENCHMARKS_SVC:
+				c->svc_benchmarks_enabled = cfg_bool(&line);
+				break;
+			case CASE_SERVICE_ENABLE_HIST_INFO:
+				c->info_hist_enabled = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_HIST_TRACK_BACK:
 				c->hist_track_back = cfg_u32_no_checks(&line);
@@ -1931,38 +2166,20 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_LOG_LOCAL_TIME:
 				cf_fault_use_local_time(cfg_bool(&line));
 				break;
-			case CASE_SERVICE_MICROBENCHMARKS:
-				c->microbenchmarks = cfg_bool(&line);
+			case CASE_SERVICE_LOG_MILLIS:
+				cf_fault_log_millis(cfg_bool(&line));
 				break;
 			case CASE_SERVICE_MIGRATE_MAX_NUM_INCOMING:
-				c->migrate_max_num_incoming = cfg_int(&line, 0, INT_MAX);
-				break;
-			case CASE_SERVICE_MIGRATE_READ_PRIORITY:
-				c->migrate_read_priority = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_MIGRATE_READ_SLEEP:
-				c->migrate_read_sleep = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_MIGRATE_RX_LIFETIME_MS:
-				c->migrate_rx_lifetime_ms = cfg_int_no_checks(&line);
+				c->migrate_max_num_incoming = cfg_u32(&line, 0, AS_MIGRATE_LIMIT_MAX_NUM_INCOMING);
 				break;
 			case CASE_SERVICE_MIGRATE_THREADS:
-				c->n_migrate_threads = cfg_int(&line, 0, MAX_NUM_MIGRATE_XMIT_THREADS);
+				c->n_migrate_threads = cfg_u32(&line, 0, MAX_NUM_MIGRATE_XMIT_THREADS);
 				break;
-			case CASE_SERVICE_MIGRATE_XMIT_HWM:
-				c->migrate_xmit_hwm = cfg_u32_no_checks(&line);
+			case CASE_SERVICE_MIN_CLUSTER_SIZE:
+				c->clustering_config.cluster_size_min = cfg_u32(&line, 0, AS_CLUSTER_SZ);
 				break;
-			case CASE_SERVICE_MIGRATE_XMIT_LWM:
-				c->migrate_xmit_lwm = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_MIGRATE_PRIORITY:
-				cfg_renamed_name_tok(&line, "migrate-xmit-priority");
-				// Intentional fall-through.
-			case CASE_SERVICE_MIGRATE_XMIT_PRIORITY:
-				c->migrate_xmit_priority = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_MIGRATE_XMIT_SLEEP:
-				c->migrate_xmit_sleep = cfg_u32_no_checks(&line);
+			case CASE_SERVICE_NODE_ID_INTERFACE:
+				c->node_id_interface = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_SERVICE_NSUP_DELETE_SLEEP:
 				c->nsup_delete_sleep = cfg_u32_no_checks(&line);
@@ -1973,60 +2190,20 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_NSUP_STARTUP_EVICT:
 				c->nsup_startup_evict = cfg_bool(&line);
 				break;
-			case CASE_SERVICE_PAXOS_MAX_CLUSTER_SIZE:
-				c->paxos_max_cluster_size = cfg_u64(&line, 2, AS_CLUSTER_SZ);
-				break;
-			case CASE_SERVICE_PAXOS_PROTOCOL:
-				switch(cfg_find_tok(line.val_tok_1, SERVICE_PAXOS_PROTOCOL_OPTS, NUM_SERVICE_PAXOS_PROTOCOL_OPTS)) {
-				case CASE_SERVICE_PAXOS_PROTOCOL_V1:
-					c->paxos_protocol = AS_PAXOS_PROTOCOL_V1;
-					break;
-				case CASE_SERVICE_PAXOS_PROTOCOL_V2:
-					c->paxos_protocol = AS_PAXOS_PROTOCOL_V2;
-					break;
-				case CASE_SERVICE_PAXOS_PROTOCOL_V3:
-					c->paxos_protocol = AS_PAXOS_PROTOCOL_V3;
-					break;
-				case CASE_SERVICE_PAXOS_PROTOCOL_V4:
-					c->paxos_protocol = AS_PAXOS_PROTOCOL_V4;
-					break;
-				case CASE_NOT_FOUND:
-				default:
-					cfg_unknown_val_tok_1(&line);
-					break;
-				}
-				break;
-			case CASE_SERVICE_PAXOS_RECOVERY_POLICY:
-				switch(cfg_find_tok(line.val_tok_1, SERVICE_PAXOS_RECOVERY_OPTS, NUM_SERVICE_PAXOS_RECOVERY_OPTS)) {
-				case CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_ALL:
-					c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_AUTO_DUN_ALL;
-					break;
-				case CASE_SERVICE_PAXOS_RECOVERY_AUTO_DUN_MASTER:
-					c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_AUTO_DUN_MASTER;
-					break;
-				case CASE_SERVICE_PAXOS_RECOVERY_AUTO_RESET_MASTER:
-					c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_AUTO_RESET_MASTER;
-					break;
-				case CASE_SERVICE_PAXOS_RECOVERY_MANUAL:
-					c->paxos_recovery_policy = AS_PAXOS_RECOVERY_POLICY_MANUAL;
-					break;
-				case CASE_NOT_FOUND:
-				default:
-					cfg_unknown_val_tok_1(&line);
-					break;
-				}
-				break;
-			case CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD:
-				c->paxos_retransmit_period = cfg_u32_no_checks(&line);
-				break;
 			case CASE_SERVICE_PROTO_FD_IDLE_MS:
 				c->proto_fd_idle_ms = cfg_int_no_checks(&line);
 				break;
 			case CASE_SERVICE_QUERY_BATCH_SIZE:
 				c->query_bsize = cfg_int_no_checks(&line);
 				break;
+			case CASE_SERVICE_QUERY_BUFPOOL_SIZE:
+				c->query_bufpool_size = cfg_u32(&line, 1, UINT32_MAX);
+				break;
 			case CASE_SERVICE_QUERY_IN_TRANSACTION_THREAD:
 				c->query_in_transaction_thr = cfg_bool(&line);
+				break;
+			case CASE_SERVICE_QUERY_LONG_Q_MAX_SIZE:
+				c->query_long_q_max_size = cfg_u32(&line, 1, UINT32_MAX);
 				break;
 			case CASE_SERVICE_QUERY_PRE_RESERVE_PARTITIONS:
 				c->partitions_pre_reserved = cfg_bool(&line);
@@ -2037,14 +2214,29 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_QUERY_PRIORITY_SLEEP_US:
 				c->query_sleep_us = cfg_u64_no_checks(&line);
 				break;
+			case CASE_SERVICE_QUERY_REC_COUNT_BOUND:
+				c->query_rec_count_bound = cfg_u64(&line, 1, UINT64_MAX);
+				break;
+			case CASE_SERVICE_QUERY_REQ_IN_QUERY_THREAD:
+				c->query_req_in_query_thread = cfg_bool(&line);
+				break;
+			case CASE_SERVICE_QUERY_REQ_MAX_INFLIGHT:
+				c->query_req_max_inflight = cfg_u32(&line, 1, UINT32_MAX);
+				break;
+			case CASE_SERVICE_QUERY_SHORT_Q_MAX_SIZE:
+				c->query_short_q_max_size = cfg_u32(&line, 1, UINT32_MAX);
+				break;
+			case CASE_SERVICE_QUERY_THREADS:
+				c->query_threads = cfg_u32(&line, 1, AS_QUERY_MAX_THREADS);
+				break;
 			case CASE_SERVICE_QUERY_THRESHOLD:
 				c->query_threshold = cfg_int_no_checks(&line);
 				break;
 			case CASE_SERVICE_QUERY_UNTRACKED_TIME_MS:
 				c->query_untracked_time_ms = cfg_u64_no_checks(&line);
 				break;
-			case CASE_SERVICE_REPLICATION_FIRE_AND_FORGET:
-				c->replication_fire_and_forget = cfg_bool(&line);
+			case CASE_SERVICE_QUERY_WORKER_THREADS:
+				c->query_worker_threads = cfg_u32(&line, 1, AS_QUERY_MAX_WORKER_THREADS);
 				break;
 			case CASE_SERVICE_RESPOND_CLIENT_ON_MASTER_COMPLETION:
 				c->respond_client_on_master_completion = cfg_bool(&line);
@@ -2064,28 +2256,20 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_SCAN_THREADS:
 				c->scan_threads = cfg_u32(&line, 0, 32);
 				break;
-			case CASE_SERVICE_SINDEX_DATA_MAX_MEMORY:
-				config_val = cfg_u64_no_checks(&line);
-				if (config_val <  cf_atomic64_get(c->sindex_data_memory_used)) {
-					cf_warning(AS_CFG, "sindex-data-max-memory must"
-							" be greater than existing used memory %ld (line %d)",
-							cf_atomic64_get(c->sindex_data_memory_used), line_num);
-				}
-				else {
-					c->sindex_data_max_memory = config_val; // this is in addition to namespace memory
-				}
+			case CASE_SERVICE_SERVICE_THREADS:
+				c->n_service_threads = cfg_u32(&line, 1, MAX_DEMARSHAL_THREADS);
 				break;
-			case CASE_SERVICE_SNUB_NODES:
-				c->snub_nodes = cfg_bool(&line);
+			case CASE_SERVICE_SINDEX_BUILDER_THREADS:
+				c->sindex_builder_threads = cfg_u32(&line, 1, MAX_SINDEX_BUILDER_THREADS);
 				break;
-			case CASE_SERVICE_STORAGE_BENCHMARKS:
-				c->storage_benchmarks = cfg_bool(&line);
+			case CASE_SERVICE_SINDEX_GC_MAX_RATE:
+				c->sindex_gc_max_rate = cfg_u32_no_checks(&line);
+				break;
+			case CASE_SERVICE_SINDEX_GC_PERIOD:
+				c->sindex_gc_period = cfg_u32_no_checks(&line);
 				break;
 			case CASE_SERVICE_TICKER_INTERVAL:
 				c->ticker_interval = cfg_u32_no_checks(&line);
-				break;
-			case CASE_SERVICE_TRANSACTION_DUPLICATE_THREADS:
-				c->n_transaction_duplicate_threads = cfg_int_no_checks(&line);
 				break;
 			case CASE_SERVICE_TRANSACTION_MAX_MS:
 				c->transaction_max_ns = cfg_u64_no_checks(&line) * 1000000;
@@ -2093,26 +2277,17 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_TRANSACTION_PENDING_LIMIT:
 				c->transaction_pending_limit = cfg_u32_no_checks(&line);
 				break;
+			case CASE_SERVICE_TRANSACTION_QUEUES:
+				c->n_transaction_queues = cfg_u32(&line, 1, MAX_TRANSACTION_QUEUES);
+				break;
 			case CASE_SERVICE_TRANSACTION_REPEATABLE_READ:
 				c->transaction_repeatable_read = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_TRANSACTION_RETRY_MS:
 				c->transaction_retry_ms = cfg_u32_no_checks(&line);
 				break;
-			case CASE_SERVICE_UDF_RUNTIME_MAX_GMEMORY:
-				config_val = cfg_u64_no_checks(&line);
-				if (config_val < c->udf_runtime_gmemory_used) {
-					cf_crash_nostack(AS_CFG, "udf-runtime-max-gmemory must"
-							" be greater than existing used memory %ld (line %d)",
-							cf_atomic_int_get(c->udf_runtime_gmemory_used), line_num);
-				}
-				c->udf_runtime_max_gmemory = config_val;
-				break;
-			case CASE_SERVICE_UDF_RUNTIME_MAX_MEMORY:
-				config_val = cfg_u64_no_checks(&line);
-				break;
-			case CASE_SERVICE_USE_QUEUE_PER_DEVICE:
-				c->use_queue_per_device = cfg_bool(&line);
+			case CASE_SERVICE_TRANSACTION_THREADS_PER_QUEUE:
+				c->n_transaction_threads_per_queue = cfg_u32(&line, 1, MAX_TRANSACTION_THREADS_PER_QUEUE);
 				break;
 			case CASE_SERVICE_WORK_DIRECTORY:
 				c->work_directory = cfg_strdup_no_checks(&line);
@@ -2120,8 +2295,25 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_WRITE_DUPLICATE_RESOLUTION_DISABLE:
 				c->write_duplicate_resolution_disable = cfg_bool(&line);
 				break;
-			case CASE_SERVICE_ASMALLOC_ENABLED:
-				c->asmalloc_enabled = cfg_bool(&line);
+			case CASE_SERVICE_DEBUG_ALLOCATIONS:
+				switch (cfg_find_tok(line.val_tok_1, SERVICE_DEBUG_ALLOCATIONS_OPTS, NUM_SERVICE_DEBUG_ALLOCATIONS_OPTS)) {
+				case CASE_SERVICE_DEBUG_ALLOCATIONS_NONE:
+					c->debug_allocations = CF_ALLOC_DEBUG_NONE;
+					break;
+				case CASE_SERVICE_DEBUG_ALLOCATIONS_TRANSIENT:
+					c->debug_allocations = CF_ALLOC_DEBUG_TRANSIENT;
+					break;
+				case CASE_SERVICE_DEBUG_ALLOCATIONS_PERSISTENT:
+					c->debug_allocations = CF_ALLOC_DEBUG_PERSISTENT;
+					break;
+				case CASE_SERVICE_DEBUG_ALLOCATIONS_ALL:
+					c->debug_allocations = CF_ALLOC_DEBUG_ALL;
+					break;
+				case CASE_NOT_FOUND:
+				default:
+					cfg_unknown_val_tok_1(&line);
+					break;
+				}
 				break;
 			case CASE_SERVICE_FABRIC_DUMP_MSGS:
 				c->fabric_dump_msgs = cfg_bool(&line);
@@ -2130,11 +2322,11 @@ as_config_init(const char *config_file)
 				c->max_msgs_per_type = cfg_i64_no_checks(&line);
 				msg_set_max_msgs_per_type(c->max_msgs_per_type = c->max_msgs_per_type >= 0 ? c->max_msgs_per_type : -1);
 				break;
-			case CASE_SERVICE_MEMORY_ACCOUNTING:
-				c->memory_accounting = cfg_bool(&line);
-				break;
 			case CASE_SERVICE_PROLE_EXTRA_TTL:
 				c->prole_extra_ttl = cfg_u32_no_checks(&line);
+				break;
+			case CASE_SERVICE_ALLOW_INLINE_TRANSACTIONS:
+				cfg_obsolete(&line, "please configure 'service-threads' carefully"); // FIXME - better message?
 				break;
 			case CASE_SERVICE_AUTO_DUN:
 			case CASE_SERVICE_AUTO_UNDUN:
@@ -2145,10 +2337,20 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_DEFRAG_QUEUE_LWM:
 			case CASE_SERVICE_DEFRAG_QUEUE_PRIORITY:
 			case CASE_SERVICE_DUMP_MESSAGE_ABOVE_SIZE:
+			case CASE_SERVICE_FABRIC_WORKERS:
 			case CASE_SERVICE_FB_HEALTH_BAD_PCT:
 			case CASE_SERVICE_FB_HEALTH_GOOD_PCT:
 			case CASE_SERVICE_FB_HEALTH_MSG_PER_BURST:
 			case CASE_SERVICE_FB_HEALTH_MSG_TIMEOUT:
+			case CASE_SERVICE_GENERATION_DISABLE:
+			case CASE_SERVICE_MIGRATE_READ_PRIORITY:
+			case CASE_SERVICE_MIGRATE_READ_SLEEP:
+			case CASE_SERVICE_MIGRATE_RX_LIFETIME_MS:
+			case CASE_SERVICE_MIGRATE_XMIT_HWM:
+			case CASE_SERVICE_MIGRATE_XMIT_LWM:
+			case CASE_SERVICE_MIGRATE_PRIORITY:
+			case CASE_SERVICE_MIGRATE_XMIT_PRIORITY:
+			case CASE_SERVICE_MIGRATE_XMIT_SLEEP:
 			case CASE_SERVICE_NSUP_AUTO_HWM:
 			case CASE_SERVICE_NSUP_AUTO_HWM_PCT:
 			case CASE_SERVICE_NSUP_MAX_DELETES:
@@ -2158,18 +2360,24 @@ as_config_init(const char *config_file)
 			case CASE_SERVICE_NSUP_REDUCE_PRIORITY:
 			case CASE_SERVICE_NSUP_REDUCE_SLEEP:
 			case CASE_SERVICE_NSUP_THREADS:
+			case CASE_SERVICE_PAXOS_MAX_CLUSTER_SIZE:
+			case CASE_SERVICE_PAXOS_PROTOCOL:
+			case CASE_SERVICE_PAXOS_RECOVERY_POLICY:
+			case CASE_SERVICE_PAXOS_RETRANSMIT_PERIOD:
+			case CASE_SERVICE_REPLICATION_FIRE_AND_FORGET:
 			case CASE_SERVICE_SCAN_MEMORY:
 			case CASE_SERVICE_SCAN_PRIORITY:
 			case CASE_SERVICE_SCAN_RETRANSMIT:
 			case CASE_SERVICE_SCHEDULER_PRIORITY:
 			case CASE_SERVICE_SCHEDULER_TYPE:
+			case CASE_SERVICE_TRANSACTION_DUPLICATE_THREADS:
 			case CASE_SERVICE_TRIAL_ACCOUNT_KEY:
+			case CASE_SERVICE_UDF_RUNTIME_MAX_GMEMORY:
+			case CASE_SERVICE_UDF_RUNTIME_MAX_MEMORY:
+			case CASE_SERVICE_USE_QUEUE_PER_DEVICE:
 				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_CONTEXT_END:
-				if (c->use_queue_per_device && transaction_queues_set) {
-					cf_crash_nostack(AS_CFG, "can't set use-queue-per-device and explicit transaction-queues");
-				}
 				cfg_end_context(&state);
 				break;
 			case CASE_NOT_FOUND:
@@ -2183,7 +2391,7 @@ as_config_init(const char *config_file)
 		// Parse logging context items.
 		//
 		case LOGGING:
-			switch(cfg_find_tok(line.name_tok, LOGGING_OPTS, NUM_LOGGING_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, LOGGING_OPTS, NUM_LOGGING_OPTS)) {
 			case CASE_LOG_FILE_BEGIN:
 				if ((sink = cf_fault_sink_hold(line.val_tok_1)) == NULL) {
 					cf_crash_nostack(AS_CFG, "line %d :: can't add file %s as log sink", line_num, line.val_tok_1);
@@ -2210,14 +2418,11 @@ as_config_init(const char *config_file)
 		// Parse logging::file context items.
 		//
 		case LOGGING_FILE:
-			switch(cfg_find_tok(line.name_tok, LOGGING_FILE_OPTS, NUM_LOGGING_FILE_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, LOGGING_FILE_OPTS, NUM_LOGGING_FILE_OPTS)) {
 			case CASE_LOG_FILE_CONTEXT:
 				if (0 != cf_fault_sink_addcontext(sink, line.val_tok_1, line.val_tok_2)) {
 					cf_crash_nostack(AS_CFG, "line %d :: can't add logging file context %s %s", line_num, line.val_tok_1, line.val_tok_2);
 				}
-				break;
-			case CASE_LOG_FILE_SPECIFIC:
-				cfg_future_name_tok(&line); // TODO - deprecate?
 				break;
 			case CASE_CONTEXT_END:
 				sink = NULL;
@@ -2234,14 +2439,11 @@ as_config_init(const char *config_file)
 		// Parse logging::console context items.
 		//
 		case LOGGING_CONSOLE:
-			switch(cfg_find_tok(line.name_tok, LOGGING_CONSOLE_OPTS, NUM_LOGGING_CONSOLE_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, LOGGING_CONSOLE_OPTS, NUM_LOGGING_CONSOLE_OPTS)) {
 			case CASE_LOG_CONSOLE_CONTEXT:
 				if (0 != cf_fault_sink_addcontext(sink, line.val_tok_1, line.val_tok_2)) {
 					cf_crash_nostack(AS_CFG, "line %d :: can't add logging console context %s %s", line_num, line.val_tok_1, line.val_tok_2);
 				}
-				break;
-			case CASE_LOG_CONSOLE_SPECIFIC:
-				cfg_future_name_tok(&line); // TODO - deprecate?
 				break;
 			case CASE_CONTEXT_END:
 				sink = NULL;
@@ -2258,7 +2460,7 @@ as_config_init(const char *config_file)
 		// Parse network context items.
 		//
 		case NETWORK:
-			switch(cfg_find_tok(line.name_tok, NETWORK_OPTS, NUM_NETWORK_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NETWORK_OPTS, NUM_NETWORK_OPTS)) {
 			case CASE_NETWORK_SERVICE_BEGIN:
 				cfg_begin_context(&state, NETWORK_SERVICE);
 				break;
@@ -2285,29 +2487,110 @@ as_config_init(const char *config_file)
 		// Parse network::service context items.
 		//
 		case NETWORK_SERVICE:
-			switch(cfg_find_tok(line.name_tok, NETWORK_SERVICE_OPTS, NUM_NETWORK_SERVICE_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NETWORK_SERVICE_OPTS, NUM_NETWORK_SERVICE_OPTS)) {
 			case CASE_NETWORK_SERVICE_ADDRESS:
-				c->socket.addr = cfg_set_addr(line.val_tok_1);
+				cfg_add_addr_bind(line.val_tok_1, &c->service);
 				break;
 			case CASE_NETWORK_SERVICE_PORT:
-				c->socket.port = cfg_port(&line);
-				c->localhost_socket.port = cfg_port(&line);
+				c->service.bind_port = cfg_port(&line);
 				break;
 			case CASE_NETWORK_SERVICE_EXTERNAL_ADDRESS:
 				cfg_renamed_name_tok(&line, "access-address");
-				// Intentional fall-through.
+				// No break.
 			case CASE_NETWORK_SERVICE_ACCESS_ADDRESS:
-				c->external_address = cfg_strdup_no_checks(&line);
-				c->is_external_address_virtual = strcmp(line.val_tok_2, "virtual") == 0;
+				cfg_add_addr_std(line.val_tok_1, &c->service);
+				break;
+			case CASE_NETWORK_SERVICE_ACCESS_PORT:
+				c->service.std_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_SERVICE_ALTERNATE_ACCESS_ADDRESS:
+				cfg_add_addr_alt(line.val_tok_1, &c->service);
+				break;
+			case CASE_NETWORK_SERVICE_ALTERNATE_ACCESS_PORT:
+				c->service.alt_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_ACCESS_ADDRESS:
+				cfg_enterprise_only(&line);
+				cfg_add_addr_std(line.val_tok_1, &c->tls_service);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_ACCESS_PORT:
+				cfg_enterprise_only(&line);
+				c->tls_service.std_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_ADDRESS:
+				cfg_enterprise_only(&line);
+				cfg_add_addr_bind(line.val_tok_1, &c->tls_service);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_ALTERNATE_ACCESS_ADDRESS:
+				cfg_enterprise_only(&line);
+				cfg_add_addr_alt(line.val_tok_1, &c->tls_service);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_ALTERNATE_ACCESS_PORT:
+				cfg_enterprise_only(&line);
+				c->tls_service.alt_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_CAFILE:
+				cfg_enterprise_only(&line);
+				c->tls_service.cafile = cfg_strdup_no_checks(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_CAPATH:
+				cfg_enterprise_only(&line);
+				c->tls_service.capath = cfg_strdup_no_checks(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_CERT_BLACKLIST:
+				cfg_enterprise_only(&line);
+				c->tls_service.cert_blacklist = cfg_strdup_no_checks(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_CERTFILE:
+				cfg_enterprise_only(&line);
+				c->tls_service.certfile = cfg_strdup_no_checks(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_CIPHER_SUITE:
+				cfg_enterprise_only(&line);
+				c->tls_service.cipher_suite = cfg_strdup_no_checks(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_KEYFILE:
+				cfg_enterprise_only(&line);
+				c->tls_service.keyfile = cfg_strdup_no_checks(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_MODE:
+				cfg_enterprise_only(&line);
+				switch (cfg_find_tok(line.val_tok_1, NETWORK_SERVICE_TLS_MODE_OPTS, NUM_NETWORK_SERVICE_TLS_MODE_OPTS)) {
+				case CASE_NETWORK_SERVICE_TLS_MODE_ENCRYPT_ONLY:
+					c->tls_service.mode = CF_TLS_MODE_ENCRYPT_ONLY;
+					break;
+				case CASE_NETWORK_SERVICE_TLS_MODE_AUTHENTICATE_BOTH:
+					c->tls_service.mode = CF_TLS_MODE_AUTHENTICATE_BOTH;
+					break;
+				case CASE_NETWORK_SERVICE_TLS_MODE_AUTHENTICATE_SERVER:
+					c->tls_service.mode = CF_TLS_MODE_AUTHENTICATE_SERVER;
+					break;
+				case CASE_NOT_FOUND:
+				default:
+					cfg_unknown_val_tok_1(&line);
+					break;
+				}
+				break;
+			case CASE_NETWORK_SERVICE_TLS_NAME:
+				cfg_enterprise_only(&line);
+				c->tls_name = cfg_strdup_no_checks(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_PORT:
+				cfg_enterprise_only(&line);
+				c->tls_service.bind_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_SERVICE_TLS_PROTOCOLS:
+				cfg_enterprise_only(&line);
+				c->tls_service.protocols = cfg_strdup_no_checks(&line);
 				break;
 			case CASE_NETWORK_SERVICE_ALTERNATE_ADDRESS:
-				c->alternate_address = cfg_strdup_no_checks(&line);
+				cfg_obsolete(&line, "see Aerospike documentation http://www.aerospike.com/docs/operations/upgrade/network_to_3_10");
 				break;
 			case CASE_NETWORK_SERVICE_NETWORK_INTERFACE_NAME:
-				c->network_interface_name = cfg_strdup_no_checks(&line);
+				cfg_obsolete(&line, "see Aerospike documentation http://www.aerospike.com/docs/operations/upgrade/network_to_3_10");
 				break;
 			case CASE_NETWORK_SERVICE_REUSE_ADDRESS:
-				c->socket_reuse_addr = cfg_bool_no_value_is_true(&line);
+				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);
@@ -2323,14 +2606,14 @@ as_config_init(const char *config_file)
 		// Parse network::heartbeat context items.
 		//
 		case NETWORK_HEARTBEAT:
-			switch(cfg_find_tok(line.name_tok, NETWORK_HEARTBEAT_OPTS, NUM_NETWORK_HEARTBEAT_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NETWORK_HEARTBEAT_OPTS, NUM_NETWORK_HEARTBEAT_OPTS)) {
 			case CASE_NETWORK_HEARTBEAT_MODE:
-				switch(cfg_find_tok(line.val_tok_1, NETWORK_HEARTBEAT_MODE_OPTS, NUM_NETWORK_HEARTBEAT_MODE_OPTS)) {
+				switch (cfg_find_tok(line.val_tok_1, NETWORK_HEARTBEAT_MODE_OPTS, NUM_NETWORK_HEARTBEAT_MODE_OPTS)) {
 				case CASE_NETWORK_HEARTBEAT_MODE_MULTICAST:
-					c->hb_mode = AS_HB_MODE_MCAST;
+					c->hb_config.mode = AS_HB_MODE_MULTICAST;
 					break;
 				case CASE_NETWORK_HEARTBEAT_MODE_MESH:
-					c->hb_mode = AS_HB_MODE_MESH;
+					c->hb_config.mode = AS_HB_MODE_MESH;
 					break;
 				case CASE_NOT_FOUND:
 				default:
@@ -2339,45 +2622,39 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case CASE_NETWORK_HEARTBEAT_ADDRESS:
-				c->hb_addr = cfg_set_addr(line.val_tok_1);
+				cfg_add_addr_bind(line.val_tok_1, &c->hb_serv_spec);
+				break;
+			case CASE_NETWORK_HEARTBEAT_MULTICAST_GROUP:
+				add_addr(line.val_tok_1, &c->hb_multicast_groups);
 				break;
 			case CASE_NETWORK_HEARTBEAT_PORT:
-				c->hb_port = cfg_int_no_checks(&line);
-				break;
-			case CASE_NETWORK_HEARTBEAT_MESH_ADDRESS:
-				c->hb_init_addr = cfg_strdup_no_checks(&line);
-				break;
-			case CASE_NETWORK_HEARTBEAT_MESH_PORT:
-				c->hb_init_port = cfg_port(&line);
+				c->hb_serv_spec.bind_port = cfg_port(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MESH_SEED_ADDRESS_PORT:
 				cfg_add_mesh_seed_addr_port(cfg_strdup_no_checks(&line), cfg_port_val2(&line));
 				break;
 			case CASE_NETWORK_HEARTBEAT_INTERVAL:
-				c->hb_interval = cfg_u32_no_checks(&line);
+				c->hb_config.tx_interval = cfg_u32(&line, AS_HB_TX_INTERVAL_MS_MIN, AS_HB_TX_INTERVAL_MS_MAX);
 				break;
 			case CASE_NETWORK_HEARTBEAT_TIMEOUT:
-				c->hb_timeout = cfg_u32_no_checks(&line);
+				c->hb_config.max_intervals_missed = cfg_u32(&line, AS_HB_MAX_INTERVALS_MISSED_MIN, UINT_MAX);
 				break;
-			case CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS:
-				c->hb_tx_addr = cfg_strdup_no_checks(&line);
+			case CASE_NETWORK_HEARTBEAT_MTU:
+				c->hb_config.override_mtu = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_MCAST_TTL:
-				c->hb_mcast_ttl = cfg_u8_no_checks(&line);
-				break;
-			case CASE_NETWORK_HEARTBEAT_MESH_RW_RETRY_TIMEOUT:
-				c->hb_mesh_rw_retry_timeout = cfg_u32_no_checks(&line);
+				cfg_renamed_name_tok(&line, "multicast-ttl");
+				// No break.
+			case CASE_NETWORK_HEARTBEAT_MULTICAST_TTL:
+				c->hb_config.multicast_ttl = cfg_u8_no_checks(&line);
 				break;
 			case CASE_NETWORK_HEARTBEAT_PROTOCOL:
-				switch(cfg_find_tok(line.val_tok_1, NETWORK_HEARTBEAT_PROTOCOL_OPTS, NUM_NETWORK_HEARTBEAT_PROTOCOL_OPTS)) {
-				case CASE_NETWORK_HEARTBEAT_PROTOCOL_RESET:
-					c->hb_protocol = AS_HB_PROTOCOL_RESET;
+				switch (cfg_find_tok(line.val_tok_1, NETWORK_HEARTBEAT_PROTOCOL_OPTS, NUM_NETWORK_HEARTBEAT_PROTOCOL_OPTS)) {
+				case CASE_NETWORK_HEARTBEAT_PROTOCOL_NONE:
+					c->hb_config.protocol = AS_HB_PROTOCOL_NONE;
 					break;
-				case CASE_NETWORK_HEARTBEAT_PROTOCOL_V1:
-					c->hb_protocol = AS_HB_PROTOCOL_V1;
-					break;
-				case CASE_NETWORK_HEARTBEAT_PROTOCOL_V2:
-					c->hb_protocol = AS_HB_PROTOCOL_V2;
+				case CASE_NETWORK_HEARTBEAT_PROTOCOL_V3:
+					c->hb_config.protocol = AS_HB_PROTOCOL_V3;
 					break;
 				case CASE_NOT_FOUND:
 				default:
@@ -2385,10 +2662,10 @@ as_config_init(const char *config_file)
 					break;
 				}
 				break;
+			case CASE_NETWORK_HEARTBEAT_INTERFACE_ADDRESS:
+				cfg_obsolete(&line, "see Aerospike documentation http://www.aerospike.com/docs/operations/upgrade/network_to_3_10");
+				break;
 			case CASE_CONTEXT_END:
-				if (c->hb_init_addr && c->hb_mesh_seed_addrs[0]) {
-					cf_crash_nostack(AS_CFG, "can't use both mesh-address and mesh-seed-address-port");
-				}
 				cfg_end_context(&state);
 				break;
 			case CASE_NOT_FOUND:
@@ -2402,24 +2679,57 @@ as_config_init(const char *config_file)
 		// Parse network::fabric context items.
 		//
 		case NETWORK_FABRIC:
-			switch(cfg_find_tok(line.name_tok, NETWORK_FABRIC_OPTS, NUM_NETWORK_FABRIC_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NETWORK_FABRIC_OPTS, NUM_NETWORK_FABRIC_OPTS)) {
 			case CASE_NETWORK_FABRIC_ADDRESS:
-				cfg_future_name_tok(&line); // TODO - deprecate?
+				cfg_add_addr_bind(line.val_tok_1, &c->fabric);
 				break;
 			case CASE_NETWORK_FABRIC_PORT:
-				c->fabric_port = cfg_port(&line);
+				c->fabric.bind_port = cfg_port(&line);
+				break;
+			case CASE_NETWORK_FABRIC_CHANNEL_BULK_FDS:
+				c->n_fabric_channel_fds[AS_FABRIC_CHANNEL_BULK] = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_SOCKETS);
+				break;
+			case CASE_NETWORK_FABRIC_CHANNEL_BULK_RECV_THREADS:
+				c->n_fabric_channel_recv_threads[AS_FABRIC_CHANNEL_BULK] = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_THREADS);
+				break;
+			case CASE_NETWORK_FABRIC_CHANNEL_CTRL_FDS:
+				c->n_fabric_channel_fds[AS_FABRIC_CHANNEL_CTRL] = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_SOCKETS);
+				break;
+			case CASE_NETWORK_FABRIC_CHANNEL_CTRL_RECV_THREADS:
+				c->n_fabric_channel_recv_threads[AS_FABRIC_CHANNEL_CTRL] = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_THREADS);
+				break;
+			case CASE_NETWORK_FABRIC_CHANNEL_META_FDS:
+				c->n_fabric_channel_fds[AS_FABRIC_CHANNEL_META] = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_SOCKETS);
+				break;
+			case CASE_NETWORK_FABRIC_CHANNEL_META_RECV_THREADS:
+				c->n_fabric_channel_recv_threads[AS_FABRIC_CHANNEL_META] = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_THREADS);
+				break;
+			case CASE_NETWORK_FABRIC_CHANNEL_RW_FDS:
+				c->n_fabric_channel_fds[AS_FABRIC_CHANNEL_RW] = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_SOCKETS);
+				break;
+			case CASE_NETWORK_FABRIC_CHANNEL_RW_RECV_THREADS:
+				c->n_fabric_channel_recv_threads[AS_FABRIC_CHANNEL_RW] = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_THREADS);
 				break;
 			case CASE_NETWORK_FABRIC_KEEPALIVE_ENABLED:
 				c->fabric_keepalive_enabled = cfg_bool(&line);
-				break;
-			case CASE_NETWORK_FABRIC_KEEPALIVE_TIME:
-				c->fabric_keepalive_time = cfg_int_no_checks(&line);
 				break;
 			case CASE_NETWORK_FABRIC_KEEPALIVE_INTVL:
 				c->fabric_keepalive_intvl = cfg_int_no_checks(&line);
 				break;
 			case CASE_NETWORK_FABRIC_KEEPALIVE_PROBES:
 				c->fabric_keepalive_probes = cfg_int_no_checks(&line);
+				break;
+			case CASE_NETWORK_FABRIC_KEEPALIVE_TIME:
+				c->fabric_keepalive_time = cfg_int_no_checks(&line);
+				break;
+			case CASE_NETWORK_FABRIC_LATENCY_MAX_MS:
+				c->fabric_latency_max_ms = cfg_int(&line, 0, 1000);
+				break;
+			case CASE_NETWORK_FABRIC_RECV_REARM_THRESHOLD:
+				c->fabric_recv_rearm_threshold = cfg_u32(&line, 0, 1024 * 1024);
+				break;
+			case CASE_NETWORK_FABRIC_SEND_THREADS:
+				c->n_fabric_send_threads = cfg_u32(&line, 1, MAX_FABRIC_CHANNEL_THREADS);
 				break;
 			case CASE_CONTEXT_END:
 				cfg_end_context(&state);
@@ -2435,12 +2745,12 @@ as_config_init(const char *config_file)
 		// Parse network::info context items.
 		//
 		case NETWORK_INFO:
-			switch(cfg_find_tok(line.name_tok, NETWORK_INFO_OPTS, NUM_NETWORK_INFO_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NETWORK_INFO_OPTS, NUM_NETWORK_INFO_OPTS)) {
 			case CASE_NETWORK_INFO_ADDRESS:
-				cfg_future_name_tok(&line); // TODO - deprecate?
+				cfg_add_addr_bind(line.val_tok_1, &c->info);
 				break;
 			case CASE_NETWORK_INFO_PORT:
-				c->info_port = cfg_port(&line);
+				c->info.bind_port = cfg_port(&line);
 				break;
 			case CASE_NETWORK_INFO_ENABLE_FASTPATH:
 				cfg_deprecated_name_tok(&line);
@@ -2459,37 +2769,32 @@ as_config_init(const char *config_file)
 		// Parse namespace items.
 		//
 		case NAMESPACE:
-			switch(cfg_find_tok(line.name_tok, NAMESPACE_OPTS, NUM_NAMESPACE_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NAMESPACE_OPTS, NUM_NAMESPACE_OPTS)) {
 			case CASE_NAMESPACE_REPLICATION_FACTOR:
-				ns->cfg_replication_factor = ns->replication_factor = cfg_u16(&line, 1, AS_CLUSTER_SZ);
+				ns->cfg_replication_factor = cfg_u32(&line, 1, AS_CLUSTER_SZ);
 				break;
 			case CASE_NAMESPACE_LIMIT_SIZE:
 				cfg_renamed_name_tok(&line, "memory-size");
-				// Intentional fall-through.
+				// No break.
 			case CASE_NAMESPACE_MEMORY_SIZE:
 				ns->memory_size = cfg_u64_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_DEFAULT_TTL:
-				ns->default_ttl = cfg_seconds(&line);
+				ns->default_ttl = cfg_seconds_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_STORAGE_ENGINE_BEGIN:
-				switch(cfg_find_tok(line.val_tok_1, NAMESPACE_STORAGE_OPTS, NUM_NAMESPACE_STORAGE_OPTS)) {
+				switch (cfg_find_tok(line.val_tok_1, NAMESPACE_STORAGE_OPTS, NUM_NAMESPACE_STORAGE_OPTS)) {
 				case CASE_NAMESPACE_STORAGE_MEMORY:
 					ns->storage_type = AS_STORAGE_ENGINE_MEMORY;
 					ns->storage_data_in_memory = true;
 					break;
 				case CASE_NAMESPACE_STORAGE_SSD:
 					cfg_renamed_val_tok_1(&line, "device");
-					// Intentional fall-through.
+					// No break.
 				case CASE_NAMESPACE_STORAGE_DEVICE:
 					ns->storage_type = AS_STORAGE_ENGINE_SSD;
 					ns->storage_data_in_memory = false;
 					cfg_begin_context(&state, NAMESPACE_STORAGE_DEVICE);
-					break;
-				case CASE_NAMESPACE_STORAGE_KV:
-					ns->storage_type = AS_STORAGE_ENGINE_KV;
-					ns->storage_data_in_memory = false;
-					cfg_begin_context(&state, NAMESPACE_STORAGE_KV);
 					break;
 				case CASE_NOT_FOUND:
 				default:
@@ -2498,48 +2803,34 @@ as_config_init(const char *config_file)
 				}
 				break;
 			case CASE_NAMESPACE_ENABLE_XDR:
+				cfg_enterprise_only(&line);
 				ns->enable_xdr = cfg_bool(&line);
-				if (ns->enable_xdr && ! c->xdr_cfg.xdr_supported) {
-					cfg_not_supported(&line, "XDR");
-				}
 				break;
 			case CASE_NAMESPACE_SETS_ENABLE_XDR:
 				ns->sets_enable_xdr = cfg_bool(&line);
-				if (ns->sets_enable_xdr && ! c->xdr_cfg.xdr_supported) {
-					cfg_not_supported(&line, "XDR");
-				}
 				break;
 			case CASE_NAMESPACE_FORWARD_XDR_WRITES:
 				ns->ns_forward_xdr_writes = cfg_bool(&line);
-				if (ns->ns_forward_xdr_writes && ! c->xdr_cfg.xdr_supported) {
-					cfg_not_supported(&line, "XDR");
-				}
+				break;
+			case CASE_NAMESPACE_XDR_REMOTE_DATACENTER:
+				xdr_cfg_add_datacenter(cfg_strdup(&line, true), ns->id);
 				break;
 			case CASE_NAMESPACE_ALLOW_NONXDR_WRITES:
 				ns->ns_allow_nonxdr_writes = cfg_bool(&line);
-				if (ns->ns_allow_nonxdr_writes && ! c->xdr_cfg.xdr_supported) {
-					cfg_not_supported(&line, "XDR");
-				}
 				break;
 			case CASE_NAMESPACE_ALLOW_XDR_WRITES:
 				ns->ns_allow_xdr_writes = cfg_bool(&line);
-				if (ns->ns_allow_xdr_writes && ! c->xdr_cfg.xdr_supported) {
-					cfg_not_supported(&line, "XDR");
-				}
-				break;
-			case CASE_NAMESPACE_XDR_REMOTE_DATACENTER:
-				// The server isn't interested in this, but the XDR module is!
 				break;
 			case CASE_NAMESPACE_COLD_START_EVICT_TTL:
 				ns->cold_start_evict_ttl = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_CONFLICT_RESOLUTION_POLICY:
-				switch(cfg_find_tok(line.val_tok_1, NAMESPACE_CONFLICT_RESOLUTION_OPTS, NUM_NAMESPACE_CONFLICT_RESOLUTION_OPTS)) {
+				switch (cfg_find_tok(line.val_tok_1, NAMESPACE_CONFLICT_RESOLUTION_OPTS, NUM_NAMESPACE_CONFLICT_RESOLUTION_OPTS)) {
 				case CASE_NAMESPACE_CONFLICT_RESOLUTION_GENERATION:
 					ns->conflict_resolution_policy = AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION;
 					break;
-				case CASE_NAMESPACE_CONFLICT_RESOLUTION_TTL:
-					ns->conflict_resolution_policy = AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_TTL;
+				case CASE_NAMESPACE_CONFLICT_RESOLUTION_LAST_UPDATE_TIME:
+					ns->conflict_resolution_policy = AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_LAST_UPDATE_TIME;
 					break;
 				case CASE_NOT_FOUND:
 				default:
@@ -2553,14 +2844,35 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_DISALLOW_NULL_SETNAME:
 				ns->disallow_null_setname = cfg_bool(&line);
 				break;
+			case CASE_NAMESPACE_ENABLE_BENCHMARKS_BATCH_SUB:
+				ns->batch_sub_benchmarks_enabled = true;
+				break;
+			case CASE_NAMESPACE_ENABLE_BENCHMARKS_READ:
+				ns->read_benchmarks_enabled = true;
+				break;
+			case CASE_NAMESPACE_ENABLE_BENCHMARKS_UDF:
+				ns->udf_benchmarks_enabled = true;
+				break;
+			case CASE_NAMESPACE_ENABLE_BENCHMARKS_UDF_SUB:
+				ns->udf_sub_benchmarks_enabled = true;
+				break;
+			case CASE_NAMESPACE_ENABLE_BENCHMARKS_WRITE:
+				ns->write_benchmarks_enabled = true;
+				break;
+			case CASE_NAMESPACE_ENABLE_HIST_PROXY:
+				ns->proxy_hist_enabled = cfg_bool(&line);
+				break;
+			case CASE_NAMESPACE_EVICT_HIST_BUCKETS:
+				ns->evict_hist_buckets = cfg_u32(&line, 100, 10000000);
+				break;
 			case CASE_NAMESPACE_EVICT_TENTHS_PCT:
 				ns->evict_tenths_pct = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_HIGH_WATER_DISK_PCT:
-				ns->hwm_disk = (float)cfg_pct_fraction(&line);
+				ns->hwm_disk_pct = cfg_u32(&line, 0, 100);
 				break;
 			case CASE_NAMESPACE_HIGH_WATER_MEMORY_PCT:
-				ns->hwm_memory = (float)cfg_pct_fraction(&line);
+				ns->hwm_memory_pct = cfg_u32(&line, 0, 100);
 				break;
 			case CASE_NAMESPACE_LDT_ENABLED:
 				ns->ldt_enabled = cfg_bool(&line);
@@ -2572,13 +2884,31 @@ as_config_init(const char *config_file)
 				ns->ldt_page_size = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_MAX_TTL:
-				ns->max_ttl = cfg_seconds(&line);
+				ns->max_ttl = cfg_seconds(&line, 1, MAX_ALLOWED_TTL);
+				break;
+			case CASE_NAMESPACE_MIGRATE_ORDER:
+				ns->migrate_order = cfg_u32(&line, 1, 10);
+				break;
+			case CASE_NAMESPACE_MIGRATE_RETRANSMIT_MS:
+				ns->migrate_retransmit_ms = cfg_u32_no_checks(&line);
+				break;
+			case CASE_NAMESPACE_MIGRATE_SLEEP:
+				ns->migrate_sleep = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_OBJ_SIZE_HIST_MAX:
 				ns->obj_size_hist_max = cfg_obj_size_hist_max(cfg_u32_no_checks(&line));
 				break;
+			case CASE_NAMESPACE_PARTITION_TREE_LOCKS:
+				ns->tree_shared.n_lock_pairs = cfg_u32_power_of_2(&line, 1, 256);
+				break;
+			case CASE_NAMESPACE_PARTITION_TREE_SPRIGS:
+				ns->tree_shared.n_sprigs = cfg_u32_power_of_2(&line, 16, 4096);
+				break;
+			case CASE_NAMESPACE_RACK_ID:
+				ns->rack_id = cfg_u32(&line, 0, MAX_RACK_ID);
+				break;
 			case CASE_NAMESPACE_READ_CONSISTENCY_LEVEL_OVERRIDE:
-				switch(cfg_find_tok(line.val_tok_1, NAMESPACE_READ_CONSISTENCY_OPTS, NUM_NAMESPACE_READ_CONSISTENCY_OPTS)) {
+				switch (cfg_find_tok(line.val_tok_1, NAMESPACE_READ_CONSISTENCY_OPTS, NUM_NAMESPACE_READ_CONSISTENCY_OPTS)) {
 				case CASE_NAMESPACE_READ_CONSISTENCY_ALL:
 					ns->read_consistency_level = AS_POLICY_CONSISTENCY_LEVEL_ALL;
 					ns->read_consistency_level_override = true;
@@ -2601,12 +2931,6 @@ as_config_init(const char *config_file)
 				cfg_strcpy(&line, p_set->name, AS_SET_NAME_MAX_SIZE);
 				cfg_begin_context(&state, NAMESPACE_SET);
 				break;
-			case CASE_NAMESPACE_SI_BEGIN:
-				cfg_init_si_var(ns);
-				as_sindex_config_var_default(&si_cfg);
-				cfg_strcpy(&line, si_cfg.name, AS_ID_INAME_SZ);
-				cfg_begin_context(&state, NAMESPACE_SI);
-				break;
 			case CASE_NAMESPACE_SINDEX_BEGIN:
 				cfg_begin_context(&state, NAMESPACE_SINDEX);
 				break;
@@ -2617,10 +2941,18 @@ as_config_init(const char *config_file)
 				ns->single_bin = cfg_bool(&line);
 				break;
 			case CASE_NAMESPACE_STOP_WRITES_PCT:
-				ns->stop_writes_pct = (float)cfg_pct_fraction(&line);
+				ns->stop_writes_pct = cfg_u32(&line, 0, 100);
+				break;
+			case CASE_NAMESPACE_TOMB_RAIDER_ELIGIBLE_AGE:
+				cfg_enterprise_only(&line);
+				ns->tomb_raider_eligible_age = cfg_seconds_no_checks(&line);
+				break;
+			case CASE_NAMESPACE_TOMB_RAIDER_PERIOD:
+				cfg_enterprise_only(&line);
+				ns->tomb_raider_period = cfg_seconds_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_WRITE_COMMIT_LEVEL_OVERRIDE:
-				switch(cfg_find_tok(line.val_tok_1, NAMESPACE_WRITE_COMMIT_OPTS, NUM_NAMESPACE_WRITE_COMMIT_OPTS)) {
+				switch (cfg_find_tok(line.val_tok_1, NAMESPACE_WRITE_COMMIT_OPTS, NUM_NAMESPACE_WRITE_COMMIT_OPTS)) {
 				case CASE_NAMESPACE_WRITE_COMMIT_ALL:
 					ns->write_commit_level = AS_POLICY_COMMIT_LEVEL_ALL;
 					ns->write_commit_level_override = true;
@@ -2645,12 +2977,24 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_LOW_WATER_PCT:
 				cfg_deprecated_name_tok(&line);
 				break;
+			case CASE_NAMESPACE_SI_BEGIN:
+				cfg_deprecated_name_tok(&line);
+				// Entire section is deprecated but needs to begin and end the
+				// context to avoid crash.
+				cfg_begin_context(&state, NAMESPACE_SI);
+				break;
 			case CASE_CONTEXT_END:
 				if (ns->data_in_index && ! (ns->single_bin && ns->storage_data_in_memory && ns->storage_type == AS_STORAGE_ENGINE_SSD)) {
 					cf_crash_nostack(AS_CFG, "ns %s data-in-index can't be true unless storage-engine is device and both single-bin and data-in-memory are true", ns->name);
 				}
 				if (ns->ldt_enabled && ns->single_bin) {
 					cf_crash_nostack(AS_CFG, "ns %s ldt-enabled and single-bin can't both be true", ns->name);
+				}
+				if (ns->default_ttl > ns->max_ttl) {
+					cf_crash_nostack(AS_CFG, "ns %s default-ttl can't be > max-ttl", ns->name);
+				}
+				if (ns->tree_shared.n_lock_pairs > ns->tree_shared.n_sprigs) {
+					cf_crash_nostack(AS_CFG, "ns %s partition-tree-locks can't be > partition-tree-sprigs", ns->name);
 				}
 				if (ns->storage_data_in_memory) {
 					ns->storage_post_write_queue = 0; // override default (or configuration mistake)
@@ -2676,7 +3020,7 @@ as_config_init(const char *config_file)
 		// Parse namespace::storage-engine device context items.
 		//
 		case NAMESPACE_STORAGE_DEVICE:
-			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_DEVICE_OPTS, NUM_NAMESPACE_STORAGE_DEVICE_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_DEVICE_OPTS, NUM_NAMESPACE_STORAGE_DEVICE_OPTS)) {
 			case CASE_NAMESPACE_STORAGE_DEVICE_DEVICE:
 				cfg_add_storage_device(ns, cfg_strdup(&line, true), cfg_strdup_val2(&line, false));
 				break;
@@ -2694,7 +3038,7 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_MEMORY_ALL:
 				cfg_renamed_name_tok(&line, "data-in-memory");
-				// Intentional fall-through.
+				// No break.
 			case CASE_NAMESPACE_STORAGE_DEVICE_DATA_IN_MEMORY:
 				ns->storage_data_in_memory = cfg_bool(&line);
 				break;
@@ -2716,6 +3060,9 @@ as_config_init(const char *config_file)
 			case CASE_NAMESPACE_STORAGE_DEVICE_DISABLE_ODIRECT:
 				ns->storage_disable_odirect = cfg_bool(&line);
 				break;
+			case CASE_NAMESPACE_STORAGE_DEVICE_ENABLE_BENCHMARKS_STORAGE:
+				ns->storage_benchmarks_enabled = true;
+				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_ENABLE_OSYNC:
 				ns->storage_enable_osync = cfg_bool(&line);
 				break;
@@ -2733,6 +3080,10 @@ as_config_init(const char *config_file)
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_POST_WRITE_QUEUE:
 				ns->storage_post_write_queue = cfg_u32(&line, 0, 2 * 1024);
+				break;
+			case CASE_NAMESPACE_STORAGE_DEVICE_TOMB_RAIDER_SLEEP:
+				cfg_enterprise_only(&line);
+				ns->storage_tomb_raider_sleep = cfg_u32_no_checks(&line);
 				break;
 			case CASE_NAMESPACE_STORAGE_DEVICE_WRITE_THREADS:
 				ns->storage_write_threads = cfg_u32_no_checks(&line);
@@ -2757,48 +3108,15 @@ as_config_init(const char *config_file)
 			break;
 
 		//----------------------------------------
-		// Parse namespace::storage-engine kv context items.
-		//
-		case NAMESPACE_STORAGE_KV:
-			switch(cfg_find_tok(line.name_tok, NAMESPACE_STORAGE_KV_OPTS, NUM_NAMESPACE_STORAGE_KV_OPTS)) {
-			case CASE_NAMESPACE_STORAGE_KV_DEVICE:
-				cfg_add_storage_file(ns, cfg_strdup(&line, true));
-				break;
-			case CASE_NAMESPACE_STORAGE_KV_FILESIZE:
-				ns->storage_filesize = cfg_i64_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_STORAGE_KV_READ_BLOCK_SIZE:
-				ns->storage_read_block_size = cfg_u32_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_STORAGE_KV_WRITE_BLOCK_SIZE:
-				ns->storage_write_block_size = cfg_u32_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_STORAGE_KV_NUM_WRITE_BLOCKS:
-				ns->storage_num_write_blocks = cfg_u32_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_STORAGE_KV_COND_WRITE:
-				ns->cond_write = cfg_bool(&line);
-				break;
-			case CASE_CONTEXT_END:
-				cfg_end_context(&state);
-				break;
-			case CASE_NOT_FOUND:
-			default:
-				cfg_unknown_name_tok(&line);
-				break;
-			}
-			break;
-
-		//----------------------------------------
 		// Parse namespace::set context items.
 		//
 		case NAMESPACE_SET:
-			switch(cfg_find_tok(line.name_tok, NAMESPACE_SET_OPTS, NUM_NAMESPACE_SET_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NAMESPACE_SET_OPTS, NUM_NAMESPACE_SET_OPTS)) {
 			case CASE_NAMESPACE_SET_DISABLE_EVICTION:
 				DISABLE_SET_EVICTION(p_set, cfg_bool(&line));
 				break;
 			case CASE_NAMESPACE_SET_ENABLE_XDR:
-				switch(cfg_find_tok(line.val_tok_1, NAMESPACE_SET_ENABLE_XDR_OPTS, NUM_NAMESPACE_SET_ENABLE_XDR_OPTS)) {
+				switch (cfg_find_tok(line.val_tok_1, NAMESPACE_SET_ENABLE_XDR_OPTS, NUM_NAMESPACE_SET_ENABLE_XDR_OPTS)) {
 				case CASE_NAMESPACE_SET_ENABLE_XDR_USE_DEFAULT:
 					p_set->enable_xdr = AS_SET_ENABLE_XDR_DEFAULT;
 					break;
@@ -2837,26 +3155,20 @@ as_config_init(const char *config_file)
 		// Parse namespace::si context items.
 		//
 		case NAMESPACE_SI:
-			switch(cfg_find_tok(line.name_tok, NAMESPACE_SI_OPTS, NUM_NAMESPACE_SI_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NAMESPACE_SI_OPTS, NUM_NAMESPACE_SI_OPTS)) {
 			case CASE_NAMESPACE_SI_GC_PERIOD:
-				si_cfg.defrag_period= cfg_u64_no_checks(&line);
+				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_NAMESPACE_SI_GC_MAX_UNITS:
-				si_cfg.defrag_max_units = cfg_u32_no_checks(&line);
-				break;
-			case CASE_NAMESPACE_SI_DATA_MAX_MEMORY:
-				si_cfg.data_max_memory = cfg_u64_no_checks(&line);
+				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_NAMESPACE_SI_HISTOGRAM:
-				si_cfg.enable_histogram = cfg_bool(&line);
+				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_NAMESPACE_SI_IGNORE_NOT_SYNC:
-				si_cfg.ignore_not_sync_flag = cfg_bool(&line) ? 1 : 0;
+				cfg_deprecated_name_tok(&line);
 				break;
 			case CASE_CONTEXT_END:
-				if (SHASH_OK != shash_put_unique(ns->sindex_cfg_var_hash, (void*)si_cfg.name, (void*)&si_cfg)) {
-					cf_crash_nostack(AS_CFG, "ns %s failed inserting hash for si config item %s", ns->name, si_cfg.name);
-				}
 				cfg_end_context(&state);
 				break;
 			case CASE_NOT_FOUND:
@@ -2870,18 +3182,7 @@ as_config_init(const char *config_file)
 		// Parse namespace::sindex context items.
 		//
 		case NAMESPACE_SINDEX:
-			switch(cfg_find_tok(line.name_tok, NAMESPACE_SINDEX_OPTS, NUM_NAMESPACE_SINDEX_OPTS)) {
-			case CASE_NAMESPACE_SINDEX_DATA_MAX_MEMORY:
-				config_val = cfg_u64_no_checks(&line);
-				if (config_val < cf_atomic64_get(ns->sindex_data_memory_used)) {
-					cf_warning(AS_CFG, "sindex-data-max-memory must"
-							" be greater than existing used memory %ld (line %d)",
-							cf_atomic64_get(ns->sindex_data_memory_used), line_num);
-				}
-				else {
-					ns->sindex_data_max_memory = config_val; // this is in addition to namespace memory
-				}
-				break;
+			switch (cfg_find_tok(line.name_tok, NAMESPACE_SINDEX_OPTS, NUM_NAMESPACE_SINDEX_OPTS)) {
 			case CASE_NAMESPACE_SINDEX_NUM_PARTITIONS:
 				// FIXME - minimum should be 1, but currently crashes.
 				ns->sindex_num_partitions = cfg_u32(&line, MIN_PARTITIONS_PER_INDEX, MAX_PARTITIONS_PER_INDEX);
@@ -2900,7 +3201,7 @@ as_config_init(const char *config_file)
 		// Parse namespace::2dsphere-within context items.
 		//
 		case NAMESPACE_GEO2DSPHERE_WITHIN:
-			switch(cfg_find_tok(line.name_tok, NAMESPACE_GEO2DSPHERE_WITHIN_OPTS, NUM_NAMESPACE_GEO2DSPHERE_WITHIN_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, NAMESPACE_GEO2DSPHERE_WITHIN_OPTS, NUM_NAMESPACE_GEO2DSPHERE_WITHIN_OPTS)) {
 			case CASE_NAMESPACE_GEO2DSPHERE_WITHIN_STRICT:
 				ns->geo2dsphere_within_strict = cfg_bool(&line);
 				break;
@@ -2930,68 +3231,10 @@ as_config_init(const char *config_file)
 			break;
 
 		//==================================================
-		// Parse xdr context items.
-		//
-		case XDR:
-			switch(xdr_cfg_find_tok(line.name_tok, XDR_OPTS, NUM_XDR_OPTS)) {
-			case XDR_CASE_ENABLE_XDR:
-				c->xdr_cfg.xdr_global_enabled = cfg_bool(&line);
-				if (c->xdr_cfg.xdr_global_enabled && ! c->xdr_cfg.xdr_supported) {
-					cfg_not_supported(&line, "XDR");
-				}
-				break;
-			case XDR_CASE_NAMEDPIPE_PATH:
-				c->xdr_cfg.xdr_digestpipe_path = cfg_strdup_no_checks(&line);
-				break;
-			case XDR_CASE_FORWARD_XDR_WRITES:
-				c->xdr_cfg.xdr_forward_xdrwrites = cfg_bool(&line);
-				break;
-			case XDR_CASE_XDR_DELETE_SHIPPING_ENABLED:
-				c->xdr_cfg.xdr_delete_shipping_enabled = cfg_bool(&line);
-				break;
-			case XDR_CASE_XDR_NSUP_DELETES_ENABLED:
-				c->xdr_cfg.xdr_nsup_deletes_enabled = cfg_bool(&line);
-				break;
-			case XDR_CASE_STOP_WRITES_NOXDR:
-				c->xdr_cfg.xdr_stop_writes_noxdr = cfg_bool(&line);
-				break;
-			case XDR_CASE_DATACENTER_BEGIN:
-				cfg_begin_context(&state, XDR_DATACENTER);
-				break;
-			case XDR_CASE_CONTEXT_END:
-				cfg_end_context(&state);
-				break;
-			case XDR_CASE_NOT_FOUND:
-			default:
-				// We do not use a default case here. Any other config option is
-				// specific to the XDR module and the server is not interested
-				// in it.
-				break;
-			}
-			break;
-
-		//----------------------------------------
-		// Parse xdr::datacenter context items.
-		//
-		case XDR_DATACENTER:
-			// This is a hack to avoid defining a new array for the datacenter
-			// subsection. The server is not interested in the details. It just
-			// wants the subsection to end. So just check for the closing brace.
-			switch(xdr_cfg_find_tok(line.name_tok, XDR_DC_OPTS, NUM_XDR_DC_OPTS)) {
-			case XDR_CASE_CONTEXT_END:
-				cfg_end_context(&state);
-				break;
-			default:
-				// Ignore all lines in datacenter subsection except for end.
-				break;
-			}
-			break;
-
-		//==================================================
 		// Parse mod-lua context items.
 		//
 		case MOD_LUA:
-			switch(cfg_find_tok(line.name_tok, MOD_LUA_OPTS, NUM_MOD_LUA_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, MOD_LUA_OPTS, NUM_MOD_LUA_OPTS)) {
 			case CASE_MOD_LUA_CACHE_ENABLED:
 				c->mod_lua.cache_enabled = cfg_bool(&line);
 				break;
@@ -3012,75 +3255,10 @@ as_config_init(const char *config_file)
 			break;
 
 		//==================================================
-		// Parse cluster context items.
-		//
-		case CLUSTER:
-			switch(cfg_find_tok(line.name_tok, CLUSTER_OPTS, NUM_CLUSTER_OPTS)) {
-			case CASE_CLUSTER_SELF_NODE_ID:
-				c->cluster.cl_self_node = cfg_u32_no_checks(&line);
-				break;
-			case CASE_CLUSTER_SELF_GROUP_ID:
-				c->cluster.cl_self_group = cfg_u16_no_checks(&line);
-				break;
-			case CASE_CLUSTER_MODE:
-				// Define the MODE for this cluster: static or dynamic.
-				if (strcmp(line.val_tok_1, CL_STR_STATIC) == 0) {
-					c->cluster_mode = CL_MODE_STATIC;
-				}
-				else if (strcmp(line.val_tok_1, CL_STR_DYNAMIC) == 0) {
-					c->cluster_mode = CL_MODE_DYNAMIC;
-				}
-				else if (strcmp(line.val_tok_1, CL_STR_NONE) == 0) {
-					// Same as default case -- for now.  Leave as separate
-					// test, though, to make future changes easier.
-					c->cluster_mode = CL_MODE_NO_TOPOLOGY;
-				}
-				else {
-					c->cluster_mode = CL_MODE_NO_TOPOLOGY;
-				}
-				break;
-			case CASE_CLUSTER_GROUP_BEGIN:
-				cluster_group_id = cfg_u16_no_checks(&line);
-				cc_add_group(&(c->cluster), cluster_group_id);
-				cfg_begin_context(&state, CLUSTER_GROUP);
-				break;
-			case CASE_CONTEXT_END:
-				cfg_end_context(&state);
-				break;
-			case CASE_NOT_FOUND:
-			default:
-				cfg_unknown_name_tok(&line);
-				break;
-			}
-			break;
-
-		//----------------------------------------
-		// Parse cluster::group context items.
-		//
-		case CLUSTER_GROUP:
-			switch(cfg_find_tok(line.name_tok, CLUSTER_GROUP_OPTS, NUM_CLUSTER_GROUP_OPTS)) {
-			case CASE_CLUSTER_GROUP_NODE_ID:
-				// For each node ID, register the node and group.
-				cluster_node_id = cfg_u32_no_checks(&line);
-				cc_add_node_group_entry(&(c->cluster), cluster_node_id, cluster_group_id);
-				cf_detail(AS_CFG, "node ID(%08x) Group ID(%04x)", cluster_node_id, cluster_group_id);
-				break;
-			case CASE_CONTEXT_END:
-				cluster_group_id = 0; // clear the group ID
-				cfg_end_context(&state);
-				break;
-			case CASE_NOT_FOUND:
-			default:
-				cfg_unknown_name_tok(&line);
-				break;
-			}
-			break;
-
-		//==================================================
 		// Parse security context items.
 		//
 		case SECURITY:
-			switch(cfg_find_tok(line.name_tok, SECURITY_OPTS, NUM_SECURITY_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, SECURITY_OPTS, NUM_SECURITY_OPTS)) {
 			case CASE_SECURITY_ENABLE_SECURITY:
 				c->sec_cfg.security_enabled = cfg_bool(&line);
 				break;
@@ -3107,7 +3285,7 @@ as_config_init(const char *config_file)
 		// Parse security::log context items.
 		//
 		case SECURITY_LOG:
-			switch(cfg_find_tok(line.name_tok, SECURITY_LOG_OPTS, NUM_SECURITY_LOG_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, SECURITY_LOG_OPTS, NUM_SECURITY_LOG_OPTS)) {
 			case CASE_SECURITY_LOG_REPORT_AUTHENTICATION:
 				c->sec_cfg.report.authentication |= cfg_bool(&line) ? AS_SEC_SINK_LOG : 0;
 				break;
@@ -3137,7 +3315,7 @@ as_config_init(const char *config_file)
 		// Parse security::syslog context items.
 		//
 		case SECURITY_SYSLOG:
-			switch(cfg_find_tok(line.name_tok, SECURITY_SYSLOG_OPTS, NUM_SECURITY_SYSLOG_OPTS)) {
+			switch (cfg_find_tok(line.name_tok, SECURITY_SYSLOG_OPTS, NUM_SECURITY_SYSLOG_OPTS)) {
 			case CASE_SECURITY_SYSLOG_LOCAL:
 				c->sec_cfg.syslog_local = (as_sec_syslog_local)cfg_int(&line, AS_SYSLOG_MIN, AS_SYSLOG_MAX);
 				break;
@@ -3157,6 +3335,142 @@ as_config_init(const char *config_file)
 				c->sec_cfg.report.violation |= cfg_bool(&line) ? AS_SEC_SINK_SYSLOG : 0;
 				break;
 			case CASE_CONTEXT_END:
+				cfg_end_context(&state);
+				break;
+			case CASE_NOT_FOUND:
+			default:
+				cfg_unknown_name_tok(&line);
+				break;
+			}
+			break;
+
+		//==================================================
+		// Parse xdr context items.
+		//
+		case XDR:
+			switch (cfg_find_tok(line.name_tok, XDR_OPTS, NUM_XDR_OPTS)) {
+			case CASE_CONTEXT_BEGIN:
+				// Allow open brace on its own line to begin this context.
+				break;
+			case CASE_XDR_ENABLE_XDR:
+				g_xcfg.xdr_global_enabled = cfg_bool(&line);
+				break;
+			case CASE_XDR_DIGESTLOG_PATH:
+				g_xcfg.xdr_digestlog_path = cfg_strdup(&line, true);
+				g_xcfg.xdr_digestlog_file_size = cfg_u64_val2_no_checks(&line);
+				break;
+			case CASE_XDR_DATACENTER_BEGIN:
+				cur_dc_cfg = &g_dc_xcfg_opt[g_dc_count];
+				cur_dc_cfg->dc_name = cfg_strdup(&line, true);
+				cur_dc_cfg->dc_id = g_dc_count;
+				cf_vector_pointer_init(&cur_dc_cfg->dc_node_v, 10, 0);
+				cf_vector_pointer_init(&cur_dc_cfg->dc_addr_map_v, 10, 0);
+				cfg_begin_context(&state, XDR_DATACENTER);
+				break;
+			case CASE_XDR_CLIENT_THREADS:
+				g_xcfg.xdr_client_threads = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_COMPRESSION_THRESHOLD:
+				g_xcfg.xdr_compression_threshold = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_DELETE_SHIPPING_ENABLED:
+				g_xcfg.xdr_delete_shipping_enabled = cfg_bool(&line);
+				break;
+			case CASE_XDR_DIGESTLOG_IOWAIT_MS:
+				g_xcfg.xdr_digestlog_iowait_ms = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_FORWARD_XDR_WRITES:
+				g_xcfg.xdr_forward_xdrwrites = cfg_bool(&line);
+				break;
+			case CASE_XDR_HOTKEY_TIME_MS:
+				g_xcfg.xdr_hotkey_time_ms = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_INFO_PORT:
+				g_xcfg.xdr_info_port = cfg_port(&line);
+				break;
+			case CASE_XDR_INFO_TIMEOUT:
+				g_xcfg.xdr_info_request_timeout_ms = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_MAX_SHIP_BANDWIDTH:
+				g_xcfg.xdr_max_ship_bandwidth = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_MAX_SHIP_THROUGHPUT:
+				g_xcfg.xdr_max_ship_throughput = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_NSUP_DELETES_ENABLED:
+				g_xcfg.xdr_nsup_deletes_enabled = cfg_bool(&line);
+				break;
+			case CASE_XDR_READ_THREADS:
+				g_xcfg.xdr_read_threads = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_SHIP_BINS:
+				g_xcfg.xdr_ship_bins = cfg_bool(&line);
+				break;
+			case CASE_XDR_SHIP_DELAY:
+				g_xcfg.xdr_internal_shipping_delay = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_SHIPPING_ENABLED:
+				g_xcfg.xdr_shipping_enabled = cfg_bool(&line);
+				break;
+			case CASE_XDR_WRITE_TIMEOUT:
+				g_xcfg.xdr_write_timeout = cfg_u32_no_checks(&line);
+				break;
+			case CASE_CONTEXT_END:
+				cfg_end_context(&state);
+				break;
+			case CASE_NOT_FOUND:
+			default:
+				cfg_unknown_name_tok(&line);
+				break;
+			}
+			break;
+
+		//----------------------------------------
+		// Parse xdr::datacenter context items.
+		//
+		case XDR_DATACENTER:
+			switch (cfg_find_tok(line.name_tok, XDR_DATACENTER_OPTS, NUM_XDR_DATACENTER_OPTS)) {
+			case CASE_CONTEXT_BEGIN:
+				// Allow open brace on its own line to begin this context.
+				break;
+			case CASE_XDR_DATACENTER_DC_NODE_ADDRESS_PORT:
+				xdr_cfg_add_node_addr_port(cur_dc_cfg, cfg_strdup(&line, true), cfg_port_val2(&line));
+				break;
+			case CASE_XDR_DATACENTER_DC_CONNECTIONS:
+				cur_dc_cfg->dc_connections = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_DATACENTER_DC_CONNECTIONS_IDLE_MS:
+				cur_dc_cfg->dc_connections_idle_ms = cfg_u32_no_checks(&line);
+				break;
+			case CASE_XDR_DATACENTER_DC_INT_EXT_IPMAP:
+				xdr_cfg_add_int_ext_mapping(cur_dc_cfg, cfg_strdup(&line, true), cfg_strdup_val2(&line, true));
+				break;
+			case CASE_XDR_DATACENTER_DC_SECURITY_CONFIG_FILE:
+				cur_dc_cfg->dc_security_cfg.sec_config_file = cfg_strdup(&line, true);
+				break;
+			case CASE_XDR_DATACENTER_DC_USE_ALTERNATE_SERVICES:
+				cur_dc_cfg->dc_use_alternate_services = cfg_bool(&line);
+				break;
+			case CASE_XDR_DATACENTER_TLS_CAFILE:
+				cur_dc_cfg->tls_cafile = cfg_strdup(&line, true);
+				break;
+			case CASE_XDR_DATACENTER_TLS_CAPATH:
+				cur_dc_cfg->tls_capath = cfg_strdup(&line, true);
+				break;
+			case CASE_XDR_DATACENTER_TLS_CERT_BLACKLIST:
+				cur_dc_cfg->tls_cert_blacklist = cfg_strdup(&line, true);
+				break;
+			case CASE_XDR_DATACENTER_TLS_CERTFILE:
+				cur_dc_cfg->tls_certfile = cfg_strdup(&line, true);
+				break;
+			case CASE_XDR_DATACENTER_TLS_KEYFILE:
+				cur_dc_cfg->tls_keyfile = cfg_strdup(&line, true);
+				break;
+			case CASE_XDR_DATACENTER_TLS_NODE:
+				xdr_cfg_add_tls_node(cur_dc_cfg, cfg_strdup(&line, true), cfg_strdup_val2(&line, true), cfg_port_val3(&line));
+				break;
+			case CASE_CONTEXT_END:
+				g_dc_count++;
 				cfg_end_context(&state);
 				break;
 			case CASE_NOT_FOUND:
@@ -3195,7 +3509,7 @@ as_config_init(const char *config_file)
 //
 
 void
-as_config_post_process(as_config *c, const char *config_file)
+as_config_post_process(as_config* c, const char* config_file)
 {
 	//--------------------------------------------
 	// Re-read the configuration file and print it to the logs, line by line.
@@ -3231,105 +3545,480 @@ as_config_post_process(as_config *c, const char *config_file)
 	// Done echoing configuration file to log.
 	//--------------------------------------------
 
+	cf_alloc_set_debug(c->debug_allocations);
+
 	// Check the configured file descriptor limit against the system limit.
 	struct rlimit fd_limit;
 
 	getrlimit(RLIMIT_NOFILE, &fd_limit);
 
 	if (c->n_proto_fd_max < 0 || (rlim_t)c->n_proto_fd_max > fd_limit.rlim_cur) {
-		cf_crash(AS_CFG, "%lu system file descriptors not enough, config specified %d", fd_limit.rlim_cur, c->n_proto_fd_max);
+		cf_crash_nostack(AS_CFG, "%lu system file descriptors not enough, config specified %d", fd_limit.rlim_cur, c->n_proto_fd_max);
 	}
 
 	cf_info(AS_CFG, "system file descriptor limit: %lu, proto-fd-max: %d", fd_limit.rlim_cur, c->n_proto_fd_max);
 
+	// Output NUMA topology information.
+	cf_topo_info();
+
+	if (c->auto_pin != CF_TOPO_AUTO_PIN_NONE) {
+		if (c->n_service_threads != 0) {
+			cf_crash_nostack(AS_CFG, "can't configure 'service-threads' and 'auto-pin' at the same time");
+		}
+
+		if (c->n_transaction_queues != 0) {
+			cf_crash_nostack(AS_CFG, "can't configure 'transaction-queues' and 'auto-pin' at the same time");
+		}
+	}
+
+	uint16_t n_cpus = cf_topo_count_cpus();
+
+	if (c->n_service_threads == 0) {
+		c->n_service_threads = n_cpus;
+	}
+
+	if (c->n_transaction_queues == 0) {
+		// If there's at least one SSD namespace, use CPU count. Otherwise, be
+		// modest - only proxies, internal retries, and background scans & queries
+		// will use these queues & threads.
+		c->n_transaction_queues = g_config.n_namespaces_not_in_memory != 0 ? n_cpus : 4;
+	}
+
+	// Allocate and initialize the record locks (olocks). Maybe not the best
+	// place for this, unless we make number of locks configurable.
+	g_record_locks = olock_create(16 * 1024, true);
+
 	// Setup performance metrics histograms.
 	cfg_create_all_histograms();
 
-	// Since cfg_use_hardware_values() has side effects, we MUST call it, and
-	// THEN if we are doing the new topology, set the new type of Self Node
-	// value.
-	c->self_node = (cf_node) 0;
-	cfg_use_hardware_values(c);
-	// Cache the HW value - which will be overridden if cache-aware is on.
-	c->hw_self_node = c->self_node;
+	if (cf_node_id_get(c->fabric.bind_port, c->node_id_interface, &c->self_node) < 0) {
+		cf_crash_nostack(AS_CFG, "could not get node id");
+	}
 
-	// If we're in "manual cluster topology" mode, then that means the user has
-	// defined a node ID and Group ID in the config file, and thus we will
-	// override the HW Generated file and create a PORT + GROUP + NODE value
-	// for the "Self Node" value that is passed around by Paxos.
+	cf_info(AS_CFG, "node-id %lx", c->self_node);
+
+	// Populate access ports from configuration.
+
+	g_access.service.port = g_config.service.std_port != 0 ?
+			g_config.service.std_port : g_config.service.bind_port;
+
+	g_access.alt_service.port = g_config.service.alt_port != 0 ?
+			g_config.service.alt_port : g_access.service.port;
+
+	g_access.tls_service.port = g_config.tls_service.std_port != 0 ?
+			g_config.tls_service.std_port : g_config.tls_service.bind_port;
+
+	g_access.alt_tls_service.port = g_config.tls_service.alt_port != 0 ?
+			g_config.tls_service.alt_port : g_access.tls_service.port;
+
+	// Populate access addresses from configuration.
+
+	cfg_serv_spec_std_to_access(&g_config.service, &g_access.service.addrs);
+	cfg_serv_spec_alt_to_access(&g_config.service, &g_access.alt_service.addrs);
+	cfg_serv_spec_std_to_access(&g_config.tls_service, &g_access.tls_service.addrs);
+	cfg_serv_spec_alt_to_access(&g_config.tls_service, &g_access.alt_tls_service.addrs);
+
+	// By default, use bind addresses also as access addresses.
+
+	if (g_access.service.addrs.n_addrs == 0) {
+		bind_to_access(&g_config.service, &g_access.service.addrs);
+	}
+
+	if (g_access.tls_service.addrs.n_addrs == 0) {
+		bind_to_access(&g_config.tls_service, &g_access.tls_service.addrs);
+	}
+
+	// By default, use non-TLS access addresses also for TLS - and vice versa.
+
+	default_addrs(&g_access.service.addrs, &g_access.tls_service.addrs);
+	default_addrs(&g_access.alt_service.addrs, &g_access.alt_tls_service.addrs);
+
+	cf_serv_cfg_init(&g_service_bind);
+
+	// Client service bind addresses.
+
+	bool empty = false;
+
+	if (g_config.service.bind_port != 0) {
+		if (g_config.service.bind.n_addrs == 0) {
+			g_config.service.bind.n_addrs = 1;
+			g_config.service.bind.addrs[0] = "any";
+			empty = true;
+		}
+
+		cfg_serv_spec_to_bind(&g_config.service, &g_service_bind, CF_SOCK_OWNER_SERVICE);
+	}
+
+	// Client TLS service bind addresses.
+
+	bool tls_empty = false;
+
+	if (g_config.tls_service.bind_port != 0) {
+		if (g_config.tls_service.bind.n_addrs == 0) {
+			copy_addrs(&g_config.service.bind, &g_config.tls_service.bind);
+			tls_empty = true;
+		}
+
+		cfg_serv_spec_to_bind(&g_config.tls_service, &g_service_bind, CF_SOCK_OWNER_SERVICE_TLS);
+	}
+
+	if (empty) {
+		g_config.service.bind.n_addrs = 0;
+	}
+
+	if (tls_empty) {
+		g_config.tls_service.bind.n_addrs = 0;
+	}
+
+	if (g_config.tls_service.bind_port != 0) {
+		// Resolve the TLS name if necessary.
+		cfg_resolve_tls_name(&g_config);
+
+		// Read TLS parameters and initialize SSL_CTX.
+		tls_config_context(&g_config.tls_service);
+	}
+
+	// Heartbeat service bind addresses.
+
+	cf_serv_cfg_init(&g_config.hb_config.bind_cfg);
+
+	if (c->hb_serv_spec.bind.n_addrs == 0) {
+		c->hb_serv_spec.bind.n_addrs = 1;
+		c->hb_serv_spec.bind.addrs[0] = "any";
+	}
+
+	cfg_serv_spec_to_bind(&c->hb_serv_spec, &g_config.hb_config.bind_cfg, CF_SOCK_OWNER_HEARTBEAT);
+
+	// Heartbeat multicast groups.
+
+	if (c->hb_multicast_groups.n_addrs > 0) {
+		cfg_mserv_config_from_addrs(&c->hb_multicast_groups, &c->hb_serv_spec.bind,
+				&g_config.hb_config.multicast_group_cfg, c->hb_serv_spec.bind_port,
+				CF_SOCK_OWNER_HEARTBEAT, g_config.hb_config.multicast_ttl);
+	}
+
+	// Fabric service port.
+
+	g_fabric_port = g_config.fabric.bind_port;
+
+	// Fabric service bind addresses.
+
+	cf_serv_cfg_init(&g_fabric_bind);
+
+	if (g_config.fabric.bind.n_addrs == 0) {
+		g_config.fabric.bind.n_addrs = 1;
+		g_config.fabric.bind.addrs[0] = "any";
+	}
+
+	cfg_serv_spec_to_bind(&g_config.fabric, &g_fabric_bind, CF_SOCK_OWNER_FABRIC);
+
+	// Info service port.
+
+	g_info_port = g_config.info.bind_port;
+
+	// Info service bind addresses.
+
+	cf_serv_cfg_init(&g_info_bind);
+
+	if (g_config.info.bind.n_addrs == 0) {
+		g_config.info.bind.n_addrs = 1;
+		g_config.info.bind.addrs[0] = "any";
+	}
+
+	cfg_serv_spec_to_bind(&g_config.info, &g_info_bind, CF_SOCK_OWNER_INFO);
+
+	// Validate heartbeat configuration.
+	as_hb_config_validate();
+
+	//--------------------------------------------
+	// Per-namespace config post-processing.
 	//
-	// FOR FUTURE CONSIDERATION:: We may want to use the new naming style even
-	// when Rack-Aware mode is turned off -- provided that the group and node
-	// values are valid.  However, in order to use "cfg_reset_self_node()", we
-	// ALSO must make sure that other things are in effect (e.g. Paxos V4).
-	// So -- this is just a bookmark for some future changes:
-	// TODO: Update this to set new self_node even in "No Topology" mode.
-	if (c->cluster_mode != CL_MODE_NO_TOPOLOGY) {
-		cf_info(AS_CFG, "Rack Aware mode enabled");
-		// Do some checking here to verify that the user gave us valid group
-		// and node id values.  If not, then stop here and do not proceed.
-		if (c->cluster.cl_self_group == 0) {
-			cf_crash_nostack(AS_CFG,
-				"Cluster 'self-group-id' must be set to a non-zero value");
+
+	for (int i = 0; i < g_config.n_namespaces; i++) {
+		as_namespace* ns = g_config.namespaces[i];
+
+		client_replica_maps_create(ns);
+
+		ns->tree_shared.destructor			= (as_index_value_destructor)&as_record_destroy;
+		ns->tree_shared.destructor_udata	= (void*)ns;
+		ns->tree_shared.locks_shift			= 12 - cf_msb(ns->tree_shared.n_lock_pairs);
+		ns->tree_shared.sprigs_shift		= 12 - cf_msb(ns->tree_shared.n_sprigs);
+		ns->tree_shared.sprigs_offset		= sizeof(as_lock_pair) * ns->tree_shared.n_lock_pairs;
+
+		char hist_name[HISTOGRAM_NAME_SIZE];
+
+		// One-way activated histograms (may be tracked histograms).
+
+		sprintf(hist_name, "{%s}-read", ns->name);
+		create_and_check_hist_track(&ns->read_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-write", ns->name);
+		create_and_check_hist_track(&ns->write_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-udf", ns->name);
+		create_and_check_hist_track(&ns->udf_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-query", ns->name);
+		create_and_check_hist_track(&ns->query_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-query-rec-count", ns->name);
+		create_and_check_hist(&ns->query_rec_count_hist, hist_name, HIST_COUNT);
+
+		// Activate-by-config histograms (can't be tracked histograms).
+
+		sprintf(hist_name, "{%s}-proxy", ns->name);
+		create_and_check_hist(&ns->proxy_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-read-start", ns->name);
+		create_and_check_hist(&ns->read_start_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-read-restart", ns->name);
+		create_and_check_hist(&ns->read_restart_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-read-dup-res", ns->name);
+		create_and_check_hist(&ns->read_dup_res_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-read-local", ns->name);
+		create_and_check_hist(&ns->read_local_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-read-response", ns->name);
+		create_and_check_hist(&ns->read_response_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-write-start", ns->name);
+		create_and_check_hist(&ns->write_start_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-write-restart", ns->name);
+		create_and_check_hist(&ns->write_restart_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-write-dup-res", ns->name);
+		create_and_check_hist(&ns->write_dup_res_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-write-master", ns->name);
+		create_and_check_hist(&ns->write_master_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-write-repl-write", ns->name);
+		create_and_check_hist(&ns->write_repl_write_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-write-response", ns->name);
+		create_and_check_hist(&ns->write_response_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-udf-start", ns->name);
+		create_and_check_hist(&ns->udf_start_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-restart", ns->name);
+		create_and_check_hist(&ns->udf_restart_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-dup-res", ns->name);
+		create_and_check_hist(&ns->udf_dup_res_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-master", ns->name);
+		create_and_check_hist(&ns->udf_master_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-repl-write", ns->name);
+		create_and_check_hist(&ns->udf_repl_write_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-response", ns->name);
+		create_and_check_hist(&ns->udf_response_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-batch-sub-start", ns->name);
+		create_and_check_hist(&ns->batch_sub_start_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-batch-sub-restart", ns->name);
+		create_and_check_hist(&ns->batch_sub_restart_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-batch-sub-dup-res", ns->name);
+		create_and_check_hist(&ns->batch_sub_dup_res_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-batch-sub-read-local", ns->name);
+		create_and_check_hist(&ns->batch_sub_read_local_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-batch-sub-response", ns->name);
+		create_and_check_hist(&ns->batch_sub_response_hist, hist_name, HIST_MILLISECONDS);
+
+		sprintf(hist_name, "{%s}-udf-sub-start", ns->name);
+		create_and_check_hist(&ns->udf_sub_start_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-sub-restart", ns->name);
+		create_and_check_hist(&ns->udf_sub_restart_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-sub-dup-res", ns->name);
+		create_and_check_hist(&ns->udf_sub_dup_res_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-sub-master", ns->name);
+		create_and_check_hist(&ns->udf_sub_master_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-sub-repl-write", ns->name);
+		create_and_check_hist(&ns->udf_sub_repl_write_hist, hist_name, HIST_MILLISECONDS);
+		sprintf(hist_name, "{%s}-udf-sub-response", ns->name);
+		create_and_check_hist(&ns->udf_sub_response_hist, hist_name, HIST_MILLISECONDS);
+
+		// Linear 'nsup' histograms.
+		// Note - histograms' ranges MUST be set before use.
+
+		sprintf(hist_name, "%s object size histogram", ns->name);
+		ns->obj_size_hist = linear_hist_create(hist_name, 0, 0, OBJ_SIZE_HIST_NUM_BUCKETS);
+
+		sprintf(hist_name, "%s evict histogram", ns->name);
+		ns->evict_hist = linear_hist_create(hist_name, 0, 0, ns->evict_hist_buckets);
+
+		sprintf(hist_name, "%s ttl histogram", ns->name);
+		ns->ttl_hist = linear_hist_create(hist_name, 0, 0, TTL_HIST_NUM_BUCKETS);
+	}
+}
+
+
+//==========================================================
+// Public API - Cluster name.
+//
+
+pthread_mutex_t g_config_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void
+as_config_cluster_name_get(char* cluster_name)
+{
+	pthread_mutex_lock(&g_config_lock);
+	strcpy(cluster_name, g_config.cluster_name);
+	pthread_mutex_unlock(&g_config_lock);
+}
+
+bool
+as_config_cluster_name_set(const char* cluster_name)
+{
+	if (cluster_name[0] == '\0') {
+		cf_warning(AS_CFG, "cluster name '%s' is not allowed. Ignoring.", cluster_name);
+		return false;
+	}
+
+	if (strlen(cluster_name) >= AS_CLUSTER_NAME_SZ) {
+		cf_warning(AS_CFG, "size of cluster name should not be greater than %d characters. Ignoring cluster name '%s'.",
+			AS_CLUSTER_NAME_SZ - 1, cluster_name);
+		return false;
+	}
+
+	pthread_mutex_lock(&g_config_lock);
+	if (strcmp(cluster_name,"null") == 0){
+		// 'null' is a special value representing an unset cluster-name.
+		strcpy(g_config.cluster_name, "");
+	} else {
+		strcpy(g_config.cluster_name, cluster_name);
+	}
+	pthread_mutex_unlock(&g_config_lock);
+
+	return true;
+}
+
+bool
+as_config_cluster_name_matches(const char* cluster_name)
+{
+	pthread_mutex_lock(&g_config_lock);
+	bool matches = strcmp(cluster_name, g_config.cluster_name) == 0;
+	pthread_mutex_unlock(&g_config_lock);
+	return matches;
+}
+
+
+//==========================================================
+// Public API - XDR.
+//
+
+bool
+xdr_read_security_configfile(xdr_security_config* sc)
+{
+	FILE* FD;
+	char iobuf[256];
+	int line_num = 0;
+	cfg_parser_state state;
+
+	cfg_parser_state_init(&state);
+
+	// Initialize the XDR config values to the defaults.
+	sc->username = NULL;
+	sc->password = NULL;
+	iobuf[0] = 0;
+
+	// Open the configuration file for reading. Dont crash if it fails as this
+	// function can be called during runtime (when credentials file change)
+	if (NULL == (FD = fopen(sc->sec_config_file, "r"))) {
+		cf_warning(AS_XDR, "Couldn't open configuration file %s: %s",
+				sc->sec_config_file, cf_strerror(errno));
+		return false;
+	}
+
+	// Parse the configuration file, line by line.
+	while (fgets(iobuf, sizeof(iobuf), FD)) {
+		line_num++;
+
+		// First chop the comment off, if there is one.
+
+		char* p_comment = strchr(iobuf, '#');
+
+		if (p_comment) {
+			*p_comment = '\0';
 		}
-		if (c->cluster.cl_self_node == 0 && c->cluster_mode == CL_MODE_STATIC) {
-			cf_crash_nostack(AS_CFG,
-				"Cluster 'self-node-id' must be set to a non-zero value when in 'static' mode");
+
+		// Find (and null-terminate) up to three whitespace-delimited tokens in
+		// the line, a 'name' token and up to two 'value' tokens.
+
+		cfg_line line = { line_num, NULL, NULL, NULL, NULL };
+
+		line.name_tok = strtok(iobuf, CFG_WHITESPACE);
+
+		// If there are no tokens, ignore this line, get the next line.
+		if (! line.name_tok) {
+			continue;
 		}
 
-		// If we got this far, then group/node should be ok.
-		cfg_reset_self_node(c);
-	}
-	else if (AS_PAXOS_PROTOCOL_V4 == c->paxos_protocol) {
-		cf_crash_nostack(AS_CFG, "must only use Paxos protocol V4 with Rack Aware enabled");
-	}
-	else {
-		cf_info(AS_CFG, "Rack Aware mode not enabled");
-	}
+		line.val_tok_1 = strtok(NULL, CFG_WHITESPACE);
 
-	cf_info(AS_CFG, "Node id %"PRIx64, c->self_node);
-
-	// Handle specific service address (as opposed to 'any') if configured.
-	if (g_config.socket.addr != IPV4_ANY_ADDR) {
-		if (g_config.external_address) {
-			if (strcmp(g_config.external_address, g_config.socket.addr) != 0) {
-				cf_crash_nostack(AS_CFG, "external address '%s' does not match service address '%s'",
-						g_config.external_address, g_config.socket.addr);
-			}
+		if (! line.val_tok_1) {
+			line.val_tok_1 = ""; // in case it's used where NULL can't be used
 		}
 		else {
-			// Set external address to avoid updating service list continuously.
-			g_config.external_address = g_config.socket.addr;
+			line.val_tok_2 = strtok(NULL, CFG_WHITESPACE);
 		}
 
-		// Set the localhost socket address only if the main service socket is
-		// not already (effectively) listening on that address.
-		if (g_config.socket.addr != IPV4_LOCALHOST_ADDR) {
-			g_config.localhost_socket.addr = (char*)IPV4_LOCALHOST_ADDR;
+		if (! line.val_tok_2) {
+			line.val_tok_2 = ""; // in case it's used where NULL can't be used
+		}
+		else {
+			line.val_tok_3 = strtok(NULL, CFG_WHITESPACE);
+		}
+
+		if (! line.val_tok_3) {
+			line.val_tok_3 = ""; // in case it's used where NULL can't be used
+		}
+
+		// Note that we can't see this output until a logging sink is specified.
+		cf_detail(AS_CFG, "line %d :: %s %s %s %s", line_num, line.name_tok,
+				line.val_tok_1, line.val_tok_2, line.val_tok_3);
+
+		// Parse the directive.
+		switch (state.current) {
+
+		// Parse top-level items.
+		case GLOBAL:
+			switch (cfg_find_tok(line.name_tok, XDR_SEC_GLOBAL_OPTS, NUM_XDR_SEC_GLOBAL_OPTS)) {
+			case XDR_SEC_CASE_CREDENTIALS_BEGIN:
+				cfg_begin_context(&state, XDR_SEC_CREDENTIALS);
+				break;
+			case CASE_NOT_FOUND:
+			default:
+				cfg_unknown_name_tok(&line);
+				break;
+			}
+			break;
+
+		// Parse xdr context items.
+		case XDR_SEC_CREDENTIALS:
+			switch (cfg_find_tok(line.name_tok, XDR_SEC_CREDENTIALS_OPTS, NUM_XDR_SEC_CREDENTIALS_OPTS)) {
+			case CASE_CONTEXT_BEGIN:
+				// Allow open brace on its own line to begin this context.
+				break;
+			case XDR_SEC_CASE_CREDENTIALS_USERNAME:
+				sc->username = cfg_strdup(&line, true);
+				break;
+			case XDR_SEC_CASE_CREDENTIALS_PASSWORD:
+				sc->password = cfg_strdup(&line, true);
+				break;
+			case CASE_CONTEXT_END:
+				cfg_end_context(&state);
+				break;
+			case CASE_NOT_FOUND:
+			default:
+				cfg_unknown_name_tok(&line);
+				break;
+			}
+			break;
+
+		// Parser state is corrupt.
+		default:
+			cf_warning(AS_XDR, "line %d :: invalid parser top-level state %d",
+					line_num, state.current);
+			break;
 		}
 	}
 
-	if (g_config.external_address && ! g_config.is_external_address_virtual) {
-		// Check if external address matches any address in service list.
-		uint8_t buf[512];
-		cf_ifaddr *ifaddr;
-		int	ifaddr_sz;
-		cf_ifaddr_get(&ifaddr, &ifaddr_sz, buf, sizeof(buf));
-
-		cf_dyn_buf_define(temp_service_db);
-		build_service_list(ifaddr, ifaddr_sz, &temp_service_db);
-
-		char *service_str = cf_dyn_buf_strdup(&temp_service_db);
-
-		if (! (service_str && strstr(service_str, g_config.external_address))) {
-			cf_crash_nostack(AS_CFG, "external address '%s' does not match service addresses '%s'",
-					g_config.external_address,
-					service_str ? service_str : "null");
-		}
-
-		cf_dyn_buf_free(&temp_service_db);
-		cf_free(service_str);
-	}
+	// Close the file.
+	fclose(FD);
+	return true;
 }
 
 
@@ -3338,14 +4027,230 @@ as_config_post_process(as_config *c, const char *config_file)
 //
 
 void
-cfg_add_mesh_seed_addr_port(char* addr, int port)
+init_addr_list(cf_addr_list* addrs)
 {
-	int i;
+	addrs->n_addrs = 0;
+	memset(&addrs->addrs, '\0', sizeof(addrs->addrs));
+}
+
+void
+add_addr(const char* name, cf_addr_list* addrs)
+{
+	uint32_t n = addrs->n_addrs;
+
+	if (n >= CF_SOCK_CFG_MAX) {
+		cf_crash_nostack(CF_SOCKET, "Too many addresses: %s", name);
+	}
+
+	addrs->addrs[n] = cf_strdup(name);
+
+	if (addrs->addrs[n] == NULL) {
+		cf_crash(CF_SOCKET, "Out of memory");
+	}
+
+	++addrs->n_addrs;
+}
+
+void
+copy_addrs(const cf_addr_list* from, cf_addr_list* to)
+{
+	for (uint32_t i = 0; i < from->n_addrs; ++i) {
+		to->addrs[i] = from->addrs[i];
+	}
+
+	to->n_addrs = from->n_addrs;
+}
+
+void
+default_addrs(cf_addr_list* one, cf_addr_list* two)
+{
+	if (one->n_addrs == 0) {
+		copy_addrs(two, one);
+	}
+
+	if (two->n_addrs == 0) {
+		copy_addrs(one, two);
+	}
+}
+
+void
+bind_to_access(const cf_serv_spec* from, cf_addr_list* to)
+{
+	cf_serv_spec spec;
+	spec.bind_port = 0;
+	init_addr_list(&spec.bind);
+	spec.std_port = 0;
+	init_addr_list(&spec.std);
+	spec.alt_port = 0;
+	init_addr_list(&spec.alt);
+
+	for (uint32_t i = 0; i < from->bind.n_addrs; ++i) {
+		cf_ip_addr resol[CF_SOCK_CFG_MAX];
+		uint32_t n_resol = CF_SOCK_CFG_MAX;
+
+		if (cf_ip_addr_from_string_multi(from->bind.addrs[i], resol, &n_resol) < 0) {
+			cf_crash_nostack(AS_CFG, "Invalid default access address: %s", from->bind.addrs[i]);
+		}
+
+		bool valid = true;
+
+		for (uint32_t k = 0; k < n_resol; ++k) {
+			if (cf_ip_addr_is_any(&resol[k]) || cf_ip_addr_is_local(&resol[k])) {
+				cf_debug(AS_CFG, "Skipping invalid default access address: %s",
+						from->bind.addrs[i]);
+				valid = false;
+				break;
+			}
+		}
+
+		if (valid) {
+			uint32_t n = spec.std.n_addrs;
+			spec.std.addrs[n] = from->bind.addrs[i];
+			++spec.std.n_addrs;
+		}
+	}
+
+	cfg_serv_spec_std_to_access(&spec, to);
+}
+
+void
+cfg_add_addr_bind(const char* name, cf_serv_spec* spec)
+{
+	add_addr(name, &spec->bind);
+}
+
+void
+cfg_add_addr_std(const char* name, cf_serv_spec* spec)
+{
+	add_addr(name, &spec->std);
+}
+
+void
+cfg_add_addr_alt(const char* name, cf_serv_spec* spec)
+{
+	add_addr(name, &spec->alt);
+}
+
+void
+cfg_mserv_config_from_addrs(cf_addr_list* addrs, cf_addr_list* bind_addrs,
+		cf_mserv_cfg* serv_cfg, cf_ip_port port, cf_sock_owner owner,
+		uint8_t ttl)
+{
+	for (uint32_t i = 0; i < addrs->n_addrs; ++i) {
+
+		cf_ip_addr resol[CF_SOCK_CFG_MAX];
+		uint32_t n_resol = CF_SOCK_CFG_MAX;
+
+		if (cf_ip_addr_from_string_multi(addrs->addrs[i], resol,
+						 &n_resol) < 0) {
+			cf_crash_nostack(AS_CFG, "Invalid multicast group: %s",
+					 addrs->addrs[i]);
+		}
+
+		for (uint32_t j = 0; j < bind_addrs->n_addrs; j++) {
+
+			cf_ip_addr bind_resol[CF_SOCK_CFG_MAX];
+			uint32_t n_bind_resol = CF_SOCK_CFG_MAX;
+
+			if (cf_ip_addr_from_string_multi(bind_addrs->addrs[j],
+							 bind_resol,
+							 &n_bind_resol) < 0) {
+				cf_crash_nostack(AS_CFG, "Invalid address: %s",
+						 bind_addrs->addrs[j]);
+			}
+
+			for (int32_t k = 0; k < n_resol; ++k) {
+				for (int32_t l = 0; l < n_bind_resol; ++l) {
+					if (cf_mserv_cfg_add_combo(serv_cfg, owner, port,
+							&resol[k], &bind_resol[l], ttl) < 0) {
+						cf_crash_nostack(AS_CFG, "Too many IP addresses");
+					}
+				}
+			}
+		}
+	}
+}
+
+void
+cfg_serv_spec_to_bind(const cf_serv_spec* spec, cf_serv_cfg* bind, cf_sock_owner owner)
+{
+	bind->spec = spec;
+
+	cf_sock_cfg cfg;
+	cf_sock_cfg_init(&cfg, owner);
+	cfg.port = spec->bind_port;
+
+	const cf_addr_list* addrs = &spec->bind;
+
+	for (uint32_t i = 0; i < addrs->n_addrs; ++i) {
+		cf_ip_addr resol[CF_SOCK_CFG_MAX];
+		uint32_t n_resol = CF_SOCK_CFG_MAX;
+
+		if (cf_ip_addr_from_string_multi(addrs->addrs[i], resol, &n_resol) < 0) {
+			cf_crash_nostack(AS_CFG, "Invalid address: %s", addrs->addrs[i]);
+		}
+
+		for (uint32_t k = 0; k < n_resol; ++k) {
+			cf_ip_addr_copy(&resol[k], &cfg.addr);
+
+			if (cf_serv_cfg_add_sock_cfg(bind, &cfg) < 0) {
+				cf_crash_nostack(AS_CFG, "Too many IP addresses: %s", addrs->addrs[i]);
+			}
+		}
+	}
+}
+
+static void
+addrs_to_access(const cf_addr_list* addrs, cf_addr_list* access)
+{
+	for (uint32_t i = 0; i < addrs->n_addrs; ++i) {
+		cf_ip_addr resol[CF_SOCK_CFG_MAX];
+		uint32_t n_resol = CF_SOCK_CFG_MAX;
+
+		if (cf_ip_addr_from_string_multi(addrs->addrs[i], resol, &n_resol) < 0) {
+			cf_crash_nostack(AS_CFG, "Invalid access address: %s", addrs->addrs[i]);
+		}
+
+		for (uint32_t k = 0; k < n_resol; ++k) {
+			if (cf_ip_addr_is_any(&resol[k])) {
+				cf_crash_nostack(AS_CFG, "Invalid access address: %s", addrs->addrs[i]);
+			}
+		}
+
+		if (cf_ip_addr_is_dns_name(addrs->addrs[i])) {
+			add_addr(addrs->addrs[i], access);
+		}
+		else {
+			for (uint32_t k = 0; k < n_resol; ++k) {
+				char tmp[250];
+				cf_ip_addr_to_string_safe(&resol[k], tmp, sizeof(tmp));
+				add_addr(tmp, access);
+			}
+		}
+	}
+}
+
+void
+cfg_serv_spec_std_to_access(const cf_serv_spec* spec, cf_addr_list* access)
+{
+	addrs_to_access(&spec->std, access);
+}
+
+void
+cfg_serv_spec_alt_to_access(const cf_serv_spec* spec, cf_addr_list* access)
+{
+	addrs_to_access(&spec->alt, access);
+}
+
+void
+cfg_add_mesh_seed_addr_port(char* addr, cf_ip_port port)
+{
+	int32_t i;
 
 	for (i = 0; i < AS_CLUSTER_SZ; i++) {
-		if (g_config.hb_mesh_seed_addrs[i] == NULL) {
-			g_config.hb_mesh_seed_addrs[i] = addr;
-			g_config.hb_mesh_seed_ports[i] = port;
+		if (g_config.hb_config.mesh_seed_addrs[i] == NULL) {
+			g_config.hb_config.mesh_seed_addrs[i] = addr;
+			g_config.hb_config.mesh_seed_ports[i] = port;
 			break;
 		}
 	}
@@ -3408,21 +4313,6 @@ cfg_add_storage_device(as_namespace* ns, char* device_name, char* shadow_name)
 	}
 }
 
-void
-cfg_init_si_var(as_namespace* ns)
-{
-	if (! ns->sindex_cfg_var_hash) {
-		if (SHASH_OK != shash_create(&ns->sindex_cfg_var_hash,
-							as_sindex_config_var_hash_fn, AS_ID_INAME_SZ, sizeof(as_sindex_config_var),
-							AS_SINDEX_MAX, 0)) {
-			cf_crash_nostack(AS_CFG, "namespace %s couldn't create sindex cfg item hash", ns->name);
-		}
-	}
-	else if (shash_get_size(ns->sindex_cfg_var_hash) >= AS_SINDEX_MAX) {
-		cf_crash_nostack(AS_CFG, "namespace %s - too many secondary indexes", ns->name);
-	}
-}
-
 uint32_t
 cfg_obj_size_hist_max(uint32_t hist_max)
 {
@@ -3437,12 +4327,19 @@ cfg_obj_size_hist_max(uint32_t hist_max)
 	return round_max; // in 128-byte blocks
 }
 
+void
+cfg_set_cluster_name(char* cluster_name){
+	if(!as_config_cluster_name_set(cluster_name)){
+		cf_crash_nostack(AS_CFG, "cluster name '%s' is not allowed", cluster_name);
+	}
+}
+
 
 //==========================================================
 // Other (non-item-specific) utilities.
 //
 
-static void
+void
 create_and_check_hist_track(cf_hist_track** h, const char* name,
 		histogram_scale scale)
 {
@@ -3458,7 +4355,7 @@ create_and_check_hist_track(cf_hist_track** h, const char* name,
 	}
 }
 
-static void
+void
 create_and_check_hist(histogram** h, const char* name, histogram_scale scale)
 {
 	if (NULL == (*h = histogram_create(name, scale))) {
@@ -3466,166 +4363,135 @@ create_and_check_hist(histogram** h, const char* name, histogram_scale scale)
 	}
 }
 
+// TODO - not really a config method any more, reorg needed.
 void
 cfg_create_all_histograms()
 {
-	as_config* c = &g_config;
+	create_and_check_hist(&g_stats.batch_index_hist, "batch-index", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.info_hist, "info", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.svc_demarshal_hist, "svc-demarshal", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.svc_queue_hist, "svc-queue", HIST_MILLISECONDS);
 
-	create_and_check_hist_track(&c->rt_hist, "reads", HIST_MILLISECONDS);
-	create_and_check_hist_track(&c->q_hist, "query", HIST_MILLISECONDS);
-	create_and_check_hist_track(&c->q_rcnt_hist, "query_rec_count", HIST_RAW);
-	create_and_check_hist_track(&c->ut_hist, "udf", HIST_MILLISECONDS);
-	create_and_check_hist_track(&c->wt_hist, "writes_master", HIST_MILLISECONDS);
-	create_and_check_hist_track(&c->px_hist, "proxy", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_send_init_hists[AS_FABRIC_CHANNEL_BULK], "fabric-bulk-send-init", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_send_fragment_hists[AS_FABRIC_CHANNEL_BULK], "fabric-bulk-send-fragment", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_recv_fragment_hists[AS_FABRIC_CHANNEL_BULK], "fabric-bulk-recv-fragment", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_recv_cb_hists[AS_FABRIC_CHANNEL_BULK], "fabric-bulk-recv-cb", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_send_init_hists[AS_FABRIC_CHANNEL_CTRL], "fabric-ctrl-send-init", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_send_fragment_hists[AS_FABRIC_CHANNEL_CTRL], "fabric-ctrl-send-fragment", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_recv_fragment_hists[AS_FABRIC_CHANNEL_CTRL], "fabric-ctrl-recv-fragment", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_recv_cb_hists[AS_FABRIC_CHANNEL_CTRL], "fabric-ctrl-recv-cb", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_send_init_hists[AS_FABRIC_CHANNEL_META], "fabric-meta-send-init", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_send_fragment_hists[AS_FABRIC_CHANNEL_META], "fabric-meta-send-fragment", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_recv_fragment_hists[AS_FABRIC_CHANNEL_META], "fabric-meta-recv-fragment", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_recv_cb_hists[AS_FABRIC_CHANNEL_META], "fabric-meta-recv-cb", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_send_init_hists[AS_FABRIC_CHANNEL_RW], "fabric-rw-send-init", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_send_fragment_hists[AS_FABRIC_CHANNEL_RW], "fabric-rw-send-fragment", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_recv_fragment_hists[AS_FABRIC_CHANNEL_RW], "fabric-rw-recv-fragment", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.fabric_recv_cb_hists[AS_FABRIC_CHANNEL_RW], "fabric-rw-recv-cb", HIST_MILLISECONDS);
 
-	create_and_check_hist(&c->rt_cleanup_hist, "reads_cleanup", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_net_hist, "reads_net", HIST_MILLISECONDS);
-	create_and_check_hist(&c->wt_net_hist, "writes_net", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_storage_read_hist, "reads_storage_read", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_storage_open_hist, "reads_storage_open", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_tree_hist, "reads_tree", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_internal_hist, "reads_internal", HIST_MILLISECONDS);
-	create_and_check_hist(&c->wt_internal_hist, "writes_internal", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_start_hist, "reads_start", HIST_MILLISECONDS);
-	create_and_check_hist(&c->wt_start_hist, "writes_start", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_q_process_hist, "reads_q_process", HIST_MILLISECONDS);
-	create_and_check_hist(&c->wt_q_process_hist, "writes_q_process", HIST_MILLISECONDS);
-	create_and_check_hist(&c->q_wait_hist, "q_wait", HIST_MILLISECONDS);
-	create_and_check_hist(&c->demarshal_hist, "demarshal_hist", HIST_MILLISECONDS);
-	create_and_check_hist(&c->wt_master_wait_prole_hist, "wt_master_wait_prole", HIST_MILLISECONDS);
-	create_and_check_hist(&c->wt_prole_hist, "writes_prole", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_resolve_hist, "reads_resolve", HIST_MILLISECONDS);
-	create_and_check_hist(&c->wt_resolve_hist, "writes_resolve", HIST_MILLISECONDS);
-	create_and_check_hist(&c->rt_resolve_wait_hist, "reads_resolve_wait", HIST_MILLISECONDS);
-	create_and_check_hist(&c->wt_resolve_wait_hist, "writes_resolve_wait", HIST_MILLISECONDS);
-	create_and_check_hist(&c->error_hist, "error", HIST_MILLISECONDS);
-	create_and_check_hist(&c->batch_index_reads_hist, "batch_index_reads", HIST_MILLISECONDS);
-	create_and_check_hist(&c->batch_q_process_hist, "batch_q_process", HIST_MILLISECONDS);
-	create_and_check_hist(&c->info_tr_q_process_hist, "info_tr_q_process", HIST_MILLISECONDS);
-	create_and_check_hist(&c->info_q_wait_hist, "info_q_wait", HIST_MILLISECONDS);
-	create_and_check_hist(&c->info_post_lock_hist, "info_post_lock", HIST_MILLISECONDS);
-	create_and_check_hist(&c->info_fulfill_hist, "info_fulfill", HIST_MILLISECONDS);
-	create_and_check_hist(&c->write_storage_close_hist, "write_storage_close", HIST_MILLISECONDS);
-	create_and_check_hist(&c->write_sindex_hist, "write_sindex", HIST_MILLISECONDS);
-	create_and_check_hist(&c->prole_fabric_send_hist, "prole_fabric_send", HIST_MILLISECONDS);
-
-	create_and_check_hist(&c->ldt_multiop_prole_hist, "ldt_multiop_prole", HIST_MILLISECONDS);
-	create_and_check_hist(&c->ldt_io_record_cnt_hist, "ldt_rec_io_count", HIST_RAW);
-	create_and_check_hist(&c->ldt_update_record_cnt_hist, "ldt_rec_update_count", HIST_RAW);
-	create_and_check_hist(&c->ldt_update_io_bytes_hist, "ldt_rec_update_bytes", HIST_RAW);
-	create_and_check_hist(&c->ldt_hist, "ldt", HIST_MILLISECONDS);
-
-#ifdef HISTOGRAM_OBJECT_LATENCY
-	create_and_check_hist(&c->read0_hist, "read_0bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read1_hist, "read_1bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read2_hist, "read_2bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read3_hist, "read_3bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read4_hist, "read_4bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read5_hist, "read_5bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read6_hist, "read_6bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read7_hist, "read_7bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read8_hist, "read_8bucket", HIST_MILLISECONDS);
-	create_and_check_hist(&c->read9_hist, "read_9bucket", HIST_MILLISECONDS);
-#endif
+	create_and_check_hist(&g_stats.ldt_multiop_prole_hist, "ldt_multiop_prole", HIST_MILLISECONDS);
+	create_and_check_hist(&g_stats.ldt_io_record_cnt_hist, "ldt_rec_io_count", HIST_COUNT);
+	create_and_check_hist(&g_stats.ldt_update_record_cnt_hist, "ldt_rec_update_count", HIST_COUNT);
+	create_and_check_hist(&g_stats.ldt_update_io_bytes_hist, "ldt_rec_update_bytes", HIST_SIZE);
+	create_and_check_hist(&g_stats.ldt_hist, "ldt", HIST_MILLISECONDS);
 }
 
-/**
- * cfg_reset_self_node:
- * If we're in "Topology Mode", then we repurpose the self-node value from
- * "PORT + MAC ADDRESS" to our altered state:
- *
- * Rebuild the self node value as follows:
- * Top 16 bits: Port Number
- * Next 16 bits: Group ID
- * Bottom 32 bits: Node ID
- */
-int
-cfg_reset_self_node(as_config * config_p) {
-	cf_node self_node = config_p->self_node;
-
-	// Take the existing Self Node, pull out the Port Number, then rebuild as
-	// PORT + GROUP ID + NODE ID (16 bits::16 bits::32 bits)
-	cf_debug(AS_CFG,"[ENTER] set self Node:: group(%u) Node (%u)\n",
-		config_p->cluster.cl_self_group, config_p->cluster.cl_self_node);
-
-	if (AS_PAXOS_PROTOCOL_V4 != config_p->paxos_protocol) {
-		cf_crash_nostack(AS_CFG, "must use Paxos protocol V4 with Rack Aware enabled");
-	}
-
-	cc_node_t node_id = config_p->cluster.cl_self_node;
-	cc_group_t group_id = config_p->cluster.cl_self_group;
-	uint16_t port_num = cc_compute_port(self_node);
-
-	// If cluster mode is DYNAMIC, then construct self-node-id from the
-	// service IP address.
-	if (config_p->cluster_mode == CL_MODE_DYNAMIC) {
-		cf_info(AS_CFG, "Cluster Mode Dynamic: Config IP address for Self Node");
-		int a, b, c, d;
-		if (4 != sscanf(config_p->node_ip, "%d.%d.%d.%d", &a, &b, &c, &d)) {
-			cf_crash_nostack(AS_CFG, "could not extract 4 octets from node IP address \"%s\" for node ID", config_p->node_ip);
-		}
-		else {
-			node_id = ((((((a << 8) | b) << 8) | c) << 8) | d);
-			cf_info(AS_CFG, "Setting node ID to %u (0x%08X) from IP address \"%s\"", node_id, node_id, config_p->node_ip);
-		}
-	}
-	else if (config_p->cluster_mode == CL_MODE_STATIC) {
-		cf_info(AS_CFG, "Cluster Mode Static: Config self-node-id (%"PRIx64") for Self Node", node_id);
-	}
-
-	cf_node new_self = cc_compute_self_node(port_num, group_id, node_id);
-
-	config_p->self_node = new_self;
-
-	return 0;
-} // end cfg_reset_self_node()
-
-/**
- * cfg_set_addr
- * Normalize a name for an IP address into a specific IP address string.
- * Returns a constant string pointer for certain well-known addresses.
- */
-char*
-cfg_set_addr(const char* name)
-{
-	char* retval = NULL;
-
-	if (strcmp(name, "any") == 0 || strcmp(name, IPV4_ANY_ADDR) == 0) {
-		return (char*)IPV4_ANY_ADDR;
-	}
-	else if (strcmp(name, IPV4_LOCALHOST_ADDR) == 0) {
-		return (char*)IPV4_LOCALHOST_ADDR;
-	}
-	else {
-		if (NULL == (retval = cf_strdup(name))) {
-			cf_crash_nostack(AS_CFG, "failed alloc for %s", name);
-		}
-	}
-
-	return retval;
-}
-
-/**
- * cfg_use_hardware_values
- * Some configuration information -- such as the number of processors, amount of
- * memory, hardware addresses, etc. -- should be read from hardware sources
- * rather than specified via configuration parameters
- */
 void
-cfg_use_hardware_values(as_config* c)
+cfg_init_serv_spec(cf_serv_spec* spec_p)
 {
-	// Use this array if interface name is configured in config file.
-	const char *config_interface_names[] = { 0, 0 };
+	spec_p->bind_port = 0;
+	init_addr_list(&spec_p->bind);
+	spec_p->std_port = 0;
+	init_addr_list(&spec_p->std);
+	spec_p->alt_port = 0;
+	init_addr_list(&spec_p->alt);
+	spec_p->mode = CF_TLS_MODE_AUTHENTICATE_SERVER;
+	spec_p->certfile = NULL;
+	spec_p->keyfile = NULL;
+	spec_p->cafile = NULL;
+	spec_p->capath = NULL;
+	spec_p->protocols = NULL;
+	spec_p->cipher_suite = NULL;
+	spec_p->cert_blacklist = NULL;
+	spec_p->ssl_ctx = NULL;
+	spec_p->cbl = NULL;
+}
 
-	if (c->self_node == 0) {
-		const char **interface_names = NULL;
-		if (c->network_interface_name) {
-			// Use network interface name provided in the configuration.
-			config_interface_names[0] = c->network_interface_name;
-			interface_names = config_interface_names;
+void
+cfg_resolve_tls_name(as_config *cfg)
+{
+	if (!cfg->tls_name) {
+		if (cfg->tls_service.mode == CF_TLS_MODE_ENCRYPT_ONLY) {
+			return;
 		}
-		if (0 > (cf_nodeid_get(c->fabric_port, &(c->self_node), &(c->node_ip), c->hb_mode, &(c->hb_addr), interface_names))) {
-			cf_crash_nostack(AS_CFG, "could not get unique id and/or ip address");
+		cf_crash_nostack(AS_CFG,
+			"tls-name required for TLS service");
+	}
+
+	if (strcmp(cfg->tls_name, "<hostname>") == 0) {
+		char hostname[1024];
+		int rv = gethostname(hostname, sizeof(hostname));
+		if (rv != 0) {
+			cf_crash_nostack(AS_CFG,
+				"trouble resolving hostname for tls-name: %s", cf_strerror(errno));
+		}
+		hostname[sizeof(hostname)-1] = '\0'; // POSIX.1-2001
+		cf_free(cfg->tls_name);
+		cfg->tls_name = cf_strdup(hostname);
+	}
+	else if (strcmp(cfg->tls_name, "<cluster-name>") == 0) {
+		if (strlen(cfg->cluster_name) == 0) {
+			cf_crash_nostack
+				(AS_CFG, "can't resolve tls-name to non-existent cluster-name");
+		}
+		cf_free(cfg->tls_name);
+		cfg->tls_name = cf_strdup(cfg->cluster_name);
+	}
+	cf_info(AS_CFG, "tls-name %s", cfg->tls_name);
+}
+
+
+//==========================================================
+// XDR utilities.
+//
+
+void
+xdr_cfg_add_datacenter(char* dc, uint32_t nsid)
+{
+	cf_vector *v = &g_config.namespaces[nsid-1]->xdr_dclist_v;
+
+	// Crash if datacenter with same name already exists.
+	for (uint32_t index = 0; index < cf_vector_size(v); index++) {
+		if (strcmp((char *)cf_vector_pointer_get(v, index), dc) == 0) {
+			cf_crash_nostack(AS_XDR, "datacenter %s already exists for namespace %s - please remove duplicate entries from config file",
+					dc, g_config.namespaces[nsid-1]->name);
 		}
 	}
+
+	// Add the string pointer (of the datacenter name) to the vector.
+	cf_vector_pointer_append(v, dc);
+}
+
+void
+xdr_cfg_add_node_addr_port(dc_config_opt *dc_cfg, char* addr, int port)
+{
+	xdr_cfg_add_tls_node(dc_cfg, addr, NULL, port);
+}
+
+void
+xdr_cfg_add_tls_node(dc_config_opt *dc_cfg, char* addr, char *tls_name, int port)
+{
+	// Add the element to the vector.
+	node_addr_port* nap = (node_addr_port*)cf_malloc(sizeof(node_addr_port));
+
+	if (nap == NULL) {
+		cf_warning(AS_XDR, "unable to allocate memory for node details");
+		return;
+	}
+
+	nap->addr = addr;
+	nap->tls_name = tls_name;
+	nap->port = port;
+
+	cf_vector_pointer_append(&dc_cfg->dc_node_v, nap);
 }

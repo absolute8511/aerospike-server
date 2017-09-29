@@ -22,7 +22,7 @@
 
 #pragma once
  
-#include <aerospike/as_aerospike.h>
+#include "aerospike/as_aerospike.h"
 
 extern const   as_aerospike_hooks udf_aerospike_hooks;
 as_aerospike * udf_aerospike_new();

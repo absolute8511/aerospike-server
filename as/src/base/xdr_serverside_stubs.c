@@ -1,7 +1,7 @@
 /*
  * xdr_serverside_stubs.c
  *
- * Copyright (C) 2014 Aerospike, Inc.
+ * Copyright (C) 2014-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -27,48 +27,99 @@ int as_xdr_init()
 	return -1;
 }
 
+void xdr_config_post_process()
+{
+}
+
+void as_xdr_start()
+{
+}
+
 int as_xdr_shutdown()
 {
 	return -1;
+}
+
+void xdr_sig_handler(int signum)
+{
 }
 
 void xdr_broadcast_lastshipinfo(uint64_t val[])
 {
 }
 
-int xdr_create_named_pipe(xdr_config *xc)
+void xdr_clear_dirty_bins(xdr_dirty_bins *dirty)
+{
+}
+
+void xdr_fill_dirty_bins(xdr_dirty_bins *dirty)
+{
+}
+
+void xdr_copy_dirty_bins(xdr_dirty_bins *from, xdr_dirty_bins *to)
+{
+}
+
+void xdr_add_dirty_bin(as_namespace *ns, xdr_dirty_bins *dirty, const char *name, size_t name_len)
+{
+}
+
+void xdr_write(as_namespace *ns, cf_digest keyd, as_generation generation, cf_node masternode, xdr_op_type op_type, uint16_t set_id, xdr_dirty_bins *dirty)
+{
+}
+
+void as_xdr_read_txn(as_transaction *txn)
+{
+}
+
+void as_xdr_info_init(void)
+{
+}
+
+void as_xdr_info_port(cf_serv_cfg *serv_cfg)
+{
+	(void)serv_cfg;
+}
+
+int as_info_command_xdr(char *name, char *params, cf_dyn_buf *db)
 {
 	return -1;
 }
 
-int xdr_send_nsinfo()
-{
-	return -1;
-}
-
-int xdr_send_nodemap()
-{
-	return -1;
-}
-
-int xdr_send_clust_state_change(cf_node node, int8_t change)
-{
-	return -1;
-}
-
-uint64_t xdr_min_lastshipinfo()
-{
-	return -1;
-}
-
-void xdr_clmap_update(int changetype, cf_node succession[], int listsize)
+void as_xdr_get_stats(cf_dyn_buf *db)
 {
 }
 
-void xdr_write(as_namespace *ns, cf_digest keyd, as_generation generation, cf_node masternode, bool is_delete, uint16_t set_id)
+void as_xdr_get_config(cf_dyn_buf *db)
 {
 }
 
-void xdr_handle_failednodeprocessingdone(cf_node nodeid)
+bool as_xdr_set_config(char *params)
+{
+	return false;
+}
+
+bool as_xdr_set_config_ns(char *ns_name, char *params)
+{
+	return false;
+}
+
+bool is_xdr_delete_shipping_enabled()
+{
+	return false;
+}
+
+bool is_xdr_nsup_deletes_enabled()
+{
+	return false;
+}
+
+bool is_xdr_forwarding_enabled()
+{
+	return false;
+}
+
+void xdr_cfg_add_int_ext_mapping(dc_config_opt *dc_cfg, char* orig, char* alt)
 {
 }
+

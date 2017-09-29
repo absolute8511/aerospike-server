@@ -23,7 +23,6 @@
 #pragma once
 
 #include <stdbool.h>
-#include <stdint.h>
 
 #include "aerospike/as_rec.h"
 #include "aerospike/as_result.h"
@@ -33,20 +32,18 @@
 
 #include "ai_btree.h"
 
-#include "base/datamodel.h"
-#include "base/proto.h"
-#include "base/transaction.h"
-#include "base/udf_memtracker.h"
-#include "base/udf_record.h"
-#include "base/udf_rw.h"
+#include "transaction/udf.h"
 
+struct as_namespace_s;
+struct as_partition_reservation_s;
+struct udf_record_s;
 
 typedef struct {
-	as_stream_status           (* ostream_write) (void *, as_val *);
-	void                       (* set_error)     (void *, int);
-	as_partition_reservation * (* ptn_reserve)   (void *, as_namespace *, as_partition_id, as_partition_reservation *);
-	void                       (* ptn_release)   (void *, as_partition_reservation *);
-	bool                       (* pre_check)     (void *, udf_record *, void *);
+	as_stream_status                    (* ostream_write) (void *, as_val *);
+	void                                (* set_error)     (void *, int);
+	struct as_partition_reservation_s * (* ptn_reserve)   (void *, struct as_namespace_s *, uint32_t, struct as_partition_reservation_s *);
+	void                                (* ptn_release)   (void *, struct as_partition_reservation_s *);
+	bool                                (* pre_check)     (void *, struct udf_record_s *, void *);
 } as_aggr_hooks;
 
 typedef struct {
@@ -54,4 +51,4 @@ typedef struct {
 	const as_aggr_hooks     * aggr_hooks;
 } as_aggr_call;
 
-int as_aggr_process(as_namespace *ns, as_aggr_call * ag_call, cf_ll * ap_recl, void * udata, as_result * ap_res);
+int as_aggr_process(struct as_namespace_s *ns, as_aggr_call *ag_call, cf_ll *ap_recl, void *udata, as_result *ap_res);

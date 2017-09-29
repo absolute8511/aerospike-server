@@ -43,3 +43,5 @@ void olock_vlock(olock *ol, cf_digest *d, pthread_mutex_t **vlock);
 void olock_unlock(olock *ol, cf_digest *d);
 olock *olock_create(uint32_t n_locks, bool mutex);
 void olock_destroy(olock *o);
+
+extern olock *g_record_locks;

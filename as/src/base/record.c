@@ -1,7 +1,7 @@
 /*
  * record.c
  *
- * Copyright (C) 2012-2014 Aerospike, Inc.
+ * Copyright (C) 2012-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -24,15 +24,11 @@
  * Record operations
  */
 
-#include "base/feature.h" // Turn new AS Features on/off (must be first in line)
-
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <netinet/in.h>
-#include <sys/param.h>
 
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
@@ -47,112 +43,46 @@
 #include "base/ldt.h"
 #include "base/rec_props.h"
 #include "base/secondary_index.h"
+#include "base/stats.h"
 #include "base/transaction.h"
+#include "base/truncate.h"
+#include "fabric/partition.h"
 #include "storage/storage.h"
+#include "transaction/delete.h"
+#include "transaction/rw_utils.h"
 
 
-// #define EXTRA_CHECKS
-// #define BREAK_VTP_ERROR
-
-#ifdef EXTRA_CHECKS
-#include <signal.h>
-#endif
-
-/* Used for debugging/tracing */
-static char * MOD = "partition.c::06/28/13";
-
-
-/* as_record_initialize
- * Initialize the record.
- * Called from as_record_get_create() and write_local()
- * record lock needs to be held before calling this function.
- */
-void as_record_initialize(as_index_ref *r_ref, as_namespace *ns)
+void
+as_record_rescue(as_index_ref *r_ref, as_namespace *ns)
 {
-	if (!r_ref || !ns) {
-		cf_warning(AS_RECORD, "as_record_reinitialize: illegal params");
-		return;
-	}
-
-	as_index *r = r_ref->r;
-
-	as_index_clear_flags(r, AS_INDEX_ALL_FLAGS);
-
-	if (ns->single_bin) {
-		as_bin *b = as_index_get_single_bin(r);
-		as_bin_state_set(b, AS_BIN_STATE_UNUSED);
-		b->particle = 0;
-
-	}
-	else {
-		r->dim = NULL;
-	}
-
-	// clear everything owned by record
-	r->generation = 0;
-	r->void_time = 0;
-
-	// layer violation, refactor sometime
-	if (AS_STORAGE_ENGINE_SSD == ns->storage_type) {
-		r->storage_key.ssd.file_id = STORAGE_INVALID_FILE_ID;
-		r->storage_key.ssd.rblock_id = STORAGE_INVALID_RBLOCK;
-		r->storage_key.ssd.n_rblocks = 0;
-	}
-#ifdef USE_KV
-	else if (AS_STORAGE_ENGINE_KV == ns->storage_type) {
-		r->storage_key.kv.file_id = STORAGE_INVALID_FILE_ID;
-	}
-#endif
-	else if (AS_STORAGE_ENGINE_MEMORY == ns->storage_type) {
-		// The storage_key struct shouldn't be used, but for now is accessed
-		// when making the (useless for memory-only) object size histogram.
-		*(uint64_t*)&r->storage_key.ssd = 0;
-		r->storage_key.ssd.rblock_id = STORAGE_INVALID_RBLOCK;
-	}
-	else {
-		cf_crash(AS_RECORD, "unknown storage engine type: %d", ns->storage_type);
-	}
-
-	as_index_set_set_id(r, 0);
+	record_delete_adjust_sindex(r_ref->r, ns);
+	as_record_destroy(r_ref->r, ns);
+	as_index_clear_record_info(r_ref->r);
+	cf_atomic64_incr(&ns->n_objects);
 }
 
-/* as_record_get_create
- * Instantiate a new as_record in a namespace (no bins though)
- * AND CREATE IF IT DOESN"T EXIST
- * returns -1 if fail
- * 0 if successful find
- * 1 if successful but CREATE
- */
+// Returns:
+//  1 - created new record
+//  0 - found existing record
+// -1 - failure - found "half created" or deleted record
+// -2 - failure - could not allocate arena stage
 int
 as_record_get_create(as_index_tree *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns, bool is_subrec)
 {
-	int rv =
-#ifdef USE_KV
-			as_storage_has_index(ns) ? as_index_ref_initialize(tree, keyd, r_ref, true, ns) :
-#endif
-			as_index_get_insert_vlock(tree, keyd, r_ref);
+	int rv = as_index_get_insert_vlock(tree, keyd, r_ref);
 
 	if (rv == 0) {
 		cf_detail(AS_RECORD, "record get_create: digest %"PRIx64" found record %p", *(uint64_t *)keyd , r_ref->r);
-
-		if (r_ref->r->storage_key.ssd.rblock_id == 0) {
-			cf_debug_digest(AS_RECORD, keyd, "fail as_record_get_create(): rblock_id 0 ");
-			as_record_done(r_ref, ns);
-			rv = -1;
-		}
 	}
 	else if (rv == 1) {
 		cf_detail(AS_RECORD, "record get_create: digest %"PRIx64" new record %p", *(uint64_t *)keyd, r_ref->r);
 
-		// new record, have to initialize bits
-		as_record_initialize(r_ref, ns);
-
 		// this is decremented by the destructor here, so best tracked on the constructor
 		if (is_subrec) {
-			cf_atomic_int_incr(&ns->n_sub_objects);
+			cf_atomic64_incr(&ns->n_sub_objects);
 		}
 		else {
-			cf_atomic_int_incr(&ns->n_objects);
+			cf_atomic64_incr(&ns->n_objects);
 		}
 	}
 
@@ -178,6 +108,17 @@ as_record_clean_bins(as_storage_rd *rd)
 	as_record_clean_bins_from(rd, 0);
 }
 
+void
+as_record_free_bin_space(as_record *r)
+{
+	as_bin_space *bin_space = as_index_get_bin_space(r);
+
+	if (bin_space) {
+		cf_free((void*)bin_space);
+		as_index_set_bin_space(r, NULL);
+	}
+}
+
 /* as_record_destroy
  * Destroy a record, when the refcount has gone to zero */
 void
@@ -190,17 +131,15 @@ as_record_destroy(as_record *r, as_namespace *ns)
 		as_storage_rd rd;
 		rd.r = r;
 		rd.ns = ns;
-		rd.n_bins = as_bin_get_n_bins(r, &rd);
-		rd.bins = as_bin_get_all(r, &rd, 0);
+		as_storage_rd_load_n_bins(&rd);
+		as_storage_rd_load_bins(&rd, NULL);
 
 		as_storage_record_drop_from_mem_stats(&rd);
 
 		as_record_clean_bins(&rd);
+
 		if (! ns->single_bin) {
-			if (rd.n_bins) {
-				cf_free((void*)as_index_get_bin_space(r));
-				as_index_set_bin_space(r, NULL);
-			}
+			as_record_free_bin_space(r);
 
 			if (r->dim) {
 				cf_free(r->dim); // frees the key
@@ -208,16 +147,7 @@ as_record_destroy(as_record *r, as_namespace *ns)
 		}
 	}
 
-	// release from set
-	as_namespace_release_set_id(ns, as_index_get_set_id(r));
-
-	// TODO: LDT what if flag is not set ??
-	if (as_ldt_record_is_sub(r)) {
-		cf_atomic_int_decr(&ns->n_sub_objects);
-	}
-	else {
-		cf_atomic_int_decr(&ns->n_objects);
-	}
+	as_record_drop_stats(r, ns);
 
 	/* Destroy the storage and then free the memory-resident parts */
 	as_storage_record_destroy(ns, r);
@@ -231,28 +161,9 @@ as_record_destroy(as_record *r, as_namespace *ns)
  * -1 if searched tree and record does not exist
  */
 int
-as_record_get(as_index_tree *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns)
+as_record_get(as_index_tree *tree, cf_digest *keyd, as_index_ref *r_ref)
 {
-	int rv =
-#ifdef USE_KV
-			as_storage_has_index(ns) ? (! as_index_ref_initialize(tree, keyd, r_ref, false, ns) ? 0 : -1) :
-#endif
-			as_index_get_vlock(tree, keyd, r_ref);
-
-	if (rv == 0) {
-		cf_detail(AS_RECORD, "record get: digest %"PRIx64" found record %p", *(uint64_t *)keyd, r_ref->r);
-
-		if (r_ref->r->storage_key.ssd.rblock_id == 0) {
-			cf_debug_digest(AS_RECORD, keyd, "fail as_record_get(): rblock_id 0 ");
-			as_record_done(r_ref, ns);
-			rv = -1; // masquerade as a not-found, which is handled everywhere
-		}
-	}
-	else if (rv == -1) {
-		cf_detail(AS_RECORD, "record get: digest %"PRIx64" not found", *(uint64_t *)keyd);
-	}
-
-	return rv;
+	return as_index_get_vlock(tree, keyd, r_ref);
 }
 
 /* as_record_exists
@@ -261,20 +172,9 @@ as_record_get(as_index_tree *tree, cf_digest *keyd, as_index_ref *r_ref, as_name
  * -1 if searched tree and record does not exist
  */
 int
-as_record_exists(as_index_tree *tree, cf_digest *keyd, as_namespace *ns)
+as_record_exists(as_index_tree *tree, cf_digest *keyd)
 {
-	int rv =
-#ifdef USE_KV
-			as_storage_has_index(ns) ? -1 :
-#endif
-			as_index_exists(tree, keyd);
-
-	if (rv == -1) {
-		cf_detail(AS_RECORD, "record get: digest %"PRIx64" not found", *(uint64_t *)keyd);
-
-		return(-1);
-	}
-	return(0);
+	return as_index_exists(tree, keyd);
 }
 
 /* Done with this record - release and unlock
@@ -282,27 +182,20 @@ as_record_exists(as_index_tree *tree, cf_digest *keyd, as_namespace *ns)
 void
 as_record_done(as_index_ref *r_ref, as_namespace *ns)
 {
-	if ((!r_ref->skip_lock)
-			&& (r_ref->olock == 0)) {
-		cf_crash(AS_RECORD, "calling done with null lock, illegal");
+	if (! r_ref->skip_lock) {
+		pthread_mutex_unlock(r_ref->olock);
 	}
 
-	int rv = 0;
-	if (!r_ref->skip_lock) {
-		rv = pthread_mutex_unlock(r_ref->olock);
-		cf_atomic_int_decr(&g_config.global_record_lock_count);
-	}
-	if (0 != rv)
-		cf_crash(AS_RECORD, "couldn't release lock: %s", cf_strerror(rv));
+	int rc = as_index_release(r_ref->r);
 
-	if (0 == as_index_release(r_ref->r)) {
-		// cf_info(AS_RECORD, "index destroy 4 %p %x",r_ref->r,r_ref->r_h);
-		as_record_destroy(r_ref->r, ns);
-		cf_arenax_free(ns->arena, r_ref->r_h);
+	if (rc > 0) {
+		return;
 	}
-	cf_atomic_int_decr(&g_config.global_record_ref_count);
 
-	return;
+	cf_assert(rc == 0, AS_RECORD, "index ref-count %d", rc);
+
+	as_record_destroy(r_ref->r, ns);
+	cf_arenax_free(ns->arena, r_ref->r_h);
 }
 
 // Called only for data-in-memory multi-bin, with no key currently stored.
@@ -311,7 +204,7 @@ void
 as_record_allocate_key(as_record* r, const uint8_t* key, uint32_t key_size)
 {
 	as_rec_space* rec_space = (as_rec_space*)
-			cf_malloc(sizeof(as_rec_space) + key_size);
+			cf_malloc_ns(sizeof(as_rec_space) + key_size);
 
 	rec_space->bin_space = (as_bin_space*)r->dim;
 	rec_space->key_size = key_size;
@@ -342,7 +235,7 @@ as_record_remove_key(as_record* r)
 //
 
 int
-as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
+as_record_pickle(as_record *r, as_storage_rd *rd, uint8_t **buf_r, size_t *len_r)
 {
 	// Determine size
 	uint32_t sz = 2;
@@ -360,14 +253,14 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 		sz += as_bin_particle_pickled_size(b);
 	}
 
-	byte *buf = cf_malloc(sz);
+	uint8_t *buf = cf_malloc(sz);
 	if (!buf) {
 		*buf_r = 0;
 		*len_r = 0;
 		return(-1);
 	}
 
-	byte *buf_lim = buf + sz; // debug
+	uint8_t *buf_lim = buf + sz; // debug
 	*len_r = sz;
 	*buf_r = buf;
 
@@ -377,7 +270,7 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 	for (uint16_t i = 0; i < n_bins_inuse; i++) {
 		as_bin *b = &rd->bins[i];
 
-		byte namelen = (byte)as_bin_memcpy_name(rd->ns, buf + 1, b);
+		uint8_t namelen = (uint8_t)as_bin_memcpy_name(rd->ns, buf + 1, b);
 		*buf++ = namelen;
 		buf += namelen;
 		*buf++ = 0; // was bin version
@@ -385,50 +278,34 @@ as_record_pickle(as_record *r, as_storage_rd *rd, byte **buf_r, size_t *len_r)
 		buf += as_bin_particle_to_pickled(b, buf);
 	}
 
-	if (buf > buf_lim)
+	if (buf > buf_lim) {
 		cf_crash(AS_RECORD, "pickle record overwriting data");
-
-	return(0);
-}
-
-int
-as_record_pickle_a_delete(byte **buf_r, size_t *len_r)
-{
-	// Determine size
-	uint32_t sz = 2;
-
-	// only pickle the n_bins in use
-	uint16_t n_bins_inuse = 0;
-
-	byte *buf = cf_malloc(sz);
-	if (!buf) {
-		*buf_r = 0;
-		*len_r = 0;
-		return(-1);
 	}
 
-	*len_r = sz;
-	*buf_r = buf;
-
-	(*(uint16_t *)buf) = htons(n_bins_inuse); // number of bins
 	return(0);
 }
 
-uint32_t
+int32_t
 as_record_buf_get_stack_particles_sz(uint8_t *buf) {
-	uint32_t stack_particles_sz = 0;
+	int32_t stack_particles_sz = 0;
 
 	uint16_t newbins = ntohs( *(uint16_t *) buf );
 	buf += 2;
 
 	for (uint16_t i = 0; i < newbins; i++) {
-		byte name_sz = *buf;
+		uint8_t name_sz = *buf;
 		buf += name_sz + 2;
 
-		stack_particles_sz += as_particle_size_from_pickled(&buf);
+		int32_t result = as_particle_size_from_pickled(&buf);
+
+		if (result < 0) {
+			return result;
+		}
+
+		stack_particles_sz += result;
 	}
 
-	return (stack_particles_sz);
+	return stack_particles_sz;
 }
 
 int
@@ -457,14 +334,13 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 	if (has_sindex) {
 		SINDEX_GRLOCK();
 	}
-	
+
 	// To read the algorithm of upating sindex in bins check notes in ssd_record_add function.
 	SINDEX_BINS_SETUP(sbins, 2 * ns->sindex_cnt);
 	as_sindex * si_arr[2 * ns->sindex_cnt];
 	int si_arr_index = 0;
-	const char* set_name = NULL;
-	set_name = as_index_get_set_name(rd->r, ns);
-	
+	const char* set_name = as_index_get_set_name(rd->r, ns);
+
 	// RESERVE SIs for old bins
 	// Cannot reserve SIs for new bins as we do not know the bin-id yet
 	if (has_sindex) {
@@ -472,7 +348,7 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 			si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(ns, set_name, rd->bins[i].id, &si_arr[si_arr_index]);
 		}
 	}
-	
+
 	if ((delta_bins < 0) && has_sindex) {
 		sbins_populated += as_sindex_sbins_from_rd(rd, newbins, old_n_bins, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 	}
@@ -493,12 +369,12 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 	for (uint16_t i = 0; i < newbins; i++) {
 		if (buf >= buf_lim) {
 			cf_warning(AS_RECORD, "as_record_unpickle_replace: bad format: on bin %d of %d, %p >= %p (diff: %lu) newbins: %d", i, newbins, buf, buf_lim, buf - buf_lim, newbins);
-			ret = -3;
+			ret = -4;
 			break;
 		}
 
-		byte name_sz     = *buf++;
-		byte *name       = buf;
+		uint8_t name_sz  = *buf++;
+		uint8_t *name    = buf;
 		buf             += name_sz;
 		buf++; // skipped byte was bin version
 		as_bin *b;
@@ -515,9 +391,11 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 		}
 
 		if (ns->storage_data_in_memory) {
+			// TODO - what if this fails?
 			as_bin_particle_replace_from_pickled(b, &buf);
 		}
 		else {
+			// TODO - what if this fails?
 			*stack_particles += as_bin_particle_stack_from_pickled(b, *stack_particles, &buf);
 		}
 
@@ -533,11 +411,11 @@ as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t
 	}
 
 	if (has_sindex) {
-		SINDEX_GUNLOCK();
+		SINDEX_GRUNLOCK();
 	}
 	if (ret == 0) {
 		if (has_sindex && sbins_populated) {
-			sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sbins_populated, &rd->keyd);
+			sindex_ret = as_sindex_update_by_sbin(ns, set_name, sbins, sbins_populated, &rd->r->keyd);
 			if (sindex_ret != AS_SINDEX_OK) {
 				cf_warning(AS_RECORD, "Failed: %s", as_sindex_err_str(sindex_ret));
 			}
@@ -634,13 +512,14 @@ as_record_set_properties(as_storage_rd *rd, const as_rec_props *p_rec_props)
 }
 
 int
-as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
-		as_index_ref *r_ref, as_record_merge_component *c)
+as_record_flatten_component(as_storage_rd *rd, as_index_ref *r_ref,
+		as_record_merge_component *c, bool is_create)
 {
 	as_index *r = r_ref->r;
-	bool has_sindex = as_sindex_ns_has_sindex(rd->ns);
+
 	rd->ignore_record_on_device = true; // TODO - set to ! has_sindex
-	rd->n_bins = as_bin_get_n_bins(r, rd);
+	as_storage_rd_load_n_bins(rd); // TODO - handle error returned
+
 	uint16_t newbins = ntohs(*(uint16_t *)c->record_buf); // already checked that newbins can't be 0 here
 
 	if (! rd->ns->storage_data_in_memory && ! rd->ns->single_bin && newbins > rd->n_bins) {
@@ -649,13 +528,20 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 
 	as_bin stack_bins[rd->ns->storage_data_in_memory ? 0 : rd->n_bins];
 
-	rd->bins = as_bin_get_all(r, rd, stack_bins);
+	as_storage_rd_load_bins(rd, stack_bins); // TODO - handle error returned
 
 	uint64_t memory_bytes = as_storage_record_get_n_bytes_memory(rd);
 
-	uint32_t stack_particles_sz = 0;
+	int32_t stack_particles_sz = 0;
+
 	if (! rd->ns->storage_data_in_memory) {
 		stack_particles_sz = as_record_buf_get_stack_particles_sz(c->record_buf);
+
+		if (stack_particles_sz < 0) {
+			cf_warning_digest(AS_RECORD, &rd->r->keyd, "stack particle size failed");
+			as_storage_record_close(rd);
+			return -1;
+		}
 	}
 
 	// 256 as upper bound on the LDT control bin, we may write version below
@@ -664,14 +550,28 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 
 	// Cleanup old info and put new info
 	as_record_set_properties(rd, &c->rec_props);
+
+	if (is_create) {
+		r->last_update_time = c->last_update_time;
+
+		if (as_truncate_record_is_truncated(r, rd->ns)) {
+			as_storage_record_close(rd);
+			return -8; // yes, another special return value
+		}
+	}
+
+	// Check after applying set-id from rec-props, in case r just created.
+	bool has_sindex = record_has_sindex(r, rd->ns);
+
 	int rv = as_record_unpickle_replace(r, rd, c->record_buf, c->record_buf_sz, &p_stack_particles, has_sindex);
 	if (0 != rv) {
-		cf_warning_digest(AS_LDT, &rd->keyd, "Unpickled replace failed rv=%d",rv);
-		as_storage_record_close(r, rd);
+		cf_warning_digest(AS_LDT, &rd->r->keyd, "Unpickled replace failed rv=%d",rv);
+		as_storage_record_close(rd);
 		return rv;
-    }
+	}
 
-	r->void_time  = c->void_time;
+	r->void_time = truncate_void_time(rd->ns, c->void_time);
+	r->last_update_time  = c->last_update_time;
 	r->generation = c->generation;
 	// Update the version in the parent. In case it is incoming migration
 	//
@@ -681,106 +581,101 @@ as_record_flatten_component(as_partition_reservation *rsv, as_storage_rd *rd,
 	if (COMPONENT_IS_MIG(c) && as_ldt_record_is_parent(rd->r)) {
 		int ldt_rv = as_ldt_parent_storage_set_version(rd, c->version, p_stack_particles, __FILE__, __LINE__);
 		if (ldt_rv < 0) {
-			cf_warning_digest(AS_LDT, &rd->keyd, "LDT_MERGE Failed to write version in rv=%d", ldt_rv);
+			cf_warning_digest(AS_LDT, &rd->r->keyd, "LDT_MERGE Failed to write version in rv=%d", ldt_rv);
 		}
 	}
 
-	// cf_info(AS_RECORD, "flatten: key %"PRIx64" used incoming component %d generation %d",*(uint64_t *)keyd, idx,r->generation);
-
-#ifdef EXTRA_CHECKS
-	// an EXTRA CHECK - should have some bins
-	uint16_t n_bins_check = 0;
-	for (uint16_t i = 0; i < rd->n_bins; i++) {
-		if (as_bin_inuse(&rd->bins[i])) n_bins_check++;
-	}
-	if (n_bins_check == 0) cf_info(AS_RECORD, "merge: extra check: after write, no bins. peculiar.");
-#endif
-
-	if (! as_bin_inuse_has(rd)) {
-		cf_crash(AS_RECORD, "as_record_flatten_component() resulted in binless record");
-	}
-
+	as_record_apply_pickle(rd);
 	as_storage_record_adjust_mem_stats(rd, memory_bytes);
+	as_storage_record_close(rd);
 
-	// write record to device
-	as_storage_record_write(r, rd);
-	as_storage_record_close(r, rd);
-
-	return (0);
+	return 0;
 }
 
 // Returns -1 if left wins, 1 if right wins, and 0 for tie.
-int
-as_record_resolve_conflict(conflict_resolution_pol policy,
-		uint16_t l_generation, uint32_t l_void_time,
-		uint16_t r_generation, uint32_t r_void_time)
+
+static inline int
+resolve_generation_direct(uint16_t left, uint16_t right)
 {
-	switch (policy) {
-	case AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION:
-		if (l_generation == r_generation) {
-			if (l_void_time == r_void_time) {
-				return 0;
-			}
-			if (l_void_time == 0 ||
-					(r_void_time != 0 && l_void_time > r_void_time)) {
-				return -1;
-			}
-			return 1;
-		}
-		if (l_generation > r_generation) {
-			return -1;
-		}
-		return 1;
+	return left == right ? 0 : (right > left  ? 1 : -1);
+}
 
-	case AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_TTL:
-		if (l_void_time == r_void_time) {
-			if (l_generation == r_generation) {
-				return 0;
-			}
-			if (l_generation > r_generation) {
-				return -1;
-			}
-			return 1;
-		}
-		if (l_void_time == 0 ||
-				(r_void_time != 0 && l_void_time > r_void_time)) {
-			return -1;
-		}
-		return 1;
+static inline int
+resolve_generation(uint16_t left, uint16_t right)
+{
+	return left == right ? 0 : (as_gen_less_than(left, right) ? 1 : -1);
+}
 
-	default:
-		cf_crash(AS_RECORD, "invalid conflict resolution policy");
-		return 0;
-	}
+static inline int
+resolve_last_update_time(uint64_t left, uint64_t right)
+{
+	return left == right ? 0 : (right > left ? 1 : -1);
 }
 
 int
-as_record_component_winner(as_partition_reservation *rsv, int n_components,
-		as_record_merge_component *components, as_index *r)
+as_record_resolve_conflict(conflict_resolution_pol policy, uint16_t left_gen,
+		uint64_t left_lut, uint16_t right_gen, uint64_t right_lut)
 {
-	uint32_t max_void_time, max_generation, start, winner_idx;
+	int result = 0;
 
-	// if local record is there set its as starting value other
-	// was set initial value to be of component[0]
-	if (r) {
-		max_void_time  = r->void_time;
-		max_generation = r->generation;
-		start          = 0;
-		winner_idx     = -1;
-	} else {
-		max_void_time  = components[0].void_time;
-		max_generation = components[0].generation;
-		start          = 1;
-		winner_idx     = 0;
+	switch (policy) {
+	case AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION:
+		// Doesn't use resolve_generation() - direct comparison gives much
+		// better odds of picking the record with more history after a split
+		// brain where one side starts the record from scratch.
+		result = resolve_generation_direct(left_gen, right_gen);
+		if (result == 0) {
+			result = resolve_last_update_time(left_lut, right_lut);
+		}
+		break;
+
+	case AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_LAST_UPDATE_TIME:
+		result = resolve_last_update_time(left_lut, right_lut);
+		if (result == 0) {
+			result = resolve_generation(left_gen, right_gen);
+		}
+		break;
+
+	default:
+		cf_crash(AS_RECORD, "invalid conflict resolution policy");
+		break;
 	}
 
-	for (uint16_t i = start; i < n_components; i++) {
-		as_record_merge_component *c = &components[i];
-		if (-1 == as_record_resolve_conflict(rsv->ns->conflict_resolution_policy,
-				c->generation, c->void_time, max_generation, max_void_time)) {
-					max_void_time = c->void_time;
-					max_generation = c->generation;
-					winner_idx = (int32_t)i;
+	return result;
+}
+
+int
+as_record_component_winner(conflict_resolution_pol conflict_resolution_policy,
+		uint32_t n_components, const as_record_merge_component *components,
+		const as_record *r)
+{
+	int winner_idx;
+	uint32_t start;
+	uint32_t max_generation;
+	uint64_t max_last_update_time;
+
+	if (r) {
+		winner_idx = -1; // existing record is best so far
+		start = 0; // compare all components to existing record
+		max_generation = r->generation;
+		max_last_update_time = r->last_update_time;
+	}
+	else {
+		winner_idx = 0; // first component is best so far
+		start = 1; // compare other components to first component
+		max_generation = components[0].generation;
+		max_last_update_time = components[0].last_update_time;
+	}
+
+	for (uint32_t i = start; i < n_components; i++) {
+		const as_record_merge_component *c = &components[i];
+
+		if (as_record_resolve_conflict(conflict_resolution_policy,
+				c->generation, c->last_update_time, max_generation,
+				max_last_update_time) == -1) {
+			winner_idx = (int)i;
+			max_generation = c->generation;
+			max_last_update_time = c->last_update_time;
 		}
 	}
 
@@ -789,158 +684,102 @@ as_record_component_winner(as_partition_reservation *rsv, int n_components,
 
 int
 as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
-		uint16_t n_components, as_record_merge_component *components,
+		uint32_t n_components, as_record_merge_component *components,
 		int *winner_idx)
 {
-	static char * meth = "as_record_flatten()";
-	cf_debug(AS_RECORD, "flatten start: ");
+	as_namespace *ns = rsv->ns;
 
-	if (! as_storage_has_space(rsv->ns)) {
-		cf_warning(AS_RECORD, "{%s}: record_flatten: drives full", rsv->ns->name);
+	if (COMPONENT_IS_LDT(&components[0]) && ! ns->ldt_enabled) {
+		// Ignore LDT migrations. (And if LDT is disabled, LDT dummies won't get
+		// here via duplicate resolution.)
+		return 0;
+	}
+
+	if (! as_storage_has_space(ns)) {
+		cf_warning(AS_RECORD, "{%s}: record_flatten: drives full", ns->name);
 		return -1;
 	}
 
-	// Validate the reservation. This is a WORKAROUND for a known crash
-	if ((rsv->tree == 0) || (rsv->ns == 0) || (rsv->p == 0)) {
-		cf_info(AS_RECORD, "record merge: bad reservation. tree %p ns %p part %p", rsv->tree, rsv->ns, rsv->p);
-		return(-1);
+	CF_ALLOC_SET_NS_ARENA(ns);
+
+	bool is_subrec = false;
+
+	// LDT subrecords (which get here only via migration) have their own
+	// conflict resolution method.
+	if (COMPONENT_IS_MIG(&components[0]) &&
+			COMPONENT_IS_LDT_SUB(&components[0])) {
+		if (! as_ldt_merge_component_is_candidate(rsv, &components[0])) {
+			// Remote subrecord loses comparison - ignore it.
+			return 0;
+		}
+		// else - remote subrecord wins - apply it.
+
+		is_subrec = true;
+		*winner_idx = 0;
 	}
 
-	// look up base record
+	as_index_tree *tree = is_subrec ? rsv->sub_tree : rsv->tree;
+
 	as_index_ref r_ref;
-	r_ref.skip_lock     = false;
-	as_index_tree *tree = rsv->tree;
-	bool is_subrec      = false;
+	r_ref.skip_lock = false;
 
+	int rv = as_record_get_create(tree, keyd, &r_ref, ns, is_subrec);
 
-	// If the incoming component is the SUBRECORD it should have come as
-	// part of MIGRATION... and there will be only 1 component currently.
-	// assert the fact
-	if (rsv->ns->ldt_enabled) {
-		if (COMPONENT_IS_MIG(&components[0])) {
-			// Currently the migration is single record at a time merge
-			if (n_components > 1) {
-				cf_warning(AS_RECORD, "Unexpected function call parameter ... n_components = %d", n_components);
-				return (-1);
-			}
+	if (rv < 0) {
+		cf_debug_digest(AS_RECORD, keyd, "{%s} record flatten: could not get-create record %d", ns->name, is_subrec);
+		return -3;
+	}
 
-			if (COMPONENT_IS_LDT_SUB(&components[0])) {
+	bool is_create = rv == 1;
+	as_index *r = r_ref.r;
 
-				cf_detail_digest(AS_LDT, keyd, "LDT_MERGE merge component is LDT_SUB %d", components[0].flag);
+	if (! is_subrec) {
+		*winner_idx = as_record_component_winner(ns->conflict_resolution_policy,
+				n_components, components, is_create ? NULL : r);
+	}
 
-				if (as_ldt_merge_component_is_candidate(rsv, &components[0]) == false) {
-					cf_debug_digest(AS_LDT, keyd, "LDT subrec is not a merge candidate");
-					return 0;
-				}
+	// If the winner is the local copy, nothing to do.
+	if (*winner_idx == -1) {
+		as_record_done(&r_ref, ns);
+		return 0;
+	}
+	// else - remote winner - apply it (unless it's an LDT dummy).
 
-				if ((rsv->sub_tree == 0)) {
-					cf_warning(AS_RECORD, "[LDT]<%s:%s>record merge: bad reservation. sub tree %p",
-							MOD, meth, rsv->sub_tree);
-					return(-1);
-				}
-				tree        = rsv->sub_tree;
-				is_subrec   = true;
-				*winner_idx = 0;
-			} else {
-				cf_detail_digest(AS_RECORD, keyd, "LDT_MERGE merge component is NON LDT_SUB %d", components[0].flag);
-			}
-		} else {
-			// In non-migration i.e duplicate resolution code path digest being
-			// operated on at current node is is always for non ldt record or 
-			// ldt parent record. is_subrec should always be false
-			is_subrec = false;
+	int flatten_rv;
+	as_record_merge_component *c = &components[*winner_idx];
+
+	if (COMPONENT_IS_LDT_DUMMY(c)) {
+		// LDT dummy won - don't apply locally, trigger a ship-op.
+		flatten_rv = -7; // -7 is special - do not change!
+	}
+	else {
+		// Normal remote winner.
+		as_storage_rd rd;
+
+		if (is_create) {
+			as_storage_record_create(ns, r, &rd);
 		}
-	}
-
-	bool has_local_copy = false;
-	as_index  *r        = NULL;
-	int ret             = as_record_get_create(tree, keyd, &r_ref, rsv->ns, is_subrec);
-	if (-1 == ret) {
-		cf_debug_digest(AS_RECORD, keyd, "{%s} record flatten: could not get-create record %b", rsv->ns->name, is_subrec);
-		return(-3);
-	} else if (ret) {
-		has_local_copy  = false;
-		r               = r_ref.r;
-	} else {
-		has_local_copy  = true;
-		r               = r_ref.r;
-	}
-	// DO NOT check for subrecord generation. If the parent generation wins
-	// (check above in *_merge_candidate) we should should have winner_idx
-	// set. 
-	// Note: In all likelihood the incoming SUBRECORD will not have a local
-	// copy because the digest comes with the migrate_ldt_version already stamped
-	// in it. Even if it matches just go ahead and write it down.
-	if (!is_subrec) {
-		if (has_local_copy) {
-			*winner_idx = as_record_component_winner(rsv, n_components, components, r);
-		} else {
-			*winner_idx = as_record_component_winner(rsv, n_components, components, NULL);
-		}
-	}
-
-	int rv = 0;
-
-	// Remote winner.
-	if (*winner_idx != -1) {
-		cf_detail(AS_LDT, "Flatten Record Remote LDT Winner @ %d", *winner_idx);
-		as_record_merge_component *c = &components[*winner_idx];
-
-		if (COMPONENT_IS_LDT_DUMMY(c)) {
-			// Case 1:
-			// In case the winning component is remote and is dummy (ofcourse flatten
-			// is called under reply to duplicate resolution request) return -2. Caller
-			// would ship operation to the winning node!!
-			if (COMPONENT_IS_MIG(c)) {
-				cf_warning(AS_RECORD, "DUMMY LDT Component in Non Duplicate Resolution Code");
-				rv = -1;
-			} else {
-				cf_detail(AS_LDT, "Ship Operation");
-				// NB: DO NOT CHANGE THIS RETURN. IT MEANS A SPECIAL THING TO THE CALLER
-				rv = -2;
-			}
-		} else {
-			// Case 2:
-			// In case the winning component is remote then write it locally. Create record
-			// in case there is no local copy of record.
-			cf_detail_digest(AS_RECORD, keyd, "is_subrec (%d) Local (%d:%d) Remote (%d:%d)", is_subrec, r->generation, r->void_time, c->generation, c->void_time);
-
-			as_storage_rd rd;
-			if (has_local_copy) {
-				as_storage_record_open(rsv->ns, r_ref.r, &rd, keyd);
-			} else {
-				as_storage_record_create(rsv->ns, r_ref.r, &rd, keyd);
-			}
-
-			// NB: Side effect of this function is this closes the record
-			rv = as_record_flatten_component(rsv, &rd, &r_ref, c);
+		else {
+			as_storage_record_open(ns, r, &rd);
 		}
 
-		// delete newly created index above if there is no local copy
-		if (rv && !has_local_copy) {
-			as_index_delete(rsv->tree, keyd);
-		}
-	} else {
-		cf_assert(has_local_copy, AS_RECORD, CF_CRITICAL,
-				"Local Copy Won when there is no local copy");
-		cf_detail_digest(AS_LDT, keyd, "Local Copy Win [%d %d] %d winner_idx=%d", r->generation, components[0].generation, r->void_time, winner_idx);
+		// Apply remote winner locally. (Yes, call closes as_storage_rd.)
+		flatten_rv = as_record_flatten_component(&rd, &r_ref, c, is_create);
 	}
 
-	// our reservation must still be valid here. Check it.
-	if ((rsv->tree == 0) || (rsv->ns == 0) || (rsv->p == 0)) {
-		cf_info(AS_RECORD, "record merge: bad reservation. tree %p ns %p part %p", rsv->tree, rsv->ns, rsv->p);
-		return(-1);
+	// On failure or ship-op, delete index element if created above.
+	if (flatten_rv != 0 && is_create) {
+		as_index_delete(rsv->tree, keyd);
 	}
 
-	// and after here it's GONE
-	as_record_done(&r_ref, rsv->ns);
+	as_record_done(&r_ref, ns);
 
-	return rv;
+	return flatten_rv;
 }
 
 // TODO - inline this, if/when we unravel header files.
 bool
-as_record_is_expired(as_record *r)
+as_record_is_expired(const as_record *r)
 {
 	return r->void_time != 0 && r->void_time < as_record_void_time_get();
 }

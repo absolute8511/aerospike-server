@@ -32,11 +32,22 @@
 #include <sys/types.h>
 
 #include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_queue.h"
 
 #include "hist.h"
-#include "queue.h"
 
-#include "base/datamodel.h"
+#include "fabric/partition.h"
+
+
+//==========================================================
+// Forward declarations.
+//
+
+struct as_index_s;
+struct as_namespace_s;
+struct as_rec_props_s;
+struct as_storage_rd_s;
+struct drv_ssd_s;
 
 
 //==========================================================
@@ -57,9 +68,6 @@
 // 2 - minimum storage increment (RBLOCK_SIZE) from 512 to 128 bytes
 
 #define MAX_SSD_THREADS 20
-
-// Forward declaration.
-struct drv_ssd_s;
 
 
 //------------------------------------------------
@@ -136,7 +144,7 @@ typedef enum {
 //
 typedef struct drv_ssd_s
 {
-	as_namespace	*ns;
+	struct as_namespace_s *ns;
 
 	char			*name;				// this device's name
 	char			*shadow_name;		// this device's shadow's name, if any
@@ -160,9 +168,11 @@ typedef struct drv_ssd_s
 	cf_queue		*swb_free_q;		// pointers to swbs free and waiting
 	cf_queue		*post_write_q;		// pointers to swbs that have been written but are cached
 
-	cf_atomic_int	n_defrag_wblock_reads;	// total number of wblocks added to the defrag_wblock_q
-	cf_atomic_int	n_defrag_wblock_writes;	// total number of swbs added to the swb_write_q by defrag
-	cf_atomic_int	n_wblock_writes;		// total number of swbs added to the swb_write_q by writes
+	cf_atomic64		n_defrag_wblock_reads;	// total number of wblocks added to the defrag_wblock_q
+	cf_atomic64		n_defrag_wblock_writes;	// total number of swbs added to the swb_write_q by defrag
+	cf_atomic64		n_wblock_writes;		// total number of swbs added to the swb_write_q by writes
+
+	volatile uint64_t n_tomb_raider_reads;	// relevant for enterprise edition only
 
 	cf_atomic32		defrag_sweep;		// defrag sweep flag
 
@@ -185,7 +195,7 @@ typedef struct drv_ssd_s
 	bool			sub_sweep;
 
 	uint32_t		cold_start_block_counter;		// large blocks read
-	uint64_t		record_add_generation_counter;	// records not inserted due to generation
+	uint64_t		record_add_older_counter;		// records not inserted due to better existing one
 	uint64_t		record_add_expired_counter;		// records not inserted due to expiration
 	uint64_t		record_add_max_ttl_counter;		// records not inserted due to max-ttl
 	uint64_t		record_add_replace_counter;		// records reinserted
@@ -213,8 +223,8 @@ typedef struct drv_ssd_s
 //
 typedef struct drv_ssds_s
 {
-	ssd_device_header	*header;
-	as_namespace		*ns;
+	ssd_device_header		*header;
+	struct as_namespace_s	*ns;
 
 	// Not a great place for this - used only at startup to determine whether to
 	// load a record.
@@ -229,14 +239,46 @@ typedef struct drv_ssds_s
 // Private API - for enterprise separation only
 //
 
+#define SSD_BLOCK_MAGIC		0x037AF200
+#define LENGTH_BASE			offsetof(struct drv_ssd_block_s, keyd)
+
+// Per-record metadata on device.
+typedef struct drv_ssd_block_s {
+	uint64_t		sig;			// deprecated
+	uint32_t		magic;
+	uint32_t		length;			// total after this field - this struct's pointer + 16
+	cf_digest		keyd;
+	uint32_t		generation;
+	cf_clock		void_time;
+	uint32_t		bins_offset;	// offset to bins from data
+	uint32_t		n_bins;
+	uint64_t		last_update_time;
+	uint8_t			data[];
+} __attribute__ ((__packed__)) drv_ssd_block;
+
+// Warm restart.
 void ssd_resume_devices(drv_ssds *ssds);
+
+// Tomb raider.
+void ssd_cold_start_adjust_cenotaph(struct as_namespace_s *ns, const drv_ssd_block *block, struct as_index_s *r);
+void ssd_cold_start_transition_record(struct as_namespace_s *ns, const drv_ssd_block *block, struct as_index_s *r, bool is_create);
+void ssd_cold_start_drop_cenotaphs(struct as_namespace_s *ns);
+
+// Miscellaneous.
+bool ssd_cold_start_is_valid_n_bins(uint32_t n_bins);
+bool ssd_cold_start_is_record_truncated(struct as_namespace_s *ns, const drv_ssd_block *block, const struct as_rec_props_s *p_props);
+
+// Called in (enterprise-split) storage table function.
+int ssd_write(struct as_storage_rd_s *rd);
+
 
 //
 // Conversions between bytes and rblocks.
 //
 
-#define STORAGE_RBLOCK_IS_VALID(__x)	((__x) != STORAGE_INVALID_RBLOCK)
-#define STORAGE_RBLOCK_IS_INVALID(__x)	((__x) == STORAGE_INVALID_RBLOCK)
+// TODO - make checks stricter (exclude drive header, consider drive size) ???
+#define STORAGE_RBLOCK_IS_VALID(__x)	((__x) != 0)
+#define STORAGE_RBLOCK_IS_INVALID(__x)	((__x) == 0)
 
 #define RBLOCK_SIZE			128	// 2^7
 #define LOG_2_RBLOCK_SIZE	7	// must be in sync with RBLOCK_SIZE

@@ -48,6 +48,7 @@ dist:
 	@# share configs
 	install -pm 755 -Dd $(TARGET)/share/etc
 	install -pm 644 -D $(SOURCE)/share/etc/aerospike.conf $(TARGET)/share/etc/aerospike.conf
+	install -pm 755 -D $(DEPTH)/as/etc/irqbalance-ban.sh $(TARGET)/share/etc/irqbalance-ban.sh
 
 	@# lua files
 	install -pm 755 -Dd $(TARGET)/share/udf/lua

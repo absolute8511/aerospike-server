@@ -61,12 +61,11 @@ typedef struct as_mon_jobstat_s {
 	char		set[AS_SET_NAME_MAX_SIZE];
 	uint32_t	priority;
 	char		status[64];
-	uint32_t	progress_pct;
+	float		progress_pct;
 	uint64_t	run_time;
 	uint64_t	time_since_done;
 	uint64_t	recs_read;
 	uint64_t	net_io_bytes;
-	uint64_t	mem;
 	float		cpu;
 	char		jdata[512];
 } as_mon_jobstat;

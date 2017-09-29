@@ -8,21 +8,16 @@ ifeq ($(USE_EE),1)
   include $(EEREPO)/cf/make_in/Makefile.vars
 endif
 
-HEADERS += arenax.h cf_str.h dynbuf.h
-HEADERS += enhanced_alloc.h fault.h hist.h hist_track.h mem_count.h
-HEADERS += meminfo.h msg.h olock.h queue.h rchash.h socket.h util.h
+HEADERS += arenax.h bits.h cf_str.h daemon.h dynbuf.h
+HEADERS += enhanced_alloc.h fault.h hist.h hist_track.h linear_hist.h mem_count.h
+HEADERS += meminfo.h msg.h node.h olock.h socket.h tls.h
 HEADERS += vmapx.h
 
-SOURCES += alloc.c arenax.c cf_str.c daemon.c dynbuf.c fault.c
-SOURCES += hist.c hist_track.c id.c meminfo.c msg.c olock.c
+SOURCES += alloc.c arenax.c cf_str.c daemon.c dynbuf.c fault.c hardware.c
+SOURCES += hist.c hist_track.c linear_hist.c meminfo.c msg.c node.c olock.c
 SOURCES += socket.c vmapx.c
-ifneq ($(USE_WARM),1)
-  SOURCES += arenax_cold.c
-endif
-
-ifeq ($(USE_JEM),1)
-  HEADERS += jem.h
-  SOURCES += jem.c
+ifneq ($(USE_EE),1)
+  SOURCES += arenax_ce.c socket_ce.c tls_ce.c
 endif
 
 LIBRARY = $(LIBRARY_DIR)/libcf.a
@@ -31,8 +26,6 @@ INCLUDES += $(INCLUDE_DIR:%=-I%) -I$(COMMON)/src/include
 
 OBJECTS = $(SOURCES:%.c=$(OBJECT_DIR)/%.o)
 DEPENDENCIES = $(OBJECTS:%.o=%.d)
-MEXP_SOURCES = $(SOURCES:%=$(MEXP_DIR)/%)
-PREPROS = $(OBJECTS:%=%$(PREPRO_SUFFIX))
 
 .PHONY: all
 all: $(LIBRARY)
@@ -41,13 +34,8 @@ all: $(LIBRARY)
 clean:
 	$(RM) $(OBJECTS) $(LIBRARY)
 	$(RM) $(DEPENDENCIES)
-	$(RM) $(MEXP_SOURCES) $(PREPROS)
 
 $(LIBRARY): $(OBJECTS)
-ifneq ($(PREPRO),1)
-  ifneq ($(MEXP_PHASE),1)
 	$(AR) rs $(LIBRARY) $(OBJECTS)
-  endif
-endif
 
 include $(DEPTH)/make_in/Makefile.targets

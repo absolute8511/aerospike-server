@@ -1,7 +1,7 @@
 /*
  * ldt_record.c
  *
- * Copyright (C) 2013-2015 Aerospike, Inc.
+ * Copyright (C) 2013-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -24,8 +24,6 @@
  * as_record interface for large stack objects
  *
  */
-
-#include "base/feature.h" // Turn new AS Features on/off (must be first in line)
 
 #include "base/ldt_record.h"
 
@@ -184,6 +182,23 @@ ldt_record_ttl(const as_rec * rec)
 	return as_rec_ttl(h_urec);
 }
 
+static uint64_t
+ldt_record_last_update_time(const as_rec * rec)
+{
+	static const char * meth = "ldt_record_last_update_time()";
+	if (!rec) {
+		cf_warning(AS_UDF, "%s: Invalid Parameters [record=%p]", meth, rec);
+		return 0;
+	}
+	ldt_record *lrecord  = (ldt_record *)as_rec_source(rec);
+	if (!lrecord) {
+		return 0;
+	}
+	const as_rec *h_urec = lrecord->h_urec;
+
+	return as_rec_last_update_time(h_urec);
+}
+
 static uint16_t
 ldt_record_gen(const as_rec * rec)
 {
@@ -272,11 +287,29 @@ ldt_record_bin_names(const as_rec * rec, as_rec_bin_names_callback callback, voi
 	return as_rec_bin_names(h_urec, callback, context);
 }
 
+static uint16_t
+ldt_record_numbins(const as_rec * rec)
+{
+	static const char * meth = "ldt_record_numbins()";
+	if (!rec) {
+		cf_warning(AS_UDF, "%s Invalid Parameters: record=%p", meth, rec);
+		return 0;
+	}
+	ldt_record *lrecord  = (ldt_record *)as_rec_source(rec);
+	if (!lrecord) {
+		return 0;
+	}
+	const as_rec *h_urec = lrecord->h_urec;
+
+	return as_rec_numbins(h_urec);
+}
+
 const as_rec_hooks ldt_record_hooks = {
 	.get		= ldt_record_get,
 	.set		= ldt_record_set,
 	.remove		= ldt_record_remove,
 	.ttl		= ldt_record_ttl,
+	.last_update_time	= ldt_record_last_update_time,
 	.gen		= ldt_record_gen,
 	.key		= ldt_record_key,
 	.setname	= ldt_record_setname,
@@ -287,5 +320,5 @@ const as_rec_hooks ldt_record_hooks = {
 	.set_ttl	= ldt_record_set_ttl,
 	.drop_key	= ldt_record_drop_key,
 	.bin_names	= ldt_record_bin_names,
-	.numbins	= NULL
+	.numbins	= ldt_record_numbins
 };

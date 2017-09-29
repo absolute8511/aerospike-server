@@ -1,6 +1,7 @@
 .DS_Store
 .cproject
 .project
+.settings
 /vg.log
 TAGS
 run
@@ -11,3 +12,9 @@ target
 \#*\#
 .\#*
 
+# TLS credentials
+key.pem
+cert.pem
+chain.pem
+cacert.pem
+cbl.txt

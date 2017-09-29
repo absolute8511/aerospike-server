@@ -3,9 +3,11 @@
 CWD=$(pwd)
 SCRIPT=${BASH_SOURCE[0]}
 SCRIPT_PATH=$( cd "$( dirname "${SCRIPT}" )" && pwd )
+SCRIPT_BASE=$( basename "${SCRIPT}" )
 
 SOURCE=${1}
 TARGET=${2}
+DEPTH=${3}
 
 if [ -z "${SOURCE}" ]; then
   echo "ERROR: Missing SOURCE argument." >&2
@@ -20,11 +22,18 @@ if [ ! -d ${SOURCE} ]; then
   exit 1
 fi
 
+if [ -n "${DEPTH}" ]; then
+	if [ ${DEPTH} -eq 0 ]; then
+		exit 0
+	fi
+	DEPTH=$((DEPTH - 1))
+fi
+
 mkdir -p ${TARGET}
 
 IFS=$'\n'
 for file in $(cd ${SOURCE} && git ls-files --abbrev); do
-  if [ -f ${f} ]; then
+  if [ -f ${SOURCE}/${file} ]; then
     dir=$(dirname ${file})
     if [ ! -z "${dir}" ] && [ ! -d ${TARGET}/${dir} ]; then
       mkdir -p "${TARGET}/${dir}"
@@ -34,5 +43,5 @@ for file in $(cd ${SOURCE} && git ls-files --abbrev); do
 done
 
 for module in $(cd ${SOURCE} && git submodule status | awk '{print $2}'); do
-  bash ${SCRIPT_PATH}/${SCRIPT} ${SOURCE}/${module} ${TARGET}/${module}
+  bash ${SCRIPT_PATH}/${SCRIPT_BASE} ${SOURCE}/${module} ${TARGET}/${module} ${DEPTH}
 done

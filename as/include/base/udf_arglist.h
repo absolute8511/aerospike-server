@@ -22,7 +22,7 @@
 
 #pragma once
 
-#include <aerospike/as_list.h>
+#include "aerospike/as_list.h"
 
 /******************************************************************************
  * VARIABLES

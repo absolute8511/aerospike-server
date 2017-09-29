@@ -30,13 +30,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <netinet/in.h>
 
-#include <aerospike/as_val.h>
-#include <citrusleaf/cf_digest.h>
-#include <citrusleaf/cf_vector.h>
+#include "aerospike/as_val.h"
+#include "citrusleaf/cf_digest.h"
+#include "citrusleaf/cf_vector.h"
 
 #include "dynbuf.h"
+#include "socket.h"
 
 
 // Forward declarations.
@@ -45,32 +45,36 @@ struct as_index_s;
 struct as_storage_rd_s;
 struct as_namespace_s;
 struct as_file_handle_s;
+struct as_transaction_s;
 
 // These numbers match with cl_types.h on the client
 
-#define AS_PROTO_RESULT_OK 0
-#define AS_PROTO_RESULT_FAIL_UNKNOWN 1 // unknown failure - consider retry
-#define AS_PROTO_RESULT_FAIL_NOTFOUND 2
-#define AS_PROTO_RESULT_FAIL_GENERATION 3
-#define AS_PROTO_RESULT_FAIL_PARAMETER 4
-#define AS_PROTO_RESULT_FAIL_RECORD_EXISTS 5 // if 'WRITE_ADD', could fail because already exists
-#define AS_PROTO_RESULT_FAIL_BIN_EXISTS 6
-#define AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH 7
-#define AS_PROTO_RESULT_FAIL_PARTITION_OUT_OF_SPACE 8
-#define AS_PROTO_RESULT_FAIL_TIMEOUT 9
-#define AS_PROTO_RESULT_FAIL_NOXDR 10
-#define AS_PROTO_RESULT_FAIL_UNAVAILABLE 11 // error returned during node down and partition isn't available
-#define AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE 12 // op and bin type incompatibility
-#define AS_PROTO_RESULT_FAIL_RECORD_TOO_BIG 13
-#define AS_PROTO_RESULT_FAIL_KEY_BUSY 14
-#define AS_PROTO_RESULT_FAIL_SCAN_ABORT 15
-#define AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE 16 // asked to do something we don't yet do (like scan+udf).
-#define AS_PROTO_RESULT_FAIL_BIN_NOT_FOUND 17
-#define AS_PROTO_RESULT_FAIL_DEVICE_OVERLOAD 18
-#define AS_PROTO_RESULT_FAIL_KEY_MISMATCH 19
-#define AS_PROTO_RESULT_FAIL_NAMESPACE 20
-#define AS_PROTO_RESULT_FAIL_BIN_NAME 21
-#define AS_PROTO_RESULT_FAIL_FORBIDDEN 22 // operation (perhaps temporarily) not possible
+#define AS_PROTO_RESULT_OK							0
+#define AS_PROTO_RESULT_FAIL_UNKNOWN				1	// unknown failure - consider retry
+#define AS_PROTO_RESULT_FAIL_NOTFOUND				2
+#define AS_PROTO_RESULT_FAIL_GENERATION				3
+#define AS_PROTO_RESULT_FAIL_PARAMETER				4
+#define AS_PROTO_RESULT_FAIL_RECORD_EXISTS			5	// if 'WRITE_ADD', could fail because already exists
+#define AS_PROTO_RESULT_FAIL_UNUSED_6				6	// recycle - was AS_PROTO_RESULT_FAIL_BIN_EXISTS
+#define AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH	7
+#define AS_PROTO_RESULT_FAIL_OUT_OF_SPACE			8
+#define AS_PROTO_RESULT_FAIL_TIMEOUT				9
+#define AS_PROTO_RESULT_FAIL_UNUSED_10				10	// recycle - was AS_PROTO_RESULT_FAIL_NOXDR
+#define AS_PROTO_RESULT_FAIL_UNAVAILABLE			11	// error returned during node down and partition isn't available
+#define AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE		12	// op and bin type incompatibility
+#define AS_PROTO_RESULT_FAIL_RECORD_TOO_BIG			13
+#define AS_PROTO_RESULT_FAIL_KEY_BUSY				14
+#define AS_PROTO_RESULT_FAIL_SCAN_ABORT				15
+#define AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE	16	// asked to do something we don't do for a particular configuration
+#define AS_PROTO_RESULT_FAIL_UNUSED_17				17	// recycle - was AS_PROTO_RESULT_FAIL_BIN_NOT_FOUND
+#define AS_PROTO_RESULT_FAIL_DEVICE_OVERLOAD		18
+#define AS_PROTO_RESULT_FAIL_KEY_MISMATCH			19
+#define AS_PROTO_RESULT_FAIL_NAMESPACE				20
+#define AS_PROTO_RESULT_FAIL_BIN_NAME				21
+#define AS_PROTO_RESULT_FAIL_FORBIDDEN				22	// operation (perhaps temporarily) not possible
+#define AS_PROTO_RESULT_FAIL_ELEMENT_NOT_FOUND		23
+#define AS_PROTO_RESULT_FAIL_ELEMENT_EXISTS			24
+#define AS_PROTO_RESULT_FAIL_ENTERPRISE_ONLY		25	// attempting enterprise functionality on community build
 
 // Security result codes. Must be <= 255, to fit in one byte. Defined here to
 // ensure no overlap with other result codes.
@@ -151,7 +155,8 @@ struct as_file_handle_s;
 #define PROTO_TYPE_SECURITY				2
 #define PROTO_TYPE_AS_MSG				3
 #define PROTO_TYPE_AS_MSG_COMPRESSED	4
-#define PROTO_TYPE_MAX					5 // if you see 5, it's illegal
+#define PROTO_TYPE_INTERNAL_XDR			5
+#define PROTO_TYPE_MAX					6 // if you see 6, it's illegal
 
 #define PROTO_SIZE_MAX (128 * 1024 * 1024) // used simply for validation, as we've been corrupting msgp's
 
@@ -182,17 +187,18 @@ typedef struct as_comp_proto_s {
 /* as_msg_field
 * Aerospike message field */
 typedef struct as_msg_field_s {
-#define AS_MSG_FIELD_TYPE_NAMESPACE 0 	// UTF8 string
-#define AS_MSG_FIELD_TYPE_SET 1
-#define AS_MSG_FIELD_TYPE_KEY 2 		// contains a key value
-#define AS_MSG_FIELD_TYPE_DIGEST_RIPE 4 // Key digest computed with RIPE160
-#define AS_MSG_FIELD_TYPE_DIGEST_RIPE_ARRAY 6
-#define AS_MSG_FIELD_TYPE_TRID 7
-#define AS_MSG_FIELD_TYPE_SCAN_OPTIONS 8
+#define AS_MSG_FIELD_TYPE_NAMESPACE				0
+#define AS_MSG_FIELD_TYPE_SET					1
+#define AS_MSG_FIELD_TYPE_KEY					2
+#define AS_MSG_FIELD_TYPE_DIGEST_RIPE			4
+#define AS_MSG_FIELD_TYPE_DIGEST_RIPE_ARRAY		6
+#define AS_MSG_FIELD_TYPE_TRID					7
+#define AS_MSG_FIELD_TYPE_SCAN_OPTIONS			8
+#define AS_MSG_FIELD_TYPE_SOCKET_TIMEOUT		9
 
 #define AS_MSG_FIELD_TYPE_INDEX_NAME			21
 #define	AS_MSG_FIELD_TYPE_INDEX_RANGE			22
-#define AS_MSG_FIELD_TYPE_INDEX_TYPE  			26
+#define AS_MSG_FIELD_TYPE_INDEX_TYPE			26
 
 // UDF RANGE: 30-39
 #define AS_MSG_FIELD_TYPE_UDF_FILENAME			30
@@ -203,6 +209,7 @@ typedef struct as_msg_field_s {
 #define AS_MSG_FIELD_TYPE_QUERY_BINLIST			40
 #define AS_MSG_FIELD_TYPE_BATCH					41
 #define AS_MSG_FIELD_TYPE_BATCH_WITH_SET		42
+#define AS_MSG_FIELD_TYPE_PREDEXP				43
 
 	/* NB: field_sz is sizeof(type) + sizeof(data) */
 	uint32_t field_sz; // get the data size through the accessor function, don't worry, it's a small macro
@@ -210,23 +217,29 @@ typedef struct as_msg_field_s {
 	uint8_t data[];
 } __attribute__((__packed__)) as_msg_field;
 
-typedef struct map_args_t {
-	int    argc;
-	char **kargv;
-	char **vargv;
-} map_args_t;
+// For as_transaction::field_types, a bit-field to mark which fields are in the
+// as_msg.
+#define AS_MSG_FIELD_BIT_NAMESPACE			0x00000001
+#define AS_MSG_FIELD_BIT_SET				0x00000002
+#define AS_MSG_FIELD_BIT_KEY				0x00000004
+#define AS_MSG_FIELD_BIT_DIGEST_RIPE		0x00000008
+#define AS_MSG_FIELD_BIT_DIGEST_RIPE_ARRAY	0x00000010
+#define AS_MSG_FIELD_BIT_TRID				0x00000020
+#define AS_MSG_FIELD_BIT_SCAN_OPTIONS		0x00000040
+#define AS_MSG_FIELD_BIT_SOCKET_TIMEOUT		0x00000080
+#define AS_MSG_FIELD_BIT_INDEX_NAME			0x00000100
+#define	AS_MSG_FIELD_BIT_INDEX_RANGE		0x00000200
+#define AS_MSG_FIELD_BIT_INDEX_TYPE  		0x00000400
+#define AS_MSG_FIELD_BIT_UDF_FILENAME		0x00000800
+#define AS_MSG_FIELD_BIT_UDF_FUNCTION		0x00001000
+#define AS_MSG_FIELD_BIT_UDF_ARGLIST		0x00002000
+#define AS_MSG_FIELD_BIT_UDF_OP				0x00004000
+#define AS_MSG_FIELD_BIT_QUERY_BINLIST		0x00008000
+#define AS_MSG_FIELD_BIT_BATCH				0x00010000
+#define AS_MSG_FIELD_BIT_BATCH_WITH_SET		0x00020000
+#define AS_MSG_FIELD_BIT_PREDEXP			0x00040000
 
-typedef struct index_metadata_t {
-	char     *iname;
-	int       ilen;
-	char     *bname;
-	int       blen;
-	char     *type;
-	int       tlen;
-	int       msg_sz;
-	uint8_t   isuniq;
-	uint8_t   istime;
-} index_metadata_t;
+// as_msg ops
 
 #define AS_MSG_OP_READ 1			// read the value in question
 #define AS_MSG_OP_WRITE 2			// write the value in question
@@ -311,16 +324,6 @@ static inline uint32_t as_msg_field_get_strncpy(as_msg_field *f, char *dst, int 
 	}
 }
 
-typedef struct as_msg_key_s {
-	as_msg_field	f;
-	uint8_t			key[];
-} __attribute__ ((__packed__)) as_msg_key;
-
-typedef struct as_msg_number_s {
-	as_msg_field	f;
-	uint32_t		number;
-} __attribute__ ((__packed__)) as_msg_number;
-
 typedef struct as_msg_s {
 	/*00 [x00] (08) */	uint8_t		header_sz;	// number of bytes in this header - 22
 	/*01 [x01] (09) */	uint8_t		info1;		// bitfield about this request
@@ -356,10 +359,10 @@ typedef struct cl_msg_s {
 #define AS_MSG_INFO2_WRITE				(1 << 0) // contains a write semantic
 #define AS_MSG_INFO2_DELETE				(1 << 1) // delete record
 #define AS_MSG_INFO2_GENERATION			(1 << 2) // pay attention to the generation
-#define AS_MSG_INFO2_GENERATION_GT		(1 << 3) // apply write if new generation >= old, good for restore
-// (Note:  Bit 4 is unused.)
+#define AS_MSG_INFO2_GENERATION_GT		(1 << 3) // apply write if new generation > old, good for restore
+#define AS_MSG_INFO2_DURABLE_DELETE		(1 << 4) // op resulting in record deletion leaves tombstone (Enterprise only)
 #define AS_MSG_INFO2_CREATE_ONLY		(1 << 5) // write record only if it doesn't exist
-#define AS_MSG_INFO2_BIN_CREATE_ONLY	(1 << 6) // write bin only if it doesn't exist
+// (Note:  Bit 6 is unused.)
 #define AS_MSG_INFO2_RESPOND_ALL_OPS	(1 << 7) // all bin ops (read, write, or modify) require a response, in request order
 
 #define AS_MSG_INFO3_LAST				(1 << 0) // this is the last of a multi-part message
@@ -368,7 +371,7 @@ typedef struct cl_msg_s {
 #define AS_MSG_INFO3_UPDATE_ONLY		(1 << 3) // update existing record only, do not create new record
 #define AS_MSG_INFO3_CREATE_OR_REPLACE	(1 << 4) // completely replace existing record, or create new record
 #define AS_MSG_INFO3_REPLACE_ONLY		(1 << 5) // completely replace existing record, do not create new record
-#define AS_MSG_INFO3_BIN_REPLACE_ONLY	(1 << 6) // replace existing bin, do not create new bin
+// (Note:  Bit 6 is unused.)
 // (Note:  Bit 7 is unused.)
 
 #define AS_MSG_FIELD_SCAN_INCLUDE_LDT_DATA			(0x02) // whether to send ldt bin data back to the client
@@ -388,10 +391,17 @@ as_msg_field_get_next_unswap(as_msg_field *mf)
 	return (as_msg_field*)(((uint8_t*)mf) + sizeof(mf->field_sz) + ntohl(mf->field_sz));
 }
 
+static inline uint8_t *
+as_msg_field_skip(as_msg_field *mf)
+{
+	// At least 1 byte always follow field_sz.
+	return mf->field_sz == 0 ? NULL : (uint8_t*)mf + sizeof(mf->field_sz) + mf->field_sz;
+}
+
 /* as_msg_field_get
  * Retrieve a specific field from a message */
 static inline as_msg_field *
-as_msg_field_get(as_msg *msg, uint8_t type)
+as_msg_field_get(const as_msg *msg, uint8_t type)
 {
 	uint16_t n;
 	as_msg_field *fp = NULL;
@@ -421,6 +431,13 @@ as_msg_op_get_next(as_msg_op *op)
 	return (as_msg_op*)(((uint8_t*)op) + sizeof(uint32_t) + op->op_sz);
 }
 
+static inline uint8_t *
+as_msg_op_skip(as_msg_op *op)
+{
+	// At least 4 bytes always follow op_sz.
+	return op->op_sz < 4 ? NULL : (uint8_t*)op + sizeof(op->op_sz) + op->op_sz;
+}
+
 /* as_msg_field_getnext
  * Iterator for all fields of a particular type.
  * First time through: pass 0 as current, you'll get a field.
@@ -438,7 +455,7 @@ as_msg_op_iterate(as_msg *msg, as_msg_op *current, int *n)
 
 		as_msg_field *mf = (as_msg_field*)msg->data;
 
-		for (uint i = 0; i < msg->n_fields; i++) {
+		for (uint16_t i = 0; i < msg->n_fields; i++) {
 			mf = as_msg_field_get_next(mf);
 		}
 
@@ -480,14 +497,11 @@ as_proto_wrapped_is_valid(const as_proto *proto, size_t size)
 extern void as_proto_swap(as_proto *m);
 extern void as_msg_swap_header(as_msg *m);
 extern void as_msg_swap_field(as_msg_field *mf);
-extern int as_msg_swap_fields(as_msg *m, void *limit);
 extern void as_msg_swap_op(as_msg_op *op);
-extern int as_msg_swap_ops(as_msg *m, void *limit);
-extern int as_msg_swap_fields_and_ops(as_msg *m, void *limit);
 extern int as_msg_send_reply(struct as_file_handle_s *fd_h, uint32_t result_code,
 		uint32_t generation, uint32_t void_time, as_msg_op **ops,
 		struct as_bin_s **bins, uint16_t bin_count, struct as_namespace_s *ns,
-		uint *written_sz, uint64_t trid, const char *setname);
+		uint64_t trid, const char *setname);
 extern int as_msg_send_ops_reply(struct as_file_handle_s *fd_h, cf_dyn_buf *db);
 
 extern cl_msg *as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
@@ -504,37 +518,24 @@ extern size_t as_msg_response_msgsize(struct as_index_s *r, struct as_storage_rd
 		bool nobindata, char *nsname, bool use_sets, cf_vector *binlist);
 extern int as_msg_make_val_response_bufbuilder(const as_val *val, cf_buf_builder **bb_r, int val_sz, bool);
 
-extern int as_msg_send_response(int fd, uint8_t* buf, size_t len, int flags);
-extern int as_msg_send_fin(int fd, uint32_t result_code);
+extern int as_msg_send_response(cf_socket *sock, uint8_t* buf, size_t len, int flags);
+extern int as_msg_send_fin(cf_socket *sock, uint32_t result_code);
 
-extern bool as_msg_peek_data_in_memory(cl_msg *msgp);
-
-// To find out key things about the message before actually reading it.
-typedef struct {
-	int       info1;
-	int       info2;
-	cf_digest keyd;
-	int       ns_queue_offset;
-	int       ns_n_devices;
-} proto_peek;
-
-// Always succeeds, sometimes finds nothing.
-extern void as_msg_peek(cl_msg *m, proto_peek *peek);
+extern bool as_msg_peek_data_in_memory(const as_msg *m);
 
 extern uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
-		const char *set, int set_len, const cf_digest *d, cf_digest *d_ret,
-		uint64_t trid, as_msg_field *scan_param_field, void * call);
+		const char *set, int set_len, const cf_digest *d, uint64_t trid);
 
-extern uint8_t * as_msg_write_header(uint8_t *buf, size_t msg_sz, uint info1,
-		uint info2, uint info3, uint32_t generation, uint32_t record_ttl,
+extern uint8_t * as_msg_write_header(uint8_t *buf, size_t msg_sz, uint8_t info1,
+		uint8_t info2, uint8_t info3, uint32_t generation, uint32_t record_ttl,
 		uint32_t transaction_ttl, uint32_t n_fields, uint32_t n_ops);
 
-// Async IO 
+// Async IO
 typedef int (* as_netio_finish_cb) (void *udata, int retcode);
 typedef int (* as_netio_start_cb) (void *udata, int seq);
 typedef struct as_netio_s {
 	as_netio_finish_cb         finish_cb;
-	as_netio_start_cb          start_cb;	
+	as_netio_start_cb          start_cb;
 	void                     * data;
 	// fd and buffer
 	struct as_file_handle_s  * fd_h;
@@ -550,8 +551,8 @@ int as_netio_send(as_netio *io, void *q, bool);
 
 #define AS_NETIO_OK        0
 #define AS_NETIO_CONTINUE  1
-#define AS_NETIO_ERR       2 
-#define AS_NETIO_IO_ERR    3 
+#define AS_NETIO_ERR       2
+#define AS_NETIO_IO_ERR    3
 
 // These values correspond to client protocol values - do not change them!
 typedef enum as_udf_op {
@@ -561,13 +562,32 @@ typedef enum as_udf_op {
 	AS_UDF_OP_FOREGROUND = 3		// not supported yet
 } as_udf_op;
 
-typedef enum as_cdt_paramtype_e {
-	AS_CDT_PARAM_NONE    = 0,
+#define CDT_MAGIC	0xC0 // so we know it can't be (first byte of) msgpack list/map
 
-	AS_CDT_PARAM_INDEX   = 1,
-	AS_CDT_PARAM_COUNT   = 2,
-	AS_CDT_PARAM_PAYLOAD = 3,
+typedef enum as_cdt_paramtype_e {
+	AS_CDT_PARAM_NONE		= 0,
+
+	AS_CDT_PARAM_INDEX		= 1,
+	AS_CDT_PARAM_COUNT		= 2,
+	AS_CDT_PARAM_PAYLOAD	= 3,
+	AS_CDT_PARAM_FLAGS		= 4,
 } as_cdt_paramtype;
+
+typedef enum result_type_e {
+	RESULT_TYPE_NONE			= 0,
+	RESULT_TYPE_INDEX			= 1,
+	RESULT_TYPE_REVINDEX		= 2,
+	RESULT_TYPE_RANK			= 3,
+	RESULT_TYPE_REVRANK			= 4,
+	RESULT_TYPE_COUNT			= 5,
+	RESULT_TYPE_KEY				= 6,
+	RESULT_TYPE_VALUE			= 7,
+	RESULT_TYPE_MAP				= 8,
+	RESULT_TYPE_INDEX_RANGE		= 9,
+	RESULT_TYPE_REVINDEX_RANGE	= 10,
+	RESULT_TYPE_RANK_RANGE		= 11,
+	RESULT_TYPE_REVRANK_RANGE	= 12,
+} result_type_t;
 
 typedef enum as_cdt_optype_e {
 	// ------------------------------------------------------------------------
@@ -599,23 +619,55 @@ typedef enum as_cdt_optype_e {
 	// ------------------------------------------------------------------------
 	// Map Operation
 
-	// Adding <key, value> to the Map
-	AS_CDT_OP_MAP_PUT            = 32,
-	AS_CDT_OP_MAP_PUT_ITEMS      = 33,
+	// Create and flags
+	AS_CDT_OP_MAP_SET_TYPE							= 64,
 
-	// Op by key
-	AS_CDT_OP_MAP_GET            = 34,
-	AS_CDT_OP_MAP_GET_MATCHING   = 35,
-	AS_CDT_OP_MAP_REMOVE         = 36,
-	AS_CDT_OP_MAP_REMOVE_ALL     = 37,
-	AS_CDT_OP_MAP_CONTAINS_KEY   = 38,
-	AS_CDT_OP_MAP_INCREMENT_BY   = 39,
-	AS_CDT_OP_MAP_CONTAINS_VALUE = 40,
+	// Modify Ops
+	AS_CDT_OP_MAP_ADD								= 65,
+	AS_CDT_OP_MAP_ADD_ITEMS							= 66,
+	AS_CDT_OP_MAP_PUT								= 67,
+	AS_CDT_OP_MAP_PUT_ITEMS							= 68,
+	AS_CDT_OP_MAP_REPLACE							= 69,
+	AS_CDT_OP_MAP_REPLACE_ITEMS						= 70,
+	AS_CDT_OP_MAP_RESERVED_0						= 71,
+	AS_CDT_OP_MAP_RESERVED_1						= 72,
 
-	// Misc
-	AS_CDT_OP_MAP_GET_ITEMS      = 41,
-	AS_CDT_OP_MAP_KEYS           = 42,
-	AS_CDT_OP_MAP_VALUES         = 43,
-	AS_CDT_OP_MAP_CLEAR          = 44,
-	AS_CDT_OP_MAP_SIZE           = 45,
+	AS_CDT_OP_MAP_INCREMENT							= 73,
+	AS_CDT_OP_MAP_DECREMENT							= 74,
+
+	AS_CDT_OP_MAP_CLEAR								= 75,
+
+	AS_CDT_OP_MAP_REMOVE_BY_KEY						= 76,
+	AS_CDT_OP_MAP_REMOVE_BY_INDEX					= 77,
+	AS_CDT_OP_MAP_REMOVE_BY_VALUE					= 78,
+	AS_CDT_OP_MAP_REMOVE_BY_RANK					= 79,
+
+	AS_CDT_OP_MAP_RESERVED_2						= 80,
+	AS_CDT_OP_MAP_REMOVE_BY_KEY_LIST				= 81,
+	AS_CDT_OP_MAP_REMOVE_ALL_BY_VALUE				= 82,
+	AS_CDT_OP_MAP_REMOVE_BY_VALUE_LIST				= 83,
+
+	AS_CDT_OP_MAP_REMOVE_BY_KEY_INTERVAL			= 84,
+	AS_CDT_OP_MAP_REMOVE_BY_INDEX_RANGE				= 85,
+	AS_CDT_OP_MAP_REMOVE_BY_VALUE_INTERVAL			= 86,
+	AS_CDT_OP_MAP_REMOVE_BY_RANK_RANGE				= 87,
+
+	// Read ops
+	AS_CDT_OP_MAP_SIZE								= 96,
+
+	AS_CDT_OP_MAP_GET_BY_KEY						= 97,
+	AS_CDT_OP_MAP_GET_BY_INDEX						= 98,
+	AS_CDT_OP_MAP_GET_BY_VALUE						= 99,
+	AS_CDT_OP_MAP_GET_BY_RANK						= 100,
+
+	AS_CDT_OP_MAP_RESERVED_3						= 101,
+	AS_CDT_OP_MAP_GET_ALL_BY_VALUE					= 102,
+
+	AS_CDT_OP_MAP_GET_BY_KEY_INTERVAL				= 103,
+	AS_CDT_OP_MAP_GET_BY_INDEX_RANGE				= 104,
+	AS_CDT_OP_MAP_GET_BY_VALUE_INTERVAL				= 105,
+	AS_CDT_OP_MAP_GET_BY_RANK_RANGE					= 106,
+
 } as_cdt_optype;
+
+#define AS_CDT_OP_LIST_LAST	AS_CDT_OP_LIST_GET_RANGE

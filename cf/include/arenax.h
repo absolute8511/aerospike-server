@@ -44,10 +44,11 @@
 #define CF_ARENAX_BIGLOCK	(1 << 0)
 #define CF_ARENAX_CALLOC	(1 << 1)
 
-// Stage is indexed by 8 bits.
-#define CF_ARENAX_MAX_STAGES (1 << 8) // 256
+#ifndef CF_ARENAX_MAX_STAGES
+#define CF_ARENAX_MAX_STAGES 256
+#endif
 
-typedef uint32_t cf_arenax_handle;
+typedef uint64_t cf_arenax_handle;
 
 // Must be in-sync with internal array ARENAX_ERR_STRINGS[]:
 typedef enum {
@@ -64,7 +65,10 @@ typedef enum {
 //
 
 // Element is indexed by 24 bits.
-#define MAX_STAGE_CAPACITY (1 << 24) // 16 M
+#define ELEMENT_ID_NUM_BITS	24
+#define ELEMENT_ID_MASK		0xFFffFFL // least significant 24 bits (3 bytes)
+
+#define MAX_STAGE_CAPACITY (1 << ELEMENT_ID_NUM_BITS) // 16 M
 
 // DO NOT access this member data directly - use the API!
 typedef struct cf_arenax_s {
@@ -92,11 +96,6 @@ typedef struct cf_arenax_s {
 	uint32_t			stage_count;
 	uint8_t*			stages[CF_ARENAX_MAX_STAGES];
 } cf_arenax;
-
-typedef struct arenax_handle_s {
-	uint32_t stage_id: 8;
- 	uint32_t element_id: 24;
-} __attribute__ ((__packed__)) arenax_handle;
 
 typedef struct free_element_s {
 	uint32_t			magic;
@@ -142,5 +141,12 @@ void* cf_arenax_resolve(cf_arenax* _this, cf_arenax_handle h);
 //==========================================================
 // Private API - for enterprise separation only
 //
+
+static inline void
+cf_arenax_set_handle(cf_arenax_handle* h, uint32_t stage_id,
+		uint32_t element_id)
+{
+	*h = ((uint64_t)stage_id << ELEMENT_ID_NUM_BITS) | element_id;
+}
 
 cf_arenax_err cf_arenax_add_stage(cf_arenax* _this);

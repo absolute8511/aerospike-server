@@ -49,6 +49,21 @@ set_shmmax() {
 	fi
 }
 
+set_socket_buffer_limit() {
+	name=${1}; path=${2}; size=${3}
+	curr=$(cat ${path})
+
+	if [ ${curr} -lt ${size} ]; then
+		echo "Increasing ${name} socket buffer limit (${path}): ${curr} -> ${size}"
+		echo ${size} >${path}
+	fi
+}
+
+set_socket_buffer_limits() {
+	set_socket_buffer_limit read /proc/sys/net/core/rmem_max 15728640
+	set_socket_buffer_limit write /proc/sys/net/core/wmem_max 5242880
+}
+
 #We are adding create_piddir as /var/run is tmpfs on Debian 7+/Ubuntu 12+. This causes
 #the piddir to be removed on reboot
 create_piddir() {
@@ -74,12 +89,27 @@ stop() {
 	return $rv
 }
 
+do_telemetry_start () {
+	if [ $EDITION = "community" ];
+	then
+		/usr/sbin/service aerospike_telemetry start >/dev/null  2>&1
+	fi
+}
+
+do_telemetry_stop () {
+	if [ $EDITION = "community" ];
+	then
+		/usr/sbin/service aerospike_telemetry stop >/dev/null  2>&1
+	fi
+}
+
 case "$1" in
 	start|coldstart)
 		ulimit -n 100000
 		logger -t aerospike "ulimit -n=" `ulimit -n`
 		set_shmall
 		set_shmmax
+		set_socket_buffer_limits
 		create_piddir
 
 		[ -n "$LD_PRELOAD" ] && export LD_PRELOAD
@@ -97,6 +127,8 @@ case "$1" in
 				log_end_msg 1
 				;;
 		esac
+
+		do_telemetry_start
 		;;
 	stop)
 		log_daemon_msg "Stopping aerospike"
@@ -113,14 +145,8 @@ case "$1" in
 				log_end_msg 1
 				;;
 		esac
-		;;
-	stop)
-		log_daemon_msg "Halt aerospike: " "asd"
-		if start-stop-daemon --stop --quiet --name $ASDN  ; then
-			log_end_msg 0
-		else
-			log_end_msg 1
-		fi
+
+		do_telemetry_stop
 		;;
 	status)
 		status_of_proc -p $PIDFILE $ASDN aerospike

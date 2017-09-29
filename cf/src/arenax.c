@@ -144,8 +144,12 @@ cf_arenax_create(cf_arenax* this, key_t key_base, uint32_t element_size,
 	// Add first stage.
 	cf_arenax_err result = cf_arenax_add_stage(this);
 
+	if (result == CF_ARENAX_OK) {
+		// Clear the null element - allocation bypasses it, but it may be read.
+		memset(cf_arenax_resolve(this, 0), 0, element_size);
+	}
 	// No need to detach - add_stage() won't fail and leave attached stage.
-	if (result != CF_ARENAX_OK && (this->flags & CF_ARENAX_BIGLOCK)) {
+	else if (this->flags & CF_ARENAX_BIGLOCK) {
 		pthread_mutex_destroy(&this->lock);
 	}
 
@@ -188,8 +192,7 @@ cf_arenax_alloc(cf_arenax* this)
 			this->at_element_id = 0;
 		}
 
-		((arenax_handle*)&h)->stage_id = this->at_stage_id;
-		((arenax_handle*)&h)->element_id = this->at_element_id;
+		cf_arenax_set_handle(&h, this->at_stage_id, this->at_element_id);
 
 		this->at_element_id++;
 	}
@@ -234,6 +237,6 @@ cf_arenax_free(cf_arenax* this, cf_arenax_handle h)
 void*
 cf_arenax_resolve(cf_arenax* this, cf_arenax_handle h)
 {
-	return this->stages[((arenax_handle*)&h)->stage_id] +
-			(((arenax_handle*)&h)->element_id * this->element_size);
+	return this->stages[h >> ELEMENT_ID_NUM_BITS] +
+			((h & ELEMENT_ID_MASK) * this->element_size);
 }

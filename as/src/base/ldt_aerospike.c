@@ -1,7 +1,7 @@
 /*
  * ldt_aerospike.c
  *
- * Copyright (C) 2013-2015 Aerospike, Inc.
+ * Copyright (C) 2013-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -29,8 +29,6 @@
  *  some part its own logic
  */
 
-#include "base/feature.h" // Turn new AS Features on/off
-
 #include "base/ldt_aerospike.h"
 
 #include <stdbool.h>
@@ -46,15 +44,15 @@
 
 #include "fault.h"
 #include "msg.h"
-#include "util.h"
 
 #include "base/datamodel.h"
 #include "base/ldt.h"
 #include "base/ldt_record.h"
-#include "base/thr_rw_internal.h"
 #include "base/transaction.h"
 #include "base/udf_record.h"
 #include "fabric/fabric.h"
+#include "transaction/udf.h"
+
 
 /* GLOBALS */
 as_aerospike g_ldt_aerospike; // Only instantiation is enough
@@ -178,7 +176,7 @@ chunk_print(ldt_slot *lslotp)
 	udf_record *c_urecord = &lslotp->c_urecord;
 
 	cf_detail(AS_LDT, "LSO CHUNK: slotp = %p lchunk [%p,%p,%p,%p] ", lslotp,
-				lslotp->c_urecord, &lslotp->tr, &lslotp->rd, &lslotp->r_ref);
+				&lslotp->c_urecord, &lslotp->tr, &lslotp->rd, &lslotp->r_ref);
 	cf_detail(AS_LDT, "LSO CHUNK: slotp = %p urecord   [%p,%p,%p,%p] ", lslotp,
 				c_urecord, c_urecord->tr, c_urecord->rd, c_urecord->r_ref);
 	return 0;
@@ -205,7 +203,7 @@ slot_lookup_by_digest(ldt_record *lrecord, cf_digest *keyd)
 		ldt_slot_chunk *lchunk = &lrecord->chunk[i];
 		for (int j = 0; j < LDT_SLOT_CHUNK_SIZE; j++) {
 			if (lchunk->slots[j].inuse &&
-				(0 == cf_digest_compare(&lchunk->slots[j].rd.keyd, keyd))) {
+				(0 == cf_digest_compare(&lchunk->slots[j].rd.r->keyd, keyd))) {
 				return &lchunk->slots[j];
 			}
 		}
@@ -312,9 +310,8 @@ slot_init(ldt_slot *lslotp, ldt_record *lrecord)
 	as_transaction * c_tr      = &lslotp->tr;
 
 	// Chunk Record Does not respond for proxy request
-	c_tr->proto_fd_h           = NULL;       // Need not reply
-	c_tr->proxy_node           = 0;          // ??
-	c_tr->proxy_msg            = NULL;       // ??
+	c_tr->from.any             = NULL;       // Need not reply
+	c_tr->from_data.any        = 0;          // ??
 
 	// Chunk Record Does not respond back to the client
 	c_tr->result_code          = 0;
@@ -325,14 +322,14 @@ slot_init(ldt_slot *lslotp, ldt_record *lrecord)
 	c_tr->msgp                 = h_tr->msgp;
 
 	// We do not track microbenchmark or time for chunk today
-	c_tr->microbenchmark_time  = 0;
-	c_tr->microbenchmark_is_resolve = false;
+	c_tr->benchmark_time  = 0;
 	c_tr->start_time           = h_tr->start_time;
 	c_tr->end_time             = h_tr->end_time;
 
 	// Chunk transaction is always preprocessed
-	c_tr->preprocessed         = true;       // keyd is hence preprocessed
-	c_tr->flag                 = 0;
+	c_tr->msg_fields           = h_tr->msg_fields;
+	c_tr->from_flags           = 0;
+	c_tr->flags                = 0;
 
 	// Parent reservation cannot go away as long as Chunck needs reservation.
 	memcpy(&c_tr->rsv, &h_tr->rsv, sizeof(as_partition_reservation));
@@ -358,7 +355,6 @@ slot_setup_digest(ldt_slot *lslotp, cf_digest *keyd)
 	//
 	// urecord->keyd is the digest which gets exposed to lua world. In this
 	// version bits are always set to zero.
-	cf_detail(AS_LDT, "LDT_VERSION Resetting @ create LDT version %p", *(uint64_t *)&c_urecord->keyd);
 	as_ldt_subdigest_resetversion(&c_urecord->keyd);
 
 }
@@ -476,7 +472,7 @@ crec_create(ldt_record *lrecord)
 {
 	// Generate Key Digest
 	udf_record *h_urecord = (udf_record *) as_rec_source(lrecord->h_urec);
-	cf_digest keyd        = h_urecord->r_ref->r->key;
+	cf_digest keyd        = h_urecord->r_ref->r->keyd;
 	as_namespace *ns      = h_urecord->tr->rsv.ns;
 	int retry_cnt         = 0;
 	ldt_slot *lslotp      = slot_lookup_free(lrecord, "crec_create");
@@ -520,7 +516,6 @@ crec_create(ldt_record *lrecord)
  * lrecord init and cleanup funtions
  */
 // **************************************************************************************************
-extern as_aerospike g_as_aerospike;
 void
 ldt_record_init(ldt_record *lrecord)
 {
@@ -649,7 +644,7 @@ ldt_aerospike_crec_update(const as_aerospike * as, const as_rec *crec)
 {
 	cf_detail(AS_LDT, "[ENTER] as(%p) subrec(%p)", as, crec );
 	if (!as || !crec) {
-		cf_warning(AS_LDT, "ldt_aerospike_crec_update: Invalid Parameters [as=%p, record=%p subrecord=%p]... Fail", as, crec);
+		cf_warning(AS_LDT, "ldt_aerospike_crec_update: Invalid Parameters [as=%p, subrecord=%p]... Fail", as, crec);
 		return 2;
 	}
 	if (!udf_record_ldt_enabled(crec)) {
@@ -716,7 +711,7 @@ ldt_aerospike_crec_open(const as_aerospike * as, const as_rec *rec, const char *
 {
 	static char * meth = "ldt_aerospike_crec_open()";
 	if (!as || !rec || !bdig) {
-		cf_warning(AS_LDT, "ldt_aerospike_crec_open: Invalid Parameters [as=%p, record=%p digest=%p]... Fail", meth, as, rec, bdig);
+		cf_warning(AS_LDT, "%s: Invalid Parameters [as=%p, record=%p digest=%p]... Fail", meth, as, rec, bdig);
 		return NULL;
 	}
 	cf_digest keyd;
@@ -771,7 +766,7 @@ ldt_aerospike_rec_update(const as_aerospike * as, const as_rec * rec)
 	} else if (ret == -2) {
 		// Record is not open. Unexpected with LDT usage, though a UDF test case
 		// does come through here.
-		cf_warning(AS_LDT, "%s: Record does not exist or is not open, cannot update");
+		cf_warning(AS_LDT, "%s: Record does not exist or is not open, cannot update", meth);
 	}
 	return ret;
 }
@@ -837,7 +832,7 @@ ldt_aerospike_log(const as_aerospike * a, const char * file,
 	// Logging for Lua Files (UDFs) should be labeled as "UDF", not "LDT".
 	// If we want to distinguish between LDT and general UDF calls, then we
 	// need to create a separate context for LDT.
-	cf_fault_event(AS_UDF, lvl, file, NULL, line, "%s", (char *) msg);
+	cf_fault_event(AS_UDF, lvl, file, line, "%s", (char *) msg);
 	return 0;
 }
 

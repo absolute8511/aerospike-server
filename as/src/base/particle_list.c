@@ -1,7 +1,7 @@
 /*
  * particle_list.c
  *
- * Copyright (C) 2015 Aerospike, Inc.
+ * Copyright (C) 2015-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -142,8 +142,7 @@ typedef struct as_packed_list_s {
 	uint32_t nil_ele_size;	// number of nils we need to insert
 } as_packed_list;
 
-#define LIST_MAGIC	0xC0 // so we know it can't be (first byte of) msgpack list
-#define LIST_FLAG_PACKED_NEED_FREE	1
+#define CDT_FLAG_PACKED_NEED_FREE	1
 
 typedef struct list_wrapper_s {
 	uint8_t			type;
@@ -171,11 +170,10 @@ typedef struct list_flat_s {
 	uint8_t		data[];
 } __attribute__ ((__packed__)) list_flat;
 
-static const uint8_t msgpack_nil[1] = {0xC0};
 static const uint8_t msgpack_empty_list[1] = {0x90};
 static const list_wrapper list_wrapper_empty = {
 	.type = AS_PARTICLE_TYPE_LIST,
-	.magic = LIST_MAGIC,
+	.magic = CDT_MAGIC,
 	.flags = 0,
 	.packed_sz = 1,
 	.packed = (uint8_t *)msgpack_empty_list,
@@ -191,8 +189,6 @@ static const list_wrapper list_wrapper_empty = {
 //
 
 static inline bool is_list_type(uint8_t type);
-static inline int64_t calc_index(int64_t index, int max_index);
-static inline uint64_t calc_count(uint64_t index, uint64_t input_count, int max_index);
 
 // as_bin
 static inline void as_bin_set_empty_packed_list(as_bin *b, rollback_alloc *alloc_buf);
@@ -205,7 +201,7 @@ static int32_t as_packed_list_get_new_element_count(as_packed_list *pl);
 static int32_t as_packed_list_header_element_count(as_packed_list *pl);
 static void as_packed_list_init(as_packed_list *pl, const uint8_t *buf, uint32_t size);
 static void as_packed_list_init_from_bin(as_packed_list *pl, const as_bin *b);
-static int32_t as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32_t insert_size, as_packed_list_index *pli);
+static int64_t as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32_t insert_size, as_packed_list_index *pli);
 static int32_t as_packed_list_remove(as_packed_list *pl, uint32_t index, uint32_t count, as_packed_list_index *pli);
 static int32_t as_packed_list_write_hdrseg1(as_packed_list *pl, uint8_t *buf);
 static int32_t as_packed_list_write_header(uint8_t *buf, uint32_t ele_count);
@@ -230,10 +226,6 @@ static void list_wrapper_init(list_wrapper *p_list_wrapped, uint32_t ele_count);
 
 // packed_list create
 static as_particle *packed_list_create(rollback_alloc *alloc_buf, uint32_t ele_count, const uint8_t *buf, uint32_t size, bool wrapped);
-//static list_mem *packed_list_simple_create(rollback_alloc *alloc_buf, uint32_t new_size);
-static inline as_particle *packed_list_simple_create_from_buf(rollback_alloc *alloc_buf, uint32_t ele_count, const uint8_t *buf, uint32_t size);
-static inline as_particle *packed_list_simple_create_empty(rollback_alloc *alloc_buf);
-static inline as_particle *packed_list_simple_create_nil(rollback_alloc *alloc_buf);
 
 // packed_list ops
 static int packed_list_append(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, bool payload_is_container, as_bin *result);
@@ -241,10 +233,9 @@ static int packed_list_insert(as_bin *b, rollback_alloc *alloc_buf, const cdt_pa
 static int packed_list_remove(as_bin *b, rollback_alloc *alloc_buf, int64_t index, uint64_t count, as_bin *result, bool result_is_count, bool result_is_list, rollback_alloc *alloc_result);
 static int packed_list_set(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload, int64_t index);
 static int packed_list_trim(as_bin *b, rollback_alloc *alloc_buf, int64_t index, uint64_t count, as_bin *result);
-static uint8_t *packed_list_setup_bin(as_bin *b, rollback_alloc *alloc_buf, uint32_t new_size, uint32_t index, uint32_t new_ele_count, as_packed_list_index *pli);
+static uint8_t *packed_list_setup_bin(as_bin *b, rollback_alloc *alloc_buf, uint32_t new_size, uint32_t new_ele_count, uint32_t index, as_packed_list_index *pli);
 
 // Debugging support
-static void print_hex(const uint8_t *packed, uint32_t packed_sz, char *buf, uint32_t buf_sz);
 static void print_cdt_list_particle(const as_particle *p);
 void print_cdt_list_bin(const as_bin *b);
 void print_as_packed_list(const as_packed_list *pl);
@@ -516,7 +507,7 @@ list_from_flat(const uint8_t *flat, uint32_t flat_size, as_particle **pp)
 		return (int)new_size;
 	}
 
-	list_wrapper *p_list_wrapped = cf_malloc(new_size);
+	list_wrapper *p_list_wrapped = cf_malloc_ns(new_size);
 
 	if (! p_list_wrapped) {
 		cf_warning(AS_PARTICLE, "failed malloc for list wrapper (%d)", new_size);
@@ -609,29 +600,6 @@ static inline bool
 is_list_type(uint8_t type)
 {
 	return type == AS_PARTICLE_TYPE_LIST;
-}
-
-// Calculate index given index and max_index.
-static inline int64_t
-calc_index(int64_t index, int max_index)
-{
-	return index < 0 ? (int64_t)max_index + index : index;
-}
-
-// Calculate count given index and max_index.
-// input_count == 0 implies until end of list.
-// Assumes index < ele_count.
-static inline uint64_t
-calc_count(uint64_t index, uint64_t input_count, int max_index)
-{
-	uint64_t max = (uint64_t)max_index;
-
-	// Since we assume index < ele_count, max - index will never overflow.
-	if (input_count == 0 || input_count >= max - index) {
-		return max - index;
-	}
-
-	return input_count;
 }
 
 //------------------------------------------------
@@ -742,7 +710,7 @@ as_packed_list_init_from_bin(as_packed_list *pl, const as_bin *b)
 
 // Calculate a packed list split via insert op.
 // Return negative int on failure, new size of packed buffer.
-static int32_t
+static int64_t
 as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32_t insert_size, as_packed_list_index *pli)
 {
 	int32_t ele_count = as_packed_list_header_element_count(pl);
@@ -755,6 +723,11 @@ as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32
 		pl->header_size = (uint32_t)pl->upk.offset;
 
 		if (index >= ele_count) {
+			if (index + count >= INT32_MAX) {
+				cf_warning(AS_PARTICLE, "as_packed_list_insert() index %u + count %u overflow", index, count);
+				return -2;
+			}
+
 			pl->new_ele_count = (int)(index + count);
 			pl->nil_ele_size = index - (uint32_t)ele_count;
 
@@ -766,7 +739,7 @@ as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32
 			pl->nil_ele_size = 0;
 
 			if (! as_unpack_list_elements_find_index(&pl->upk, index, pli)) {
-				return -2;
+				return -3;
 			}
 
 			pl->seg1_size = pl->upk.offset;
@@ -778,11 +751,11 @@ as_packed_list_insert(as_packed_list *pl, uint32_t index, uint32_t count, uint32
 		pl->seg1_size -= pl->header_size;
 	}
 
-	return (int32_t)(as_pack_list_header_get_size(pl->new_ele_count)
+	return (int64_t)as_pack_list_header_get_size(pl->new_ele_count)
 			+ pl->seg1_size
 			+ pl->nil_ele_size
 			+ insert_size
-			+ pl->seg2_size);
+			+ pl->seg2_size;
 }
 
 // Calculate a packed list split via remove op.
@@ -1038,7 +1011,7 @@ list_is_wrapped(const as_particle *p)
 {
 	const list_wrapper *p_list_wrapped = (const list_wrapper *)p;
 
-	return p_list_wrapped->magic == LIST_MAGIC;
+	return p_list_wrapped->magic == CDT_MAGIC;
 }
 
 // alloc_buf -	allocation method
@@ -1072,7 +1045,7 @@ list_wrapper_create(rollback_alloc *alloc_buf, uint32_t ele_count, as_packed_lis
 static void
 list_wrapper_destroy(list_wrapper *p_list_wrapped)
 {
-	if ((p_list_wrapped->flags & LIST_FLAG_PACKED_NEED_FREE) != 0) {
+	if ((p_list_wrapped->flags & CDT_FLAG_PACKED_NEED_FREE) != 0) {
 		cf_free(p_list_wrapped->packed);
 	}
 
@@ -1091,7 +1064,7 @@ list_wrapper_from_buf(list_wrapper *p_list_wrapped, const uint8_t *buf, uint32_t
 
 	list_wrapper_init(p_list_wrapped, ele_count);
 
-	uint8_t *new_buf = (uint8_t *)p_list_wrapped + sizeof(list_wrapper) + (ele_count / AS_PACKED_LIST_INDEX_STEP);
+	uint8_t *new_buf = (uint8_t *)p_list_wrapped + sizeof(list_wrapper) + (sizeof(uint32_t) * p_list_wrapped->index.cap);
 
 	memcpy(new_buf, buf, size);
 
@@ -1120,7 +1093,7 @@ static void
 list_wrapper_init(list_wrapper *p_list_wrapped, uint32_t ele_count)
 {
 	p_list_wrapped->type = AS_PARTICLE_TYPE_LIST;
-	p_list_wrapped->magic = LIST_MAGIC;
+	p_list_wrapped->magic = CDT_MAGIC;
 	p_list_wrapped->flags = 0;
 	p_list_wrapped->packed_sz = 0;
 	p_list_wrapped->packed = NULL;
@@ -1184,35 +1157,16 @@ packed_list_create(rollback_alloc *alloc_buf, uint32_t ele_count, const uint8_t 
 	return particle;
 }
 
-#if 0
-static list_mem *
-packed_list_simple_create(rollback_alloc *alloc_buf, uint32_t new_size)
-{
-	list_mem *p_list_mem = (list_mem *)rollback_alloc_reserve(alloc_buf, new_size);
-
-	p_list_mem->type = AS_PARTICLE_TYPE_LIST;
-	p_list_mem->sz = new_size;
-
-	return p_list_mem;
-}
-#endif
-
-static inline as_particle *
+as_particle *
 packed_list_simple_create_from_buf(rollback_alloc *alloc_buf, uint32_t ele_count, const uint8_t *buf, uint32_t size)
 {
 	return packed_list_create(alloc_buf, ele_count, buf, size, false);
 }
 
-static inline as_particle *
+as_particle *
 packed_list_simple_create_empty(rollback_alloc *alloc_buf)
 {
 	return packed_list_simple_create_from_buf(alloc_buf, 0, NULL, 0);
-}
-
-static inline as_particle *
-packed_list_simple_create_nil(rollback_alloc *alloc_buf)
-{
-	return packed_list_simple_create_from_buf(alloc_buf, 1, msgpack_nil, 1);
 }
 
 //----------------------------------------------------------
@@ -1267,7 +1221,7 @@ packed_list_insert(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payl
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	if (index > UINT32_MAX || (index = calc_index(index, ele_count)) < 0) {
+	if (index > INT32_MAX || (index = calc_index(index, ele_count)) < 0) {
 		cf_warning(AS_PARTICLE, "packed_list_insert() index %ld out of bounds for ele_count %d", index > 0 ? index : index - ele_count, ele_count);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
@@ -1275,10 +1229,15 @@ packed_list_insert(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payl
 	uint32_t uindex = (uint32_t)index;
 
 	as_packed_list_index *pli = as_bin_get_packed_list_index(b);
-	int32_t new_size = as_packed_list_insert(&pl, uindex, count, payload->size - payload_hdr_sz, pli);
+	int64_t new_size = as_packed_list_insert(&pl, uindex, count, payload->size - payload_hdr_sz, pli);
 
 	if (new_size < 0) {
-		cf_warning(AS_PARTICLE, "packed_list_insert() as_packed_list_insert failed with ret=%d, index.cap=%u", new_size, pli->cap);
+		cf_warning(AS_PARTICLE, "packed_list_insert() as_packed_list_insert failed with ret=%ld, index.cap=%u", new_size, pli->cap);
+		return -AS_PROTO_RESULT_FAIL_PARAMETER;
+	}
+
+	if (new_size > (int64_t)UINT32_MAX) {
+		cf_warning(AS_PARTICLE, "packed_list_insert() mem size overflow with new_size=%ld", new_size);
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
@@ -1446,10 +1405,13 @@ packed_list_set(as_bin *b, rollback_alloc *alloc_buf, const cdt_payload *payload
 		return -AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
+	int32_t new_ele_count = as_packed_list_get_new_element_count(&pl);
+
+	// Add difference in header size and payload size.
+	new_size += as_pack_list_header_get_size(ele_count) - as_pack_list_header_get_size(new_ele_count);
 	new_size += payload->size;
 
-	int32_t new_ele_count = as_packed_list_get_new_element_count(&pl);
-	uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, (uint32_t)new_size, (uint32_t)new_ele_count, uindex, pli);
+	uint8_t *ptr = packed_list_setup_bin(b, alloc_buf, (uint32_t)new_size, (uint32_t)ele_count, uindex, pli);
 
 	if (! ptr) {
 		cf_warning(AS_PARTICLE, "packed_list_set() failed to alloc list particle");
@@ -1594,6 +1556,55 @@ packed_list_setup_bin(as_bin *b, rollback_alloc *alloc_buf, uint32_t new_size, u
 
 
 //==========================================================
+// cdt_list_builder
+//
+
+bool
+cdt_list_builder_start(cdt_container_builder *builder, rollback_alloc *alloc_buf, uint32_t ele_count, uint32_t max_size)
+{
+	uint32_t new_size = sizeof(list_mem) + sizeof(uint64_t) + 1 + max_size;
+	list_mem *p_list_mem = (list_mem *)rollback_alloc_reserve(alloc_buf, new_size);
+
+	if (! p_list_mem) {
+		return false;
+	}
+
+	p_list_mem->type = AS_PARTICLE_TYPE_LIST;
+	p_list_mem->sz = as_packed_list_write_header(p_list_mem->data, ele_count);
+
+	builder->particle = (as_particle *)p_list_mem;
+	builder->write_ptr = p_list_mem->data + p_list_mem->sz;
+	builder->ele_count = 0;
+	builder->header_ele_count = ele_count;
+	builder->size = &p_list_mem->sz;
+
+	return true;
+}
+
+void
+cdt_list_builder_finalize(cdt_container_builder *builder)
+{
+	if (builder->ele_count == builder->header_ele_count) {
+		return;
+	}
+
+	uint32_t hdr_size = as_pack_list_header_get_size(builder->ele_count);
+	list_mem *p_list_mem = (list_mem *)builder->particle;
+	uint32_t current_hdr_size = as_pack_list_header_get_size(builder->header_ele_count);
+
+	if (hdr_size != current_hdr_size) {
+		int64_t delta = (int64_t)hdr_size - current_hdr_size;
+		size_t size = 0;
+
+		memmove(p_list_mem->data + delta + current_hdr_size, p_list_mem->data + current_hdr_size, size);
+		p_list_mem->sz += delta;
+	}
+
+	as_packed_list_write_header(p_list_mem->data, builder->ele_count);
+}
+
+
+//==========================================================
 // cdt_process_state_packed_list
 //
 
@@ -1610,9 +1621,9 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 		return false;
 	}
 
-	rollback_alloc_inita(alloc_buf, cdt_udata->alloc_buf, 5);
+	rollback_alloc_inita(alloc_buf, cdt_udata->alloc_buf, 5, true);
 	// Results always on the heap.
-	rollback_alloc_inita(alloc_result, NULL, 1);
+	rollback_alloc_inita(alloc_result, NULL, 1, false);
 
 	switch (optype) {
 	// Add to list.
@@ -1811,7 +1822,7 @@ cdt_process_state_packed_list_modify_optype(cdt_process_state *state, cdt_modify
 	}
 	case AS_CDT_OP_LIST_INCREMENT_BY:
 		// TODO - Support or remove these.
-		cdt_udata->ret_code = AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
+		cdt_udata->ret_code = -AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
 		return false;
 
 	// Misc
@@ -1872,7 +1883,7 @@ cdt_process_state_packed_list_read_optype(cdt_process_state *state, cdt_read_dat
 	}
 
 	// Just one entry needed for results bin.
-	rollback_alloc_inita(packed_alloc, NULL, 1);
+	rollback_alloc_inita(packed_alloc, NULL, 1, false);
 
 	switch (optype) {
 	case AS_CDT_OP_LIST_GET: {
@@ -2022,32 +2033,12 @@ cdt_process_state_packed_list_read_optype(cdt_process_state *state, cdt_read_dat
 //
 
 static void
-print_hex(const uint8_t *packed, uint32_t packed_sz, char *buf, uint32_t buf_sz)
-{
-	uint32_t n = (buf_sz - 3) / 2;
-
-	if (n > packed_sz) {
-		n = packed_sz;
-		buf[buf_sz - 3] = '.';
-		buf[buf_sz - 2] = '.';
-		buf[buf_sz - 1] = '\0';
-	}
-
-	char *ptr = (char *)buf;
-
-	for (int i = 0; i < n; i++) {
-		sprintf(ptr, "%02X", packed[i]);
-		ptr += 2;
-	}
-}
-
-static void
 print_cdt_list_particle(const as_particle *p)
 {
 	list_wrapper *p_list_wrapped = (list_wrapper *)p;
 	cf_warning(AS_PARTICLE, "print_cdt_list_particle: type=%d", p_list_wrapped->type);
 
-	if (p_list_wrapped->magic == LIST_MAGIC) {
+	if (p_list_wrapped->magic == CDT_MAGIC) {
 		cf_warning(AS_PARTICLE, "  wrapped");
 		cf_warning(AS_PARTICLE, "    flags=%x", p_list_wrapped->flags);
 		cf_warning(AS_PARTICLE, "    magic=%X", p_list_wrapped->magic);

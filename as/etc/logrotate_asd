@@ -6,7 +6,7 @@
     olddir /var/log/aerospike
     missingok
     notifempty
-    postrotate 
-        (kill -HUP `cat /var/run/aerospike/asd.pid`) > /dev/null 2>&1 || true
+    postrotate
+        (kill -HUP `pgrep asd`) > /dev/null 2>&1 || true
     endscript
 }

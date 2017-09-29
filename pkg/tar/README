@@ -29,7 +29,7 @@ QUICK START
 
         sudo ./bin/aerospike start
 
-      Superuser priveledges are required because it attempts to set upper
+      Superuser privileges are required because it attempts to set upper
       limits on system resources.
 
     3. Check the status of the aerospike server

@@ -1,7 +1,7 @@
 /*
  * cf_str.h
  *
- * Copyright (C) 2008 Aerospike, Inc.
+ * Copyright (C) 2008-2017 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -48,11 +48,25 @@ int cf_str_atoi_u64_x(char *s, uint64_t *value, int radix);
 struct cf_vector_s;
 extern void cf_str_split(char *fmt, char *str, struct cf_vector_s *v);
 
-static inline int cf_str_strnchr(uint8_t *s, int sz, int c) {
+static inline int
+cf_str_strnchr(uint8_t *s, int sz, int c)
+{
 	for (int i = 0; i < sz; i++) {
 		if (s[i] == c) {
 			return i;
 		}
 	}
 	return -1;
+}
+
+static inline const char *
+cf_str_safe_as_empty(const char *s)
+{
+	return s ? s : "";
+}
+
+static inline const char *
+cf_str_safe_as_null(const char *s)
+{
+	return s ? s : "null";
 }

@@ -30,8 +30,11 @@
 #include "citrusleaf/cf_queue.h"
 #include "citrusleaf/cf_queue_priority.h"
 
-#include "base/datamodel.h"
-#include "base/monitor.h"
+struct as_job_s;
+struct as_job_manager_s;
+struct as_mon_jobstat_s;
+struct as_namespace_s;
+struct as_partition_reservation_s;
 
 //----------------------------------------------------------
 // as_priority_thread_pool - class header.
@@ -63,11 +66,10 @@ void as_priority_thread_pool_change_task_priority(as_priority_thread_pool* pool,
 // as_job - base class header.
 //
 
-struct as_job_s;
-typedef void (*as_job_slice_fn)(struct as_job_s* _job, as_partition_reservation* rsv);
+typedef void (*as_job_slice_fn)(struct as_job_s* _job, struct as_partition_reservation_s* rsv);
 typedef void (*as_job_finish_fn)(struct as_job_s* _job);
 typedef void (*as_job_destroy_fn)(struct as_job_s* _job);
-typedef void (*as_job_info_fn)(struct as_job_s* _job, as_mon_jobstat* stat);
+typedef void (*as_job_info_fn)(struct as_job_s* _job, struct as_mon_jobstat_s* stat);
 
 typedef struct as_job_vtable_s {
 	as_job_slice_fn		slice_fn;
@@ -75,8 +77,6 @@ typedef struct as_job_vtable_s {
 	as_job_destroy_fn	destroy_fn;
 	as_job_info_fn		info_mon_fn;
 } as_job_vtable;
-
-struct as_job_manager_s;
 
 typedef enum {
 	RSV_WRITE	= 0,
@@ -95,6 +95,10 @@ typedef enum {
 #define AS_JOB_FAIL_USER_ABORT	AS_PROTO_RESULT_FAIL_SCAN_ABORT
 #define AS_JOB_FAIL_FORBIDDEN	AS_PROTO_RESULT_FAIL_FORBIDDEN
 
+// These result codes can't make it back to the client, but show in monitor:
+#define AS_JOB_FAIL_RESPONSE_ERROR		(-1)
+#define AS_JOB_FAIL_RESPONSE_TIMEOUT	(-2)
+
 typedef struct as_job_s {
 	// Mandatory interface for derived classes:
 	as_job_vtable				vtable;
@@ -109,7 +113,7 @@ typedef struct as_job_s {
 	uint64_t					trid;
 
 	// Job scope:
-	as_namespace*				ns;
+	struct as_namespace_s*		ns;
 	uint16_t					set_id;
 
 	// Handle active phase:
@@ -127,11 +131,12 @@ typedef struct as_job_s {
 
 void as_job_init(as_job* _job, const as_job_vtable* vtable,
 		struct as_job_manager_s* manager, as_job_rsv_type rsv_type,
-		uint64_t trid, as_namespace* ns, uint16_t set_id, int priority);
+		uint64_t trid, struct as_namespace_s* ns, uint16_t set_id,
+		int priority);
 void as_job_slice(void* task);
 void as_job_finish(as_job* _job);
 void as_job_destroy(as_job* _job);
-void as_job_info(as_job* _job, as_mon_jobstat* stat);
+void as_job_info(as_job* _job, struct as_mon_jobstat_s* stat);
 void as_job_active_reserve(as_job* _job);
 void as_job_active_release(as_job* _job);
 
@@ -161,6 +166,6 @@ bool as_job_manager_change_job_priority(as_job_manager* mgr, uint64_t trid, int 
 void as_job_manager_limit_active_jobs(as_job_manager* mgr, uint32_t max_active);
 void as_job_manager_limit_finished_jobs(as_job_manager* mgr, uint32_t max_done);
 void as_job_manager_resize_thread_pool(as_job_manager* mgr, uint32_t n_threads);
-as_mon_jobstat* as_job_manager_get_job_info(as_job_manager* mgr, uint64_t trid);
-as_mon_jobstat* as_job_manager_get_info(as_job_manager* mgr, int* size);
+struct as_mon_jobstat_s* as_job_manager_get_job_info(as_job_manager* mgr, uint64_t trid);
+struct as_mon_jobstat_s* as_job_manager_get_info(as_job_manager* mgr, int* size);
 int as_job_manager_get_active_job_count(as_job_manager* mgr);

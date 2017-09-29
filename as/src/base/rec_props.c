@@ -169,12 +169,64 @@ as_rec_props_add_field(as_rec_props *this,
 //
 void
 as_rec_props_add_field_null_terminate(as_rec_props *this,
-		as_rec_props_field_id id, uint32_t value_size, const uint8_t *p_value)
+		as_rec_props_field_id id, uint32_t value_len, const uint8_t *p_value)
 {
-	as_rec_props_add_field(this, id, value_size, p_value);
+	as_rec_prop_field* p_field =
+			(as_rec_prop_field*)(this->p_data + this->size);
 
-	if (value_size) {
-		this->p_data[this->size - 1] = 0;
+	p_field->id = id;
+	p_field->value_size = value_len + 1;
+	memcpy(p_field->value, p_value, value_len);
+	p_field->value[value_len] = 0;
+
+	this->size += as_rec_props_sizeof_field(p_field->value_size);
+}
+
+//------------------------------------------------
+// Returns size required for as_rec_props p_data
+// buffer for specified fields.
+//
+size_t
+as_rec_props_size_all(const uint8_t *set_name, size_t set_name_len,
+		const uint8_t *key, size_t key_size, uint32_t ldt_bits)
+{
+	size_t rec_props_data_size = ldt_bits != 0 ?
+			as_rec_props_sizeof_field(sizeof(uint16_t)) : 0;
+
+	if (set_name) {
+		rec_props_data_size += as_rec_props_sizeof_field(set_name_len + 1);
+	}
+
+	if (key) {
+		rec_props_data_size += as_rec_props_sizeof_field(key_size);
+	}
+
+	return rec_props_data_size;
+}
+
+//------------------------------------------------
+// Add all specified fields, trusting that:
+// - this->p_data has been allocated big enough
+//
+void
+as_rec_props_fill_all(as_rec_props *this, uint8_t *p_data,
+		const uint8_t *set_name, size_t set_name_len, const uint8_t *key,
+		size_t key_size, uint32_t ldt_bits)
+{
+	as_rec_props_init(this, p_data);
+
+	if (ldt_bits != 0) {
+		as_rec_props_add_field(this, CL_REC_PROPS_FIELD_LDT_TYPE,
+				sizeof(uint16_t), (uint8_t *)&ldt_bits);
+	}
+
+	if (set_name) {
+		as_rec_props_add_field_null_terminate(this, CL_REC_PROPS_FIELD_SET_NAME,
+				set_name_len, set_name);
+	}
+
+	if (key) {
+		as_rec_props_add_field(this, CL_REC_PROPS_FIELD_KEY, key_size, key);
 	}
 }
 

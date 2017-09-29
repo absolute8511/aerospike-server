@@ -28,8 +28,6 @@
 
 #include "base/datamodel.h"
 
-#include "citrusleaf/cf_types.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif

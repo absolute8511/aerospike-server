@@ -9,12 +9,6 @@ probe process("./target/Linux-x86_64/bin/asd").mark("trans__demarshal")
            gettimeofday_us(), tid(), $arg1, $arg2);
 }
 
-probe process("./target/Linux-x86_64/bin/asd").mark("trans__prepare")
-{
-    printf("%d %d ASD_trans_prepare nodeid=%0x msgp=%0x taskid=%0x\n",
-           gettimeofday_us(), tid(), $arg1, $arg2, $arg3);
-}
-
 probe process("./target/Linux-x86_64/bin/asd").mark("query__starting")
 {
     printf("%d %d ASD_query_starting nodeid=%0x taskid=%0x\n",

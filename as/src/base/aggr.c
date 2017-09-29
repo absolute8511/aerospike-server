@@ -40,6 +40,7 @@
 #include "base/udf_arglist.h"
 #include "base/udf_memtracker.h"
 #include "base/udf_record.h"
+#include "fabric/partition.h"
 
 
 #define AS_AGGR_ERR  -1
@@ -67,7 +68,7 @@ typedef struct {
 } aggr_state;
 
 static as_partition_reservation *
-ptn_reserve(aggr_state *astate, as_partition_id pid, as_partition_reservation *rsv)
+ptn_reserve(aggr_state *astate, uint32_t pid, as_partition_reservation *rsv)
 {
 	as_aggr_call *call = astate->call;
 	if (call && call->aggr_hooks && call->aggr_hooks->ptn_reserve) {
@@ -108,14 +109,14 @@ pre_check(aggr_state *astate, void *skey)
 }
 
 static int
-aopen(aggr_state *astate, cf_digest digest)
+aopen(aggr_state *astate, const cf_digest *digest)
 {
 	udf_record   * urecord  = as_rec_source(astate->urec);
 	as_index_ref   * r_ref  = urecord->r_ref;
 	as_transaction * tr     = urecord->tr;
 
 	int pid                = as_partition_getid(digest);
-	urecord->keyd = digest;
+	urecord->keyd = *digest;
 
 	AS_PARTITION_RESERVATION_INIT(tr->rsv);
 	astate->rsv        = ptn_reserve(astate, pid, &tr->rsv);
@@ -127,8 +128,7 @@ aopen(aggr_state *astate, cf_digest digest)
 	// NB: Partial Initialization due to heaviness. Not everything needed
 	// TODO: Make such initialization Commodity
 	tr->rsv.ns          = astate->rsv->ns;
-	tr->rsv.state       = astate->rsv->state;
-	tr->rsv.pid         = astate->rsv->pid;
+	tr->rsv.reject_repl_write = astate->rsv->reject_repl_write;
 	tr->rsv.p           = astate->rsv->p;
 	tr->rsv.tree        = astate->rsv->tree;
 	tr->rsv.cluster_key = astate->rsv->cluster_key;
@@ -169,6 +169,8 @@ acleanup(aggr_state *astate)
 		astate->iter = NULL;
 	}
 	aclose(astate);
+
+	as_rec_destroy(astate->urec);
 }
 
 // **************************************************************************************************
@@ -221,13 +223,12 @@ istream_read(const as_stream *s)
 			return NULL;
 		}
 
-		if (!aopen(astate, astate->keys_arr->pindex_digs[astate->keys_arr_offset])) {
+		if (!aopen(astate, &astate->keys_arr->pindex_digs[astate->keys_arr_offset])) {
 			if (!pre_check(astate, &astate->keys_arr->sindex_keys[astate->keys_arr_offset])) {
 				aclose(astate);
 			}
 		}
 	}
-	as_val_reserve(astate->urec);
 	return (as_val *)astate->urec;
 }
 
@@ -266,7 +267,7 @@ const as_stream_hooks ostream_hooks = {
 static int
 as_aggr_aerospike_log(const as_aerospike * a, const char * file, const int line, const int lvl, const char * msg)
 {
-	cf_fault_event(AS_AGGR, lvl, file, NULL, line, (char *) msg);
+	cf_fault_event(AS_AGGR, lvl, file, line, "%s", (char *) msg);
 	return 0;
 }
 
@@ -317,6 +318,7 @@ as_aggr_process(as_namespace *ns, as_aggr_call * ag_call, cf_ll * ap_recl, void 
 
 	if (!astate.iter) {
 		cf_warning (AS_AGGR, "Could not set up iterator .. possibly out of memory .. Aborting Query !!");
+		as_rec_destroy(urec);
 		return AS_AGGR_ERR;
 	}
 
@@ -331,18 +333,12 @@ as_aggr_process(as_namespace *ns, as_aggr_call * ag_call, cf_ll * ap_recl, void 
 	as_stream ostream;
 	as_stream_init(&ostream, &astate, &ostream_hooks);
 
-	// Argument list
-	as_list arglist;
-	as_list_init(&arglist, ag_call->def.arglist, &udf_arglist_hooks);
-
 	as_udf_context ctx = {
 		.as         = &as,
 		.timer      = NULL,
 		.memtracker = NULL
 	};
-	int ret = as_module_apply_stream(&mod_lua, &ctx, ag_call->def.filename, ag_call->def.function, &istream, &arglist, &ostream, ap_res);
-
-	as_list_destroy(&arglist);
+	int ret = as_module_apply_stream(&mod_lua, &ctx, ag_call->def.filename, ag_call->def.function, &istream, ag_call->def.arglist, &ostream, ap_res);
 
 	acleanup(&astate);
 	return ret;

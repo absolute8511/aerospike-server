@@ -32,6 +32,7 @@
 // Includes
 //
 
+#include <stddef.h>
 #include <stdint.h>
 
 
@@ -68,4 +69,10 @@ void as_rec_props_init_malloc(as_rec_props *_this, uint32_t malloc_size);
 void as_rec_props_add_field(as_rec_props *_this,
 		as_rec_props_field_id id, uint32_t value_size, const uint8_t *p_value);
 void as_rec_props_add_field_null_terminate(as_rec_props *_this,
-		as_rec_props_field_id id, uint32_t value_size, const uint8_t *p_value);
+		as_rec_props_field_id id, uint32_t value_len, const uint8_t *p_value);
+
+size_t as_rec_props_size_all(const uint8_t *set_name, size_t set_name_len,
+		const uint8_t *key, size_t key_size, uint32_t ldt_bits);
+void as_rec_props_fill_all(as_rec_props *_this, uint8_t *p_data,
+		const uint8_t *set_name, size_t set_name_len, const uint8_t *key,
+		size_t key_size, uint32_t ldt_bits);

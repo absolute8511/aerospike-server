@@ -19,7 +19,6 @@
 #include <string.h>
 #include <strings.h>
 
-#include "ai_globals.h"
 #include "bt.h"
 #include "bt_iterator.h"
 #include "stream.h"
@@ -49,24 +48,10 @@
 static ulong tot_bt_data     = 0; static ulong tot_bt_data_mem = 0;
 static ulong tot_num_bt_ns   = 0; static ulong tnbtnmem        = 0;
 static ulong tot_num_bts     = 0; static ulong tot_num_bt_mem  = 0;
-
-void dump_bt_mem_profile(bt *btr) {
-    printf("BT: num: %d\n", btr->s.num);
-    printf("tot_bt_data:     %lu\n", tot_bt_data);
-    printf("tot_bt_data_mem: %lu\n", tot_bt_data_mem);
-    printf("tot_num_bts:     %lu\n", tot_num_bts);
-    printf("tot_bt_mem:      %lu\n", tot_num_bt_mem);
-    printf("tot_num_btn:     %lu\n", tot_num_bt_ns);
-    printf("tbtn_mem:        %lu\n", tnbtnmem);
-    fflush(NULL);
-}
   #define BT_MEM_PROFILE_BT   {tot_num_bts++; tot_num_bt_mem += size;}
-  #define BT_MEM_PROFILE_MLC  {tot_bt_data++; tot_bt_data_mem += size;}
   #define BT_MEM_PROFILE_NODE {tot_num_bt_ns++; tnbtnmem += size;}
 #else
-void dump_bt_mem_profile(bt *btr) { btr = NULL; return; }
   #define BT_MEM_PROFILE_BT
-  #define BT_MEM_PROFILE_MLC
   #define BT_MEM_PROFILE_NODE
 #endif
 
@@ -82,15 +67,8 @@ static ulong getNumKey(bt *btr, bt_n *x, int i) { //TODO U128 support
     else {
         ai_obj  akey; void *be = KEYS(btr, x, i);
         convertStream2Key(be, &akey, btr);
-        return C_IS_I(btr->s.ktype) ? akey.i : akey.l;
+        return akey.l;
     }
-}
-bool isGhostRow(bt *btr, bt_n *x, int i) {
-    if (!NORM_BT(btr)) return 0;
-    uchar *stream = KEYS(btr, x, i); 
-    ai_obj akey; convertStream2Key(stream, &akey, btr);
-    void  *rrow   = parseStream(stream, btr);
-    return IS_GHOST(btr, rrow);
 }
 
 // MEMORY_MANAGEMENT MEMORY_MANAGEMENT MEMORY_MANAGEMENT MEMORY_MANAGEMENT
@@ -98,18 +76,8 @@ bool isGhostRow(bt *btr, bt_n *x, int i) {
 static void bt_increment_used_memory(bt *btr, size_t size) {  //DEBUG_INCR_MEM
     btr->msize += (ull)size;
 }
-void bt_incr_dsize(bt *btr, size_t size) {
-    bt_increment_used_memory(btr, size); btr->dsize += size;
-}
 static void bt_decrement_used_memory(bt *btr, size_t size) {  //DEBUG_DECR_MEM
     btr->msize -= (ull)size;
-}
-void bt_decr_dsize(bt *btr, size_t size) {
-    bt_decrement_used_memory(btr, size); btr->dsize -= size;
-}
-void *bt_malloc(bt *btr, int size) {                         //DEBUG_BT_MALLOC
-    BT_MEM_PROFILE_MLC
-    bt_incr_dsize(btr, size); return cf_malloc(size);
 }
 // DIRTY_STREAM DIRTY_STREAM DIRTY_STREAM DIRTY_STREAM DIRTY_STREAM
 static uint32 get_dssize(bt *btr, char dirty) {
@@ -166,19 +134,13 @@ static bt *allocbtree() {
     bt_increment_used_memory(btr, size);                    //DEBUG_ALLOC_BTREE
     return btr;
 }
-// BT_FREE BT_FREE BT_FREE BT_FREE BT_FREE BT_FREE BT_FREE BT_FREE BT_FREE
-void bt_free(bt *btr, void *v, int size) {                     //DEBUG_BT_FREE
-    bt_decr_dsize(btr, size); cf_free(v);
-}
+
 static void release_dirty_stream(bt *btr, bt_n *x) {      //DEBUG_BTF_BTN_DIRTY
     assert(x->dirty > 0);
     GET_BTN_SIZE(x->leaf)
     bt_decrement_used_memory(btr, get_dssize(btr, x->dirty));
     void **dsp = GET_DS(x, nsize); cf_free(dsp);          // FREED 108
     x->dirty   = 0;
-#ifndef NO_NUM_DIRTY_BUILD
-    x->ndirty  = 0;
-#endif
 }
 static void bt_free_btreenode(bt *btr, bt_n *x) {
     GET_BTN_SIZES(x->leaf, x->dirty) bt_decrement_used_memory(btr, msize);
@@ -188,13 +150,13 @@ static void bt_free_btreenode(bt *btr, bt_n *x) {
 static void bt_free_btree(bt *btr) { cf_free(btr); }
 
 // BT_CREATE BT_CREATE BT_CREATE BT_CREATE BT_CREATE BT_CREATE BT_CREATE
-bt *bt_create(bt_cmp_t cmp, uchar trans, bts_t *s, char dirty) {
+bt *bt_create(bt_cmp_t cmp, bts_t *s, char dirty) {
 	int n = BTREE_LONG_TYPE_DEGREE;
 
 	if (C_IS_L(s->ktype) || C_IS_G(s->ktype)) {
 		n = BTREE_LONG_TYPE_DEGREE;
 	}
-	else if (C_IS_Y(s->ktype)) {
+	else if (C_IS_DG(s->ktype)) {
 		n = BTREE_STRING_TYPE_DEGREE;
 	}
 
@@ -219,16 +181,6 @@ bt *bt_create(bt_cmp_t cmp, uchar trans, bts_t *s, char dirty) {
     if (!btr->root) return NULL;
     btr->numnodes   = 1; //printf("bt_create\n"); bt_dump_info(printf, btr);
     return btr;
-}
-
-// INDEX.POS() INDEX.POS() INDEX.POS() INDEX.POS() INDEX.POS() INDEX.POS()
-static inline void add_to_cipos(bt *btr, bt_n *x, int i) {
-    if (i == -1) return;
-    if (!x->leaf) {
-        for (int j = 0; j <= i; j++) {
-            bt_n *xp = NODES(btr, x)[j]; Index[btr->s.num].cipos += xp->scion;
-        }}
-    Index[btr->s.num].cipos += i + 1;                      //DEBUG_ADD_TO_CIPOS
 }
 
 // BINARY_SEARCH BINARY_SEARCH BINARY_SEARCH BINARY_SEARCH BINARY_SEARCH
@@ -295,7 +247,6 @@ static int findkindex(bt *btr, bt_n *x, bt_data_t k, int *r, btIterator *iter) {
         }
     }
     if ((*rr = btr->cmp(k, KEYS(btr, x, i))) < 0)  i--;
-    if (SIMP_UNIQ(btr) && Index[btr->s.num].iposon) add_to_cipos(btr, x, i);
     if (iter) { iter->bln->in = iter->bln->ik = (i > 0) ? i : 0; }
     return i;
 }
@@ -303,7 +254,6 @@ static int findkindex(bt *btr, bt_n *x, bt_data_t k, int *r, btIterator *iter) {
 // KEY_SHUFFLING KEY_SHUFFLING KEY_SHUFFLING KEY_SHUFFLING KEY_SHUFFLING
 // NOTE: KEYS are variable sizes: [4,8,12,16,20,24,32 bytes]
 #define ISVOID(btr)  (btr->s.ksize == VOIDSIZE)
-#define ISUINT(btr)  (btr->s.ksize == UINTSIZE)
 
 static inline void **AKEYS(bt *btr, bt_n *x, int i) {
     int   ofst = (i * btr->s.ksize);
@@ -313,7 +263,6 @@ static inline void **AKEYS(bt *btr, bt_n *x, int i) {
 #define OKEYS(btr, x) ((void **)((char *)x + btr->keyofst))
 inline void *KEYS(bt *btr, bt_n *x, int i) {                       //DEBUG_KEYS
     if      ISVOID(btr) return                  OKEYS(btr, x)[i];
-    else if ISUINT(btr) return VOIDINT (*(int *)AKEYS(btr, x, i));
     else /* OTHER_BT */ return (void *)         AKEYS(btr, x, i);
 }
 
@@ -394,13 +343,7 @@ static void __setDR(bt *btr, bt_n *x, int i, uint32 dr) {
         uint32   *ds = (uint32   *)dsp;
         odr = ds[i]; ds[i] = dr;
     } else assert(!"setDR ERROR");
-#ifndef NO_NUM_DIRTY_BUILD
-    if      (!odr && dr) x->ndirty++;
-    else if (odr && !dr) x->ndirty--;
-    if ((x->dirty > 0) && !x->ndirty) release_dirty_stream(btr, x);
-#else
-    (void) odr;	// silence compiler warnings
-#endif
+    (void) odr;        // silence compiler warnings
 }
 static bt_n *setDR(bt *btr, bt_n *x, int i, uint32 dr, bt_n *p, int pi) {
     if (!dr)                return x;
@@ -473,7 +416,6 @@ static bt_n *incrCase2B(bt *btr, bt_n *x, int i, int dr) {  //DEBUG_INCR_CASE2B
 static void setBTKeyRaw(bt *btr, bt_n *x, int i, void *src) { //PRIVATE
     void **dest = AKEYS(btr, x, i);
     if      ISVOID(btr) *dest                  = src;   
-    else if ISUINT(btr) *(int *)((long *)dest) = (int)(long)src;
     else                memcpy(dest, src, btr->s.ksize);
     //DEBUG_SET_KEY
 }
@@ -627,7 +569,7 @@ static bt_n *replaceKeyWithGhost(bt *btr, bt_n *x, int i, bt_data_t k,
 
 #define CREATE_RETURN_DELETED_KEY(btr, kp, dr)        \
   dwd_t dwd; bzero(&dwd, sizeof(dwd_t)); dwd.dr = dr; \
-  if BIG_BT(btr) memcpy(delbuf, kp, btr->s.ksize); \
+  if (BIG_BT(btr)) { memcpy(delbuf, kp, btr->s.ksize); } \
   dwd.k = BIG_BT(btr) ? delbuf : kp;
 
 /* NOTE: ksize > 8 bytes needs buffer for CASE 1 */
@@ -685,7 +627,7 @@ static dwd_t deletekey(bt   *btr,  bt_n *x,  bt_data_t k,    int    s, bool drt,
             } else decr_scion(x, 1 + dr); //NOTE: key FOR Case2A/B
         } else if (s == DK_NONE) {                // CASE: DELETE NOT CASE2A/B
             if (dr) {
-                if INODE(btr) x = incrPrevDR(btr, x, i, dr, p, pi, plist);
+                if (NBT(btr)) { x = incrPrevDR(btr, x, i, dr, p, pi, plist); }
                 else { rgst = 1; // DELETE DataBT KEY w/ DR -> REPLACE w/ GHOST
                     x = replaceKeyWithGhost(btr, x, i, kp, dr, p, pi);
                 }
@@ -958,9 +900,6 @@ static dwd_t remove_key(bt *btr, bt_data_t k, bool drt, bool leafd) {
 dwd_t bt_delete(bt *btr, bt_data_t k, bool leafd) {
     return      remove_key(btr, k, 0, leafd);
 }
-bt_data_t bt_evict(bt *btr, bt_data_t k) {
-    dwd_t dwd = remove_key(btr, k, 1, 0); return dwd.k;
-}
 
 // ACCESSORS ACCESSORS ACCESSORS ACCESSORS ACCESSORS ACCESSORS ACCESSORS
 static inline bool key_covers_miss(bt *btr, bt_n *x, int i, ai_obj *akey) {
@@ -969,7 +908,7 @@ static inline bool key_covers_miss(bt *btr, bt_n *x, int i, ai_obj *akey) {
     ulong mkey = getNumKey(btr, x, i);
     ulong dr   = (ulong)getDR(btr, x, i);
     if (mkey && dr) {
-        ulong qkey = C_IS_I(btr->s.ktype) ? akey->i : akey->l;
+        ulong qkey = akey->l;
         ulong span = mkey + dr;
         //DEBUG_CURRKEY_MISS
         if (qkey >= mkey && qkey <= span) return 1;
@@ -981,7 +920,6 @@ dwm_t findnodekey(bt *btr, bt_n *x, bt_data_t k, ai_obj *akey) {
     int    r = -1,             i = 0;
     bt_n  *p = btr->root; int pi = 0;
     dwm_t  dwm; bzero(&dwm, sizeof(dwm_t)); SET_DWM_XIP
-    if (SIMP_UNIQ(btr) && Index[btr->s.num].iposon) Index[btr->s.num].cipos = 0;
     while (x) {
         i = findkindex(btr, x, k, &r, NULL);              //DEBUG_FIND_NODE_KEY
         if (i >= 0 && !r) { SET_DWM_XIP dwm.k = KEYS(btr, x, i); return dwm; }
@@ -1024,25 +962,7 @@ int bt_init_iterator(bt *btr, bt_data_t k, btIterator *iter, ai_obj *alow) {
     }
     return II_FAIL;
 }
-static bt_data_t findnodekeyreplace(bt *btr, bt_n *x,
-                                    bt_data_t k, bt_data_t val) {
-    if (!btr->root) return NULL;
-    int i, r = -1;
-    while (x) {
-        i = findkindex(btr, x, k, &r, NULL);
-        if (i >= 0 && r == 0) {
-            bt_data_t b = KEYS(btr, x, i);
-            setBTKeyRaw(btr, x, i, val); // overwrite (no dirty IO)
-            return b;
-        }
-        if (x->leaf) return NULL;
-        x = NODES(btr, x)[i + 1];
-    }
-    return NULL;
-}
-bt_data_t bt_replace(bt *btr, bt_data_t k, bt_data_t val) {
-    return findnodekeyreplace(btr, btr->root, k, val);
-}
+
 bool bt_exist(bt *btr, bt_data_t k, ai_obj *akey) {
     int   r  = -1;
     bt_n *x  = btr->root;
@@ -1054,18 +974,6 @@ bool bt_exist(bt *btr, bt_data_t k, ai_obj *akey) {
         x = NODES(btr, x)[i + 1];
     }
     return 0;
-}
-/* NOTE: bt_find_loc only for VOIDPTR BTs (e.g. BTREE_TABLE) */
-bt_data_t *bt_find_loc(bt *btr, bt_data_t k) { /* pointer to BT ROW */
-    int i, r = -1;
-    bt_n *x  = btr->root;
-    while (x) {
-        i = findkindex(btr, x, k, &r, NULL);
-        if (i >= 0 && r == 0) return &OKEYS(btr, x)[i];
-        if (x->leaf)          return NULL;
-        x = NODES(btr, x)[i + 1];
-    }
-    return NULL;
 }
 
 static bt_data_t findminkey(bt *btr, bt_n *x) {
@@ -1088,35 +996,14 @@ bt_data_t bt_max(bt *btr) {
     if (!btr->root || !btr->numkeys) return NULL;
     else                             return findmaxkey(btr, btr->root);
 }
-uint32 bt_get_dr(bt *btr, bt_data_t k, ai_obj *akey) {
-    dwm_t  dwm  = findnodekey(btr, btr->root, k, akey);
-    return getDR(btr, dwm.x, dwm.i);
-}
-
-// CLONE CLONE CLONE CLONE CLONE CLONE CLONE CLONE CLONE CLONE CLONE CLONE
-bool bt_to_bt_insert(bt *nbtr, bt *obtr, bt_n *x) {
-    for (int i = 0; i < x->n; i++) {
-        void *be  = KEYS(obtr, x, i); uint32 odr = getDR(obtr, x, i);
-        if (!bt_insert(nbtr, be, odr)) return 0;
-    }
-    if (!x->leaf) {
-        for (int i = 0; i <= x->n; i++) {
-            if (!bt_to_bt_insert(nbtr, obtr, NODES(obtr, x)[i])) return 0;
-        }}
-    return 1;
-}
 
 // DESTRUCTOR DESTRUCTOR DESTRUCTOR DESTRUCTOR DESTRUCTOR DESTRUCTOR
 static void destroy_bt_node(bt *btr, bt_n *x) {
-    for (int i = 0; i < x->n; i++) {
-        void *be    = KEYS(btr, x, i);
-        int   ssize = getStreamMallocSize(btr, be);
-        if (!INODE(btr) && NORM_BT(btr)) bt_free(btr, be, ssize);
-    }
     if (!x->leaf) {
         for (int i = 0; i <= x->n; i++) {
             destroy_bt_node(btr, NODES(btr, x)[i]);
-        }}
+        }
+	}
     bt_free_btreenode(btr, x); /* memory management in btr */
 }
 void bt_destroy(bt *btr) {
@@ -1126,11 +1013,4 @@ void bt_destroy(bt *btr) {
         btr->root  = NULL;
     }
     bt_free_btree(btr);
-}
-void bt_release(bt *btr, bt_n *x) { /* dont destroy data, just btree */
-    if (!x->leaf) {
-        for (int i = 0; i <= x->n; i++) {
-            bt_release(btr, NODES(btr, x)[i]);
-        }}
-    bt_free_btreenode(btr, x); /* memory management in btr */
 }

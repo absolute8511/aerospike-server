@@ -1,7 +1,7 @@
 /*
  * hist_track.c
  *
- * Copyright (C) 2012-2014 Aerospike, Inc.
+ * Copyright (C) 2012-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -43,6 +43,7 @@
 #include <citrusleaf/alloc.h>
 
 #include "dynbuf.h"
+#include "fault.h"
 #include "hist.h"
 
 
@@ -152,6 +153,10 @@ cf_hist_track_create(const char* name, histogram_scale scale)
 	strcpy(this->hist.name, name);
 	memset((void*)this->hist.counts, 0, sizeof(this->hist.counts));
 
+	// If cf_hist_track_insert_data_point() is called for a size or count
+	// histogram, the divide by 0 will crash - consider that a high-performance
+	// assert.
+
 	switch (scale) {
 	case HIST_MILLISECONDS:
 		this->hist.scale_tag = HIST_TAG_MILLISECONDS;
@@ -161,11 +166,16 @@ cf_hist_track_create(const char* name, histogram_scale scale)
 		this->hist.scale_tag = HIST_TAG_MICROSECONDS;
 		this->hist.time_div = 1000;
 		break;
-	default:
-		this->hist.scale_tag = HIST_TAG_RAW;
+	case HIST_SIZE:
+		this->hist.scale_tag = HIST_TAG_SIZE;
 		this->hist.time_div = 0;
-		// If cf_hist_track_insert_data_point() is called for a raw histogram,
-		// the divide by 0 will crash - consider that a high-performance assert.
+		break;
+	case HIST_COUNT:
+		this->hist.scale_tag = HIST_TAG_COUNT;
+		this->hist.time_div = 0;
+		break;
+	default:
+		cf_crash(AS_INFO, "%s: unrecognized histogram scale %d", name, scale);
 		break;
 	}
 
@@ -349,10 +359,10 @@ cf_hist_track_dump(cf_hist_track* this)
 //------------------------------------------------
 // Pass-through to base histogram.
 //
-void
+uint64_t
 cf_hist_track_insert_data_point(cf_hist_track* this, uint64_t start_ns)
 {
-	histogram_insert_data_point((histogram*)this, start_ns);
+	return histogram_insert_data_point((histogram*)this, start_ns);
 }
 
 //------------------------------------------------
@@ -375,7 +385,7 @@ cf_hist_track_get_info(cf_hist_track* this, uint32_t back_sec,
 	pthread_mutex_lock(&this->rows_lock);
 
 	if (! this->rows) {
-		cf_dyn_buf_append_string(db_p, "error-not-tracking");
+		cf_dyn_buf_append_string(db_p, "error-not-tracking;");
 		pthread_mutex_unlock(&this->rows_lock);
 		return;
 	}
@@ -383,7 +393,7 @@ cf_hist_track_get_info(cf_hist_track* this, uint32_t back_sec,
 	uint32_t start_row_n = get_start_row_n(this, back_sec);
 
 	if (start_row_n == -1) {
-		cf_dyn_buf_append_string(db_p, "error-run-too-short-or-back-too-small");
+		cf_dyn_buf_append_string(db_p, "error-no-data-yet-or-back-too-small;");
 		pthread_mutex_unlock(&this->rows_lock);
 		return;
 	}
@@ -429,7 +439,8 @@ cf_hist_track_get_info(cf_hist_track* this, uint32_t back_sec,
 	}
 
 	if (no_slices) {
-		cf_dyn_buf_append_string(db_p, "error-slice-too-big-or-back-too-small");
+		cf_dyn_buf_append_string(db_p,
+				"error-slice-too-big-or-back-too-small;");
 	}
 
 	pthread_mutex_unlock(&this->rows_lock);
@@ -453,25 +464,26 @@ cf_hist_track_get_settings(cf_hist_track* this, cf_dyn_buf* db_p)
 	const char* name = ((histogram*)this)->name;
 	char output[MAX_FORMATTED_SETTINGS_SIZE];
 	char* write_p = output;
-	char* end_p = output + MAX_FORMATTED_SETTINGS_SIZE - 1;
+	char* end_p = output + MAX_FORMATTED_SETTINGS_SIZE - 2;
 
-	write_p += snprintf(output, MAX_FORMATTED_SETTINGS_SIZE - 1,
-			";%s-hist-track-back=%u"
-			";%s-hist-track-slice=%u"
-			";%s-hist-track-thresholds=",
+	write_p += snprintf(output, MAX_FORMATTED_SETTINGS_SIZE - 2,
+			"%s-hist-track-back=%u;"
+			"%s-hist-track-slice=%u;"
+			"%s-hist-track-thresholds=",
 			name, this->num_rows * this->slice_sec,
 			name, this->slice_sec,
 			name);
 
 	for (int i = 0; i < this->num_cols; i++) {
 		write_p += snprintf(write_p, end_p - write_p, "%u,",
-				1 << this->buckets[i]);
+				(uint32_t)1 << this->buckets[i]);
 	}
 
 	if (this->num_cols > 0) {
 		write_p--;
 	}
 
+	*write_p++ = ';';
 	*write_p = 0;
 
 	cf_dyn_buf_append_string(db_p, output);
@@ -605,11 +617,11 @@ output_header(cf_hist_track* this, uint32_t start_ts, uint32_t num_cols,
 
 	gmtime_r(&start_ts_time_t, &start_tm);
 	write_p += strftime(output, MAX_FORMATTED_ROW_SIZE - 2, time_fmt, &start_tm);
-	write_p += snprintf(write_p, end_p - write_p, rate_fmt);
+	write_p += snprintf(write_p, end_p - write_p, "%s", rate_fmt);
 
 	for (int i = 0; i < num_cols; i++) {
 		write_p += snprintf(write_p, end_p - write_p, pcts_fmt,
-				1 << this->buckets[i]);
+				(uint32_t)(1 << this->buckets[i]));
 	}
 
 	*write_p++ = line_sep;

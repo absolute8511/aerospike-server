@@ -438,3 +438,9 @@ as_bin_particle_integer_value(const as_bin *b)
 	// Caller must ensure this is called only for INTEGER particles.
 	return (int64_t)b->particle;
 }
+
+void
+as_bin_particle_integer_set(as_bin *b, int64_t i)
+{
+	b->particle = (as_particle *)i;
+}

@@ -27,7 +27,7 @@
 #pragma once
 
 #include <stdint.h>
-#include <aerospike/as_timer.h>
+#include "aerospike/as_timer.h"
 
 typedef struct   time_tracker_s time_tracker;
 typedef uint64_t (* as_timer_end_time_cb)(time_tracker *tt);

@@ -33,46 +33,28 @@
 #   make start   - Start the server.
 #   make stop    - Stop the server.
 #
-# Advanced Targets:
-#
-#   make asm  - Build with support for the ASMalloc memory allocation tracking tool.
-#
-# Intermediate Targets Used for ASMalloc Support:
-#
-#   make gen   - Generate the "cf/include/mallocation.h" file via "cpp" & Python.
-#   make mexp  - Build server using 2-phase macro expansion to transform  and instrument the source tree.
-#   make mexp1 - Macroexpand Phase 1:  Create the macroexpanded source tree using "m4" & Python.
-#   make mexp2 - Macroexpand Phase 2:  Build the macroexpanded source tree.
-#
 
 # Common variable definitions:
 include make_in/Makefile.vars
 
 .PHONY: all server
 all server:	targetdirs version $(JANSSON)/Makefile $(JEMALLOC)/Makefile $(LUAJIT)/src/luaconf.h
-ifeq ($(USE_ASM),1)
-	$(MAKE) -C $(ASMALLOC) jem SRCDIR=src
-endif
-ifeq ($(USE_JEM),1)
-	$(MAKE) -C $(JEMALLOC)
-endif
 ifeq ($(USE_LUAJIT),1)
 	$(MAKE) -C $(LUAJIT) Q= TARGET_SONAME=libluajit.so CCDEBUG=-g
 endif
+	$(MAKE) -C $(JEMALLOC)
 	$(MAKE) -C $(JANSSON)
 	$(MAKE) -C $(COMMON) CF=$(CF) EXT_CFLAGS="$(EXT_CFLAGS)"
 	$(MAKE) -C $(CF)
 	$(MAKE) -C $(MOD_LUA) CF=$(CF) COMMON=$(COMMON) LUA_CORE=$(LUA_CORE) EXT_CFLAGS="$(EXT_CFLAGS)" USE_LUAJIT=$(USE_LUAJIT) LUAJIT=$(LUAJIT) TARGET_SERVER=1
 	$(MAKE) -C $(S2)
-	$(MAKE) -C xdr
 	$(MAKE) -C ai
 	$(MAKE) -C as
 
 .PHONY: targetdirs
 targetdirs:
 	mkdir -p $(GEN_DIR) $(LIBRARY_DIR) $(BIN_DIR)
-	mkdir -p $(MEXP_DIR)/base $(MEXP_DIR)/fabric $(MEXP_DIR)/storage $(MEXP_DIR)/geospatial
-	mkdir -p $(OBJECT_DIR)/base $(OBJECT_DIR)/fabric $(OBJECT_DIR)/storage $(OBJECT_DIR)/geospatial
+	mkdir -p $(OBJECT_DIR)/base $(OBJECT_DIR)/fabric $(OBJECT_DIR)/storage $(OBJECT_DIR)/geospatial $(OBJECT_DIR)/transaction
 
 strip:	server
 	$(MAKE) -C xdr strip
@@ -87,11 +69,13 @@ init:
 start:
 	@echo "Running the Aerospike Server locally..."
 	@PIDFILE=run/asd.pid ; if [ -f $$PIDFILE ]; then echo "Aerospike already running?  Please do \"make stop\" first."; exit -1; fi
+	@nohup ./modules/telemetry/telemetry.py as/etc/telemetry_dev.conf > /dev/null 2>&1 &
 	$(BIN_DIR)/asd --config-file as/etc/aerospike_dev.conf
 
 stop:
 	@echo "Stopping the local Aerospike Server..."
 	@PIDFILE=run/asd.pid ; if [ -f $$PIDFILE ]; then kill `cat $$PIDFILE`; rm $$PIDFILE; fi
+	@PID=`pgrep telemetry.py | grep -v grep`; if [ -n "$$PID" ]; then kill $$PID; fi
 
 .PHONY: clean
 clean:	cleanmodules cleandist
@@ -100,7 +84,6 @@ clean:	cleanmodules cleandist
 
 .PHONY: cleanmodules
 cleanmodules:
-	$(MAKE) -C $(ASMALLOC) cleanest cleanest.jem
 	$(MAKE) -C $(COMMON) clean
 	if [ -e "$(JANSSON)/Makefile" ]; then \
 		$(MAKE) -C $(JANSSON) clean; \
@@ -131,7 +114,6 @@ GIT_CLEAN = git clean -fdx
 
 .PHONY: cleangit
 cleangit:
-	cd $(ASMALLOC); $(GIT_CLEAN)
 	cd $(COMMON); $(GIT_CLEAN)
 	cd $(JANSSON); $(GIT_CLEAN)
 	cd $(JEMALLOC); $(GIT_CLEAN)
@@ -153,29 +135,6 @@ $(VERSION_OBJ):	$(VERSION_SRC)
 
 .PHONY: version
 version:	$(VERSION_OBJ)
-
-.PHONY:	asm mexp
-asm:	version
-	$(MAKE) mexp USE_ASM=1 LD_JEM=dynamic
-
-GEN_TAG = GEN_TAG_001
-GEN_FILE = $(GEN_DIR)/CPPMallocations.py
-
-gen:
-	$(RM) $(GEN_FILE)
-	touch $(GEN_FILE)
-	$(MAKE) PREPRO=1 GEN_TAG=$(GEN_TAG)
-	echo "def AddLocs(AddLoc):" > $(GEN_FILE)
-	find -L . -name "*.o.cpp" -exec grep $(GEN_TAG) {} \; | grep -v "#define" | sed 's/.*GEN_TAG_001\( .*\)GEN_TAG_001.*/\1/g' | sort | uniq >> $(GEN_FILE)
-	build/GenMallocations.py $(GEN_DIR)
-
-mexp:	mexp2
-
-mexp1:	gen
-	$(MAKE) MEXP_PHASE=1 SRCDIR=$(realpath $(MEXP_DIR))/ TOOLS_DIR=$(realpath build)
-
-mexp2: mexp1
-	$(MAKE) MEXP_PHASE=2 SRCDIR=$(realpath $(MEXP_DIR))/
 
 $(JANSSON)/configure:
 	cd $(JANSSON) && autoreconf -i

@@ -38,7 +38,7 @@ extern char *as_udf_type_name[];
 
 //------------------------------------------------
 // Register function
-int udf_cask_init();
+void udf_cask_init();
 
 //------------------------------------------------
 // these functions are "as_info_command" format

@@ -37,298 +37,306 @@
 #include "citrusleaf/cf_digest.h"
 
 #include "fault.h"
+#include "socket.h"
 
-#include "base/as_stap.h"
 #include "base/batch.h"
 #include "base/datamodel.h"
 #include "base/proto.h"
 #include "base/scan.h"
 #include "base/security.h"
+#include "base/stats.h"
 #include "base/thr_demarshal.h"
-#include "base/thr_proxy.h"
-#include "base/udf_rw.h"
+#include "fabric/partition.h"
+#include "transaction/proxy.h"
+#include "transaction/rw_request.h"
+#include "transaction/rw_utils.h"
+#include "transaction/udf.h"
 
-/* as_transaction_prepare
- * Prepare a transaction that has just been received from the wire.
- * NB: This should only be called once on any given transaction, because it swaps bytes! */
 
-/*
-** the layout for the digest is:
-** type byte - set
-** set's bytes
-** type byte - key
-** key's bytes
-**
-** Notice that in the case of the 'key', the payload includes a particle-type byte.
-**
-** return -2 means no digest no key
-** return -3 means batch digest request
-** return -4 means bad protocol data  (but no longer used??)
-*/
-
-/*
- * Code to init the fields in a transaction.  Use this instead of memset.
- *
- * NB: DO NOT SHUFFLE INIT ORDER .. it is based on elements found in the
- *     structure.
- */
 void
-as_transaction_init(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
+as_transaction_init_head(as_transaction *tr, cf_digest *keyd, cl_msg *msgp)
 {
-	tr->msgp                      = msgp;
-	if (keyd) {
-		tr->keyd                  = *keyd;
-		tr->preprocessed          = true;
-	} else {
-		tr->keyd                  = cf_digest_zero;
-		tr->preprocessed          = false;
-	}
-	tr->flag                      = 0;
-	tr->generation                = 0;
-	tr->result_code               = AS_PROTO_RESULT_OK;
-	tr->proto_fd_h                = 0;
-	tr->start_time                = cf_getns();
-	tr->end_time                  = 0;
+	tr->msgp				= msgp;
+	tr->msg_fields			= 0;
 
-	AS_PARTITION_RESERVATION_INIT(tr->rsv);
+	tr->origin				= 0;
+	tr->from_flags			= 0;
 
-	tr->microbenchmark_time       = 0;
-	tr->microbenchmark_is_resolve = false;
+	tr->from.any			= NULL;
+	tr->from_data.any		= 0;
 
-	tr->proxy_node                = 0;
-	tr->proxy_msg                 = 0;
+	tr->keyd				= keyd ? *keyd : cf_digest_zero;
 
-	UREQ_DATA_INIT(&tr->udata);
-
-	tr->batch_shared              = 0;
-	tr->batch_index               = 0;
-
-	tr->void_time                 = 0;
+	tr->start_time			= 0;
+	tr->benchmark_time		= 0;
 }
 
-/*
-  The transaction prepare function fills out the fields of the tr structure,
-  using the information in the msg structure. It also swaps the fields in the
-  message header (which are originally in network byte order).
+void
+as_transaction_init_body(as_transaction *tr)
+{
+	AS_PARTITION_RESERVATION_INIT(tr->rsv);
 
-  Once the prepare function has been called on the transaction, the
-  'preprocessed' flag is set and the transaction cannot be prepared again.
-  Returns:
-  0:  OK
-  -1: General Error
-  -2: Request received with no key
-  -3: Request received with digest array
-*/
-int as_transaction_prepare(as_transaction *tr) {
-	cl_msg *msgp = tr->msgp;
-	as_msg *m = &msgp->msg;
+	tr->end_time			= 0;
+	tr->result_code			= AS_PROTO_RESULT_OK;
+	tr->flags				= 0;
+	tr->generation			= 0;
+	tr->void_time			= 0;
+	tr->last_update_time	= 0;
+}
 
-#if defined(USE_SYSTEMTAP)
-	uint64_t nodeid = g_config.self_node;
-#endif
+void
+as_transaction_copy_head(as_transaction *to, const as_transaction *from)
+{
+	to->msgp				= from->msgp;
+	to->msg_fields			= from->msg_fields;
 
-//	cf_assert(tr, AS_PROTO, CF_CRITICAL, "invalid transaction");
+	to->origin				= from->origin;
+	to->from_flags			= from->from_flags;
 
-	void *limit = ((void *)m) + msgp->proto.sz;
+	to->from.any			= from->from.any;
+	to->from_data.any		= from->from_data.any;
 
-	// Check processed flag.  It's a non-fatal error to call this function again.
-	if( tr->preprocessed )
-		return(0);
+	to->keyd				= from->keyd;
 
-	if (0 != cf_digest_compare(&tr->keyd, &cf_digest_zero)) {
-		cf_warning(AS_RW, "Internal inconsistency: transaction has keyd, but marked not swizzled");
+	to->start_time			= from->start_time;
+	to->benchmark_time		= from->benchmark_time;
+}
+
+void
+as_transaction_init_from_rw(as_transaction *tr, rw_request *rw)
+{
+	as_transaction_init_head_from_rw(tr, rw);
+	// Note - we don't clear rw->msgp, destructor will free it.
+
+	as_partition_reservation_copy(&tr->rsv, &rw->rsv);
+	// Note - destructor will still release the reservation.
+
+	tr->end_time = rw->end_time;
+	tr->result_code = AS_PROTO_RESULT_OK;
+	tr->flags = 0;
+	tr->generation = rw->generation;
+	tr->void_time = rw->void_time;
+}
+
+void
+as_transaction_init_head_from_rw(as_transaction *tr, rw_request *rw)
+{
+	tr->msgp				= rw->msgp;
+	tr->msg_fields			= rw->msg_fields;
+	tr->origin				= rw->origin;
+	tr->from_flags			= rw->from_flags;
+	tr->from.any			= rw->from.any;
+	tr->from_data.any		= rw->from_data.any;
+	tr->keyd				= rw->keyd;
+	tr->start_time			= rw->start_time;
+	tr->benchmark_time		= rw->benchmark_time;
+
+	rw->from.any = NULL;
+	// Note - we don't clear rw->msgp, destructor will free it.
+}
+
+bool
+as_transaction_set_msg_field_flag(as_transaction *tr, uint8_t type)
+{
+	switch (type) {
+	case AS_MSG_FIELD_TYPE_NAMESPACE:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_NAMESPACE;
+		break;
+	case AS_MSG_FIELD_TYPE_SET:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_SET;
+		break;
+	case AS_MSG_FIELD_TYPE_KEY:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_KEY;
+		break;
+	case AS_MSG_FIELD_TYPE_DIGEST_RIPE:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_DIGEST_RIPE;
+		break;
+	case AS_MSG_FIELD_TYPE_DIGEST_RIPE_ARRAY:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_DIGEST_RIPE_ARRAY;
+		break;
+	case AS_MSG_FIELD_TYPE_TRID:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_TRID;
+		break;
+	case AS_MSG_FIELD_TYPE_SCAN_OPTIONS:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_SCAN_OPTIONS;
+		break;
+	case AS_MSG_FIELD_TYPE_SOCKET_TIMEOUT:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_SOCKET_TIMEOUT;
+		break;
+	case AS_MSG_FIELD_TYPE_INDEX_NAME:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_INDEX_NAME;
+		break;
+	case AS_MSG_FIELD_TYPE_INDEX_RANGE:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_INDEX_RANGE;
+		break;
+	case AS_MSG_FIELD_TYPE_INDEX_TYPE:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_INDEX_TYPE;
+		break;
+	case AS_MSG_FIELD_TYPE_UDF_FILENAME:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_UDF_FILENAME;
+		break;
+	case AS_MSG_FIELD_TYPE_UDF_FUNCTION:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_UDF_FUNCTION;
+		break;
+	case AS_MSG_FIELD_TYPE_UDF_ARGLIST:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_UDF_ARGLIST;
+		break;
+	case AS_MSG_FIELD_TYPE_UDF_OP:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_UDF_OP;
+		break;
+	case AS_MSG_FIELD_TYPE_QUERY_BINLIST:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_QUERY_BINLIST;
+		break;
+	case AS_MSG_FIELD_TYPE_BATCH: // shouldn't get here - batch parent handles this
+		tr->msg_fields |= AS_MSG_FIELD_BIT_BATCH;
+		break;
+	case AS_MSG_FIELD_TYPE_BATCH_WITH_SET: // shouldn't get here - batch parent handles this
+		tr->msg_fields |= AS_MSG_FIELD_BIT_BATCH_WITH_SET;
+		break;
+	case AS_MSG_FIELD_TYPE_PREDEXP:
+		tr->msg_fields |= AS_MSG_FIELD_BIT_PREDEXP;
+		break;
+	default:
+		return false;
 	}
+
+	return true;
+}
+
+// TODO - check m->n_fields against PROTO_NFIELDS_MAX_WARNING?
+bool
+as_transaction_demarshal_prepare(as_transaction *tr)
+{
+	uint64_t size = tr->msgp->proto.sz;
+
+	if (size < sizeof(as_msg)) {
+		cf_warning(AS_PROTO, "proto body size %lu smaller than as_msg", size);
+		return false;
+	}
+
+	// The proto data is not smaller than an as_msg - safe to swap header.
+	as_msg *m = &tr->msgp->msg;
 
 	as_msg_swap_header(m);
-	if (0 != as_msg_swap_fields_and_ops(m, limit)) {
-		cf_info(AS_PROTO, "msg swap field and ops returned error");
-		return(-1);
-	}
 
-	if (m->n_fields>PROTO_NFIELDS_MAX_WARNING) {
-		cf_info(AS_PROTO, "received too many n_fields! %d",m->n_fields);
-    }
+	uint8_t* p_end = (uint8_t*)m + size;
+	uint8_t* p_read = m->data;
 
-	// Set the transaction end time if available.
-	if (m->transaction_ttl) {
-//		cf_debug(AS_PROTO, "received non-zero transaction ttl: %d",m->transaction_ttl);
-		tr->end_time = tr->start_time + ((uint64_t)m->transaction_ttl * 1000000);
-	}
-
-	// Set the preprocessed flag. All exits from here on out are considered
-	// processed since the msg header has been swapped and the transaction
-	// end time has been set.
-	tr->preprocessed = true;
-	tr->flag         = 0;
-	UREQ_DATA_INIT(&tr->udata);
-	as_msg_field *sfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_DIGEST_RIPE_ARRAY);
-	if (sfp) {
-		cf_debug(AS_PROTO, "received request with digest array, batch");
-		return(-3);
-	}
-
-	// It's tempting to move this to the final return, but queries
-	// actually escape in the if clause below ...
-	ASD_TRANS_PREPARE(nodeid, (uint64_t) msgp, tr->trid);
-
-	// Sent digest? Use!
-	as_msg_field *dfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_DIGEST_RIPE);
-	if (dfp) {
-//		cf_detail(AS_PROTO, "transaction prepare: received sent digest\n");
-		if (as_msg_field_get_value_sz(dfp) != sizeof(cf_digest)) {
-			cf_info(AS_PROTO, "sent bad digest size %d, recomputing digest",as_msg_field_get_value_sz(dfp));
-			goto Compute;
+	// Parse and swap fields first.
+	for (uint16_t n = 0; n < m->n_fields; n++) {
+		if (p_read + sizeof(as_msg_field) > p_end) {
+			cf_warning(AS_PROTO, "incomplete as_msg_field");
+			return false;
 		}
-		memcpy(&tr->keyd, dfp->data, sizeof(cf_digest));
-	}
-	// Not sent, so compute.
-	else {
-Compute:		;
-		as_msg_field *kfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_KEY);
-		if (!kfp) {
-			cf_detail(AS_PROTO, "received request with no key, scan");
-			return(-2);
-		}
-        if (as_msg_field_get_value_sz(kfp)> PROTO_FIELD_LENGTH_MAX) {
-	        cf_info(AS_PROTO, "key field too big %d. Is it for real?",as_msg_field_get_value_sz(kfp));
-        }
 
-		as_msg_field *sfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
-		if (sfp == 0 || as_msg_field_get_value_sz(sfp) == 0) {
-			cf_digest_compute(kfp->data, as_msg_field_get_value_sz(kfp), &tr->keyd);
-			// cf_info(AS_PROTO, "computing key for sz %d %"PRIx64" bytes %d %d %d %d",as_msg_field_get_value_sz(kfp),*(uint64_t *)&tr->keyd,kfp->data[0],kfp->data[1],kfp->data[2],kfp->data[3]);
+		as_msg_field* p_field = (as_msg_field*)p_read;
+
+		as_msg_swap_field(p_field);
+		p_read = as_msg_field_skip(p_field);
+
+		if (! p_read) {
+			cf_warning(AS_PROTO, "bad as_msg_field");
+			return false;
 		}
-		else {
-            if (as_msg_field_get_value_sz(sfp)> PROTO_FIELD_LENGTH_MAX) {
-		        cf_info(AS_PROTO, "set field too big %d. Is this for real?",as_msg_field_get_value_sz(sfp));
-            }
-			cf_digest_compute2(sfp->data, as_msg_field_get_value_sz(sfp),
-						kfp->data, as_msg_field_get_value_sz(kfp),
-						&tr->keyd);
-			// cf_info(AS_PROTO, "computing set with key for sz %d %"PRIx64" bytes %d %d",as_msg_field_get_value_sz(kfp),*(uint64_t *)&tr->keyd,kfp->data[0],kfp->data[1],kfp->data[2],kfp->data[3]);
+
+		if (p_read > p_end) {
+			cf_warning(AS_PROTO, "incomplete as_msg_field value");
+			return false;
+		}
+
+		// Store which message fields are present - prevents lots of re-parsing.
+		if (! as_transaction_set_msg_field_flag(tr, p_field->type)) {
+			cf_debug(AS_PROTO, "skipping as_msg_field type %u", p_field->type);
 		}
 	}
 
-	return(0);
+	// Parse and swap bin-ops, if any.
+	for (uint16_t n = 0; n < m->n_ops; n++) {
+		if (p_read + sizeof(as_msg_op) > p_end) {
+			cf_warning(AS_PROTO, "incomplete as_msg_op");
+			return false;
+		}
+
+		as_msg_op* op = (as_msg_op*)p_read;
+
+		as_msg_swap_op(op);
+		p_read = as_msg_op_skip(op);
+
+		if (! p_read) {
+			cf_warning(AS_PROTO, "bad as_msg_op");
+			return false;
+		}
+
+		if (p_read > p_end) {
+			cf_warning(AS_PROTO, "incomplete as_msg_op data");
+			return false;
+		}
+	}
+
+	// Temporarily skip the check for extra message bytes, for compatibility
+	// with legacy clients.
+
+//	if (p_read != p_end) {
+//		cf_warning(AS_PROTO, "extra bytes follow fields and bin-ops");
+//		return false;
+//	}
+
+	return true;
 }
 
-int
-as_transaction_digest_validate(as_transaction *tr)
+void
+as_transaction_proxyee_prepare(as_transaction *tr)
 {
-	cl_msg *msgp = tr->msgp;
-	as_msg *m = &msgp->msg;
+	as_msg *m = &tr->msgp->msg;
+	as_msg_field* p_field = (as_msg_field*)m->data;
 
-	cf_info(AS_PROTO, "digest compare succeeded");
+	// Store which message fields are present - prevents lots of re-parsing.
+	// Proto header, field sizes already swapped to host order by proxyer.
+	for (uint16_t n = 0; n < m->n_fields; n++) {
+		if (! as_transaction_set_msg_field_flag(tr, p_field->type)) {
+			cf_debug(AS_PROTO, "skipping as_msg_field type %u", p_field->type);
+		}
 
-	// Can only validate if we have two things to compare.
-	as_msg_field *dfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_DIGEST_RIPE);
-	if (dfp == 0) {
-		cf_info(AS_PROTO, "no incoming protocol digest to validate");
-		return(0);
+		p_field = as_msg_field_get_next(p_field);
 	}
-	if (as_msg_field_get_value_sz(dfp) != sizeof(cf_digest)) {
-		cf_info(AS_PROTO, "sent bad digest size %d, can't validate",as_msg_field_get_value_sz(dfp));
-		return(-1);
-	}
-
-	// Pull out the key and do the computation the same way as above.
-	cf_digest computed;
-	memset(&computed, 0, sizeof(cf_digest) );
-
-	as_msg_field *kfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_KEY);
-	if (!kfp) {
-		cf_info(AS_PROTO, "received request with no key and no digest, validation failed");
-		return(-1);
-	}
-
-	as_msg_field *sfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET);
-	if (sfp == 0 || as_msg_field_get_value_sz(sfp) == 0) {
-		cf_digest_compute(kfp->data, as_msg_field_get_value_sz(kfp), &tr->keyd);
-	}
-	else {
-		cf_digest_compute2(sfp->data, as_msg_field_get_value_sz(sfp),
-					kfp->data, as_msg_field_get_value_sz(kfp),
-					&computed);
-	}
-
-	if (0 == memcmp(&computed, &tr->keyd, sizeof(computed))) {
-		cf_info(AS_PROTO, "digest compare failed. wire: %"PRIx64" computed: %"PRIx64,
-			*(uint64_t *)&tr->keyd, *(uint64_t *) &computed );
-		return(-1);
-	}
-
-	cf_info(AS_PROTO, "digest compare succeeded");
-
-	return(0);
 }
 
-/* Create an internal transaction.
- * parameters:
- *     tr_create_data : Details for creating transaction
- *     tr             : to be filled
- *
- * return :  0  on success
- *           -1 on failure
- */
+// Initialize an internal UDF transaction (for a UDF scan/query). Allocates a
+// message with namespace and digest - no set for now, since these transactions
+// won't get security checked, and they can't create a record.
 int
-as_transaction_create_internal(as_transaction *tr, tr_create_data *  trc_data)
+as_transaction_init_iudf(as_transaction *tr, as_namespace *ns, cf_digest *keyd,
+		iudf_origin* iudf_orig, bool is_durable_delete)
 {
-	tr_create_data * d = (tr_create_data*) trc_data;
-
-	// Get Defensive 
-	memset(tr, 0, sizeof(as_transaction));
-
-	if (d->fd_h) {
-		cf_warning(AS_PROTO, "Foreground Internal Transation .. Ignoring");
-		return -1;
-	} else {
-		tr->proto_fd_h = NULL;
-	}
-
-	tr->start_time   = cf_getns();
-	tr->flag         = AS_TRANSACTION_FLAG_INTERNAL;
-	tr->keyd         = d->digest;
-	tr->preprocessed = true;
-	tr->result_code  = AS_PROTO_RESULT_OK;
-
-	AS_PARTITION_RESERVATION_INIT(tr->rsv);
-	UREQ_DATA_INIT(&tr->udata);
-
-	// Get namespace and set lengths.
-	int ns_len        = strlen(d->ns->name);
-	int set_len       = strlen(d->set);
-
-	// Figure out the size of the message.
-	size_t  msg_sz = sizeof(cl_msg);
+	size_t msg_sz = sizeof(cl_msg);
+	int ns_len = strlen(ns->name);
 
 	msg_sz += sizeof(as_msg_field) + ns_len;
-
-	if (set_len != 0) {
-		msg_sz += sizeof(as_msg_field) + set_len;
-	}
-
 	msg_sz += sizeof(as_msg_field) + sizeof(cf_digest);
-	msg_sz += sizeof(as_msg_field) + sizeof(d->trid);
 
-	// Udf call structure will go as a part of the transaction udata.
-	// Do not pack it in the message.
-	cf_debug(AS_PROTO, "UDF : Msg size for internal transaction is %d", msg_sz);
+	cl_msg *msgp = (cl_msg *)cf_malloc(msg_sz);
 
-	// Allocate space in the buffer.
-	uint8_t * buf   = cf_malloc(msg_sz); memset(buf, 0, msg_sz);
-	if (!buf) {
+	if (! msgp) {
 		return -1;
 	}
-	uint8_t * buf_r = buf;
 
-	// Calculation of number of fields:
-	// n_fields = ( ns ? 1 : 0 ) + (set ? 1 : 0) + (digest ? 1 : 0) + (trid ? 1 : 0) + (call ? 3 : 0);
+	uint8_t *b = (uint8_t *)msgp;
+	uint8_t info2 = AS_MSG_INFO2_WRITE |
+			(is_durable_delete ? AS_MSG_INFO2_DURABLE_DELETE : 0);
 
-	// Write the header in case the request gets proxied. Is it enough ??
-	buf = as_msg_write_header(buf, msg_sz, 0, d->msg_type, 0, 0, 0, 0, 2 /*n_fields*/, 0);
-	buf = as_msg_write_fields(buf, d->ns->name, ns_len, d->set, set_len, &(d->digest), 0, 0 , 0, 0);
+	b = as_msg_write_header(b, msg_sz, 0, info2, 0, 0, 0, 0, 2, 0);
+	b = as_msg_write_fields(b, ns->name, ns_len, NULL, 0, keyd, 0);
 
-	tr->msgp         = (cl_msg *) buf_r;
+	as_transaction_init_head(tr, NULL, msgp);
+
+	as_transaction_set_msg_field_flag(tr, AS_MSG_FIELD_TYPE_NAMESPACE);
+	as_transaction_set_msg_field_flag(tr, AS_MSG_FIELD_TYPE_DIGEST_RIPE);
+
+	tr->origin = FROM_IUDF;
+	tr->from.iudf_orig = iudf_orig;
+
+	// Do this last, to exclude the setup time in this function.
+	tr->start_time = cf_getns();
 
 	return 0;
 }
@@ -336,60 +344,105 @@ as_transaction_create_internal(as_transaction *tr, tr_create_data *  trc_data)
 void
 as_transaction_demarshal_error(as_transaction* tr, uint32_t error_code)
 {
-	as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, 0, NULL);
-	tr->proto_fd_h = NULL;
+	as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, 0, NULL);
+	tr->from.proto_fd_h = NULL;
 
 	cf_free(tr->msgp);
 	tr->msgp = NULL;
+
+	cf_atomic64_incr(&g_stats.n_demarshal_error);
 }
 
-// TODO - deprecate this when swap is moved out into thr_demarshal.c!
-void
-as_transaction_error_unswapped(as_transaction* tr, uint32_t error_code)
-{
-	if (tr->batch_shared) {
-		as_batch_add_error(tr->batch_shared, tr->batch_index, error_code);
-		// Clear this transaction's msgp so calling code does not free it.
-		tr->msgp = 0;
+#define UPDATE_ERROR_STATS(name) \
+	if (ns) { \
+		if (error_code == AS_PROTO_RESULT_FAIL_TIMEOUT) { \
+			cf_atomic64_incr(&ns->n_##name##_tsvc_timeout); \
+		} \
+		else { \
+			cf_atomic64_incr(&ns->n_##name##_tsvc_error); \
+		} \
+	} \
+	else { \
+		cf_atomic64_incr(&g_stats.n_tsvc_##name##_error); \
 	}
-	else {
-		as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, 0, NULL);
-		tr->proto_fd_h = 0;
-		MICROBENCHMARK_HIST_INSERT_P(error_hist);
-		cf_atomic_int_incr(&g_config.err_tsvc_requests);
-		if (error_code == AS_PROTO_RESULT_FAIL_TIMEOUT) {
-			cf_atomic_int_incr(&g_config.err_tsvc_requests_timeout);
+
+void
+as_transaction_error(as_transaction* tr, as_namespace* ns, uint32_t error_code)
+{
+	if (error_code == 0) {
+		cf_warning(AS_PROTO, "converting error code 0 to 1 (unknown)");
+		error_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
+	}
+
+	// The 'from' checks below should not be necessary, but there's a known race
+	// between duplicate-resolution's cluster-key-mismatch handler (which
+	// re-queues transactions) and retransmit thread timeouts which can allow a
+	// null 'from' to get here. That race will be fixed in a future release, but
+	// for now these checks keep us safe.
+
+	switch (tr->origin) {
+	case FROM_CLIENT:
+		if (tr->from.proto_fd_h) {
+			as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
+			tr->from.proto_fd_h = NULL; // pattern, not needed
 		}
+		UPDATE_ERROR_STATS(client);
+		break;
+	case FROM_PROXY:
+		if (tr->from.proxy_node != 0) {
+			as_proxy_send_response(tr->from.proxy_node, tr->from_data.proxy_tid, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
+			tr->from.proxy_node = 0; // pattern, not needed
+		}
+		break;
+	case FROM_BATCH:
+		if (tr->from.batch_shared) {
+			as_batch_add_error(tr->from.batch_shared, tr->from_data.batch_index, error_code);
+			tr->from.batch_shared = NULL; // pattern, not needed
+			tr->msgp = NULL; // pattern, not needed
+		}
+		UPDATE_ERROR_STATS(batch_sub);
+		break;
+	case FROM_IUDF:
+		if (tr->from.iudf_orig) {
+			tr->from.iudf_orig->cb(tr->from.iudf_orig->udata, error_code);
+			tr->from.iudf_orig = NULL; // pattern, not needed
+		}
+		UPDATE_ERROR_STATS(udf_sub);
+		break;
+	case FROM_NSUP:
+		break;
+	default:
+		cf_crash(AS_PROTO, "unexpected transaction origin %u", tr->origin);
+		break;
 	}
 }
 
+// TODO - temporary, until scan & query can do their own synchronous failure
+// responses. (Here we forfeit namespace info and add to global-scope error.)
 void
-as_transaction_error(as_transaction* tr, uint32_t error_code)
+as_multi_rec_transaction_error(as_transaction* tr, uint32_t error_code)
 {
-	if (tr->proto_fd_h) {
-		if (tr->batch_shared) {
-			as_batch_add_error(tr->batch_shared, tr->batch_index, error_code);
-			// Clear this transaction's msgp so calling code does not free it.
-			tr->msgp = 0;
-		}
-		else {
-			as_msg_send_reply(tr->proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, NULL, as_transaction_trid(tr), NULL);
-			tr->proto_fd_h = 0;
-			MICROBENCHMARK_HIST_INSERT_P(error_hist);
-			cf_atomic_int_incr(&g_config.err_tsvc_requests);
-			if (error_code == AS_PROTO_RESULT_FAIL_TIMEOUT) {
-				cf_atomic_int_incr(&g_config.err_tsvc_requests_timeout);
-			}
-		}
+	if (error_code == 0) {
+		cf_warning(AS_PROTO, "converting error code 0 to 1 (unknown)");
+		error_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
-	else if (tr->proxy_msg) {
-		as_proxy_send_response(tr->proxy_node, tr->proxy_msg, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
-		tr->proxy_msg = NULL;
-	}
-	else if (tr->udata.req_udata) {
-		if (udf_rw_needcomplete(tr)) {
-			udf_rw_complete(tr, error_code, __FILE__,__LINE__);
+
+	switch (tr->origin) {
+	case FROM_CLIENT:
+		if (tr->from.proto_fd_h) {
+			as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
+			tr->from.proto_fd_h = NULL; // pattern, not needed
 		}
+		cf_atomic64_incr(&g_stats.n_tsvc_client_error);
+		break;
+	case FROM_PROXY:
+	case FROM_BATCH:
+	case FROM_IUDF:
+	case FROM_NSUP:
+		// It should be impossible for non-client origins to get here.
+	default:
+		cf_crash(AS_PROTO, "unexpected transaction origin %u", tr->origin);
+		break;
 	}
 }
 
@@ -407,9 +460,9 @@ as_release_file_handle(as_file_handle *proto_fd_h)
 		return;
 	}
 
-	close(proto_fd_h->fd);
+	cf_socket_close(&proto_fd_h->sock);
+	cf_socket_term(&proto_fd_h->sock);
 	proto_fd_h->fh_info &= ~FH_INFO_DONOT_REAP;
-	proto_fd_h->fd = -1;
 
 	if (proto_fd_h->proto)	{
 		as_proto *p = proto_fd_h->proto;
@@ -429,16 +482,16 @@ as_release_file_handle(as_file_handle *proto_fd_h)
 	}
 
 	cf_rc_free(proto_fd_h);
-	cf_atomic_int_incr(&g_config.proto_connections_closed);
+	cf_atomic64_incr(&g_stats.proto_connections_closed);
 }
 
 void
 as_end_of_transaction(as_file_handle *proto_fd_h, bool force_close)
 {
-	thr_demarshal_resume(proto_fd_h);
+	thr_demarshal_rearm(proto_fd_h);
 
 	if (force_close) {
-		shutdown(proto_fd_h->fd, SHUT_RDWR);
+		cf_socket_shutdown(&proto_fd_h->sock);
 	}
 
 	as_release_file_handle(proto_fd_h);

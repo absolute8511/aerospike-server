@@ -22,39 +22,63 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "dynbuf.h"
-#include "socket.h"
-#include "util.h"
 
+#include "base/proto.h"
+#include "base/security.h"
 #include "base/transaction.h"
-#include "fabric/paxos.h"
 
+typedef int (*as_info_get_tree_fn) (char *name, char *subtree, cf_dyn_buf *db);
+typedef int (*as_info_get_value_fn) (char *name, cf_dyn_buf *db);
+typedef int (*as_info_command_fn) (char *name, char *parameters, cf_dyn_buf *db);
 
-extern void as_info_paxos_event(as_paxos_generation gen,
-		as_paxos_change *change, cf_node succession[], void *udata);
+// Sets a static value - set to 0 to remove a previous value.
+extern int as_info_set_buf(const char *name, const uint8_t *value, size_t value_sz, bool def);
+extern int as_info_set(const char *name, const char *value, bool def);
 
-// Starting to calculate more and more stats in thr_info. Perhaps this should be
-// elsewhere?
-extern uint64_t thr_info_get_object_count();
-extern uint64_t thr_info_get_subobject_count();
+// For dynamic items - you will get called when the name is requested. The
+// dynbuf will be fully set up for you - just add the information you want to
+// return.
+extern int as_info_set_dynamic(char *name, as_info_get_value_fn gv_fn, bool def);
+
+// For tree items - you will get called when the name is requested, and it will
+// have the name you registered (name) and the subtree portion (value). The
+// dynbuf will be fully set up for you - just add the information you want to
+// return
+extern int as_info_set_tree(char *name, as_info_get_tree_fn gv_fn);
+
+// For commands - you will be called with the parameters.
+extern int as_info_set_command(char *name, as_info_command_fn command_fn, as_sec_perm required_perm);
+
+int as_info_parameter_get(char *param_str, char *param, char *value, int *value_len);
+
+typedef struct as_info_transaction_s {
+	as_file_handle *fd_h;
+	as_proto *proto;
+	uint64_t start_time;
+} as_info_transaction;
 
 // Processes an info request that comes in from the network, sends the response.
-extern int as_info(as_transaction *tr);
+extern void as_info(as_info_transaction *it);
 
 // Processes a pure puffer request without any info header stuff.
 extern int as_info_buffer(uint8_t *req_buf, size_t req_buf_len, cf_dyn_buf *rsp);
-
-extern void info_debug_ticker_start();
 
 // The info unit uses the fabric to communicate with the other members of the
 // cluster so it needs to register for different messages and create listener
 // threads, etc.
 extern int as_info_init();
 
-// The info port is used by more basic monitoring services.
-extern int as_info_port_start();
+// Needed by ticker:
 
-extern void build_service_list(cf_ifaddr *ifaddr, int ifaddr_sz, cf_dyn_buf *db);
+int as_info_queue_get_size();
+void info_log_with_datestamp(void (*log_fn)(void));
+
+extern bool g_mstats_enabled;
+
+// Needed by main():
+extern uint64_t g_start_ms;

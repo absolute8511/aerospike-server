@@ -1,7 +1,7 @@
 /*
  * udf_record.c
  *
- * Copyright (C) 2012-2015 Aerospike, Inc.
+ * Copyright (C) 2012-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -19,8 +19,6 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
-
-#include "base/feature.h" // Turn new AS Features on/off (must be first in line)
 
 #include "base/udf_record.h"
 
@@ -44,8 +42,10 @@
 #include "base/ldt.h"
 #include "base/rec_props.h"
 #include "base/transaction.h"
-#include "base/udf_rw.h"
 #include "storage/storage.h"
+#include "transaction/rw_utils.h"
+#include "transaction/udf.h"
+
 
 bool
 udf_record_ldt_enabled(const as_rec * rec)
@@ -85,16 +85,22 @@ udf_storage_record_open(udf_record *urecord)
 	as_storage_rd  *rd    = urecord->rd;
 	as_index       *r	  = urecord->r_ref->r;
 	as_transaction *tr    = urecord->tr;
-	int rv = as_storage_record_open(tr->rsv.ns, r, rd, &r->key);
-	if (0 != rv) {
-		cf_warning(AS_UDF, "Could not open record !! %d", rv);
-		return rv;
+
+	as_storage_record_open(tr->rsv.ns, r, rd);
+
+	// Deal with delete durability (enterprise only).
+	if ((urecord->flag & UDF_RECORD_FLAG_ALLOW_UPDATES) != 0 &&
+			(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) == 0 &&
+			set_delete_durablility(tr, rd) != 0) {
+		as_storage_record_close(rd);
+		return -1;
 	}
-	rd->n_bins = as_bin_get_n_bins(r, rd);
+
+	as_storage_rd_load_n_bins(rd); // TODO - handle error returned
 
 	if (rd->n_bins > UDF_RECORD_BIN_ULIMIT) {
 		cf_warning(AS_UDF, "record has too many bins (%d) for UDF processing", rd->n_bins);
-		as_storage_record_close(r, rd);
+		as_storage_record_close(rd);
 		return -1;
 	}
 
@@ -103,7 +109,7 @@ udf_storage_record_open(udf_record *urecord)
 		rd->n_bins = sizeof(urecord->stack_bins) / sizeof(as_bin);
 	}
 
-	rd->bins = as_bin_get_all(r, rd, urecord->stack_bins);
+	as_storage_rd_load_bins(rd, urecord->stack_bins); // TODO - handle error returned
 	urecord->starting_memory_bytes = as_storage_record_get_n_bytes_memory(rd);
 
 	as_storage_record_get_key(rd);
@@ -159,20 +165,29 @@ udf_storage_record_close(udf_record *urecord)
 			}
 		}
 
-		if (!(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD)) {
+		bool is_subrec = (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) != 0;
+		bool has_bins = as_bin_inuse_has(rd);
+
+		if (! is_subrec) {
 			if (as_ldt_record_is_parent(rd->r)) {
-				cf_detail_digest(AS_LDT, &rd->keyd, "LDT_INDEXBIT Parent @ write: Digest:");
+				cf_detail_digest(AS_LDT, &rd->r->keyd, "LDT_INDEXBIT Parent @ write: Digest:");
 			}
-		} else {
+		} else if (has_bins) {
 			as_ldt_subrec_storage_validate(rd, "Writing");
 		}
 
 		if (r_ref) {
 			if (urecord->flag & UDF_RECORD_FLAG_HAS_UPDATES) {
-				as_storage_record_write(r_ref->r, rd);
+				as_storage_record_write(rd);
 				urecord->flag &= ~UDF_RECORD_FLAG_HAS_UPDATES; // TODO - necessary?
 			}
-			as_storage_record_close(r_ref->r, rd);
+
+			if (! has_bins) {
+				write_delete_record(r_ref->r, is_subrec ?
+						urecord->tr->rsv.sub_tree : urecord->tr->rsv.tree);
+			}
+
+			as_storage_record_close(rd);
 		} else {
 			// Should never happen.
 			cf_warning(AS_UDF, "Unexpected Internal Error (null r_ref)");
@@ -215,22 +230,22 @@ udf_record_open(udf_record * urecord)
 	as_transaction *tr    = urecord->tr;
 	as_index_ref   *r_ref = urecord->r_ref;
 	as_index_tree  *tree  = tr->rsv.tree;
+	bool is_subrec = (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) != 0;
 
-	if (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) {
+	if (is_subrec) {
 		tree = tr->rsv.sub_tree;
 	}
 
 	int rec_rv = 0;
 	if (!(urecord->flag & UDF_RECORD_FLAG_OPEN)) {
-		cf_detail(AS_UDF, "Opening %sRecord ",
-				  (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) ? "Sub" : "");
-		rec_rv = as_record_get(tree, &tr->keyd, r_ref, tr->rsv.ns);
+		cf_detail(AS_UDF, "Opening %sRecord ", is_subrec ? "Sub" : "");
+		rec_rv = as_record_get_live(tree, &tr->keyd, r_ref, tr->rsv.ns);
 	}
 
 	if (!rec_rv) {
 		as_index *r = r_ref->r;
 		// check to see this isn't an expired record waiting to die
-		if (as_record_is_expired(r)) {
+		if (! is_subrec && as_record_is_doomed(r, tr->rsv.ns)) {
 			as_record_done(r_ref, tr->rsv.ns);
 			cf_detail(AS_UDF, "udf_record_open: Record has expired cannot read");
 			rec_rv = -2;
@@ -242,7 +257,7 @@ udf_record_open(udf_record * urecord)
 		}
 	} else {
 		cf_detail_digest(AS_UDF, &urecord->tr->keyd, "udf_record_open: %s rec_get returned with %d", 
-				(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) ? "sub" : "", rec_rv);
+				is_subrec ? "sub" : "", rec_rv);
 	}
 	return rec_rv;
 }
@@ -310,6 +325,7 @@ udf_record_init(udf_record *urecord, bool allow_updates)
 	urecord->tr                 = NULL;
 	urecord->r_ref              = NULL;
 	urecord->rd                 = NULL;
+	urecord->dirty              = NULL;
 	urecord->nupdates           = 0;
 	urecord->ldt_rectype_bit_update   = 0;
 	urecord->particle_data      = NULL;
@@ -433,14 +449,7 @@ udf_record_cache_get(udf_record * urecord, const char * name)
 			udf_record_bin * bin = &(urecord->updates[i]);
 			if ( strncmp(name, bin->name, AS_ID_BIN_SZ) == 0 ) {
 				cf_detail(AS_UDF, "Bin %s found, type(%d)", name, bin->value->type );
-				if ( bin->value->type == AS_NIL ) {
-					cf_detail(AS_UDF, "udf_record_get: %s return NULL", name);
-					return NULL;
-				}
-				else {
-					cf_detail(AS_UDF, "udf_record_get: %s return", name);
-					return bin->value;
-				}
+				return bin->value; // note it's OK if the bin contains a nil
 			}
 		}
 	}
@@ -731,7 +740,7 @@ udf_record_get(const as_rec * rec, const char * name)
 	// We have a value, so we will cache it.
 	// DO NOT remove this. We need to cache copy to makes sure ref count 
 	// gets decremented post handing this as_val over to the lua world
-	if ( urecord && value ) {
+	if (value) {
 		udf_record_cache_set(urecord, name, value, false);
 	}
 
@@ -770,12 +779,14 @@ udf_record_set_flags(const as_rec * rec, const char * name, uint8_t flags)
 	}
 
 	udf_record * urecord = (udf_record *) as_rec_source(rec);
-	if (!(urecord->flag & UDF_RECORD_FLAG_ALLOW_UPDATES)) {
+	if (!urecord || !(urecord->flag & UDF_RECORD_FLAG_ALLOW_UPDATES)) {
 		return -1;
 	}
 
-	if ( urecord && name ) {
-		if (flags & LDT_FLAG_HIDDEN_BIN || flags & LDT_FLAG_LDT_BIN || flags & LDT_FLAG_CONTROL_BIN ) {
+	if (name) {
+		if ((flags & LDT_FLAG_HIDDEN_BIN) != 0 ||
+				(flags & LDT_FLAG_LDT_BIN) != 0 ||
+				(flags & LDT_FLAG_CONTROL_BIN) != 0) {
 			cf_debug(AS_UDF, "LDT flag(%d) Designates Hidden Bin", flags);
 			udf_record_cache_sethidden(urecord, name);
 		} else {
@@ -823,7 +834,7 @@ udf_record_set_type(const as_rec * rec,  int8_t ldt_rectype_bit_update)
 
 	urecord->ldt_rectype_bit_update = ldt_rectype_bit_update;
 	cf_detail(AS_RW, "TO URECORD FROM LUA   Digest=%"PRIx64" bits %d",
-			  *(uint64_t *)&urecord->rd->keyd.digest[8], urecord->ldt_rectype_bit_update);
+			  *(uint64_t *)&urecord->rd->r->keyd.digest[8], urecord->ldt_rectype_bit_update);
 
 	urecord->flag |= UDF_RECORD_FLAG_METADATA_UPDATED;
 
@@ -943,6 +954,24 @@ udf_record_ttl(const as_rec * rec)
 		return 0; // since we can't indicate the record doesn't exist
 	}
 	return 0;
+}
+
+static uint64_t
+udf_record_last_update_time(const as_rec * rec)
+{
+	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	if (ret) {
+		return 0;
+	}
+
+	udf_record * urecord = (udf_record *) as_rec_source(rec);
+	if (urecord && (urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN)) {
+		return urecord->r_ref->r->last_update_time;
+	}
+	else {
+		cf_warning(AS_UDF, "Error getting last update time: no record found");
+		return 0;
+	}
 }
 
 static uint16_t
@@ -1123,11 +1152,43 @@ udf_record_bin_names(const as_rec *rec, as_rec_bin_names_callback callback, void
 	}
 }
 
+static uint16_t
+udf_record_numbins(const as_rec * rec)
+{
+	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	if (ret) {
+		return 0;
+	}
+
+	udf_record *urecord = (udf_record *) as_rec_source(rec);
+	if (urecord && (urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN)) {
+
+		if (urecord->rd->ns->single_bin) {
+			return 1;
+		}
+
+		uint16_t i;
+		as_storage_rd *rd = urecord->rd;
+		for (i = 0; i < rd->n_bins; i++) {
+			as_bin *b = &rd->bins[i];
+			if (! as_bin_inuse(b)) {
+				break;
+			}
+		}
+		return i;
+	}
+	else {
+		cf_warning(AS_UDF, "Error in getting numbins: no record found");
+		return 0;
+	}
+}
+
 const as_rec_hooks udf_record_hooks = {
 	.get		= udf_record_get,
 	.set		= udf_record_set,
 	.remove		= udf_record_remove,
 	.ttl		= udf_record_ttl,
+	.last_update_time	= udf_record_last_update_time,
 	.gen		= udf_record_gen,
 	.key		= udf_record_key,
 	.setname	= udf_record_setname,
@@ -1138,5 +1199,5 @@ const as_rec_hooks udf_record_hooks = {
 	.set_ttl	= udf_record_set_ttl,
 	.drop_key	= udf_record_drop_key,
 	.bin_names	= udf_record_bin_names,
-	.numbins	= NULL,
+	.numbins	= udf_record_numbins
 };

@@ -28,34 +28,10 @@
 
 #include "btree.h"
 
-// BTREE TRANSITION FLAGS
-#define TRANS_ONE      1
-#define TRANS_TWO      2
-#define TRANS_ONE_MAX 64
-
 // BTREE TYPE FLAGS
-#define BTFLAG_NONE              0
-#define BTFLAG_UINT_INDEX        1 /* UINT     Index */
-#define BTFLAG_ULONG_INDEX       2 /* ULONG    Index */
-#define BTFLAG_U128_INDEX        4 /* U128     Index */
-#define BTFLAG_U160_INDEX        8 /* U160     Index */
-#define BTFLAG_OBC              16 /* ORDER BY Index */
-#define BTFLAG_UINT_UINT        32
-#define BTFLAG_UINT_ULONG       64
-#define BTFLAG_UINT_U128       128
-#define BTFLAG_UINT_U160       512
-#define BTFLAG_ULONG_UINT     1024
-#define BTFLAG_ULONG_ULONG    2048
-#define BTFLAG_ULONG_U128     4096
-#define BTFLAG_ULONG_U160     8192
-#define BTFLAG_U128_UINT     16384
-#define BTFLAG_U128_ULONG    32768
-#define BTFLAG_U128_U128     65536
-#define BTFLAG_U128_U160    131072
-#define BTFLAG_U160_UINT    262144
-#define BTFLAG_U160_ULONG   524288
-#define BTFLAG_U160_U128   1048576
-#define BTFLAG_U160_U160   2097152
+#define BTFLAG_U160          0x00
+#define BTFLAG_ULONG_ULONG   0x01
+#define BTFLAG_U160_ULONG    0x02
 
 struct btree { // 62 Bytes -> 64B
 	struct btreenode  *root;
@@ -105,9 +81,6 @@ typedef struct {
 
 //NOTE: For Aerospike, not currently using EVICT, save one byte in bt_n
 //      This changes a 2049 allocation to 2048 -> which is IMPORTANT
-#define NO_NUM_DIRTY_BUILD
-
-//#define BTREE_DEBUG
 typedef struct btreenode { // 9 bytes -> 16 bytes
 	unsigned int   scion;       /* 4 billion max scion */
 	unsigned short n;           /* 65 thousand max entries (per bt_n)*/
@@ -115,12 +88,6 @@ typedef struct btreenode { // 9 bytes -> 16 bytes
 	// DIRTY: -1->CLEAN,
 	//         0->TreeDirty but BTN_clean, 1->ucharDR, 2->ushortDR, 3->uintDR
 	char           dirty;
-#ifndef NO_NUM_DIRTY_BUILD
-	unsigned char  ndirty;
-#endif
-#ifdef BTREE_DEBUG
-	unsigned long num;
-#endif
 } __attribute__ ((packed)) bt_n;
 
 // BTREE access of KEYs & NODEs via position in bt_n

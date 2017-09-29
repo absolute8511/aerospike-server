@@ -22,6 +22,23 @@
 
 #pragma once
 
+#include "socket.h"
+#include "base/cfg.h"
 #include "base/transaction.h"
 
-void thr_demarshal_resume(as_file_handle *fd_h);
+typedef struct as_info_endpoint_s {
+	cf_addr_list addrs;
+	cf_ip_port port;
+} as_info_endpoint;
+
+typedef struct as_info_access_s {
+	as_info_endpoint service;
+	as_info_endpoint alt_service;
+	as_info_endpoint tls_service;
+	as_info_endpoint alt_tls_service;
+} as_info_access;
+
+extern as_info_access g_access;
+extern cf_serv_cfg g_service_bind;
+
+void thr_demarshal_rearm(as_file_handle *fd_h);

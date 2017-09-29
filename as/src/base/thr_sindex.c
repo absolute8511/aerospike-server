@@ -1,7 +1,7 @@
 /*
  * thr_sindex.c
  *
- * Copyright (C) 2012-2014 Aerospike, Inc.
+ * Copyright (C) 2012-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -25,7 +25,7 @@
  * This file implements supporting threads for the secondary index implementation.
  * Currently following two main threads are implemented here
  *
- * -  Secondary index defrag thread which walks sweeps through secondary indexes
+ * -  Secondary index gc thread which walks sweeps through secondary indexes
  *   and cleanup the stale entries by looking up digest in the primary index.
  *
  * -  Secondary index thread which cleans up secondary index entry for a particular
@@ -42,15 +42,17 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
+#include "citrusleaf/cf_ll.h"
+#include "citrusleaf/cf_queue.h"
 
 #include "ai_obj.h"
 #include "ai_btree.h"
 #include "fault.h"
-#include "hist.h"
 
 #include "base/cfg.h"
 #include "base/datamodel.h"
@@ -58,22 +60,18 @@
 #include "base/job_manager.h"
 #include "base/monitor.h"
 #include "base/secondary_index.h"
+#include "base/stats.h"
+#include "fabric/partition.h"
+
 
 int as_sbld_build(as_sindex* si);
-
-#define RELEASE_ITERATORS(icol) \
-do {                                \
-	init_ai_obj(&i_col);             \
-	n_offset = 0;                   \
-} while(0);
-
 
 // All this is global because Aerospike Index is single threaded
 pthread_rwlock_t g_sindex_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 pthread_rwlock_t g_ai_rwlock     = PTHREAD_RWLOCK_INITIALIZER;
 pthread_t g_sindex_populate_th;
 pthread_t g_sindex_destroy_th;
-pthread_t g_sindex_defrag_th;
+pthread_t g_sindex_gc_th;
 
 cf_queue *g_sindex_populate_q;
 cf_queue *g_sindex_destroy_q;
@@ -93,7 +91,7 @@ ll_sindex_gc_reduce_fn(cf_ll_element *ele, void *udata)
 }
 
 void
-as_sindex_gc_release_defrag_arr_to_queue(void *v)
+as_sindex_gc_release_gc_arr_to_queue(void *v)
 {
 	objs_to_defrag_arr *dt = (objs_to_defrag_arr *)v;
 	if (cf_queue_sz(g_q_objs_to_defrag) < SINDEX_GC_QUEUE_HIGHWATER) {
@@ -109,7 +107,7 @@ ll_sindex_gc_destroy_fn(cf_ll_element *ele)
 {
 	ll_sindex_gc_element * node = (ll_sindex_gc_element *) ele;
 	if (node) {
-		as_sindex_gc_release_defrag_arr_to_queue((void *)(node->objs_to_defrag));
+		as_sindex_gc_release_gc_arr_to_queue((void *)(node->objs_to_defrag));
 		cf_free(node);
 	}
 }
@@ -123,29 +121,6 @@ as_sindex_gc_get_defrag_arr(void)
 	}
 	dt->num = 0;
 	return dt;
-}
-
-void
-as_sindex_gc_histogram_dumpall()
-{
-	if (g_config.sindex_gc_enable_histogram == false) {
-		return;
-	}
-
-	if (g_config._sindex_gc_validate_obj_hist) {
-		histogram_dump(g_config._sindex_gc_validate_obj_hist);
-	}
-	if (g_config._sindex_gc_delete_obj_hist) {
-		histogram_dump(g_config._sindex_gc_delete_obj_hist);
-	}
-	if (g_config._sindex_gc_pimd_rlock_hist) {
-		histogram_dump(g_config._sindex_gc_pimd_rlock_hist);
-	}
-	if (g_config._sindex_gc_pimd_wlock_hist) {
-		histogram_dump(g_config._sindex_gc_pimd_wlock_hist);
-	}
-
-	return;
 }
 
 // Main thread which looks at the request of the populating index
@@ -166,6 +141,7 @@ as_sindex__populate_fn(void *param)
 			cf_debug(AS_SINDEX, "Populating index %s", si->imd->iname);
 			// should set under a lock
 			si->flag |= AS_SINDEX_FLAG_POPULATING;
+			si->stats.recs_pending = si->ns->n_objects;
 			as_sbld_build(si);
 		}
 	}
@@ -183,20 +159,37 @@ as_sindex__destroy_fn(void *param)
 
 		SINDEX_GWLOCK();
 		cf_assert((si->state == AS_SINDEX_DESTROY),
-				AS_SINDEX, CF_CRITICAL, " Invalid state %d at cleanup expected %d for %p and %s", si->state, AS_SINDEX_DESTROY, si, (si) ? ((si->imd) ? si->imd->iname : NULL) : NULL);
+				AS_SINDEX, " Invalid state %d at cleanup expected %d for %p and %s", si->state, AS_SINDEX_DESTROY, si, (si) ? ((si->imd) ? si->imd->iname : NULL) : NULL);
 		int rv = as_sindex__delete_from_set_binid_hash(si->ns, si->imd);
 		if (rv) {
 			cf_warning(AS_SINDEX, "Delete from set_binid hash fails with error %d", rv);
 		}
-		SINDEX_WLOCK(&si->imd->slock);
-		ai_btree_destroy(si->imd);
-		// Free entire usage counter for this index after the destroy
-		// code... alc code does not do it.
-		as_sindex_release_data_memory(si->imd, si->stats.mem_used);
+		// Free entire usage counter before tree destroy
+		cf_atomic64_sub(&si->ns->n_bytes_sindex_memory,
+				ai_btree_get_isize(si->imd) + ai_btree_get_nsize(si->imd));
+
+		// Cache the ibtr pointers
+		uint16_t nprts = si->imd->nprts;
+		struct btree *ibtr[nprts];
+		for (int i = 0; i < nprts; i++) {
+			as_sindex_pmetadata *pimd = &si->imd->pimd[i];
+			ibtr[i] = pimd->ibtr;
+			ai_btree_reset_pimd(pimd);
+		}
+
 		as_sindex_destroy_pmetadata(si);
 		si->state = AS_SINDEX_INACTIVE;
 		si->flag  = 0;
+
 		si->ns->sindex_cnt--;
+
+		if (si->imd->set) {
+			as_set *p_set = as_namespace_get_set_by_name(si->ns, si->imd->set);
+			p_set->n_sindexes--;
+		} else {
+			si->ns->n_setless_sindexes--;
+		}
+
 		as_sindex_metadata *imd = si->imd;
 		si->imd = NULL;
 
@@ -206,59 +199,39 @@ as_sindex__destroy_fn(void *param)
 		shash_delete(si->ns->sindex_iname_hash, (void *)iname);
 
 
+		as_namespace *ns = si->ns;
 		si->ns      = NULL;
 		si->simatch = -1;
+
+		as_sindex_metadata *recreate_imd = NULL;
+		if (si->recreate_imd) {
+			recreate_imd = si->recreate_imd;
+			si->recreate_imd = NULL;
+		}
 
 		// remember this is going to release the write lock
 		// of meta-data first. This is the only special case
 		// where both GLOCK and LOCK is called together
-		SINDEX_UNLOCK(&imd->slock);
-		SINDEX_GUNLOCK();
+		SINDEX_GWUNLOCK();
 
-		if (si->new_imd) {
-			as_sindex_metadata *recreate_imd = si->new_imd;
-			as_sindex_update(recreate_imd);
-			si->new_imd = NULL;
+		// Destroy cached ibtr pointer
+		for (int i = 0; i < imd->nprts; i++) {
+			ai_btree_delete_ibtr(ibtr[i]);
 		}
-
 		as_sindex_imd_free(imd);
 		cf_rc_free(imd);
+
+		if (recreate_imd) {
+			as_sindex_create(ns, recreate_imd);
+			as_sindex_imd_free(recreate_imd);
+			cf_rc_free(recreate_imd);
+		}
 	}
 	return NULL;
 }
 
-void *
-as_sindex__set_delete_fn(void *param)
-{
-	as_sindex_set * si_set = (as_sindex_set *) param;
-	uint64_t s_time = cf_getus();
-	as_sindex_delete_set(si_set->ns, si_set->set->name);
-	cf_debug(AS_SINDEX, "Time taken to clear sindexes on dropping set %s %ld ms", si_set->set->name, (cf_getus() - s_time) / 1000);
-	SET_DELETED_OFF(si_set->set);
-	cf_free(si_set);
-	return NULL;
-}
-
 void
-as_sindex_initiate_set_delete(as_namespace * ns, as_set * set)
-{
-	as_sindex_set * si_set = cf_malloc(sizeof(as_sindex_set));
-	si_set->set = set;
-	si_set->ns = ns;
-
-	pthread_attr_t attr;
-	pthread_attr_init(&attr);
-	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-	pthread_t sindex_set_delete_th;
-	if (0 != pthread_create(&sindex_set_delete_th, &attr, as_sindex__set_delete_fn, (void*)si_set)) {
-		cf_warning(AS_SINDEX, "could not create sindex set-destroy thread");
-		SET_DELETED_OFF(si_set->set);
-		cf_free(si_set);
-	}
-}
-
-void
-as_sindex_update_defrag_stat(as_sindex *si, uint64_t r, uint64_t start_time_ms)
+as_sindex_update_gc_stat(as_sindex *si, uint64_t r, uint64_t start_time_ms)
 {
 	cf_atomic64_add(&si->stats.n_deletes,        r);
 	cf_atomic64_add(&si->stats.n_objects,        -r);
@@ -266,245 +239,298 @@ as_sindex_update_defrag_stat(as_sindex *si, uint64_t r, uint64_t start_time_ms)
 	cf_atomic64_add(&si->stats.defrag_time, cf_getms() - start_time_ms);
 }
 
-/*
- * Core of sindex defragic logic.
- * Determines which pimd needs to be defragged
- * Reserves, build si and build pimd
- * Returns :
- * 		 0  - Success
- * 		-1  - go to next si
- * 		-2  - go to next ns
- * Notes-
- * 		Caller needs to release the ref count of sindex(si)
-*/
-int
-get_pimd_and_reserve_si(as_namespace *ns, int *si_index, int *p_index, as_sindex ** sindex,
-		int *si_defraged)
+typedef struct gc_stat_s {
+	uint64_t  processed;
+	uint64_t  found;
+	uint64_t  deleted;
+	uint64_t  creation_time;
+	uint64_t  deletion_time;
+} gc_stat;
+
+typedef struct gc_ctx_s {
+	uint32_t      ns_id;
+	as_sindex    *si;
+	uint16_t      pimd_idx;
+
+	// stat
+	gc_stat      stat;
+
+	// config
+	uint64_t     start_time;
+	uint32_t     gc_max_rate;
+} gc_ctx;
+
+typedef struct gc_offset_s {
+	ai_obj    i_col;
+	uint64_t  pos;  // uint actually
+	bool      done;
+} gc_offset;
+
+static bool
+can_gc_si(as_sindex *si, uint16_t pimd_idx)
 {
-	if (*p_index >= ns->sindex_num_partitions) {
-		// pimd reaches max limit. Switch to next si.
-		*p_index = 0;
-		(*si_index)++;
-		(*si_defraged)++;
+	if (! as_sindex_isactive(si)) {
+		return false;
 	}
 
-	// This check may result in skipping of some indexes.
-	// i.e When a sindex is created/dropped while the defrag is running on other sindexes of same namespace.
-	// They will be covered in next iteration. Overall its a performance gain.
-	if (*si_index >= AS_SINDEX_MAX || *si_defraged >= ns->sindex_cnt) {
-		return -2;
+	if (si->state == AS_SINDEX_DESTROY) {
+		return false;
+	}
+
+	// pimd_idx we are iterating does not
+	// exist in this sindex.
+	if (pimd_idx >= si->imd->nprts) {
+		return false;
+	}
+
+	return true;
+}
+
+static bool
+gc_getnext_si(gc_ctx *ctx)
+{
+	int16_t si_idx;
+	as_namespace *ns = g_config.namespaces[ctx->ns_id];
+
+	// From previous si_idx or 0
+	if (ctx->si) {
+		si_idx = ctx->si->simatch;
+		AS_SINDEX_RELEASE(ctx->si);
+		ctx->si = NULL;
+	} else {
+		si_idx = -1;
 	}
 
 	SINDEX_GRLOCK();
-	as_sindex * si = &ns->sindex[*si_index];
 
-	if (!si) {
-		SINDEX_GUNLOCK();
-		cf_warning(AS_SINDEX, "Allocated sindex was found as null.");
-		return -2;
-	}
-	if (si->state != AS_SINDEX_ACTIVE) {
-		// Skip to next sindex in the same namespace
-		SINDEX_GUNLOCK();
-		*si_index = *si_index + 1;
-		*p_index  = 0;
-		return -1;
-	}
+	while (true) {
 
-	AS_SINDEX_RESERVE(si);
-	SINDEX_GUNLOCK();
-	*sindex                   = si;
-	cf_detail(AS_SINDEX, "Defragging pimd %d of sindex %s on namespace %s and set %s",
-			*p_index, si->imd->iname, si->imd->ns_name, si->imd->set);
-	return 0;
+		si_idx++;
+		if (si_idx == AS_SINDEX_MAX) {
+			SINDEX_GRUNLOCK();
+			return false;
+		}
+
+		as_sindex *si = &ns->sindex[si_idx];
+
+		if (! can_gc_si(si, ctx->pimd_idx)) {
+			continue;
+		}
+
+		AS_SINDEX_RESERVE(si);
+		ctx->si = si;
+		SINDEX_GRUNLOCK();
+		return true;
+	}
 }
 
-/*
- * This thread/function continually runs over an secondary index to clean
- * up the unnecessary/expired digests.
- * If the data is on disk when record is deleted to avoid reading from the disk,
- * the delete from the secondary index is not done inline.
- *
- * Note: If the record comes back after being deleted on an on-disk namespace, there is a probability
- * that there was not enough time to defrag that. TODO -- FIX IT
- *
- * Flow :
- * 				GET PIMD ----> BUILD DEFRAG_LIST
- *				   /|\              |
- * 					|				|
- *					|			   \|/
- *				  DEFRAG THE DEFRAG_LIST
- *
- * Controlling parameters   : Modifiable through clinfo
- * 1. defrag_max_units      - Max units it will defrag in one iteration(i.e before sleeping) default -- 1000 units
- * 2. defrag_period(ms)     - Minimum time delay between two iteration of sindex defrag.     default -- 1    msec
- *
- * Takes a lock on pimd while defragging
- * TODO : Aerospike Index layer is probably doing a lot of mallocs and copy.
- *          It can be avoided.
- */
-void *
-as_sindex__defrag_fn(void *udata)
+static void
+gc_print_ctx(gc_ctx *ctx)
 {
-	cf_debug(AS_SINDEX, "Secondary index defrag thread started !!");
-	g_config.sindex_gc_enable_histogram = false;
+	cf_detail(AS_SINDEX, "%s %s[%d]", g_config.namespaces[ctx->ns_id]->name,
+			ctx->si ? ctx->si->imd->iname : "NULL", ctx->pimd_idx);
+}
 
-	char hist_name[64];
-	sprintf(hist_name, "sindex_gc_validate_obj");
-	if (NULL == ( g_config._sindex_gc_validate_obj_hist = histogram_create(hist_name, HIST_MILLISECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex gc histogram (validate_obj_hist)");
+// TODO - Find the correct values
+#define CREATE_LIST_PER_ITERATION_LIMIT   10000
+#define PROCESS_LIST_PER_ITERATION_LIMIT  10
 
-	sprintf(hist_name, "sindex_gc_delete_obj");
-	if (NULL == ( g_config._sindex_gc_delete_obj_hist = histogram_create(hist_name, HIST_MILLISECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex gc histogram (validate_obj_hist)");
+// true if tree is done
+// false if more in tree
+static bool
+gc_create_list(as_sindex *si, as_sindex_pmetadata *pimd, cf_ll *gc_list,
+		gc_offset *offsetp, gc_stat *statp)
+{
+	uint64_t processed = 0;
+	uint64_t found = 0;
+	uint64_t limit_per_iteration = CREATE_LIST_PER_ITERATION_LIMIT;
 
-	sprintf(hist_name, "sindex_gc_pimd_rlock_hist");
-	if (NULL == ( g_config._sindex_gc_pimd_rlock_hist = histogram_create(hist_name, HIST_MILLISECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex gc histogram (pimd_rlock)");
+	uint64_t start_time = cf_getms();
 
-	sprintf(hist_name, "sindex_gc_pimd_wlock_hist");
-	if (NULL == ( g_config._sindex_gc_pimd_wlock_hist = histogram_create(hist_name, HIST_MILLISECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex gc histogram (pimd_wlock)");
+	PIMD_RLOCK(&pimd->slock);
+	as_sindex_status ret = ai_btree_build_defrag_list(si->imd, pimd,
+			&offsetp->i_col, &offsetp->pos, limit_per_iteration,
+			&processed, &found, gc_list);
 
-	while (!g_sindex_boot_done) {
+	PIMD_RUNLOCK(&pimd->slock);
+
+	statp->creation_time += (cf_getms() - start_time);
+	statp->processed += processed;
+	statp->found += found;
+
+	if (ret == AS_SINDEX_DONE) {
+		offsetp->done = true;
+	}
+
+	if (ret == AS_SINDEX_ERR) {
+		return false;
+	}
+
+	return true;
+}
+
+static void
+gc_process_list(as_sindex *si, as_sindex_pmetadata *pimd, cf_ll *gc_list,
+		gc_offset *offsetp, gc_stat *statp)
+{
+	uint64_t deleted = 0;
+	uint64_t start_time = cf_getms();
+	uint64_t limit_per_iteration = PROCESS_LIST_PER_ITERATION_LIMIT;
+
+	bool more = true;
+
+	while (more) {
+
+		PIMD_WLOCK(&pimd->slock);
+		more = ai_btree_defrag_list(si->imd, pimd, gc_list,
+				limit_per_iteration, &deleted);
+		PIMD_WUNLOCK(&pimd->slock);
+	}
+
+	// Update secondary index object count
+	// statistics aggressively.
+	as_sindex_update_gc_stat(si, deleted, start_time);
+
+	statp->deletion_time = cf_getms() - start_time;
+	statp->deleted += deleted;
+}
+
+static void
+gc_throttle(gc_ctx *ctx)
+{
+	while (true) {
+		uint64_t expected_processed =
+			(cf_get_seconds() - ctx->start_time) * ctx->gc_max_rate;
+
+		// processed less than expected
+		// no throttling needed.
+		if (ctx->stat.processed <= expected_processed) {
+			break;
+		}
+
+		usleep(10000); // 10 ms
+	}
+}
+
+static void
+do_gc(gc_ctx *ctx)
+{
+	// SKEY + Digest offset
+	gc_offset offset;
+	init_ai_obj(&offset.i_col);
+	offset.pos = 0;
+	offset.done = false;
+
+	as_sindex *si = ctx->si;
+	as_sindex_pmetadata *pimd = &si->imd->pimd[ctx->pimd_idx];
+
+	cf_ll gc_list;
+	cf_ll_init(&gc_list, &ll_sindex_gc_destroy_fn, false);
+
+	while (true) {
+
+		if (! gc_create_list(si, pimd, &gc_list, &offset, &ctx->stat)) {
+			break;
+		}
+
+		if (cf_ll_size(&gc_list) > 0) {
+			gc_process_list(si, pimd, &gc_list, &offset, &ctx->stat);
+			cf_ll_reduce(&gc_list, true /*forward*/, ll_sindex_gc_reduce_fn, NULL);
+		}
+
+		if (offset.done) {
+			break;
+		}
+	}
+
+	cf_ll_reduce(&gc_list, true /*forward*/, ll_sindex_gc_reduce_fn, NULL);
+}
+
+static void
+update_gc_stat(gc_stat *statp)
+{
+	g_stats.sindex_gc_objects_validated  += statp->processed;
+	g_stats.sindex_gc_garbage_found      += statp->found;
+	g_stats.sindex_gc_garbage_cleaned    += statp->deleted;
+	g_stats.sindex_gc_list_deletion_time += statp->deletion_time;
+	g_stats.sindex_gc_list_creation_time += statp->creation_time;
+}
+
+void *
+as_sindex__gc_fn(void *udata)
+{
+	while (! g_sindex_boot_done) {
 		sleep(10);
 		continue;
 	}
 
-	uint16_t ns_id = 0;
-	while (true) {
-		as_namespace *ns = g_config.namespaces[ns_id];
-		if (!ns || (ns->sindex_cnt == 0)) {
-			goto next_ns;
+	cf_debug(AS_SINDEX, "Secondary index gc thread started !!");
+
+	uint64_t last_time = cf_get_seconds();
+
+	for ( ; ; ) {
+		// Wake up every 1 second to check the gc timeout.
+		struct timespec delay = { 1, 0 };
+		nanosleep(&delay, NULL);
+
+		uint64_t curr_time = cf_get_seconds();
+
+		if ((curr_time - last_time) < g_config.sindex_gc_period) {
+			continue; // period has not been reached for running gc check
 		}
 
-		uint64_t      last_time        = cf_getms();
-		uint64_t      curr_time        = 0;
-		int           si_index         = 0;
-		int           p_index          = 0;
-		ai_obj        i_col;                                      // Numeric type sindexes iterator
-		init_ai_obj(&i_col);
-		long          n_offset         = 0;
-		int           sindex_defraged  = 0;
-		long          defrag_period    = 0;
-		long          limit            = 0;
+		last_time = curr_time;
 
-		while (1) {
-			// Sleep for remainder of defrag period
-			curr_time                        = cf_getms();
-			uint64_t diff                    = curr_time - last_time;
-			g_config.sindex_gc_activity_dur += diff;
-			if (diff < defrag_period) {
-				g_config.sindex_gc_inactivity_dur += (defrag_period - diff);
-				usleep(1000 * (defrag_period - diff));
-			}
-			last_time = cf_getms();
+		for (int i = 0; i < g_config.n_namespaces; i++) {
 
-			// Get pimd to defrag..
-			as_sindex           * si;
-			as_sindex_pmetadata * pimd = NULL;
-			int retval     = get_pimd_and_reserve_si(ns, &si_index, &p_index, &si, &sindex_defraged);
-			if (retval != 0) {
-				if (retval == -1) {
-					// To avoid cases in which a sindex is dropped in middle of defragging
-					RELEASE_ITERATORS(icol)
-					continue;
-				}
-				if (retval == -2) {
-					break;
-				}
-			}
+			as_namespace *ns = g_config.namespaces[i];
 
-			if (!si) {
-				break;
-			}
-			limit          = (long)si->config.defrag_max_units;
-			defrag_period  = (long)si->config.defrag_period;
-
-			// This can be use to control the defrag thread.
-			// Setting defrag_max_units as 0 can allow a user
-			// to stop defragging of a sindex
-			if( limit <= 0 ) {
-				si_index++;
-				sindex_defraged++;
-				p_index = 0;
-				RELEASE_ITERATORS(icol)
-				AS_SINDEX_RELEASE(si);
+			if (ns->sindex_cnt == 0) {
 				continue;
 			}
 
-			uint64_t start_time         = 0;
-			uint64_t pimd_rlock_time_ns = 0;
-			uint64_t processed          = 0;
-			uint64_t found              = 0;
-			start_time                  = cf_getms();
-			cf_ll defrag_list;
-			cf_ll_init(&defrag_list, &ll_sindex_gc_destroy_fn, false);
-			int ret = 0;
-			int limit_per_iteration = limit > 100 ? 100 : limit;
-			for (int i = 0; i < limit; i += limit_per_iteration) {
-				SINDEX_RLOCK(&si->imd->slock);
-				pimd = &si->imd->pimd[p_index];
-				SINDEX_RLOCK(&pimd->slock);
-				SET_TIME_FOR_SINDEX_GC_HIST(pimd_rlock_time_ns);
-				ret  = ai_btree_build_defrag_list(si->imd, pimd, &i_col, &n_offset, limit_per_iteration, &processed, &found, &defrag_list);
-				SINDEX_GC_HIST_INSERT_DATA_POINT(sindex_gc_pimd_rlock_hist, pimd_rlock_time_ns);
-				SINDEX_UNLOCK(&pimd->slock);
-				SINDEX_UNLOCK(&si->imd->slock);
-				pimd_rlock_time_ns = 0;
-				if (ret != AS_SINDEX_CONTINUE) {
-					break;
+			cf_info(AS_NSUP, "{%s} sindex-gc start", ns->name);
+
+			uint64_t start_time_ms = cf_getms();
+
+			// gc_max_rate change at the namespace boundary
+			gc_ctx ctx = {
+				.ns_id = i,
+				.si = NULL,
+				.stat = { 0 },
+				.start_time = cf_get_seconds(),
+				.gc_max_rate = g_config.sindex_gc_max_rate
+			};
+
+			// Give one pimd quata of chance for every sindex
+			// in a namespace in round robin manner.
+			for (uint16_t pimd_idx = 0; pimd_idx < MAX_PARTITIONS_PER_INDEX;
+					pimd_idx++) {
+
+				ctx.pimd_idx = pimd_idx;
+
+				while (gc_getnext_si(&ctx)) {
+					gc_print_ctx(&ctx);
+					do_gc(&ctx);
+
+					// throttle after every quota (1 pimd)
+					gc_throttle(&ctx);
 				}
 			}
 
-			g_config.sindex_gc_list_creation_time    += (cf_getms() - start_time);
-			g_config.sindex_gc_objects_validated     += processed;
-			g_config.sindex_gc_garbage_found         += found;
-			int listsize                              = cf_ll_size(&defrag_list);
+			cf_info(AS_NSUP, "{%s} sindex-gc: Processed: %ld, found:%ld, deleted: %ld: Total time: %ld ms",
+					ns->name, ctx.stat.processed, ctx.stat.found, ctx.stat.deleted,
+					cf_getms() - start_time_ms);
 
-			uint64_t deleted = 0;
-			start_time = cf_getms();
-			if ( (ret != AS_SINDEX_ERR ) && (listsize > 0) ) {
-				ulong    wl_lim             = 10;
-				uint64_t start_time         = cf_getms();
-				uint64_t pimd_wlock_time_ns = 0;
-				bool     more               = true;
-				while (more) {
-					SINDEX_RLOCK(&si->imd->slock);
-					pimd = &si->imd->pimd[p_index];
-					SINDEX_WLOCK(&pimd->slock);
-					SET_TIME_FOR_SINDEX_GC_HIST(pimd_wlock_time_ns);
-					more = ai_btree_defrag_list(si->imd, pimd, &defrag_list, wl_lim, &deleted);
-					SINDEX_GC_HIST_INSERT_DATA_POINT(sindex_gc_pimd_wlock_hist, pimd_wlock_time_ns);
-					SINDEX_UNLOCK(&pimd->slock);
-					SINDEX_UNLOCK(&si->imd->slock);
-					pimd_wlock_time_ns = 0;
-				}
-				cf_detail(AS_SINDEX, "Deleted %d units of attempted %d units from index %s", listsize, limit, si->imd->iname);
-				as_sindex_update_defrag_stat(si, deleted, start_time);
-			}
-
-			cf_ll_reduce(&defrag_list, true /*forward*/, ll_sindex_gc_reduce_fn, NULL);
-			if ((ret == AS_SINDEX_DONE) || (ret == AS_SINDEX_ERR)) {
-				RELEASE_ITERATORS(icol)
-				p_index++;
-			}
-			g_config.sindex_gc_list_deletion_time += (cf_getms() - start_time);
-			g_config.sindex_gc_garbage_cleaned    += deleted;
-
-			AS_SINDEX_RELEASE(si);
+			update_gc_stat(&ctx.stat);
 		}
-next_ns:
-		sleep(1);
-		ns_id = (ns_id + 1) % g_config.n_namespaces;
 	}
-	return(0);
 }
 
 
 /*
- * Secondary index main defrag thread, it keeps watching out for request to
- * the defrag, Client API to set up aerospike facing meta data for the secondary index
+ * Secondary index main gc thread, it keeps watching out for request to
+ * the gc, Client API to set up aerospike facing meta data for the secondary index
  * and setting all the initial things
  *
  * Parameter:
@@ -552,8 +578,8 @@ as_sindex_thr_init()
 		cf_crash(AS_SINDEX, " Could not create sindex destroy thread ");
 	}
 
-	if (0 != pthread_create(&g_sindex_defrag_th, 0, as_sindex__defrag_fn, 0)) {
-		cf_crash(AS_SINDEX, " Could not create sindex defrag thread ");
+	if (0 != pthread_create(&g_sindex_gc_th, 0, as_sindex__gc_fn, 0)) {
+		cf_crash(AS_SINDEX, " Could not create sindex gc thread ");
 	}
 
 	g_sindex_populateall_done_q = cf_queue_create(sizeof(int), true);
@@ -574,7 +600,6 @@ typedef struct sbld_job_s {
 
 	// Derived class data:
 	as_sindex*		si;
-	uint64_t		si_desync_cnt;
 
 	char*			si_name;
 	cf_atomic64		n_reduced;
@@ -719,7 +744,6 @@ sbld_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
 			RSV_MIGRATE, 0, ns, set_id, AS_JOB_PRIORITY_MEDIUM);
 
 	job->si = si;
-	job->si_desync_cnt = si ? si->desync_cnt : 0;
 	job->si_name = si ? cf_strdup(si->imd->iname) : NULL;
 	job->n_reduced = 0;
 
@@ -733,7 +757,7 @@ sbld_job_create(as_namespace* ns, uint16_t set_id, as_sindex* si)
 void
 sbld_job_slice(as_job* _job, as_partition_reservation* rsv)
 {
-	as_index_reduce(rsv->p->vp, sbld_job_reduce_cb, (void*)_job);
+	as_index_reduce_live(rsv->tree, sbld_job_reduce_cb, (void*)_job);
 }
 
 void
@@ -797,12 +821,6 @@ sbld_job_reduce_cb(as_index_ref* r_ref, void* udata)
 	}
 
 	if (job->si) {
-		if (! as_sindex_isactive(job->si) || job->si->desync_cnt > job->si_desync_cnt) {
-			as_record_done(r_ref, ns);
-			as_job_manager_abandon_job(_job->mgr, _job, AS_JOB_FAIL_UNKNOWN);
-			return;
-		}
-
 		cf_atomic64_decr(&job->si->stats.recs_pending);
 	}
 
@@ -811,25 +829,29 @@ sbld_job_reduce_cb(as_index_ref* r_ref, void* udata)
 	as_index *r = r_ref->r;
 
 	if ((_job->set_id != INVALID_SET_ID && _job->set_id != as_index_get_set_id(r)) ||
-			as_record_is_expired(r)) {
+			as_record_is_doomed(r, ns)) {
 		as_record_done(r_ref, ns);
 		return;
 	}
 
 	as_storage_rd rd;
-	as_storage_record_open(ns, r, &rd, &r->key);
-	rd.n_bins = as_bin_get_n_bins(r, &rd);
+	as_storage_record_open(ns, r, &rd);
+	as_storage_rd_load_n_bins(&rd); // TODO - handle error returned
 	as_bin stack_bins[rd.ns->storage_data_in_memory ? 0 : rd.n_bins];
-	rd.bins = as_bin_get_all(r, &rd, stack_bins);
+	as_storage_rd_load_bins(&rd, stack_bins); // TODO - handle error returned
 
 	if (job->si) {
-		as_sindex_put_rd(job->si, &rd);
+		if (as_sindex_put_rd(job->si, &rd)) {
+			as_record_done(r_ref, ns);
+			as_job_manager_abandon_job(_job->mgr, _job, AS_JOB_FAIL_UNKNOWN);
+			return;
+		}
 	}
 	else {
 		as_sindex_putall_rd(ns, &rd);
 	}
 
-	as_storage_record_close(r, &rd);
+	as_storage_record_close(&rd);
 	as_record_done(r_ref, ns);
 
 	cf_atomic64_incr(&_job->n_records_read);

@@ -53,33 +53,34 @@ typedef enum {
 // Constructor/Destructor
 //
 cf_hist_track* cf_hist_track_create(const char* name, histogram_scale scale);
-void cf_hist_track_destroy(cf_hist_track* this);
+void cf_hist_track_destroy(cf_hist_track* _this);
 
 //------------------------------------------------
 // Start/Stop Caching Data
 //
-bool cf_hist_track_start(cf_hist_track* this, uint32_t back_sec,
+bool cf_hist_track_start(cf_hist_track* _this, uint32_t back_sec,
 		uint32_t slice_sec, const char* thresholds);
-void cf_hist_track_stop(cf_hist_track* this);
+void cf_hist_track_stop(cf_hist_track* _this);
 
 //------------------------------------------------
 // Histogram API "Overrides"
 //
-void cf_hist_track_clear(cf_hist_track* this);
-void cf_hist_track_dump(cf_hist_track* this);
+void cf_hist_track_clear(cf_hist_track* _this);
+void cf_hist_track_dump(cf_hist_track* _this);
 
 // These are just pass-throughs to histogram insertion methods:
-void cf_hist_track_insert_data_point(cf_hist_track* this, uint64_t start_ns);
-void cf_hist_track_insert_raw(cf_hist_track* this, uint64_t value);
+uint64_t cf_hist_track_insert_data_point(cf_hist_track* _this,
+		uint64_t start_ns);
+void cf_hist_track_insert_raw(cf_hist_track* _this, uint64_t value);
 
 //------------------------------------------------
 // Get Statistics from Cached Data
 //
-void cf_hist_track_get_info(cf_hist_track* this, uint32_t back_sec,
+void cf_hist_track_get_info(cf_hist_track* _this, uint32_t back_sec,
 		uint32_t duration_sec, uint32_t slice_sec, bool throughput_only,
 		cf_hist_track_info_format info_fmt, cf_dyn_buf* db_p);
 
 //------------------------------------------------
 // Get Current Settings
 //
-void cf_hist_track_get_settings(cf_hist_track* this, cf_dyn_buf* db_p);
+void cf_hist_track_get_settings(cf_hist_track* _this, cf_dyn_buf* db_p);

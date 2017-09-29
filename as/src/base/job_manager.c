@@ -45,7 +45,7 @@
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/monitor.h"
-
+#include "fabric/partition.h"
 
 
 //==============================================================================
@@ -78,6 +78,10 @@ job_result_str(int result_code)
 		return "abandoned-cluster-key";
 	case AS_JOB_FAIL_USER_ABORT:
 		return "user-aborted";
+	case AS_JOB_FAIL_RESPONSE_ERROR:
+		return "abandoned-response-error";
+	case AS_JOB_FAIL_RESPONSE_TIMEOUT:
+		return "abandoned-response-timeout";
 	default:
 		return "abandoned-?";
 	}
@@ -281,7 +285,7 @@ compare_cb(void* buf, void* task)
 //
 
 static inline const char* as_job_safe_set_name(as_job* _job);
-static inline uint32_t as_job_progress(as_job* _job);
+static inline float as_job_progress(as_job* _job);
 int as_job_partition_reserve(as_job* _job, int pid, as_partition_reservation* rsv);
 
 //----------------------------------------------------------
@@ -412,10 +416,10 @@ as_job_safe_set_name(as_job* _job)
 	return set_name ? set_name : ""; // empty string means no set name displayed
 }
 
-static inline uint32_t
+static inline float
 as_job_progress(as_job* _job)
 {
-	return ((uint32_t)_job->next_pid * 100) / AS_PARTITIONS;
+	return ((float)(_job->next_pid * 100)) / (float)AS_PARTITIONS;
 }
 
 int
@@ -499,12 +503,14 @@ as_job_manager_start_job(as_job_manager* mgr, as_job* _job)
 	pthread_mutex_lock(&mgr->lock);
 
 	if (cf_queue_sz(mgr->active_jobs) >= mgr->max_active) {
+		cf_warning(AS_JOB, "max of %u jobs currently active", mgr->max_active);
 		pthread_mutex_unlock(&mgr->lock);
 		return AS_JOB_FAIL_FORBIDDEN;
 	}
 
 	// Make sure trid is unique.
 	if (as_job_manager_find_any(mgr, _job->trid)) {
+		cf_warning(AS_JOB, "job with trid %lu already active", _job->trid);
 		pthread_mutex_unlock(&mgr->lock);
 		return AS_JOB_FAIL_PARAMETER;
 	}

@@ -1,7 +1,7 @@
 /*
  * udf_aerospike.c
  *
- * Copyright (C) 2012-2014 Aerospike, Inc.
+ * Copyright (C) 2012-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -19,8 +19,6 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
-
-#include "base/feature.h" // Turn new AS Features on/off
 
 #include "base/udf_aerospike.h"
 
@@ -47,11 +45,13 @@
 #include "base/index.h"
 #include "base/ldt.h"
 #include "base/secondary_index.h"
-#include "base/thr_rw_internal.h"
 #include "base/transaction.h"
+#include "base/truncate.h"
 #include "base/udf_record.h"
-#include "base/udf_rw.h"
+#include "base/xdr_serverside.h"
 #include "storage/storage.h"
+#include "transaction/rw_utils.h"
+#include "transaction/udf.h"
 
 
 static int udf_aerospike_rec_remove(const as_aerospike *, const as_rec *);
@@ -118,10 +118,7 @@ udf_aerospike_delbin(udf_record * urecord, const char * bname)
 
 	const char * set_name = as_index_get_set_name(rd->r, rd->ns);
 	
-	bool has_sindex = as_sindex_ns_has_sindex(rd->ns);
-	if (has_sindex) {
-		SINDEX_GRLOCK();
-	}
+	bool has_sindex = record_has_sindex(rd->r, rd->ns);
 	SINDEX_BINS_SETUP(sbins, rd->ns->sindex_cnt);
 	as_sindex * si_arr[rd->ns->sindex_cnt];
 	int si_arr_index = 0;
@@ -129,15 +126,14 @@ udf_aerospike_delbin(udf_record * urecord, const char * bname)
 	if (has_sindex) {
 		si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(rd->ns, set_name, b->id, &si_arr[si_arr_index]);
 		sbins_populated += as_sindex_sbins_from_bin(rd->ns, set_name, b, sbins, AS_SINDEX_OP_DELETE);
-		SINDEX_GUNLOCK();
 	}
 
 	int32_t i = as_bin_get_index(rd, bname);
 	if (i != -1) {
 		if (has_sindex) {
 			if (sbins_populated > 0) {	
-				tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
-				as_sindex_update_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), sbins, sbins_populated, &rd->keyd);
+				tr->flags |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
+				as_sindex_update_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), sbins, sbins_populated, &rd->r->keyd);
 			}
 		}
 		as_bin_destroy(rd, i);
@@ -279,10 +275,7 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 		return -1;
 	}
 
-	bool has_sindex = as_sindex_ns_has_sindex(rd->ns);
-	if (has_sindex) {
-		SINDEX_GRLOCK();
-	}
+	bool has_sindex = record_has_sindex(rd->r, rd->ns);
 	SINDEX_BINS_SETUP(sbins, 2 * rd->ns->sindex_cnt);
 	as_sindex * si_arr[2 * rd->ns->sindex_cnt];
 	int sbins_populated = 0;
@@ -331,7 +324,6 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 	// Update sindex if required
 	if (has_sindex) {
 		if (ret) {
-			SINDEX_GUNLOCK();
 			if (sbins_populated > 0) {
 				as_sindex_sbin_freeall(sbins, sbins_populated);
 			}
@@ -341,10 +333,9 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 
 		si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(rd->ns, set_name, b->id, &si_arr[si_arr_index]);
 		sbins_populated += as_sindex_sbins_from_bin(rd->ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
-		SINDEX_GUNLOCK();
 		if (sbins_populated > 0) {
-			tr->flag |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
-			as_sindex_update_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), sbins, sbins_populated, &rd->keyd);	
+			tr->flags |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
+			as_sindex_update_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), sbins, sbins_populated, &rd->r->keyd);
 			as_sindex_sbin_freeall(sbins, sbins_populated);
 		}
 		as_sindex_release_arr(si_arr, si_arr_index);
@@ -417,7 +408,8 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 	int failmax					= 0;
 	int new_bins				= 0;	// How many new bins have to be created in this update
 	as_storage_rd * rd			= urecord->rd;
-	bool has_sindex				= as_sindex_ns_has_sindex(rd->ns);
+	as_namespace * ns			= rd->ns;
+	bool has_sindex				= record_has_sindex(rd->r, ns);
 	bool is_record_dirty		= false;
 	bool is_record_flag_dirty	= false;
 	uint8_t old_index_flags		= as_index_get_flags(rd->r);
@@ -497,6 +489,10 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 					// Only case delete fails if bin is not found that is 
 					// as good as delete. Ignore return code !!
 					udf_aerospike_delbin(urecord, k);
+
+					if (urecord->dirty != NULL) {
+						xdr_fill_dirty_bins(urecord->dirty);
+					}
 				}
 				else {
 					// otherwise, it is a set
@@ -512,8 +508,13 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 						failmax = i;
 						goto Rollback;
 					}
+
+					if (urecord->dirty != NULL) {
+						xdr_add_dirty_bin(ns, urecord->dirty, k, strlen(k));
+					}
 				}
 			}
+
 			is_record_dirty = true;
 		}
 	}
@@ -571,10 +572,28 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 			failmax = (int)urecord->nupdates;
 			goto Rollback;
 		}
+
+		if (cf_atomic32_get(rd->ns->stop_writes) == 1) {
+			cf_warning(AS_UDF, "UDF failed by stop-writes, record will not be updated");
+			failmax = (int)urecord->nupdates;
+			goto Rollback;
+		}
+
+		if (! as_storage_has_space(rd->ns)) {
+			cf_warning(AS_UDF, "drives full, record will not be updated");
+			failmax = (int)urecord->nupdates;
+			goto Rollback;
+		}
+
+		if (! is_valid_ttl(rd->ns, urecord->tr->msgp->msg.record_ttl)) {
+			cf_warning(AS_UDF, "invalid ttl %u", urecord->tr->msgp->msg.record_ttl);
+			failmax = (int)urecord->nupdates;
+			goto Rollback;
+		}
 	}
 
 	if (has_sindex) {
-		SINDEX_GUNLOCK();
+		SINDEX_GRUNLOCK();
 	}
 
 	// If there were updates do miscellaneous successful commit
@@ -628,6 +647,10 @@ Rollback:
 		}
 	}
 
+	if (is_record_dirty && urecord->dirty != NULL) {
+		xdr_clear_dirty_bins(urecord->dirty);
+	}
+
 	if (is_record_flag_dirty) {
 		as_index_clear_flags(rd->r, new_index_flags);
 		as_index_set_flags(rd->r, old_index_flags);
@@ -636,7 +659,7 @@ Rollback:
 	urecord->ldt_rectype_bit_update = 0;
 
 	if (has_sindex) {
-		SINDEX_GUNLOCK();
+		SINDEX_GRUNLOCK();
 	}
 
 	// Reset the flat size in case the stuff is backedout !!! it should not
@@ -692,10 +715,6 @@ udf_aerospike__execute_updates(udf_record * urecord)
 
 	// Commit semantics is either all the update make it or none of it
 	rc = udf_aerospike__apply_update_atomic(urecord);
-
-	if (rc < 0) {
-		return rc;
-	}
 
 	// allocate down if bins are deleted / not in use
 	if (rd->ns && rd->ns->storage_data_in_memory && ! rd->ns->single_bin) {
@@ -771,10 +790,21 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	udf_record * urecord  = (udf_record *) as_rec_source(rec);
 
 	// make sure record isn't already successfully read
-	if (urecord->flag & UDF_RECORD_FLAG_OPEN) {
-		cf_detail(AS_UDF, "udf_aerospike_rec_create: Record Already Exists");
-		return 1;
+	if ((urecord->flag & UDF_RECORD_FLAG_OPEN) != 0) {
+		if (as_bin_inuse_has(urecord->rd)) {
+			cf_detail(AS_UDF, "udf_aerospike_rec_create: Record Already Exists");
+			return 1;
+		}
+		// else - binless record ok...
+
+		if ((ret = udf_aerospike__execute_updates(urecord)) != 0) {
+			cf_warning(AS_UDF, "udf_aerospike_rec_create: failure executing record updates");
+			udf_aerospike_rec_remove(as, rec);
+		}
+
+		return ret;
 	}
+
 	as_transaction *tr    = urecord->tr;
 	as_index_ref   *r_ref = urecord->r_ref;
 	as_storage_rd  *rd    = urecord->rd;
@@ -787,7 +817,6 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	}
 
 	// make sure we got the record as a create
-	bool is_create = false;
 	int rv = as_record_get_create(tree, &tr->keyd, r_ref, tr->rsv.ns, is_subrec);
 	cf_detail_digest(AS_UDF, &tr->keyd, "Creating %sRecord",
 			(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) ? "Sub" : "");
@@ -795,14 +824,11 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	// rv 0 means record exists, 1 means create, < 0 means fail
 	// TODO: Verify correct result codes.
 	if (rv == 1) {
-		is_create = true;
+		// Record created.
 	} else if (rv == 0) {
-		// If it's an expired record, pretend it's a fresh create.
-		if (as_record_is_expired(r_ref->r)) {
-			as_record_destroy(r_ref->r, tr->rsv.ns);
-			as_record_initialize(r_ref, tr->rsv.ns);
-			cf_atomic_int_incr(&tr->rsv.ns->n_objects);
-			is_create = true;
+		// If it's an expired or truncated record, pretend it's a fresh create.
+		if (! is_subrec && as_record_is_doomed(r_ref->r, tr->rsv.ns)) {
+			as_record_rescue(r_ref, tr->rsv.ns);
 		} else {
 			cf_warning(AS_UDF, "udf_aerospike_rec_create: Record Already Exists 2");
 			as_record_done(r_ref, tr->rsv.ns);
@@ -818,36 +844,32 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	if (tr->msgp) {
 		// Set the set name to index and close record if the setting the set name
 		// is not successful
-		int rv_set = as_record_set_set_from_msg(r_ref->r, tr->rsv.ns, &tr->msgp->msg);
+		int rv_set = as_transaction_has_set(tr) ?
+				set_set_from_msg(r_ref->r, tr->rsv.ns, &tr->msgp->msg) : 0;
 		if (rv_set != 0) {
 			cf_warning(AS_UDF, "udf_aerospike_rec_create: Failed to set setname");
-			if (is_create) {
-				as_index_delete(tree, &tr->keyd);
-			}
+			as_index_delete(tree, &tr->keyd);
+			as_record_done(r_ref, tr->rsv.ns);
+			return 4;
+		}
+
+		// Don't write record if it would be truncated.
+		if (as_truncate_now_is_truncated(tr->rsv.ns, as_index_get_set_id(r_ref->r))) {
+			as_index_delete(tree, &tr->keyd);
 			as_record_done(r_ref, tr->rsv.ns);
 			return 4;
 		}
 	}
 
-	urecord->flag |= UDF_RECORD_FLAG_OPEN;
-	cf_detail(AS_UDF, "Open %p %x %"PRIx64"", urecord, urecord->flag, *(uint64_t *)&tr->keyd);
-
-	as_index *r    = r_ref->r;
 	// open up storage
-	as_storage_record_create(urecord->tr->rsv.ns, urecord->r_ref->r,
-		urecord->rd, &urecord->tr->keyd);
-
-	cf_detail(AS_UDF, "as_storage_record_create: udf_aerospike_rec_create: r %p rd %p",
-		urecord->r_ref->r, urecord->rd);
+	as_storage_record_create(tr->rsv.ns, r_ref->r, rd);
 
 	// If the message has a key, apply it to the record.
-	if (! get_msg_key(&tr->msgp->msg, rd)) {
+	if (! get_msg_key(tr, rd)) {
 		cf_warning(AS_UDF, "udf_aerospike_rec_create: Can't store key");
-		if (is_create) {
-			as_index_delete(tree, &tr->keyd);
-		}
+		as_storage_record_close(rd);
+		as_index_delete(tree, &tr->keyd);
 		as_record_done(r_ref, tr->rsv.ns);
-		urecord->flag &= ~UDF_RECORD_FLAG_OPEN;
 		return 4;
 	}
 
@@ -857,21 +879,25 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	}
 
 	// side effect: will set the unused bins to properly unused
-	rd->bins       = as_bin_get_all(r, rd, urecord->stack_bins);
-	urecord->flag |= UDF_RECORD_FLAG_STORAGE_OPEN;
+	as_storage_rd_load_bins(rd, urecord->stack_bins); // TODO - handle error returned
 
-	cf_detail(AS_UDF, "Storage Open %p %x %"PRIx64"", urecord, urecord->flag, *(uint64_t *)&tr->keyd);
-	cf_detail(AS_UDF, "udf_aerospike_rec_create: Record created %d", urecord->flag);
+	int rc = udf_aerospike__execute_updates(urecord);
 
-	int rc         = udf_aerospike__execute_updates(urecord);
-	if (rc) {
+	if (rc != 0) {
 		//  Creating the udf record failed, destroy the as_record
 		cf_warning(AS_UDF, "udf_aerospike_rec_create: failure executing record updates (%d)", rc);
-		if (!as_bin_inuse_has(urecord->rd)) {
-			udf_aerospike_rec_remove(as, rec);
-		}
+		udf_record_close(urecord); // handles particle data and cache only
+		as_storage_record_close(rd);
+		as_index_delete(tree, &tr->keyd);
+		as_record_done(r_ref, tr->rsv.ns);
+		return rc;
 	}
-	return rc;
+
+	// Success...
+
+	urecord->flag |= UDF_RECORD_FLAG_OPEN | UDF_RECORD_FLAG_STORAGE_OPEN;
+
+	return 0;
 }
 
 /**
@@ -914,10 +940,10 @@ udf_aerospike_rec_update(const as_aerospike * as, const as_rec * rec)
 	// make sure record exists and is already opened up
 	if (!urecord || !(urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN)
 			|| !(urecord->flag & UDF_RECORD_FLAG_OPEN) ) {
-		cf_warning(AS_UDF, "Record not found to be open while updating urecord flag=%d", urecord->flag);
+		cf_warning(AS_UDF, "Record not found to be open while updating urecord flag=%d", urecord ? urecord->flag : -1);
 		return -2;
 	}
-	cf_detail_digest(AS_UDF, &urecord->rd->r->key, "Executing Updates");
+	cf_detail_digest(AS_UDF, &urecord->rd->r->keyd, "Executing Updates");
 	ret = udf_aerospike__execute_updates(urecord);
 
 	if (ret < 0) {
@@ -979,19 +1005,28 @@ udf_aerospike_rec_remove(const as_aerospike * as, const as_rec * rec)
 		return 1;
 	}
 
-	as_index_tree *tree  = urecord->tr->rsv.tree;
-	// remove index from tree. Will decrement ref count, but object still retains
-	if (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD)
-		tree = urecord->tr->rsv.sub_tree;
+	as_storage_rd* rd = urecord->rd;
 
-	// Reset starting memory bytes in case the same record is created again
-	// in the same UDF
-	as_index_delete(tree, &urecord->tr->keyd);
-	urecord->starting_memory_bytes = 0;
+	if (rd->ns->storage_data_in_memory && ! rd->ns->single_bin) {
+		delete_adjust_sindex(rd);
+	}
 
-	// Close the storage record associates with this UDF record
-	// do not release the reservation yet !!
-	udf_record_close(urecord);
+	as_record_clean_bins(rd);
+
+	if (rd->ns->storage_data_in_memory && ! rd->ns->single_bin) {
+		as_record_free_bin_space(rd->r);
+		rd->bins = NULL;
+		rd->n_bins = 0;
+	}
+
+	if (urecord->particle_data) {
+		cf_free(urecord->particle_data);
+		urecord->particle_data = NULL;
+	}
+
+	udf_record_cache_free(urecord);
+	urecord->flag |= UDF_RECORD_FLAG_HAS_UPDATES;
+
 	return 0;
 }
 
@@ -1002,7 +1037,7 @@ static int
 udf_aerospike_log(const as_aerospike * a, const char * file, const int line, const int lvl, const char * msg)
 {
 	(void)a;
-	cf_fault_event(AS_UDF, lvl, file, NULL, line, "%s", (char *) msg);
+	cf_fault_event(AS_UDF, lvl, file, line, "%s", (char *) msg);
 	return 0;
 }
 

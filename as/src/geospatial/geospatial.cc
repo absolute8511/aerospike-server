@@ -131,7 +131,7 @@ geo_region_cover(as_namespace * ns,
 		{
 			if (ii == (size_t) maxnumcells)
 			{
-				cf_warning(AS_GEO, (char *) "region covered with %d cells, "
+				cf_warning(AS_GEO, (char *) "region covered with %zu cells, "
 						   "only %d allowed", covering.size(), maxnumcells);
 				return false;
 			}
@@ -147,12 +147,12 @@ geo_region_cover(as_namespace * ns,
 			}
 
 			if (cellctrp) {
-				cf_detail(AS_GEO, (char *) "cell[%02d]: 0x%llx",
+				cf_detail(AS_GEO, (char *) "cell[%zu]: 0x%lx",
 						  ii, cellctrp[ii]);
 			}
 
 			if (cellminp && cellmaxp) {
-				cf_detail(AS_GEO, (char *) "cell[%02d]: [0x%llx, 0x%llx]",
+				cf_detail(AS_GEO, (char *) "cell[%zu]: [0x%lx, 0x%lx]",
 						  ii, cellminp[ii], cellmaxp[ii]);
 			}
 		}

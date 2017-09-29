@@ -57,13 +57,9 @@ typedef struct btIterator { // 60B + 16*bt_ll_n(512) -> dont malloc
 	int          depth;
 	iter_single *iNode;     // function to iterate on node's
 	iter_single *iLeaf;     // function to iterate on leaf's
-	void        *data;      // iNode and iLeaf can change "data"
 	bool         finished;
 	long         high;      // HIGH for INT & LONG
-	uint128      highx;     // HIGH for U128
 	uint160      highy;     // HIGH for U160
-	float        highf;     // HIGH for FLOAT
-	char        *highs;     // HIGH for TEXT
 	uchar        num_nodes; // \/-slot in nodes[]
 	bt_ll_n      nodes[MAX_BTREE_DEPTH];
 } btIterator;
@@ -74,9 +70,9 @@ typedef struct btSIter { // btIterator 500+ bytes -> STACK (globals) ALLOCATE
 	bool       nim;    // NEXT    iteration is miss
 	bool       empty;
 	bool       scan;
-	uchar      ktype;
+	col_type_t ktype;
 	btEntry    be;
-	ai_obj       key;    // static AI_OBJ for be.key
+	ai_obj     key;    // static AI_OBJ for be.key
 	char       dofree;
 } btSIter;
 
@@ -92,16 +88,11 @@ void     to_child(btIterator *iter, bt_n* self);
 int      init_iterator(bt *btr, bt_data_t simkey, struct btIterator *iter);
 
 btSIter *btGetRangeIter    (bt *btr, ai_obj *alow, ai_obj *ahigh,         bool asc);
-btSIter *btGetXthIter      (bt *btr, ai_obj *alow, ai_obj *ahigh, long x, bool asc);
-
 btSIter *btGetFullRangeIter(bt *btr,             bool asc, cswc_t *w);
-btSIter *btGetFullXthIter  (bt *btr,     long x, bool asc, cswc_t *w, long lim);
+btSIter *btGetFullXthIter  (bt *btr,     ulong x, bool asc, cswc_t *w, long lim);
 btSIter *btSetFullRangeIter(btSIter *iter, bt *btr, bool asc, cswc_t *w);
-
 btSIter *btSetRangeIter    (btSIter *iter, bt *btr, ai_obj *alow, ai_obj *ahigh, bool asc);
-
 btEntry *btRangeNext           (btSIter *iter,                        bool asc);
 void     btReleaseRangeIterator(btSIter *iter);
-
 bool assignMinKey(bt *btr, ai_obj *key);
 bool assignMaxKey(bt *btr, ai_obj *key);

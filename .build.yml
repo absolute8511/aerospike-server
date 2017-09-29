@@ -2,23 +2,20 @@ name: aerospike-server
 
 environment:
   EEREPO: modules/ee
-  CLIENTREPO_2X: modules/client
 
 dependency:
   - url: git@github.com:citrusleaf/aerospike-server-enterprise
     dir: $EEREPO
-  - url: git@github.com:citrusleaf/client
-    dir: $CLIENTREPO_2X
 
 container:
   - base:
       - docker.qe.aerospike.com/build/aerospike-server:centos-6
       - docker.qe.aerospike.com/build/aerospike-server:centos-7
-      - docker.qe.aerospike.com/build/aerospike-server:debian-6
       - docker.qe.aerospike.com/build/aerospike-server:debian-7
       - docker.qe.aerospike.com/build/aerospike-server:debian-8
       - docker.qe.aerospike.com/build/aerospike-server:ubuntu-12.04
       - docker.qe.aerospike.com/build/aerospike-server:ubuntu-14.04
+      - docker.qe.aerospike.com/build/aerospike-server:ubuntu-16.04
 
 build:
   - name: community
@@ -29,27 +26,16 @@ build:
       - make $PKG
       - make tar
       - make source
+      - cp -p modules/telemetry/{README,TELEMETRY}.md
     artifact:
       - pkg/packages/*
+      - modules/telemetry/TELEMETRY.md
   - name: enterprise
     environment:
       EEREPO: /work/source/$EEREPO
-      CLIENTREPO_2X: /work/source/$CLIENTREPO_2X
     script:
-      - make -C $CLIENTREPO_2X
       - make +ee
       - make $PKG+ee
       - make source+ee
     artifact:
       - pkg/packages/*
-  - name: enterprise+asm
-    environment:
-      EEREPO: /work/source/$EEREPO
-      CLIENTREPO_2X: /work/source/$CLIENTREPO_2X
-    script:
-      - make -C $CLIENTREPO_2X
-      - make asm+ee
-      - make $PKG+ee USE_ASM=1
-    artifact:
-      - pkg/packages/*
-      - target/Linux-x86_64/gen/mallocations.h

@@ -1,7 +1,7 @@
 /*
  * transaction_policy.h
  *
- * Copyright (C) 2014 Aerospike, Inc.
+ * Copyright (C) 2014-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -67,13 +67,53 @@ typedef enum as_policy_consistency_level_e {
 typedef enum as_policy_commit_level_e {
 
 	/**
-	 *  Return succcess only after successfully committing all replicas.
+	 *  Return success only after successfully committing all replicas.
 	 */
 	AS_POLICY_COMMIT_LEVEL_ALL,
 
 	/**
-	 *  Return succcess after successfully committing the master replica.
+	 *  Return success after successfully committing the master replica.
 	 */
 	AS_POLICY_COMMIT_LEVEL_MASTER,
 
 } as_policy_commit_level;
+
+
+
+//==========================================================
+// Per-transaction consistency guarantees.
+//
+// Client-request guarantee level is respected unless
+// corresponding server's namespace override is enabled.
+
+// Extract the read consistency level from an as_msg.
+// Note: not a strict check: both bits == 0 means the default, anything else
+// means the alternative.
+#define PROTO_CONSISTENCY_LEVEL(asmsg)								\
+	(((asmsg.info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B0) == 0 &&		\
+	  (asmsg.info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B1) == 0) ?		\
+			AS_POLICY_CONSISTENCY_LEVEL_ONE :						\
+			AS_POLICY_CONSISTENCY_LEVEL_ALL)
+
+// Extract the write commit level from an as_msg.
+// Note: not a strict check: both bits == 0 means the default, anything else
+// means the alternative.
+#define PROTO_COMMIT_LEVEL(asmsg)									\
+	(((asmsg.info3 & AS_MSG_INFO3_COMMIT_LEVEL_B0) == 0 &&			\
+	  (asmsg.info3 & AS_MSG_INFO3_COMMIT_LEVEL_B1) == 0) ?			\
+			AS_POLICY_COMMIT_LEVEL_ALL :							\
+			AS_POLICY_COMMIT_LEVEL_MASTER)
+
+// Determine the read consistency level for this transaction based upon the
+// server's namespace and client policy settings.
+#define TRANSACTION_CONSISTENCY_LEVEL(tr)							\
+	(tr->rsv.ns->read_consistency_level_override ?					\
+			tr->rsv.ns->read_consistency_level :					\
+			PROTO_CONSISTENCY_LEVEL(tr->msgp->msg))
+
+// Determine the write commit level for this transaction based upon the server's
+// namespace and client policy settings.
+#define TRANSACTION_COMMIT_LEVEL(tr)								\
+	(tr->rsv.ns->write_commit_level_override ?						\
+			tr->rsv.ns->write_commit_level :						\
+			PROTO_COMMIT_LEVEL(tr->msgp->msg))

@@ -364,7 +364,7 @@ blob_from_flat(const uint8_t *flat, uint32_t flat_size, as_particle **pp)
 		return mem_size;
 	}
 
-	blob_mem *p_blob_mem = (blob_mem *)cf_malloc((size_t)mem_size);
+	blob_mem *p_blob_mem = (blob_mem *)cf_malloc_ns((size_t)mem_size);
 
 	if (! p_blob_mem) {
 		cf_warning(AS_PARTICLE, "failed malloc for blob/string (%d)", mem_size);

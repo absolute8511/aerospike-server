@@ -41,6 +41,7 @@
 #include "base/datamodel.h"
 #include "base/ldt.h"
 #include "base/proto.h"
+#include "fabric/partition.h"
 #include "storage/storage.h"
 
 
@@ -195,14 +196,18 @@ int32_t
 as_particle_size_from_pickled(uint8_t **p_pickled)
 {
 	const uint8_t *pickled = (const uint8_t *)*p_pickled;
-	uint8_t type = *pickled++;
+	uint8_t type = safe_particle_type(*pickled++);
+
+	if (type == AS_PARTICLE_TYPE_BAD) {
+		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
+	}
+
 	const uint32_t *p32 = (const uint32_t *)pickled;
 	uint32_t value_size = cf_swap_from_be32(*p32++);
 	const uint8_t *value = (const uint8_t *)p32;
 
 	*p_pickled = (uint8_t *)value + value_size;
 
-	// TODO - safety-check type.
 	return particle_vtable[type]->size_from_wire_fn(value, value_size);
 }
 
@@ -270,20 +275,14 @@ as_particle_asval_to_client(const as_val *val, as_msg_op *op)
 // Destructor, etc.
 //
 
-// TODO - shouldn't this set the bin state to UNUSED?
 void
 as_bin_particle_destroy(as_bin *b, bool free_particle)
 {
-	if (as_bin_is_embedded_particle(b)) {
-		b->particle = 0;
+	if (free_particle && as_bin_is_external_particle(b) && b->particle) {
+		particle_vtable[as_bin_get_particle_type(b)]->destructor_fn(b->particle);
 	}
-	else if (b->particle) {
-		if (free_particle) {
-			particle_vtable[as_bin_get_particle_type(b)]->destructor_fn(b->particle);
-		}
 
-		b->particle = 0;
-	}
+	b->particle = NULL;
 }
 
 uint32_t
@@ -387,7 +386,7 @@ as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
 		as_particle *old_particle = b->particle;
 
 		if (mem_size != 0) {
-			b->particle = cf_malloc((size_t)mem_size);
+			b->particle = cf_malloc_ns((size_t)mem_size);
 
 			if (! b->particle) {
 				b->particle = old_particle;
@@ -442,7 +441,7 @@ as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
 		if (new_mem_size < 0) {
 			return new_mem_size;
 		}
-		if (! (new_particle = cf_malloc((size_t)new_mem_size))) {
+		if (! (new_particle = cf_malloc_ns((size_t)new_mem_size))) {
 			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 		memcpy(new_particle, b->particle, particle_vtable[existing_type]->size_fn(b->particle));
@@ -459,7 +458,7 @@ as_bin_particle_alloc_modify_from_client(as_bin *b, const as_msg_op *op)
 		if (new_mem_size < 0) {
 			return new_mem_size;
 		}
-		if (! (new_particle = cf_malloc((size_t)new_mem_size))) {
+		if (! (new_particle = cf_malloc_ns((size_t)new_mem_size))) {
 			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
 		}
 		memcpy(new_particle, b->particle, particle_vtable[existing_type]->size_fn(b->particle));
@@ -623,7 +622,7 @@ as_bin_particle_alloc_from_client(as_bin *b, const as_msg_op *op)
 	as_particle *old_particle = b->particle;
 
 	if (mem_size != 0) {
-		b->particle = cf_malloc((size_t)mem_size);
+		b->particle = cf_malloc_ns((size_t)mem_size);
 
 		if (! b->particle) {
 			b->particle = old_particle;
@@ -727,7 +726,7 @@ as_bin_particle_replace_from_pickled(as_bin *b, uint8_t **p_pickled)
 	}
 
 	if (new_mem_size != 0 && ! b->particle) {
-		b->particle = cf_malloc((size_t)new_mem_size);
+		b->particle = cf_malloc_ns((size_t)new_mem_size);
 
 		if (! b->particle) {
 			as_bin_set_empty(b);
@@ -914,7 +913,7 @@ as_bin_particle_replace_from_asval(as_bin *b, const as_val *val)
 	as_particle *old_particle = b->particle;
 
 	if (new_mem_size != 0) {
-		b->particle = cf_malloc(new_mem_size);
+		b->particle = cf_malloc_ns(new_mem_size);
 
 		if (! b->particle) {
 			b->particle = old_particle;
@@ -997,7 +996,7 @@ as_bin_particle_alloc_from_msgpack(as_bin *b, const uint8_t *packed, uint32_t pa
 	uint32_t mem_size = particle_vtable[type]->size_from_msgpack_fn(packed, packed_size);
 
 	if (mem_size != 0) {
-		b->particle = cf_malloc(mem_size);
+		b->particle = cf_malloc(mem_size); // response, so not cf_malloc_ns()
 
 		if (! b->particle) {
 			return -AS_PROTO_RESULT_FAIL_UNKNOWN;
@@ -1118,7 +1117,7 @@ as_bin_particle_to_flat(const as_bin *b, uint8_t *flat)
 uint32_t
 as_ldt_particle_client_value_size(as_storage_rd *rd, as_bin *b, as_val **p_val)
 {
-	*p_val = as_llist_scan(rd->ns, rd->ns->partitions[as_partition_getid(rd->keyd)].sub_vp, rd, b);
+	*p_val = as_llist_scan(rd->ns, rd->ns->partitions[as_partition_getid(&rd->r->keyd)].sub_vp, rd, b);
 
 	if (! *p_val) {
 		return 0;

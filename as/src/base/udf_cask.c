@@ -45,15 +45,12 @@
 #include "fault.h"
 
 #include "base/cfg.h"
+#include "base/thr_info.h"
 #include "base/system_metadata.h"
 #include <sys/stat.h>
 
 char udf_smd_module_name[] = "UDF";
-
 char *as_udf_type_name[] = {"LUA", 0};
-
-// TODO - promote to thr_info.h.
-extern int as_info_parameter_get(char *param_str, char *param, char *value, int  *value_len);
 
 static int file_read(char *, uint8_t **, size_t *, unsigned char *);
 static int file_write(char *, uint8_t *, size_t, unsigned char *);
@@ -90,7 +87,6 @@ static inline int file_resolve(char * filepath, char * filename, char * ext) {
 static int file_read(char * filename, uint8_t ** content, size_t * content_len, unsigned char * hash) {
 
 	char    filepath[256]   = {0};
-	FILE *  file            = NULL;
 	char    line[1024]      = {0};
 	size_t  line_len        = sizeof(line);
 
@@ -98,7 +94,8 @@ static int file_read(char * filename, uint8_t ** content, size_t * content_len, 
 
 	cf_dyn_buf_define(buf);
 
-	file = fopen(filepath, "r");
+	FILE *file = fopen(filepath, "r");
+
 	if ( file ) {
 
 		while( fgets(line, line_len, file) != NULL ) {
@@ -140,19 +137,20 @@ static int file_read(char * filename, uint8_t ** content, size_t * content_len, 
 
 static int file_write(char * filename, uint8_t * content, size_t content_len, unsigned char * hash) {
 
-	FILE *  file            = NULL;
 	char    filepath[256]   = {0};
 
 	file_resolve(filepath, filename, NULL);
 
-	file = fopen(filepath, "w");
+	FILE *file = fopen(filepath, "w");
+
 	if (file == NULL) {
 		cf_warning(AS_UDF, "could not open udf put to %s: %s", filepath, cf_strerror(errno));
 		return -1;
 	}
 	int r = fwrite(content, sizeof(char), content_len, file);
 	if (r <= 0) {
-		cf_info(AS_UDF, "could not write file %s %d", filepath, r);
+		cf_warning(AS_UDF, "could not write file %s: %d", filepath, r);
+		fclose(file);
 		return -1;
 	}
 
@@ -438,15 +436,24 @@ int udf_cask_info_put(char *name, char * params, cf_dyn_buf * out) {
 	if ( decoded_len > MAX_UDF_CONTENT_LENGTH) {
 		cf_info(AS_INFO, "lua file size:%d > 1MB", decoded_len);
 		cf_dyn_buf_append_string(out, "error=invalid_udf_content_len, lua file size > 1MB");
+		cf_free(udf_content);
 		return 0;
 	}
 
 	char * decoded_str = cf_malloc(decoded_len);
 
+	if ( ! decoded_str ) {
+		cf_info(AS_UDF, "internal allocation error");
+		cf_dyn_buf_append_string(out, "error=internal_error");
+		cf_free(udf_content);
+		return 0;
+	}
+
 	if ( ! cf_b64_validate_and_decode(udf_content, encoded_len, (uint8_t*)decoded_str, &decoded_len) ) {
 		cf_info(AS_UDF, "invalid base64 content %s", filename);
 		cf_dyn_buf_append_string(out, "error=invalid_base64_content");
 		cf_free(decoded_str);
+		cf_free(udf_content);
 		return 0;
 	}
 
@@ -484,17 +491,19 @@ int udf_cask_info_put(char *name, char * params, cf_dyn_buf * out) {
 	json_t *udf_obj = 0;
 	if (!(udf_obj = json_object())) {
 		cf_warning(AS_UDF, "failed to create JSON array for receiving UDF");
-		if (udf_content) cf_free(udf_content);
+		cf_free(udf_content);
 		return -1;
 	}
 	int e = 0;
 	e += json_object_set_new(udf_obj, "content64", json_string(udf_content));
 	e += json_object_set_new(udf_obj, "type", json_string(type));
 	e += json_object_set_new(udf_obj, "name", json_string(filename));
+
+	cf_free(udf_content);
+
 	if (e) {
 		cf_warning(AS_UDF, "could not encode UDF object, error %d", e);
 		json_decref(udf_obj);
-		if (udf_content) cf_free(udf_content);
 		return(-1);
 	}
 	// make it into a string, yet another buffer copy
@@ -509,7 +518,6 @@ int udf_cask_info_put(char *name, char * params, cf_dyn_buf * out) {
 	if (e) {
 		cf_warning(AS_UDF, "could not add UDF metadata, error %d", e);
 		cf_free(udf_obj_str);
-		if (udf_content) cf_free(udf_content);
 		return(-1);
 	}
 
@@ -518,8 +526,6 @@ int udf_cask_info_put(char *name, char * params, cf_dyn_buf * out) {
 	// free the metadata
 	cf_free(udf_obj_str);
 	udf_obj_str = 0;
-
-	if (udf_content) cf_free(udf_content);
 
 	return 0;
 }
@@ -625,7 +631,7 @@ udf_cask_smd_accept_fn(char *module, as_smd_item_list_t *items, void *udata, uin
 		return 0;
 	}
 
-	cf_debug(AS_UDF, "UDF CASK accept fn : n items %d", items->num_items);
+	cf_debug(AS_UDF, "UDF CASK accept fn : n items %zu", items->num_items);
 
 	// For each item in the list, see if the current version
 	// is different from the curretly stored version
@@ -636,8 +642,13 @@ udf_cask_smd_accept_fn(char *module, as_smd_item_list_t *items, void *udata, uin
 
 		if (item->action == AS_SMD_ACTION_SET) {
 
-			json_error_t json_err;
-			json_t *item_obj = json_loads(item->value, 0 /*flags*/, &json_err);
+			json_error_t json_error;
+			json_t *item_obj = json_loads(item->value, 0 /*flags*/, &json_error);
+			if (!item_obj) {
+				cf_warning(AS_UDF, "failed to parse UDF \"%s\" with JSON error: %s ; source: %s ; line: %d ; column: %d ; position: %d",
+						   item->key, json_error.text, json_error.source, json_error.line, json_error.column, json_error.position);
+				continue;
+			}
 
 			/*item->key is name */
 			json_t *content64_obj = json_object_get(item_obj, "content64");
@@ -651,7 +662,6 @@ udf_cask_smd_accept_fn(char *module, as_smd_item_list_t *items, void *udata, uin
 			if (! cf_b64_validate_and_decode(content64_str, encoded_len, (uint8_t*)content_str, &decoded_len)) {
 				cf_info(AS_UDF, "invalid script on accept, will not register %s", item->key);
 				cf_free(content_str);
-				json_decref(content64_obj);
 				json_decref(item_obj);
 				continue;
 			}
@@ -665,7 +675,6 @@ udf_cask_smd_accept_fn(char *module, as_smd_item_list_t *items, void *udata, uin
 			unsigned char       content_gen[256]    = {0};
 			int e = file_write(item->key, (uint8_t *) content_str, decoded_len, content_gen);
 			cf_free(content_str);
-			json_decref(content64_obj);
 			json_decref(item_obj);
 			if ( e ) {
 				mod_lua_unlock(&mod_lua);
@@ -705,23 +714,22 @@ udf_cask_smd_accept_fn(char *module, as_smd_item_list_t *items, void *udata, uin
 }
 
 
-int
+void
 udf_cask_init()
 {
 	// Have to delete the existing files in the user path on startup
-	DIR      * dir               = NULL;
 	struct dirent   * entry         = NULL;
 	// opendir(NULL) seg-faults
 	if (!g_config.mod_lua.user_path)
 	{
-		return -1;
+		cf_crash(AS_UDF, "cask init: null mod-lua user-path");
 	}
-	dir = opendir(g_config.mod_lua.user_path);
+
+	DIR *dir = opendir(g_config.mod_lua.user_path);
 	if ( dir == 0 ) {
-		cf_warning(AS_UDF, "cask init: could not open udf directory %s: %s", g_config.mod_lua.user_path, cf_strerror(errno));
-		return -1;
+		cf_crash(AS_UDF, "cask init: could not open udf directory %s: %s", g_config.mod_lua.user_path, cf_strerror(errno));
 	}
-	while ( (entry = readdir(dir)) && entry->d_name) {
+	while ( (entry = readdir(dir))) {
 		// readdir also reads "." and ".." entries.
 		if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
 		{
@@ -737,12 +745,9 @@ udf_cask_init()
 
 	// as_smd_create_module(udf_smd_module_name, udf_cask_smd_merge_fn, 0, udf_cask_smd_accept_fn, 0);
 	// take the default merge function
-	if (as_smd_create_module(udf_smd_module_name, 0, 0, udf_cask_smd_accept_fn, 0, 0, 0)) {
-		cf_warning(AS_UDF, "failed to create SMD module \"%s\"", udf_smd_module_name);
-		return -1;
+	if (as_smd_create_module(udf_smd_module_name, 0, 0, 0, 0, udf_cask_smd_accept_fn, 0, 0, 0)) {
+		cf_crash(AS_UDF, "failed to create SMD module \"%s\"", udf_smd_module_name);
 	}
 
 	// there may be existing data. Read it and populate the local file system.
-
-	return(0);
 }

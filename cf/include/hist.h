@@ -1,7 +1,7 @@
 /*
  * hist.h
  *
- * Copyright (C) 2009-2014 Aerospike, Inc.
+ * Copyright (C) 2009-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -40,13 +40,15 @@
 typedef enum {
 	HIST_MILLISECONDS,
 	HIST_MICROSECONDS,
-	HIST_RAW,
+	HIST_SIZE,
+	HIST_COUNT,
 	HIST_SCALE_MAX_PLUS_1
 } histogram_scale;
 
 #define HIST_TAG_MILLISECONDS	"msec"
 #define HIST_TAG_MICROSECONDS	"usec"
-#define HIST_TAG_RAW			"count"
+#define HIST_TAG_SIZE			"bytes"
+#define HIST_TAG_COUNT			"count"
 
 // DO NOT access this member data directly - use the API!
 // (Except for cf_hist_track, for which histogram is a base class.)
@@ -61,46 +63,5 @@ extern histogram *histogram_create(const char *name, histogram_scale scale);
 extern void histogram_clear(histogram *h);
 extern void histogram_dump(histogram *h );
 
-extern void histogram_insert_data_point(histogram *h, uint64_t start_ns);
+extern uint64_t histogram_insert_data_point(histogram *h, uint64_t start_ns);
 extern void histogram_insert_raw(histogram *h, uint64_t value);
-
-
-//==========================================================
-// Histogram with linear buckets, used by the eviction
-// algorithm, and for statistics such as the record storage
-// size histogram.
-//
-
-#define MAX_LINEAR_BUCKETS 100
-#define INFO_SNAPSHOT_SIZE 2048
-
-// DO NOT access this member data directly - use the API!
-typedef struct linear_histogram_s {
-	char name[HISTOGRAM_NAME_SIZE];
-	int num_buckets;
-	uint64_t start;
-	uint64_t bucket_width;
-	cf_atomic64 counts[MAX_LINEAR_BUCKETS];
-	pthread_mutex_t info_lock;
-	char info_snapshot[INFO_SNAPSHOT_SIZE];
-} linear_histogram;
-
-extern linear_histogram *linear_histogram_create(char *name, uint64_t start,
-		uint64_t max_offset, int num_buckets);
-extern void linear_histogram_destroy(linear_histogram *h);
-extern void linear_histogram_clear(linear_histogram *h, uint64_t start,
-		uint64_t max_offset); // Note: not thread-safe!
-extern void linear_histogram_dump(linear_histogram *h);
-
-extern uint64_t linear_histogram_get_total(linear_histogram *h);
-extern void linear_histogram_insert_data_point(linear_histogram *h,
-		uint64_t point);
-extern bool linear_histogram_get_thresholds_for_fraction(linear_histogram *h,
-		uint32_t tenths_pct, uint64_t *p_low, uint64_t *p_high,
-		uint32_t *p_mid_tenths_pct); // Note: not thread-safe!
-extern bool linear_histogram_get_thresholds_for_subtotal(linear_histogram *h,
-		uint64_t subtotal, uint64_t *p_low, uint64_t *p_high,
-		uint32_t *p_mid_tenths_pct); // Note: not thread-safe!
-
-extern void linear_histogram_save_info(linear_histogram *h);
-extern void linear_histogram_get_info(linear_histogram *h, cf_dyn_buf *db);

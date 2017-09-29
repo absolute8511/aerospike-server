@@ -1,7 +1,7 @@
 /*
  * ldt.h
  *
- * Copyright (C) 2012-2014 Aerospike, Inc.
+ * Copyright (C) 2012-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -27,8 +27,6 @@
 
 #pragma once
 
-#include "base/feature.h" // turn new AS Features on/off
-
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -40,11 +38,13 @@
 
 #include "fault.h"
 
-#include "base/datamodel.h"
 #include "base/index.h"
 #include "base/ldt_record.h"
-#include "base/write_request.h"
 #include "storage/storage.h"
+#include "transaction/rw_request.h"
+
+struct as_namespace_s;
+struct as_partition_reservation_s;
 
 #define LDT_SUB_GC_MAX_RATE         100000 // Do not allow more than 100,000 subrecord GC per second
 
@@ -142,8 +142,8 @@ extern cf_clock cf_clock_getabsoluteus();
 
 
 typedef struct ldt_sub_gc_info_s {
-	as_namespace	*ns;
-	uint32_t		num_gc;
+	struct as_namespace_s	*ns;
+	uint32_t				num_gc;
 } ldt_sub_gc_info;
 
 
@@ -160,7 +160,7 @@ extern bool     as_ldt_flag_has_subrec     (uint16_t flag);
 extern bool     as_ldt_flag_has_esr        (uint16_t flag);
 
 extern void     as_ldt_sub_gc_fn           (as_index_ref *r_ref, void *udata);
-extern int      as_ldt_shipop              (write_request *wr, cf_node dest_node);
+extern int      as_ldt_shipop              (rw_request *rw, cf_node dest_node);
 
 extern int      as_ldt_parent_storage_set_version (as_storage_rd *rd, uint64_t, uint8_t *, char *fname, int lineno);
 extern int      as_ldt_parent_storage_get_version (as_storage_rd *rd, uint64_t *, bool, char *fname, int lineno);
@@ -168,7 +168,7 @@ extern int      as_ldt_subrec_storage_get_digests (as_storage_rd *rd, cf_digest 
 extern void     as_ldt_subrec_storage_validate    (as_storage_rd *rd, char *op);
 
 extern void     as_ldt_digest_randomizer           (cf_digest *dig);
-extern bool     as_ldt_merge_component_is_candidate(as_partition_reservation *rsv, as_record_merge_component *c);
+extern bool     as_ldt_merge_component_is_candidate(struct as_partition_reservation_s *rsv, as_record_merge_component *c);
 
 extern void     as_ldt_record_set_rectype_bits    (as_record *r, const as_rec_props *props);
 extern int      as_ldt_record_pickle              (ldt_record *lrecord, uint8_t **pickled_buf, size_t *pickled_sz);
@@ -271,7 +271,7 @@ static inline int
 as_ldt_string_todigest(const char *bdig, cf_digest *keyd)
 {
 	if (strlen(bdig) < ((CF_DIGEST_KEY_SZ * 3) - 1)) {
-		cf_warning(AS_LDT, "ldt_string_todigest Invalid digest %s:%d", bdig, strlen(bdig));
+		cf_warning(AS_LDT, "ldt_string_todigest Invalid digest %s:%zu", bdig, strlen(bdig));
 		return -1;
 	}
 	// bdig looks like
@@ -289,11 +289,10 @@ as_ldt_string_todigest(const char *bdig, cf_digest *keyd)
 		keyd->digest[j++] = intval;
 		if (j == CF_DIGEST_KEY_SZ) break;
 	}
-	cf_detail(AS_LDT, "Convert %s to %"PRIx64"", bdig, keyd);
 	return 0;
 }
 
-as_val * as_llist_scan(as_namespace *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_bin *binp); 
+as_val * as_llist_scan(struct as_namespace_s *ns, as_index_tree *sub_tree, as_storage_rd  *rd, as_bin *binp);
 
-void ldt_update_err_stats(as_namespace *ns, as_val *val);
+void ldt_update_err_stats(struct as_namespace_s *ns, as_val *val);
 long ldt_get_error_code(void *val, size_t vlen); 

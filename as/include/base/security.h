@@ -1,7 +1,7 @@
 /*
  * security.h
  *
- * Copyright (C) 2014 Aerospike, Inc.
+ * Copyright (C) 2014-2017 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -54,7 +54,8 @@ typedef enum {
 	PERM_SCAN_MANAGE	= 0x00040000,
 	PERM_QUERY_MANAGE	= 0x00080000,
 	PERM_JOB_MONITOR	= 0x00100000,
-	// ... 3 unused bits ...
+	PERM_TRUNCATE		= 0x00200000,
+	// ... 2 unused bits ...
 
 	// Deployment operations management.
 	PERM_SET_CONFIG		= 0x01000000,
@@ -87,11 +88,11 @@ typedef struct as_sec_msg_s {
 
 void as_security_init();
 uint8_t as_security_check(const as_file_handle* fd_h, as_sec_perm perm);
-bool as_security_check_data_op(as_transaction *tr, as_msg *m, as_namespace *ns,
+bool as_security_check_data_op(as_transaction* tr, as_namespace* ns,
 		as_sec_perm perm);
 void* as_security_filter_create();
 void as_security_filter_destroy(void* pv_filter);
 void as_security_log(const as_file_handle* fd_h, uint8_t result,
 		as_sec_perm perm, const char* action, const char* detail);
 void as_security_refresh(as_file_handle* fd_h);
-void as_security_transact(as_transaction *tr);
+void as_security_transact(as_transaction* tr);

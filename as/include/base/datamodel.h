@@ -1,7 +1,7 @@
 /*
  * datamodel.h
  *
- * Copyright (C) 2008-2014 Aerospike, Inc.
+ * Copyright (C) 2008-2016 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -26,8 +26,6 @@
 
 #pragma once
 
-#include "base/feature.h" // turn new AS Features on/off (must be first in line)
-
 #include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -35,77 +33,60 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <aerospike/as_val.h>
-#include <citrusleaf/cf_atomic.h>
-#include <citrusleaf/cf_clock.h>
-#include <citrusleaf/cf_digest.h>
-#include <citrusleaf/cf_shash.h>
+#include "aerospike/as_val.h"
+#include "citrusleaf/cf_atomic.h"
+#include "citrusleaf/cf_clock.h"
+#include "citrusleaf/cf_digest.h"
+#include "citrusleaf/cf_shash.h"
 
 #include "arenax.h"
 #include "dynbuf.h"
 #include "hist.h"
-#include "util.h"
+#include "hist_track.h"
+#include "linear_hist.h"
+#include "msg.h"
+#include "node.h"
 #include "vmapx.h"
 
+#include "base/cfg.h"
 #include "base/proto.h"
 #include "base/rec_props.h"
 #include "base/transaction_policy.h"
+#include "base/truncate.h"
+#include "fabric/partition.h"
+#include "storage/storage.h"
 
 
-/* AS_CLUSTER_SZ, AS_CLUSTER_SZ_MASK[P,N]
- * The instantaneous maximum number of cluster participants, represented as
- * an integer and as a positive and negative mask */
-#define AS_CLUSTER_SZ 128
-#define AS_CLUSTER_SZ_MASKP ((uint64_t)(1 - (AS_CLUSTER_SZ + 1)))
-#define AS_CLUSTER_SZ_MASKN ((uint64_t)(AS_CLUSTER_SZ - 1))
-#define UNUSED 	-1
-
-#define SINDEX 1
-
-/*
- * AS_CLUSTER_LEGACY_SZ:  Historical hard-code maximum cluster size.
- * [Note:  This was the value of AS_CLUSTER_SZ in previous releases.]
- */
-#define AS_CLUSTER_LEGACY_SZ 32
-
-/*
- * AS_CLUSTER_DEFAULT_SZ:  Default maximum cluster size if not specified in the configuration.
- * [Note:  The legacy size is used for backward-compatibility with previous releases.]
- */
-#define AS_CLUSTER_DEFAULT_SZ (AS_CLUSTER_LEGACY_SZ)
-
-/* AS_NAMESPACE_SZ
- * The maximum number of namespaces that can exist at any one moment
- */
-#define AS_NAMESPACE_SZ 32
-
-#define AS_STORAGE_MAX_DEVICES 32 // maximum devices per namespace
-#define AS_STORAGE_MAX_FILES 32 // maximum files per namespace
+#define AS_STORAGE_MAX_DEVICES (64 - 1) // maximum devices per namespace
+#define AS_STORAGE_MAX_FILES (64 - 1) // maximum files per namespace
 #define AS_STORAGE_MAX_DEVICE_SIZE (2L * 1024L * 1024L * 1024L * 1024L) // 2Tb, due to rblock_id in as_index
 
 #define OBJ_SIZE_HIST_NUM_BUCKETS 100
-#define EVICTION_HIST_NUM_BUCKETS 100
+#define TTL_HIST_NUM_BUCKETS 100
+
+#define MAX_ALLOWED_TTL (3600 * 24 * 365 * 10) // 10 years
 
 /*
  * Subrecord Digest Scramble Position
  */
 // [0-1] For Partitionid
+// [1-2] For tree sprigs and locks
 // [2-3] For the Lock
-// [4-6] Scrambled bytes
+// [4-6] Scrambled bytes (4-7 used for rw_request hash)
 #define DIGEST_SCRAMBLE_BYTE1       4
 #define DIGEST_SCRAMBLE_BYTE2       5
 #define DIGEST_SCRAMBLE_BYTE3       6
-// [8]   SSD device hash
-//       DO NOT CHANGE THIS 2.0 STORAGE uses it
-//       Needed for backward compatibility
-#define DIGEST_STORAGE_BYTE			8
+// [8-11]   SSD device hash
+// Note - overlaps 3 old LDT clock bytes (9-11), meaning old subrecords of one
+// LDT can now be spread to different devices.
+#define DIGEST_STORAGE_BASE_BYTE	8
 
-// [7] [9-13]  // 6 byte clock
+// [7] [12-13]  // 3 byte clock
 #define DIGEST_CLOCK_ZERO_BYTE      7
-#define DIGEST_CLOCK_START_BYTE     9 // upto 13
+#define DIGEST_CLOCK_START_BYTE     12 // up to 13
 
 // [14-19]  // 6 byte version
-#define DIGEST_VERSION_START_POS   14 // upto 19
+#define DIGEST_VERSION_START_POS   14 // up to 19
 // Define the size of the Version Info that we'll write into the LDT control Map
 #define LDT_VERSION_SIZE  6
 
@@ -121,9 +102,6 @@
 
 /* Forward declarations */
 typedef struct as_namespace_s as_namespace;
-typedef struct as_partition_s as_partition;
-typedef struct as_partition_vinfo_s as_partition_vinfo;
-typedef struct as_partition_reservation_s as_partition_reservation;
 typedef struct as_index_s as_record;
 typedef struct as_bin_s as_bin;
 typedef struct as_index_ref_s as_index_ref;
@@ -131,12 +109,6 @@ typedef struct as_set_s as_set;
 typedef struct as_treex_s as_treex;
 
 struct as_index_tree_s;
-
-
-// TODO - We have a #include loop - datamodel.h and storage.h include each
-// other. I'd love to untangle this mess, but can't right now. So this needs to
-// be here to allow compilation for now:
-#include "storage/storage.h"
 
 
 /* AS_ID_[NAMESPACE,SET,BIN,INAME]_SZ
@@ -157,6 +129,20 @@ struct as_index_tree_s;
 /* as_generation
  * A generation ID */
 typedef uint32_t as_generation;
+
+/*
+ * Compare two 16-bit generation counts, allowing wrap-arounds.
+ * Works correctly, if:
+ *
+ *   - rhs is ahead of lhs, but rhs isn't ahead more than 32,768.
+ *   - lhs is ahead of rhs, but lhs isn't ahead more than 32,767.
+ */
+
+static inline bool
+as_gen_less_than(uint16_t lhs, uint16_t rhs)
+{
+	return (uint16_t)(lhs - rhs) >= 32768;
+}
 
 
 /* as_particle_type
@@ -281,6 +267,7 @@ extern uint32_t as_bin_particle_to_flat(const as_bin *b, uint8_t *flat);
 
 // integer:
 extern int64_t as_bin_particle_integer_value(const as_bin *b);
+extern void as_bin_particle_integer_set(as_bin *b, int64_t i);
 
 // string:
 extern uint32_t as_bin_particle_string_ptr(const as_bin *b, char **p_value);
@@ -289,15 +276,20 @@ extern uint32_t as_bin_particle_string_ptr(const as_bin *b, char **p_value);
 typedef void * geo_region_t;
 #define MAX_REGION_CELLS    32
 #define MAX_REGION_LEVELS   30
-extern size_t as_bin_particle_geojson_cellids(as_bin *b, uint64_t **pp_cells); // TODO - will we ever need this?
-extern bool as_bin_particle_geojson_match(as_bin *b, uint64_t cellid, geo_region_t region, bool is_strict);
+extern size_t as_bin_particle_geojson_cellids(const as_bin *b, uint64_t **pp_cells);
+extern bool as_particle_geojson_match(as_particle *p, uint64_t cellid, geo_region_t region, bool is_strict);
+extern bool as_particle_geojson_match_asval(const as_val *val, uint64_t cellid, geo_region_t region, bool is_strict);
+char const *as_geojson_mem_jsonstr(const as_particle *p, size_t *p_jsonsz);
 
 // list:
 struct cdt_payload_s;
+struct rollback_alloc_s;
 extern void as_bin_particle_list_set_hidden(as_bin *b);
 extern void as_bin_particle_list_get_packed_val(const as_bin *b, struct cdt_payload_s *packed);
 extern int as_bin_cdt_packed_read(const as_bin *b, as_msg_op *op, as_bin *result);
 extern int as_bin_cdt_packed_modify(as_bin *b, as_msg_op *op, as_bin *result, cf_ll_buf *particles_llb);
+extern as_particle *packed_list_simple_create_from_buf(struct rollback_alloc_s *alloc_buf, uint32_t ele_count, const uint8_t *buf, uint32_t size);
+extern as_particle *packed_list_simple_create_empty(struct rollback_alloc_s *alloc_buf);
 
 // map:
 extern void as_bin_particle_map_set_hidden(as_bin *b);
@@ -306,18 +298,12 @@ extern void as_bin_particle_map_set_hidden(as_bin *b);
 /* as_bin
  * A bin container - null name means unused */
 struct as_bin_s {
-	as_particle iparticle;			// DO NOT USE THE TYPE FROM THIS STRUCTURE! THIS WILL OVERWRITE DATA IN THE SINGLE BIN CASE!
-									// Only use the is_integer and inuse fields.
-	union {
-		uint64_t ivalue;			// this field should be never used directly. always use the pointer to the iparticle;
-		as_particle *particle;
-	};
-	/*
-	 *  The above is used as an as_particle_int subtype embedded inside the bin
-	 *  The length to which we go to save bytes !
-	 */
-	uint16_t	id;			// ID of bin name (bytes 10 and 11 of this struct)
-	uint8_t		unused;		// pad to 12 bytes (multiple of 4) for thread safety
+	as_particle	iparticle;	// 1 byte
+	as_particle	*particle;	// for embedded particle this is value, not pointer
+
+	// Never read or write these bytes in single-bin configuration:
+	uint16_t	id;			// ID of bin name
+	uint8_t		unused;		// pad to 12 bytes (multiple of 4) - legacy
 } __attribute__ ((__packed__)) ;
 
 // For data-in-memory namespaces in multi-bin mode, we keep an array of as_bin
@@ -343,6 +329,14 @@ typedef struct as_rec_space_s {
 	uint32_t		key_size;
 	uint8_t			key[];
 } __attribute__ ((__packed__)) as_rec_space;
+
+// For copying as_bin structs without the last 3 bytes.
+static inline void
+as_single_bin_copy(as_bin *to, const as_bin *from)
+{
+	to->iparticle = from->iparticle;
+	to->particle = from->particle;
+}
 
 static inline bool
 as_bin_inuse(const as_bin *b)
@@ -444,6 +438,11 @@ as_bin_is_embedded_particle(const as_bin *b) {
 			((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_FLOAT;
 }
 
+static inline bool
+as_bin_is_external_particle(const as_bin *b) {
+	return ((as_particle_iparticle *)b)->state == AS_BIN_STATE_INUSE_OTHER;
+}
+
 static inline as_particle *
 as_bin_get_particle(as_bin *b) {
 	return as_bin_is_embedded_particle(b) ? &b->iparticle : b->particle;
@@ -476,10 +475,10 @@ as_bin_get_particle_type(const as_bin *b) {
 /* Bin function declarations */
 extern int16_t as_bin_get_id(as_namespace *ns, const char *name);
 extern uint16_t as_bin_get_or_assign_id(as_namespace *ns, const char *name);
+extern uint16_t as_bin_get_or_assign_id_w_len(as_namespace *ns, const char *name, size_t len);
 extern const char* as_bin_get_name_from_id(as_namespace *ns, uint16_t id);
 extern bool as_bin_name_within_quota(as_namespace *ns, const char *name);
-extern uint16_t as_bin_get_n_bins(as_record *r, as_storage_rd *rd);
-extern as_bin *as_bin_get_all(as_record *r, as_storage_rd *rd, as_bin *stack_bins);
+extern int as_storage_rd_load_n_bins(as_storage_rd *rd);
 extern int as_storage_rd_load_bins(as_storage_rd *rd, as_bin *stack_bins);
 extern void as_bin_get_all_p(as_storage_rd *rd, as_bin **bin_ptrs);
 extern as_bin *as_bin_create(as_storage_rd *rd, const char *name);
@@ -488,7 +487,7 @@ extern as_bin *as_bin_get(as_storage_rd *rd, const char *name);
 extern as_bin *as_bin_get_by_id(as_storage_rd *rd, uint32_t id);
 extern as_bin *as_bin_get_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
 extern as_bin *as_bin_get_or_create(as_storage_rd *rd, const char *name);
-extern as_bin *as_bin_get_or_create_from_buf(as_storage_rd *rd, byte *name, size_t namesz, bool create_only, bool replace_only, int *p_result);
+extern as_bin *as_bin_get_or_create_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz, int *p_result);
 extern int32_t as_bin_get_index(as_storage_rd *rd, const char *name);
 extern int32_t as_bin_get_index_from_buf(as_storage_rd *rd, uint8_t *name, size_t namesz);
 extern void as_bin_allocate_bin_space(as_record *r, as_storage_rd *rd, int32_t delta);
@@ -499,54 +498,51 @@ extern uint16_t as_bin_inuse_count(as_storage_rd *rd);
 extern void as_bin_all_dump(as_storage_rd *rd, char *msg);
 
 extern void as_bin_init(as_namespace *ns, as_bin *b, const char *name);
-
-#define AS_PARTITION_MAX_VERSION 16
-
-/* as_partition_vinfo
- * A partition's version information */
-struct as_partition_vinfo_s {
-	uint64_t iid;								// iid is the identifier of the cluster at the time the partition was created
-	uint8_t vtp[AS_PARTITION_MAX_VERSION];      // vtp is the version string of the partition with the cluster's split-reforms
-};
-
-static inline bool
-as_partition_vinfo_same(as_partition_vinfo *v1, as_partition_vinfo *v2) {
-	if (v1->iid != v2->iid)		return (false);
-	if ( 0 != memcmp( v1->vtp, v2->vtp, AS_PARTITION_MAX_VERSION ) ) return (false);
-	return (true);
-}
+extern void as_bin_copy(as_namespace *ns, as_bin *to, const as_bin *from);
 
 typedef enum {
 	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_UNDEF = 0,
 	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_GENERATION = 1,
-	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_TTL = 2
+	AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_LAST_UPDATE_TIME = 2
 } conflict_resolution_pol;
 
 /* Record function declarations */
-// special - get_create returns 1 if created, 0 if just gotten, -1 if fail
+extern bool as_record_is_live(const as_record *r);
 extern int as_record_get_create(struct as_index_tree_s *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns, bool);
-extern int as_record_get(struct as_index_tree_s *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns);
-extern int as_record_exists(struct as_index_tree_s *tree, cf_digest *keyd, as_namespace *ns);
-// initialize as_record
-extern void as_record_initialize(as_index_ref *r_ref, as_namespace *ns);
+extern int as_record_get(struct as_index_tree_s *tree, cf_digest *keyd, as_index_ref *r_ref);
+extern int as_record_get_live(struct as_index_tree_s *tree, cf_digest *keyd, as_index_ref *r_ref, as_namespace *ns);
+extern int as_record_exists(struct as_index_tree_s *tree, cf_digest *keyd);
+extern int as_record_exists_live(struct as_index_tree_s *tree, cf_digest *keyd, as_namespace *ns);
+extern void as_record_rescue(as_index_ref *r_ref, as_namespace *ns);
 
 extern void as_record_clean_bins_from(as_storage_rd *rd, uint16_t from);
 extern void as_record_clean_bins(as_storage_rd *rd);
+extern void as_record_free_bin_space(as_record *r);
 
 extern void as_record_destroy(as_record *r, as_namespace *ns);
 extern void as_record_done(as_index_ref *r_ref, as_namespace *ns);
 
+void as_record_drop_stats(as_record* r, as_namespace* ns);
+
 extern void as_record_allocate_key(as_record* r, const uint8_t* key, uint32_t key_size);
 extern void as_record_remove_key(as_record* r);
-extern int as_record_resolve_conflict(conflict_resolution_pol policy, uint16_t l_generation, uint32_t l_void_time, uint16_t r_generation, uint32_t r_void_time);
+extern int as_record_resolve_conflict(conflict_resolution_pol policy, uint16_t left_gen, uint64_t left_lut, uint16_t right_gen, uint64_t right_lut);
 extern int as_record_pickle(as_record *r, as_storage_rd *rd, uint8_t **buf_r, size_t *len_r);
-extern int as_record_pickle_a_delete(byte **buf_r, size_t *len_r);
-extern uint32_t as_record_buf_get_stack_particles_sz(uint8_t *buf);
 extern int as_record_unpickle_replace(as_record *r, as_storage_rd *rd, uint8_t *buf, size_t bufsz, uint8_t **stack_particles, bool has_sindex);
+extern void as_record_apply_pickle(as_storage_rd *rd);
+extern bool as_record_apply_replica(as_storage_rd *rd, uint32_t info, struct as_index_tree_s *tree);
 extern void as_record_apply_properties(as_record *r, as_namespace *ns, const as_rec_props *p_rec_props);
 extern void as_record_clear_properties(as_record *r, as_namespace *ns);
 extern void as_record_set_properties(as_storage_rd *rd, const as_rec_props *rec_props);
 extern int as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m);
+
+static inline bool
+as_record_pickle_is_binless(const uint8_t *buf)
+{
+	return *(uint16_t *)buf == 0;
+}
+
+extern int32_t as_record_buf_get_stack_particles_sz(uint8_t *buf);
 
 // Set in component if it is dummy (no data). This in
 // conjunction with LDT_REC is used to determine if merge
@@ -584,14 +580,15 @@ extern int as_record_set_set_from_msg(as_record *r, as_namespace *ns, as_msg *m)
 		|| ((c)->flag & AS_COMPONENT_FLAG_LDT_SUBREC))
 
 #define COMPONENT_IS_LDT(c) \
-	COMPONENT_IS_LDT_PARENT((c)) \
-		|| COMPONENT_IS_LDT_SUB((c))
+	(COMPONENT_IS_LDT_PARENT((c)) \
+		|| COMPONENT_IS_LDT_SUB((c)))
 
 typedef struct {
 	uint8_t					*record_buf;
 	size_t					record_buf_sz;
 	uint32_t				generation;
 	uint32_t				void_time;
+	uint64_t				last_update_time;
 	as_rec_props			rec_props;
 	char					flag;
 	cf_digest               pdigest;
@@ -602,236 +599,17 @@ typedef struct {
 } as_record_merge_component;
 
 extern int as_record_flatten(as_partition_reservation *rsv, cf_digest *keyd,
-		uint16_t n_components, as_record_merge_component *components, int *winner_idx);
-
-// this function can be called with only one component, the one to replace the record
-extern int as_record_replace(as_partition_reservation *rsv, cf_digest *keyd,
-		uint16_t n_components, as_record_merge_component *components);
+		uint32_t n_components, as_record_merge_component *components, int *winner_idx);
 
 // a simpler call that gives seconds in the right epoch
 #define as_record_void_time_get() cf_clepoch_seconds()
-bool as_record_is_expired(as_record *r); // TODO - eventually inline
+bool as_record_is_expired(const as_record *r); // TODO - eventually inline
 
-
-/* as_partition_id
- * A generic type for partition identifiers */
-typedef uint16_t as_partition_id;
-#define AS_PARTITION_ID_UNDEF ((uint16_t)0xFFFF)
-
-/* AS_PARTITIONS
- * The number of partitions in the system (and a mask for convenience) */
-#define AS_PARTITIONS 4096
-// #define AS_PARTITIONS 1024
-//#define AS_PARTITIONS 256
-// #define AS_PARTITIONS 64
-// #define AS_PARTITIONS 32
-// #define AS_PARTITIONS 16
-// #define AS_PARTITIONS 8
-#define AS_PARTITION_MASK (AS_PARTITIONS - 1)
-
-
-
-/* as_partition_state
- * The state of a partition
- *    SYNC: fully synchronized
- *    DESYNC: unsynchronized, but moving towards synchronization
- *    ZOMBIE: sync, but moving towards absent
- *    ABSENT: empty
- */
-#define AS_PARTITION_STATE_UNDEF 0
-#define AS_PARTITION_STATE_SYNC  1
-#define AS_PARTITION_STATE_DESYNC  2
-#define AS_PARTITION_STATE_ZOMBIE  3
-#define AS_PARTITION_STATE_ABSENT 5
-typedef uint8_t as_partition_state;
-
-#define AS_PARTITION_MIG_TX_STATE_NONE  0
-#define AS_PARTITION_MIG_TX_STATE_SUBRECORD 1
-#define AS_PARTITION_MIG_TX_STATE_RECORD 2
-typedef uint8_t as_partition_mig_tx_state;
-
-/* as_partition_getid
- * A brief utility function to derive the partition ID from a digest */
-static inline as_partition_id
-as_partition_getid(cf_digest d)
+static inline bool
+as_record_is_doomed(const as_record *r, struct as_namespace_s *ns)
 {
-	return( (as_partition_id) cf_digest_gethash( &d, AS_PARTITION_MASK ) );
-//	return((as_partition_id)((*(as_partition_id *)&d.digest[0]) & AS_PARTITION_MASK));
+	return as_record_is_expired(r) || as_truncate_record_is_truncated(r, ns);
 }
-
-
-
-
-
-/* as_partition
- * A partition */
-struct as_partition_s {
-	pthread_mutex_t lock;
-
-	cf_node replica[AS_CLUSTER_SZ];
-	/* origin: the node that is replicating to us. For master, origin could be "acting master" during migration.
-	 * target: an actual master that we're migrating to */
-	cf_node origin, target;
-	as_partition_state state;  // used to be consistency
-	int pending_migrate_tx, pending_migrate_rx;
-	bool replica_tx_onsync[AS_CLUSTER_SZ];
-
-	size_t n_dupl;
-	cf_node dupl_nodes[AS_CLUSTER_SZ];
-	bool waiting_for_master;
-	as_partition_vinfo primary_version_info; // the version of the primary partition in the cluster
-	as_partition_vinfo version_info;         // the version of my partition here and now
-
-	cf_node old_sl[AS_CLUSTER_SZ];
-
-	uint64_t cluster_key;
-
-	// the maximum void time of all records in the tree below
-	cf_atomic_int max_void_time;
-
-	// the actual data
-	struct as_index_tree_s *vp;
-	struct as_index_tree_s *sub_vp;
-	as_partition_id partition_id;
-	uint p_repl_factor;
-
-	// Track ldt version in transit currently
-	uint64_t current_outgoing_ldt_version;
-	uint64_t current_incoming_ldt_version;
-};
-
-#define AS_PARTITION_HAS_DATA(p)  ((p)->vp->elements || (p)->sub_vp->elements)
-
-/* as_partition_reservation
- * A structure to hold state on a reserved partition
- * NB: Structure elements are organized to make sure access to most
- *     common field is a single cache line access ... DO NOT DISTURB
- *     unless you what you are doing
- */
-struct as_partition_reservation_s {
-	as_namespace			*ns;
-	bool					is_write;
-	uint8_t					unused;
-	as_partition_state		state;
-	uint8_t					n_dupl;
-	as_partition_id			pid;
-	uint8_t					spare[2];
-	/************* 16 byte ******/
-	as_partition			*p;
-	struct as_index_tree_s	*tree;
-	uint64_t				cluster_key;
-	as_partition_vinfo		vinfo;
-
-	/************* 64 byte *****/
-	struct as_index_tree_s	*sub_tree;
-	cf_node					dupl_nodes[AS_CLUSTER_SZ];
-};
-
-
-#define AS_PARTITION_RESERVATION_INIT(__rsv)   \
-	__rsv.ns = NULL; \
-	__rsv.is_write = false; \
-	__rsv.pid = AS_PARTITION_ID_UNDEF; \
-	__rsv.p = 0; \
-	__rsv.state = AS_PARTITION_STATE_UNDEF; \
-	__rsv.tree = 0; \
-	__rsv.n_dupl = 0; \
-	__rsv.cluster_key = 0;
-
-#define AS_PARTITION_RESERVATION_INITP(__rsv)   \
-	__rsv->ns = NULL; \
-	__rsv->is_write = false; \
-	__rsv->pid = AS_PARTITION_ID_UNDEF; \
-	__rsv->p = 0; \
-	__rsv->state = AS_PARTITION_STATE_UNDEF; \
-	__rsv->tree = 0; \
-	__rsv->n_dupl = 0; \
-	__rsv->cluster_key = 0;
-
-
-// This is a statistics function
-typedef struct as_partition_states_s {
-	int		sync_actual;
-	int		sync_replica;
-	int		desync;
-	int		zombie;
-	int		absent;
-	int		undef;
-	int		n_objects;
-	int		n_ref_count;
-	int		n_sub_objects;
-	int		n_sub_ref_count;
-} as_partition_states;
-
-/* Partition function declarations */
-extern void as_partition_init(as_partition *p, as_namespace *ns, int pid);
-extern void as_partition_reinit(as_partition *p, as_namespace *ns, int pid);
-extern void as_partition_bless(as_partition *p);
-extern bool is_partition_null(as_partition_vinfo *vinfo);
-extern cf_node as_partition_getreplica_read(as_namespace *ns, as_partition_id p);
-extern int as_partition_getreplica_readall(as_namespace *ns, as_partition_id p, cf_node *nv);
-extern cf_node as_partition_getreplica_write(as_namespace *ns, as_partition_id p);
-#define as_partition_isconsistent(_n, _p) (SYNC == ((_n)->consistency[(_p)]))
-
-// reserve_query - 
-extern int as_partition_reserve_query(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv);
-extern int as_partition_prereserve_query(as_namespace * ns, bool can_partition_query[], as_partition_reservation rsv[]);
-// reserve_write - 
-extern int as_partition_reserve_write(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv, cf_node *node, uint64_t *cluster_key);
-// reserve_migrate - 
-extern void as_partition_reserve_migrate(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv, cf_node *node);
-extern int as_partition_reserve_migrate_timeout(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv, cf_node *node, int timeout_ms );
-
-// reserve_read - 
-extern int as_partition_reserve_read(as_namespace *ns, as_partition_id pid, as_partition_reservation *rsv, cf_node *node, uint64_t *cluster_key);
-
-// moves the reservation -
-extern void as_partition_reservation_move(as_partition_reservation *dst, as_partition_reservation *src);
-extern void as_partition_reservation_copy(as_partition_reservation *dst, as_partition_reservation *src);
-extern void as_partition_reserve_update_state(as_partition_reservation *rsv);
-extern void as_partition_release(as_partition_reservation *rsv);
-
-extern int as_partition_tree_release(struct as_index_tree_s *p);
-
-extern void as_partition_getreplica_read_str(cf_dyn_buf *db);
-extern void as_partition_getreplica_prole_str(cf_dyn_buf *db);
-extern void as_partition_getreplica_write_str(cf_dyn_buf *db);
-extern void as_partition_getreplica_master_str(cf_dyn_buf *db);
-extern void as_partition_get_replicas_all_str(cf_dyn_buf *db);
-extern void as_partition_getinfo_str(cf_dyn_buf *db);
-extern void as_partition_getstates(as_partition_states *ps);
-
-extern void as_partition_getreplica_write_node(as_namespace *ns, cf_node *node_a);
-
-extern void as_partition_balance();
-extern void as_partition_balance_init();
-extern void as_partition_balance_init_multi_node_cluster();
-extern void as_partition_balance_init_single_node_cluster();
-extern bool as_partition_balance_is_init_resolved();
-extern bool as_partition_balance_is_multi_node_cluster();
-
-typedef struct as_master_prole_stats_s {
-	uint64_t n_master_records;
-	uint64_t n_prole_records;
-	uint64_t n_master_sub_records;
-	uint64_t n_prole_sub_records;
-} as_master_prole_stats;
-
-extern void as_partition_get_master_prole_stats(as_namespace* ns, as_master_prole_stats* p_stats);
-
-extern void as_partition_allow_migrations(void);
-extern void as_partition_disallow_migrations(void);
-extern bool as_partition_get_migration_flag(void);
-
-// return number of partitions found in storage
-extern int  as_partition_get_state_from_storage(as_namespace *ns, bool *partition_states);
-extern char as_partition_getstate_str(int state);
-extern bool as_partition_is_queryable_lockfree(as_namespace * ns, as_partition * p);
-// Print info. about the partition map to the log.
-void as_partition_map_dump();
-
-//#define NS_RWLOCK	 1   /* use a reader-writer lock */
-#define NS_RWLOCK    0   /* use a standard mutex */
 
 #define AS_SINDEX_MAX		256
 
@@ -930,179 +708,71 @@ typedef struct ns_ldt_stats_s {
 
 } ns_ldt_stats;
 
+
+// TODO - would be nice to put this in as_index.h:
+// Callback invoked when as_index is destroyed.
+typedef void (*as_index_value_destructor) (struct as_index_s* v, void* udata);
+
+// TODO - would be nice to put this in as_index.h:
+typedef struct as_index_tree_shared_s {
+	as_index_value_destructor destructor;
+	void*			destructor_udata;
+
+	// Number of lock pairs and sprigs per partition tree.
+	uint32_t		n_lock_pairs;
+	uint32_t		n_sprigs;
+
+	// Bit-shifts used to calculate indexes from digest bits.
+	uint32_t		locks_shift;
+	uint32_t		sprigs_shift;
+
+	// Offset into as_index_tree struct's variable-sized data.
+	uint32_t		sprigs_offset;
+} as_index_tree_shared;
+
+
 struct as_namespace_s {
-	/* Namespaces are internally assigned monotonic identifiers, but these
-	 * are not portable across node boundaries; to identify a namespace
-	 * canonically, you need to use the namespace name */
+
 	char name[AS_ID_NAMESPACE_SZ];
 	as_namespace_id id;
+	uint32_t namehash;
 
-	// If true, read storage devices to build index at startup.
-	bool cold_start;
+	//--------------------------------------------
+	// Persistent memory.
+	//
+
+	// Persistent memory "base" block ID for this namespace.
+	uint32_t		xmem_id;
 
 	// Pointer to the persistent memory "base" block.
-	uint8_t* p_xmem_base;
+	uint8_t*		xmem_base;
 
-	// Pointer to array of partition tree info in persistent memory base block.
-	as_treex* tree_roots;
-	as_treex* sub_tree_roots;
+	// Pointer to partition tree info in persistent memory "treex" block.
+	as_treex*		xmem_roots;
+	as_treex*		sub_tree_roots; // pointer within treex block
 
 	// Pointer to arena structure (not stages) in persistent memory base block.
-	cf_arenax* arena;
+	cf_arenax*		arena;
 
-#ifdef USE_JEM
-	// JEMalloc arena to be used for long-term storage in this namespace (-1 if nonexistent.)
-	int jem_arena;
-#endif
+	// Pointer to bin name vmap in persistent memory base block.
+	cf_vmapx*		p_bin_name_vmap;
 
-	/* Replication management */
-	uint16_t					replication_factor;
-	uint16_t					cfg_replication_factor;
-	conflict_resolution_pol		conflict_resolution_policy;
-	bool						single_bin;		// restrict the namespace to objects with exactly one bin
-	bool						data_in_index;	// with single-bin, allows warm restart for data-in-memory (with storage-engine device)
-	bool 						disallow_null_setname;
-	bool                        ldt_enabled;
-	uint32_t                    ldt_page_size;
-	uint32_t					ldt_gc_sleep_us;
-
-	/* XDR */
-	bool						enable_xdr;
-	bool 						sets_enable_xdr; // namespace-level flag to enable set-based xdr shipping.
-	bool 						ns_forward_xdr_writes; // namespace-level flag to enable forwarding of xdr writes
-	bool 						ns_allow_nonxdr_writes; // namespace-level flag to allow nonxdr writes or not
-	bool 						ns_allow_xdr_writes; // namespace-level flag to allow xdr writes or not
-
-	/* The server default read consistency level for this namespace. */
-	as_policy_consistency_level read_consistency_level;
-
-	/* Should the optional client-supplied, per-transaction read consistency level
-	   be overriden by the server default on this namespace? */
-	bool read_consistency_level_override;
-
-	/* The server default write commit level for this namespace. */
-	as_policy_commit_level write_commit_level;
-
-	/* Should the optional client-supplied, per-transaction write commit level
-	   be overriden by the server default on this namespace? */
-	bool write_commit_level_override;
-
-	/* Storage engine configuration - and per storage engine variables -
-	** 'private' is managed by the storage engine in question */
-	as_storage_type storage_type;
-	char *storage_path;
-	char *storage_devices[AS_STORAGE_MAX_DEVICES];
-	char *storage_shadows[AS_STORAGE_MAX_DEVICES];
-	char *storage_files[AS_STORAGE_MAX_FILES];
-	char *storage_scheduler_mode; // relevant for devices only, not files
-	off_t		storage_filesize;
-	uint32_t	storage_blocksize;
-	uint32_t	storage_write_threads;
-	uint64_t	storage_max_write_cache;
-	uint32_t	storage_read_block_size;
-	uint32_t	storage_write_block_size;
-	uint32_t	storage_num_write_blocks;
-	bool		storage_data_in_memory;    // true if the DRAM copy is always kept
-	bool		storage_cold_start_empty;
-	bool		storage_disable_odirect;
-	bool		storage_enable_osync;
-	uint32_t	storage_defrag_lwm_pct;
-	uint32_t	storage_defrag_queue_min;
-	uint32_t	storage_defrag_sleep;
-	int			storage_defrag_startup_minimum;
-	uint64_t	storage_flush_max_us;
-	uint64_t	storage_fsync_max_us;
-	uint32_t	storage_min_avail_pct;
-
-	// For data-not-in-memory, optionally cache swbs after writing to device.
-	cf_atomic32 storage_post_write_queue; // number of swbs/device held after writing to device
-	// To track fraction of reads from cache:
-	cf_atomic32 n_reads_from_cache;
-	cf_atomic32 n_reads_from_device;
-	float cache_read_pct;
-
-	void *storage_private;
-
-	/* data store management */
-	uint64_t	memory_size;
-	uint64_t	ssd_size;
-	uint64_t	kv_size;
-	bool		cond_write;  // true if writing uniqueness is to be enforced by the KV store.
-	float		hwm_disk, hwm_memory;
-	float   	stop_writes_pct;
-	uint32_t	evict_tenths_pct;
-	uint64_t	default_ttl;
-	uint64_t	max_ttl;
-	int			auto_hwm_last_free;
-	int			storage_min_free_wblocks; // the number of wblocks per device to "reserve"
-	int			storage_last_avail_pct; // most recently calculated available percent
-	int			storage_max_write_q; // storage_max_write_cache is converted to this
-	uint32_t	saved_defrag_sleep; // restore after defrag at startup is done
-	uint32_t	defrag_lwm_size; // storage_defrag_lwm_pct % of storage_write_block_size
-
-	/* very interesting counters */
-	cf_atomic_int	n_objects;
-	cf_atomic_int	n_sub_objects;
-	cf_atomic_int	n_bytes_memory;
-	cf_atomic_int	n_absent_partitions;
-	cf_atomic_int	n_actual_partitions;
-	cf_atomic_int	n_expired_objects;
-	cf_atomic_int	n_evicted_objects;
-	cf_atomic_int	n_deleted_set_objects;
-
-	// migration counters
-	cf_atomic_int	migrate_tx_partitions_initial;
-	cf_atomic_int	migrate_tx_partitions_remaining;
-	cf_atomic_int	migrate_rx_partitions_initial;
-	cf_atomic_int	migrate_rx_partitions_remaining;
-
-	// migration transmit stats
-	cf_atomic_int	migrate_tx_partitions_imbalance;
-
-	// the maximum void time of all records in the namespace
-	cf_atomic_int max_void_time;
-
-	// Number of 0-void-time objects. TODO - should be atomic.
-	uint64_t non_expirable_objects;
-
-	uint32_t	nsup_cycle_duration; // seconds taken for most recent nsup cycle
-	uint32_t	nsup_cycle_sleep_pct; // fraction of most recent nsup cycle that was spent sleeping
-
-	// Pointer to bin name vmap in persistent memory.
-	cf_vmapx		*p_bin_name_vmap;
-
-	// Pointer to set information vmap in persistent memory.
-	cf_vmapx		*p_sets_vmap;
+	// Pointer to set information vmap in persistent memory base block.
+	cf_vmapx*		p_sets_vmap;
 
 	// Temporary array of sets to hold config values until sets vmap is ready.
-	as_set			*sets_cfg_array;
+	as_set*			sets_cfg_array;
 	uint32_t		sets_cfg_count;
 
-	// Temporary structure to hold si config values until smd-bootup is done.
-	// shash entry for si name comparison btwn cfg and smd data
-	shash *sindex_cfg_var_hash;
+	// Configuration flags relevant for warm restart.
+	uint32_t		xmem_flags;
 
-	// SINDEX
-	int					sindex_cnt;
-	struct as_sindex_s	*sindex;  // array with AS_MAX_SINDEX meta data
-	uint64_t			sindex_data_max_memory;
-	cf_atomic64		    sindex_data_memory_used;
-	shash               *sindex_set_binid_hash;
-	shash				*sindex_iname_hash;
-	uint32_t			binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];
-	uint32_t			sindex_num_partitions;
+	//--------------------------------------------
+	// Cold-start.
+	//
 
-	// Geospatial query within parameters.
-	bool			geo2dsphere_within_strict;
-	uint16_t		geo2dsphere_within_min_level;
-	uint16_t		geo2dsphere_within_max_level;
-	uint16_t		geo2dsphere_within_max_cells;
-	uint16_t		geo2dsphere_within_level_mod;
-	uint32_t		geo2dsphere_within_earth_radius_meters;
-
-	// Current state of threshold breaches.
-	cf_atomic32		hwm_breached;
-	cf_atomic32		stop_writes;
+	// If true, read storage devices to build index at startup.
+	bool			cold_start;
 
 	// Flag for cold-start ticker and eviction threshold check.
 	bool			cold_start_loading;
@@ -1110,34 +780,422 @@ struct as_namespace_s {
 	// For cold-start eviction.
 	pthread_mutex_t	cold_start_evict_lock;
 	uint32_t		cold_start_record_add_count;
-	uint32_t		cold_start_evict_ttl;
 	cf_atomic32		cold_start_threshold_void_time;
 	uint32_t		cold_start_max_void_time;
 
+	//--------------------------------------------
+	// Memory management.
+	//
+
+	// JEMalloc arena to be used for long-term storage in this namespace (-1 if nonexistent.)
+	int jem_arena;
+
+	// Cached partition ownership info for clients.
+	client_replica_map* replica_maps;
+
+	// Common partition tree information. Contains two configuration items.
+	as_index_tree_shared tree_shared;
+
+	//--------------------------------------------
+	// Storage management.
+	//
+
+	// This is typecast to (drv_ssds*) in storage code.
+	void*			storage_private;
+
+	uint64_t		ssd_size; // discovered (and rounded) size of drive
+	int				storage_last_avail_pct; // most recently calculated available percent
+	int				storage_max_write_q; // storage_max_write_cache is converted to this
+	uint32_t		saved_defrag_sleep; // restore after defrag at startup is done
+	uint32_t		defrag_lwm_size; // storage_defrag_lwm_pct % of storage_write_block_size
+
+	// For data-not-in-memory, we optionally cache swbs after writing to device.
+	// To track fraction of reads from cache:
+	cf_atomic32		n_reads_from_cache;
+	cf_atomic32		n_reads_from_device;
+
+	//--------------------------------------------
+	// Truncate records.
+	//
+
+	as_truncate		truncate;
+
+	//--------------------------------------------
+	// Secondary index.
+	//
+
+	int				sindex_cnt;
+	uint32_t		n_setless_sindexes;
+	struct as_sindex_s* sindex; // array with AS_MAX_SINDEX metadata
+	shash*			sindex_set_binid_hash;
+	shash*			sindex_iname_hash;
+	uint32_t		binid_has_sindex[AS_BINID_HAS_SINDEX_SIZE];
+
+	//--------------------------------------------
+	// Configuration.
+	//
+
+	uint32_t		cfg_replication_factor;
+	uint32_t		replication_factor; // indirect config - can become less than cfg_replication_factor
+	uint64_t		memory_size;
+	uint64_t		default_ttl;
+
+	PAD_BOOL		enable_xdr;
+	PAD_BOOL		sets_enable_xdr; // namespace-level flag to enable set-based xdr shipping
+	PAD_BOOL		ns_forward_xdr_writes; // namespace-level flag to enable forwarding of xdr writes
+	PAD_BOOL		ns_allow_nonxdr_writes; // namespace-level flag to allow nonxdr writes or not
+	PAD_BOOL		ns_allow_xdr_writes; // namespace-level flag to allow xdr writes or not
+
+	uint32_t		cold_start_evict_ttl;
+	conflict_resolution_pol conflict_resolution_policy;
+	PAD_BOOL		data_in_index; // with single-bin, allows warm restart for data-in-memory (with storage-engine device)
+	PAD_BOOL		disallow_null_setname;
+	PAD_BOOL		batch_sub_benchmarks_enabled;
+	PAD_BOOL		read_benchmarks_enabled;
+	PAD_BOOL		udf_benchmarks_enabled;
+	PAD_BOOL		udf_sub_benchmarks_enabled;
+	PAD_BOOL		write_benchmarks_enabled;
+	PAD_BOOL		proxy_hist_enabled;
+	uint32_t		evict_hist_buckets;
+	uint32_t		evict_tenths_pct;
+	uint32_t		hwm_disk_pct;
+	uint32_t		hwm_memory_pct;
+	PAD_BOOL		ldt_enabled;
+	uint32_t		ldt_gc_sleep_us;
+	uint32_t		ldt_page_size;
+	uint64_t		max_ttl;
+	uint32_t		migrate_order;
+	uint32_t		migrate_retransmit_ms;
+	uint32_t		migrate_sleep;
+	cf_atomic32		obj_size_hist_max; // TODO - doesn't need to be atomic, really.
+	uint32_t		rack_id;
+	as_policy_consistency_level read_consistency_level;
+	PAD_BOOL		read_consistency_level_override;
+	PAD_BOOL		single_bin; // restrict the namespace to objects with exactly one bin
+	uint32_t		stop_writes_pct;
+	uint32_t		tomb_raider_eligible_age; // relevant only for enterprise edition
+	uint32_t		tomb_raider_period; // relevant only for enterprise edition
+	as_policy_commit_level write_commit_level;
+	PAD_BOOL		write_commit_level_override;
+	cf_vector		xdr_dclist_v;
+
+	as_storage_type storage_type;
+
+	char*			storage_devices[AS_STORAGE_MAX_DEVICES];
+	char*			storage_shadows[AS_STORAGE_MAX_DEVICES];
+	char*			storage_files[AS_STORAGE_MAX_FILES];
+	off_t			storage_filesize;
+	char*			storage_scheduler_mode; // relevant for devices only, not files
+	uint32_t		storage_write_block_size;
+	PAD_BOOL		storage_data_in_memory;
+	PAD_BOOL		storage_cold_start_empty;
+	uint32_t		storage_defrag_lwm_pct;
+	uint32_t		storage_defrag_queue_min;
+	uint32_t		storage_defrag_sleep;
+	int				storage_defrag_startup_minimum;
+	PAD_BOOL		storage_disable_odirect;
+	PAD_BOOL		storage_benchmarks_enabled; // histograms are per-drive except device-read-size & device-write-size
+	PAD_BOOL		storage_enable_osync;
+	uint64_t		storage_flush_max_us;
+	uint64_t		storage_fsync_max_us;
+	uint64_t		storage_max_write_cache;
+	uint32_t		storage_min_avail_pct;
+	cf_atomic32 	storage_post_write_queue; // number of swbs/device held after writing to device
+	uint32_t		storage_tomb_raider_sleep; // relevant only for enterprise edition
+	uint32_t		storage_write_threads;
+
+	uint32_t		sindex_num_partitions;
+
+	PAD_BOOL		geo2dsphere_within_strict;
+	uint16_t		geo2dsphere_within_min_level;
+	uint16_t		geo2dsphere_within_max_level;
+	uint16_t		geo2dsphere_within_max_cells;
+	uint16_t		geo2dsphere_within_level_mod;
+	uint32_t		geo2dsphere_within_earth_radius_meters;
+
+	//--------------------------------------------
+	// Statistics and histograms.
+	//
+
+	// Object counts.
+
+	cf_atomic64		n_objects;
+	cf_atomic64		n_sub_objects;
+	cf_atomic64		n_tombstones; // relevant only for enterprise edition
+
+	// Expiration & eviction (nsup) stats.
+
+	cf_atomic32		stop_writes;
+	cf_atomic32		hwm_breached;
+
+	uint64_t		non_expirable_objects;
+
+	cf_atomic64		n_expired_objects;
+	cf_atomic64		n_evicted_objects;
+
+	cf_atomic64		evict_ttl;
+
+	uint32_t		nsup_cycle_duration; // seconds taken for most recent nsup cycle
+	uint32_t		nsup_cycle_sleep_pct; // fraction of most recent nsup cycle that was spent sleeping
+
+	// Memory usage stats.
+
+	cf_atomic_int	n_bytes_memory;
+	cf_atomic64		n_bytes_sindex_memory;
+
+	// Persistent storage stats.
+
+	float			cache_read_pct;
+
+	// Migration stats.
+
+	cf_atomic_int	migrate_tx_partitions_imbalance; // debug only
+	cf_atomic_int	migrate_tx_instance_count; // debug only
+	cf_atomic_int	migrate_rx_instance_count; // debug only
+	cf_atomic_int	migrate_tx_partitions_active;
+	cf_atomic_int	migrate_rx_partitions_active;
+	cf_atomic_int	migrate_tx_partitions_initial;
+	cf_atomic_int	migrate_tx_partitions_remaining;
+	cf_atomic_int	migrate_rx_partitions_initial;
+	cf_atomic_int	migrate_rx_partitions_remaining;
+	cf_atomic_int	migrate_signals_active;
+	cf_atomic_int	migrate_signals_remaining;
+
+	// Per-record migration stats:
+	cf_atomic_int	migrate_records_skipped; // relevant only for enterprise edition
+	cf_atomic_int	migrate_records_transmitted;
+	cf_atomic_int	migrate_record_retransmits;
+	cf_atomic_int	migrate_record_receives;
+
+	// From-client transaction stats.
+
+	cf_atomic64		n_client_tsvc_error;
+	cf_atomic64		n_client_tsvc_timeout;
+
+	cf_atomic64		n_client_proxy_complete;
+	cf_atomic64		n_client_proxy_error;
+	cf_atomic64		n_client_proxy_timeout;
+
+	cf_atomic64		n_client_read_success;
+	cf_atomic64		n_client_read_error;
+	cf_atomic64		n_client_read_timeout;
+	cf_atomic64		n_client_read_not_found;
+
+	cf_atomic64		n_client_write_success;
+	cf_atomic64		n_client_write_error;
+	cf_atomic64		n_client_write_timeout;
+
+	// Subset of n_client_write_... above, respectively.
+	cf_atomic64		n_xdr_write_success;
+	cf_atomic64		n_xdr_write_error;
+	cf_atomic64		n_xdr_write_timeout;
+
+	cf_atomic64		n_client_delete_success;
+	cf_atomic64		n_client_delete_error;
+	cf_atomic64		n_client_delete_timeout;
+	cf_atomic64		n_client_delete_not_found;
+
+	cf_atomic64		n_client_udf_complete;
+	cf_atomic64		n_client_udf_error;
+	cf_atomic64		n_client_udf_timeout;
+
+	cf_atomic64		n_client_lang_read_success;
+	cf_atomic64		n_client_lang_write_success;
+	cf_atomic64		n_client_lang_delete_success;
+	cf_atomic64		n_client_lang_error;
+
+	// Batch sub-transaction stats.
+
+	cf_atomic64		n_batch_sub_tsvc_error;
+	cf_atomic64		n_batch_sub_tsvc_timeout;
+
+	cf_atomic64		n_batch_sub_proxy_complete;
+	cf_atomic64		n_batch_sub_proxy_error;
+	cf_atomic64		n_batch_sub_proxy_timeout;
+
+	cf_atomic64		n_batch_sub_read_success;
+	cf_atomic64		n_batch_sub_read_error;
+	cf_atomic64		n_batch_sub_read_timeout;
+	cf_atomic64		n_batch_sub_read_not_found;
+
+	// Internal-UDF sub-transaction stats.
+
+	cf_atomic64		n_udf_sub_tsvc_error;
+	cf_atomic64		n_udf_sub_tsvc_timeout;
+
+	cf_atomic64		n_udf_sub_udf_complete;
+	cf_atomic64		n_udf_sub_udf_error;
+	cf_atomic64		n_udf_sub_udf_timeout;
+
+	cf_atomic64		n_udf_sub_lang_read_success;
+	cf_atomic64		n_udf_sub_lang_write_success;
+	cf_atomic64		n_udf_sub_lang_delete_success;
+	cf_atomic64		n_udf_sub_lang_error;
+
+	// Transaction retransmit stats.
+
+	uint64_t		n_retransmit_client_read_dup_res;
+
+	uint64_t		n_retransmit_client_write_dup_res;
+	uint64_t		n_retransmit_client_write_repl_write;
+
+	uint64_t		n_retransmit_client_delete_dup_res;
+	uint64_t		n_retransmit_client_delete_repl_write;
+
+	uint64_t		n_retransmit_client_udf_dup_res;
+	uint64_t		n_retransmit_client_udf_repl_write;
+
+	uint64_t		n_retransmit_batch_sub_dup_res;
+
+	uint64_t		n_retransmit_udf_sub_dup_res;
+	uint64_t		n_retransmit_udf_sub_repl_write;
+
+	uint64_t		n_retransmit_nsup_repl_write;
+
+	// Scan stats.
+
+	cf_atomic64		n_scan_basic_complete;
+	cf_atomic64		n_scan_basic_error;
+	cf_atomic64		n_scan_basic_abort;
+
+	cf_atomic64		n_scan_aggr_complete;
+	cf_atomic64		n_scan_aggr_error;
+	cf_atomic64		n_scan_aggr_abort;
+
+	cf_atomic64		n_scan_udf_bg_complete;
+	cf_atomic64		n_scan_udf_bg_error;
+	cf_atomic64		n_scan_udf_bg_abort;
+
+	// Query stats.
+
+	cf_atomic64		query_reqs;
+	cf_atomic64		query_fail;
+	cf_atomic64		query_short_queue_full;
+	cf_atomic64		query_long_queue_full;
+	cf_atomic64		query_short_reqs;
+	cf_atomic64		query_long_reqs;
+
+	cf_atomic64		n_lookup;
+	cf_atomic64		n_lookup_success;
+	cf_atomic64		n_lookup_abort;
+	cf_atomic64		n_lookup_errs;
+	cf_atomic64		lookup_response_size;
+	cf_atomic64		lookup_num_records;
+
+	cf_atomic64		n_aggregation;
+	cf_atomic64		n_agg_success;
+	cf_atomic64		n_agg_abort;
+	cf_atomic64		n_agg_errs;
+	cf_atomic64		agg_response_size;
+	cf_atomic64		agg_num_records;
+
+	cf_atomic64		n_query_udf_bg_success;
+	cf_atomic64		n_query_udf_bg_failure;
+
+	// Geospatial query stats:
+	cf_atomic64		geo_region_query_count;		// number of region queries
+	cf_atomic64		geo_region_query_cells;		// number of cells used by region queries
+	cf_atomic64		geo_region_query_points;	// number of valid points found
+	cf_atomic64		geo_region_query_falsepos;	// number of false positives found
+
+	// Special errors that deserve their own counters:
+
+	cf_atomic64		n_fail_xdr_forbidden;
+	cf_atomic64		n_fail_key_busy;
+	cf_atomic64		n_fail_generation;
+	cf_atomic64		n_fail_record_too_big;
+
+	// Special non-error counters:
+
+	cf_atomic64		n_deleted_last_bin;
+
+	// LDT stats.
+
+	ns_ldt_stats	lstats;
+
+	// One-way automatically activated histograms.
+
+	cf_hist_track*	read_hist;
+	cf_hist_track*	write_hist;
+	cf_hist_track*	udf_hist;
+	cf_hist_track*	query_hist;
+	histogram*		query_rec_count_hist;
+
+	PAD_BOOL		read_hist_active;
+	PAD_BOOL		write_hist_active;
+	PAD_BOOL		udf_hist_active;
+	PAD_BOOL		query_hist_active;
+	PAD_BOOL		query_rec_count_hist_active;
+
+	// Activate-by-config histograms.
+
+	histogram*		proxy_hist;
+
+	histogram*		read_start_hist;
+	histogram*		read_restart_hist;
+	histogram*		read_dup_res_hist;
+	histogram*		read_local_hist;
+	histogram*		read_response_hist;
+
+	histogram*		write_start_hist;
+	histogram*		write_restart_hist;
+	histogram*		write_dup_res_hist;
+	histogram*		write_master_hist; // split this?
+	histogram*		write_repl_write_hist;
+	histogram*		write_response_hist;
+
+	histogram*		udf_start_hist;
+	histogram*		udf_restart_hist;
+	histogram*		udf_dup_res_hist;
+	histogram*		udf_master_hist; // split this?
+	histogram*		udf_repl_write_hist;
+	histogram*		udf_response_hist;
+
+	histogram*		batch_sub_start_hist;
+	histogram*		batch_sub_restart_hist;
+	histogram*		batch_sub_dup_res_hist;
+	histogram*		batch_sub_read_local_hist;
+	histogram*		batch_sub_response_hist;
+
+	histogram*		udf_sub_start_hist;
+	histogram*		udf_sub_restart_hist;
+	histogram*		udf_sub_dup_res_hist;
+	histogram*		udf_sub_master_hist; // split this?
+	histogram*		udf_sub_repl_write_hist;
+	histogram*		udf_sub_response_hist;
+
+	histogram*		device_read_size_hist;
+	histogram*		device_write_size_hist;
+
 	// Histograms of master object storage sizes. (Meaningful for drive-backed
 	// namespaces only.)
-	linear_histogram 	*obj_size_hist;
-	linear_histogram 	*set_obj_size_hists[AS_SET_MAX_COUNT + 1];
-	cf_atomic32			obj_size_hist_max;
+	linear_hist*	obj_size_hist;
+	linear_hist*	set_obj_size_hists[AS_SET_MAX_COUNT + 1];
 
 	// Histograms used for general eviction and expiration.
-	linear_histogram 	*evict_hist;
-	linear_histogram 	*evict_coarse_hist;
-	linear_histogram 	*ttl_hist;
-	linear_histogram 	*set_ttl_hists[AS_SET_MAX_COUNT + 1]; // only for info
+	linear_hist*	evict_hist; // not just for info
+	linear_hist*	ttl_hist;
+	linear_hist*	set_ttl_hists[AS_SET_MAX_COUNT + 1];
+
+	//--------------------------------------------
+	// Data partitions.
+	//
 
 	as_partition partitions[AS_PARTITIONS];
 
-	ns_ldt_stats        lstats;
+	//--------------------------------------------
+	// Information for rebalancing.
+	//
+
+	uint32_t cluster_size;
+	cf_node succession[AS_CLUSTER_SZ];
+	as_partition_version cluster_versions[AS_CLUSTER_SZ][AS_PARTITIONS];
+	uint32_t rack_ids[AS_CLUSTER_SZ];
 };
 
 #define AS_SET_NAME_MAX_SIZE	64		// includes space for null-terminator
 
 #define INVALID_SET_ID 0
-
-#define IS_SET_DELETED(p_set)	(cf_atomic32_get(p_set->deleted) == 1)
-#define SET_DELETED_ON(p_set)	(cf_atomic32_set(&p_set->deleted, 1))
-#define SET_DELETED_OFF(p_set)	(cf_atomic32_set(&p_set->deleted, 0))
 
 #define IS_SET_EVICTION_DISABLED(p_set)		(cf_atomic32_get(p_set->disable_eviction) == 1)
 #define DISABLE_SET_EVICTION(p_set, on_off)	(cf_atomic32_set(&p_set->disable_eviction, on_off ? 1 : 0))
@@ -1148,35 +1206,34 @@ typedef enum {
 	AS_SET_ENABLE_XDR_FALSE = 2
 } as_set_enable_xdr_flag;
 
+// Caution - changing this struct could break warm restart.
 struct as_set_s {
 	char			name[AS_SET_NAME_MAX_SIZE];
-	cf_atomic64		num_elements;
+	cf_atomic64		n_objects;
+	cf_atomic64		n_tombstones;		// relevant only for enterprise edition
 	cf_atomic64		n_bytes_memory;		// for data-in-memory only - sets's total record data size
 	cf_atomic64		stop_writes_count;	// restrict number of records in a set
-	cf_atomic32		unused2;
-	cf_atomic32		deleted;			// empty a set (triggered via info command only)
+	uint64_t		truncate_lut;		// records with last-update-time less than this are truncated
 	cf_atomic32		disable_eviction;	// don't evict anything in this set (note - expiration still works)
 	cf_atomic32		enable_xdr;			// white-list (AS_SET_ENABLE_XDR_TRUE) or black-list (AS_SET_ENABLE_XDR_FALSE) a set for XDR replication
+	uint32_t		n_sindexes;
+	uint8_t padding[12];
 };
 
 static inline bool
 as_set_stop_writes(as_set *p_set) {
-	uint64_t num_elements = cf_atomic64_get(p_set->num_elements);
+	uint64_t n_objects = cf_atomic64_get(p_set->n_objects);
 	uint64_t stop_writes_count = cf_atomic64_get(p_set->stop_writes_count);
 
-	return stop_writes_count != 0 && num_elements >= stop_writes_count;
+	return stop_writes_count != 0 && n_objects >= stop_writes_count;
 }
 
 // These bin functions must be below definition of struct as_namespace_s:
 
 static inline void
-as_bin_set_id_from_name_buf(as_namespace *ns, as_bin *b, byte *buf, int len) {
+as_bin_set_id_from_name_buf(as_namespace *ns, as_bin *b, uint8_t *buf, int len) {
 	if (! ns->single_bin) {
-		char name[len + 1];
-
-		memcpy(name, buf, len);
-		name[len] = 0;
-		b->id = as_bin_get_or_assign_id(ns, name);
+		b->id = as_bin_get_or_assign_id_w_len(ns, (const char *)buf, len);
 	}
 }
 
@@ -1188,7 +1245,7 @@ as_bin_set_id_from_name(as_namespace *ns, as_bin *b, const char *name) {
 }
 
 static inline size_t
-as_bin_memcpy_name(as_namespace *ns, byte *buf, as_bin *b) {
+as_bin_memcpy_name(as_namespace *ns, uint8_t *buf, as_bin *b) {
 	size_t len = 0;
 
 	if (! ns->single_bin) {
@@ -1205,23 +1262,23 @@ as_bin_memcpy_name(as_namespace *ns, byte *buf, as_bin *b) {
 struct as_msg_field_s;
 
 /* Namespace function declarations */
-extern as_namespace *as_namespace_create(char *name, uint16_t replication_factor);
+extern as_namespace *as_namespace_create(char *name);
 extern void as_namespaces_init(bool cold_start_cmd, uint32_t instance);
-extern void as_namespace_setup(as_namespace* ns, uint32_t instance, uint32_t stage_capacity);
+extern void as_namespaces_setup(bool cold_start_cmd, uint32_t instance, uint32_t stage_capacity);
 extern bool as_namespace_configure_sets(as_namespace *ns);
 extern as_namespace *as_namespace_get_byname(char *name);
-extern as_namespace *as_namespace_get_byid(uint id);
+extern as_namespace *as_namespace_get_byid(uint32_t id);
 extern as_namespace *as_namespace_get_bymsgfield(struct as_msg_field_s *fp);
-extern as_namespace *as_namespace_get_bymsgfield_unswap(struct as_msg_field_s *fp);
 extern as_namespace *as_namespace_get_bybuf(uint8_t *name, size_t len);
-extern as_namespace_id as_namespace_getid_bymsgfield(struct as_msg_field_s *fp);
 extern void as_namespace_eval_write_state(as_namespace *ns, bool *hwm_breached, bool *stop_writes);
-extern void as_namespace_bless(as_namespace *ns);
-extern int as_namespace_get_create_set(as_namespace *ns, const char *set_name, uint16_t *p_set_id, bool apply_restrictions);
-extern as_set * as_namespace_init_set(as_namespace *ns, const char *set_name);
 extern const char *as_namespace_get_set_name(as_namespace *ns, uint16_t set_id);
 extern uint16_t as_namespace_get_set_id(as_namespace *ns, const char *set_name);
 extern uint16_t as_namespace_get_create_set_id(as_namespace *ns, const char *set_name);
+extern int as_namespace_set_set_w_len(as_namespace *ns, const char *set_name, size_t len, uint16_t *p_set_id, bool apply_restrictions);
+extern int as_namespace_get_create_set_w_len(as_namespace *ns, const char *set_name, size_t len, as_set **pp_set, uint16_t *p_set_id);
+extern as_set *as_namespace_get_set_by_name(as_namespace *ns, const char *set_name);
+extern as_set* as_namespace_get_set_by_id(as_namespace* ns, uint16_t set_id);
+extern as_set* as_namespace_get_record_set(as_namespace *ns, const as_record *r);
 extern void as_namespace_get_set_info(as_namespace *ns, const char *set_name, cf_dyn_buf *db);
 extern void as_namespace_adjust_set_memory(as_namespace *ns, uint16_t set_id, int64_t delta_bytes);
 extern void as_namespace_release_set_id(as_namespace *ns, uint16_t set_id);
@@ -1230,27 +1287,21 @@ extern void as_namespace_get_hist_info(as_namespace *ns, char *set_name, char *h
 		cf_dyn_buf *db, bool show_ns);
 extern int as_namespace_check_set_limits(as_set * p_set, as_namespace * ns);
 
-#ifdef USE_JEM
-int as_namespace_set_jem_arena(char *ns, int arena);
-int as_namespace_get_jem_arena(char *ns);
-#endif
-
 // Persistent Memory Management
 
 struct as_treex_s {
-	cf_arenax_handle sentinel_h;
-	cf_arenax_handle root_h;
-};
+	uint64_t root_h: 40;
+} __attribute__ ((__packed__));
 
 void as_namespace_xmem_trusted(as_namespace *ns);
-void as_namespace_xmem_release(as_namespace* ns);
 
 // Not namespace class functions, but they live in namespace.c:
-void as_xmem_scheme_check();
 uint32_t as_mem_check();
 
-/* Cluster Key */
-// Set the cluster key
-extern void as_paxos_set_cluster_key(uint64_t cluster_key);
-// Get the cluster key
-extern uint64_t as_paxos_get_cluster_key();
+// XXX POST-JUMP - remove in "six months".
+static inline uint32_t
+truncate_void_time(as_namespace *ns, uint32_t void_time)
+{
+	uint32_t max_void_time = as_record_void_time_get() + (uint32_t)ns->max_ttl;
+	return void_time > max_void_time ? max_void_time : void_time;
+}

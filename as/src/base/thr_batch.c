@@ -29,24 +29,26 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/socket.h>
 
 #include "aerospike/as_thread_pool.h"
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_digest.h"
+#include "citrusleaf/cf_queue.h"
 
 #include "dynbuf.h"
 #include "hist.h"
-#include "queue.h"
-#include "util.h"
+#include "node.h"
+#include "socket.h"
 
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/proto.h"
+#include "base/stats.h"
 #include "base/transaction.h"
+#include "fabric/partition.h"
 #include "storage/storage.h"
 
 typedef struct {
@@ -97,46 +99,44 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 				*bb_r = cf_buf_builder_create_size(1024 * 4);
 			}
 
-			int rv = as_partition_reserve_read(ns, as_partition_getid(bmd->keyd), &rsv, &other_node, &cluster_key);
+			int rv = as_partition_reserve_read(ns, as_partition_getid(&bmd->keyd), &rsv, &other_node, &cluster_key);
 
 			if (rv == 0) {
-				cf_atomic_int_incr(&g_config.batch_tree_count);
-
 				as_index_ref r_ref;
 				r_ref.skip_lock = false;
-				int rec_rv = as_record_get(rsv.tree, &bmd->keyd, &r_ref, ns);
+				int rec_rv = as_record_get_live(rsv.tree, &bmd->keyd, &r_ref, ns);
 
 				if (rec_rv == 0) {
 					as_index *r = r_ref.r;
 
-					// Check to see this isn't an expired record waiting to die.
-					if (as_record_is_expired(r)) {
+					// Check to see this isn't a record waiting to die.
+					if (as_record_is_doomed(r, ns)) {
 						as_msg_make_error_response_bufbuilder(&bmd->keyd, AS_PROTO_RESULT_FAIL_NOTFOUND, bb_r, ns->name);
 					}
 					else {
 						// Make sure it's brought in from storage if necessary.
 						as_storage_rd rd;
 						if (get_data) {
-							as_storage_record_open(ns, r, &rd, &r->key);
-							rd.n_bins = as_bin_get_n_bins(r, &rd);
+							as_storage_record_open(ns, r, &rd);
+							as_storage_rd_load_n_bins(&rd); // TODO - handle error returned
 						}
 
 						// Note: this array must stay in scope until the
 						// response for this record has been built, since in the
 						// get data w/ record on device case, it's copied by
 						// reference directly into the record descriptor.
-						as_bin stack_bins[!get_data || rd.ns->storage_data_in_memory ? 0 : rd.n_bins];
+						as_bin stack_bins[!get_data || ns->storage_data_in_memory ? 0 : rd.n_bins];
 
 						if (get_data) {
 							// Figure out which bins you want - for now, all.
-							rd.bins = as_bin_get_all(r, &rd, stack_bins);
+							as_storage_rd_load_bins(&rd, stack_bins); // TODO - handle error returned
 							rd.n_bins = as_bin_inuse_count(&rd);
 						}
 
 						as_msg_make_response_bufbuilder(r, (get_data ? &rd : NULL), bb_r, !get_data, (get_data ? NULL : ns->name), false, false, false, btr->binlist);
 
 						if (get_data) {
-							as_storage_record_close(r, &rd);
+							as_storage_record_close(&rd);
 						}
 					}
 					as_record_done(&r_ref, ns);
@@ -150,7 +150,6 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 				bmd->done = true;
 
 				as_partition_release(&rsv);
-				cf_atomic_int_decr(&g_config.batch_tree_count);
 			}
 			else {
 				cf_debug(AS_BATCH, "batch_build_response: partition reserve read failed: rv %d", rv);
@@ -159,7 +158,7 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 
 				if (other_node != 0) {
 					bmd->node = other_node;
-					cf_debug(AS_BATCH, "other_node is: %p.", other_node);
+					cf_debug(AS_BATCH, "other_node is:  %"PRIu64".", other_node);
 				} else {
 					cf_debug(AS_BATCH, "other_node is NULL.");
 				}
@@ -175,25 +174,14 @@ batch_build_response(batch_transaction* btr, cf_buf_builder** bb_r)
 
 // Send response to client socket.
 static int
-batch_send(int fd, uint8_t* buf, size_t len, int flags)
+batch_send(cf_socket *sock, uint8_t* buf, size_t len, int flags)
 {
-	int rv;
-	int pos = 0;
-
-	while (pos < len) {
-		rv = send(fd, buf + pos, len - pos, flags);
-
-		if (rv <= 0) {
-			if (errno != EAGAIN) {
-				// This error may occur frequently if client is timing out transactions.
-				// Therefore, use debug level.
-				cf_debug(AS_BATCH, "batch send response error returned %d errno %d fd %d", rv, errno, fd);
-				return -1;
-			}
-		}
-		else {
-			pos += rv;
-		}
+	if (cf_socket_send_all(sock, buf, len, flags,
+			CF_SOCKET_TIMEOUT) < 0) {
+		// Common when a client aborts.
+		cf_debug(AS_BATCH, "batch send response error, errno %d fd %d",
+				errno, CSFD(sock));
+		return -1;
 	}
 
 	return 0;
@@ -201,7 +189,7 @@ batch_send(int fd, uint8_t* buf, size_t len, int flags)
 
 // Send protocol header to the requesting client.
 static int
-batch_send_header(int fd, size_t len)
+batch_send_header(cf_socket *sock, size_t len)
 {
 	as_proto proto;
 	proto.version = PROTO_VERSION;
@@ -209,12 +197,12 @@ batch_send_header(int fd, size_t len)
 	proto.sz = len;
 	as_proto_swap(&proto);
 
-	return batch_send(fd, (uint8_t*) &proto, 8, MSG_NOSIGNAL | MSG_MORE);
+	return batch_send(sock, (uint8_t*) &proto, 8, MSG_NOSIGNAL | MSG_MORE);
 }
 
 // Send protocol trailer to the requesting client.
 static int
-batch_send_final(int fd, uint32_t result_code)
+batch_send_final(cf_socket *sock, uint32_t result_code)
 {
 	cl_msg m;
 	m.proto.version = PROTO_VERSION;
@@ -234,7 +222,7 @@ batch_send_final(int fd, uint32_t result_code)
 	m.msg.n_ops = 0;
 	as_msg_swap_header(&m.msg);
 
-	return batch_send(fd, (uint8_t*) &m, sizeof(m), MSG_NOSIGNAL);
+	return batch_send(sock, (uint8_t*) &m, sizeof(m), MSG_NOSIGNAL);
 }
 
 
@@ -268,24 +256,24 @@ batch_process_request(batch_transaction* btr)
 	cf_buf_builder* bb = 0;
 	batch_build_response(btr, &bb);
 
-	int fd = btr->fd_h->fd;
+	cf_socket *sock = &btr->fd_h->sock;
 	int brv;
 
 	if (bb) {
-		brv = batch_send_header(fd, bb->used_sz);
+		brv = batch_send_header(sock, bb->used_sz);
 
 		if (brv == 0) {
-			brv = batch_send(fd, bb->buf, bb->used_sz, MSG_NOSIGNAL | MSG_MORE);
+			brv = batch_send(sock, bb->buf, bb->used_sz, MSG_NOSIGNAL | MSG_MORE);
 
 			if (brv == 0) {
-				brv = batch_send_final(fd, 0);
+				brv = batch_send_final(sock, 0);
 			}
 		}
 		cf_buf_builder_free(bb);
 	}
 	else {
 		cf_info(AS_BATCH, " batch request: returned no local responses");
-		brv = batch_send_final(fd, 0);
+		brv = batch_send_final(sock, 0);
 	}
 
 	batch_transaction_done(btr, brv != 0);
@@ -296,24 +284,22 @@ static void
 batch_worker(void* udata)
 {
 	batch_transaction* btr = (batch_transaction*)udata;
-	
+
 	// Check for timeouts.
 	if (btr->end_time != 0 && cf_getns() > btr->end_time) {
-		cf_atomic_int_incr(&g_config.batch_timeout);
+		cf_atomic64_incr(&g_stats.batch_timeout);
 
 		if (btr->fd_h) {
 			as_msg_send_reply(btr->fd_h, AS_PROTO_RESULT_FAIL_TIMEOUT,
-					0, 0, 0, 0, 0, 0, 0, btr->trid, NULL);
+					0, 0, 0, 0, 0, 0, btr->trid, NULL);
 			btr->fd_h = 0;
 		}
 		batch_transaction_done(btr, false);
 		return;
 	}
-	
+
 	// Process batch request.
-	uint64_t start = cf_getns();
 	batch_process_request(btr);
-	histogram_insert_data_point(g_config.batch_q_process_hist, start);	
 }
 
 // Create bin name list from message.
@@ -344,9 +330,9 @@ int
 as_batch_direct_init()
 {
 	uint32_t threads = g_config.n_batch_threads;
-	cf_info(AS_BATCH, "Initialize batch-threads to %u", threads);
+	cf_info(AS_BATCH, "starting %u batch-threads", threads);
 	int status = as_thread_pool_init_fixed(&batch_direct_thread_pool, threads, batch_worker, sizeof(batch_transaction), offsetof(batch_transaction,complete));
-	
+
 	if (status) {
 		cf_warning(AS_BATCH, "Failed to initialize batch-threads to %u: %d", threads, status);
 	}
@@ -355,9 +341,9 @@ as_batch_direct_init()
 
 // Put batch request on a separate batch queue.
 int
-as_batch_direct_queue_task(as_transaction* tr)
+as_batch_direct_queue_task(as_transaction* tr, as_namespace *ns)
 {
-	cf_atomic_int_incr(&g_config.batch_initiate);
+	cf_atomic64_incr(&g_stats.batch_initiate);
 
 	if (g_config.n_batch_threads <= 0) {
 		cf_warning(AS_BATCH, "batch-threads has been disabled.");
@@ -366,19 +352,13 @@ as_batch_direct_queue_task(as_transaction* tr)
 
 	as_msg* msg = &tr->msgp->msg;
 
-	as_msg_field* nsfp = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_NAMESPACE);
-	if (! nsfp) {
-		cf_warning(AS_BATCH, "Batch namespace is required.");
-		return AS_PROTO_RESULT_FAIL_NAMESPACE;
-	}
-
 	as_msg_field* dfp = as_msg_field_get(msg, AS_MSG_FIELD_TYPE_DIGEST_RIPE_ARRAY);
 	if (! dfp) {
 		cf_warning(AS_BATCH, "Batch digests are required.");
 		return AS_PROTO_RESULT_FAIL_PARAMETER;
 	}
 
-	uint n_digests = dfp->field_sz / sizeof(cf_digest);
+	uint32_t n_digests = dfp->field_sz / sizeof(cf_digest);
 
 	if (n_digests > g_config.batch_max_requests) {
 		cf_warning(AS_BATCH, "Batch request size %u exceeds max %u.", n_digests, g_config.batch_max_requests);
@@ -390,12 +370,7 @@ as_batch_direct_queue_task(as_transaction* tr)
 	btr.end_time = tr->end_time;
 	btr.get_data = !(msg->info1 & AS_MSG_INFO1_GET_NOBINDATA);
 	btr.complete = false;
-
-	btr.ns = as_namespace_get_bymsgfield(nsfp);
-	if (! btr.ns) {
-		cf_warning(AS_BATCH, "Batch namespace is required.");
-		return AS_PROTO_RESULT_FAIL_NAMESPACE;
-	}
+	btr.ns = ns;
 
 	// Create the master digest table.
 	btr.digests = (batch_digests*) cf_malloc(sizeof(batch_digests) + (sizeof(batch_digest) * n_digests));
@@ -416,15 +391,15 @@ as_batch_direct_queue_task(as_transaction* tr)
 	}
 
 	btr.binlist = as_binlist_from_op(msg);
-	btr.fd_h = tr->proto_fd_h;
-	tr->proto_fd_h = 0;
+	btr.fd_h = tr->from.proto_fd_h;
+	tr->from.proto_fd_h = NULL;
 	btr.fd_h->last_used = cf_getms();
 
 	int status = as_thread_pool_queue_task_fixed(&batch_direct_thread_pool, &btr);
-	
+
 	if (status) {
 		cf_warning(AS_BATCH, "Batch enqueue failed");
-		return AS_PROTO_RESULT_FAIL_UNKNOWN;		
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 	return 0;
 }
@@ -448,8 +423,8 @@ as_batch_direct_threads_resize(uint32_t threads)
 	g_config.n_batch_threads = batch_direct_thread_pool.thread_size;
 
 	if (status) {
-		cf_warning(AS_BATCH, "Failed to resize batch-threads. status=%d, batch-threads=%d", 
-				status, g_config.n_batch_index_threads);
+		cf_warning(AS_BATCH, "Failed to resize batch-threads. status=%d, batch-threads=%d",
+				status, g_config.n_batch_threads);
 	}
 	return status;
 }

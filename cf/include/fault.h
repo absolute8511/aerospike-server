@@ -22,12 +22,111 @@
 
 #pragma once
 
+#include <alloca.h>
 #include <execinfo.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include "dynbuf.h"
+
+
+// Use COMPILER_ASSERT() for compile-time verification.
+//
+// Usage does not add any compiled code, or cost anything at runtime. When the
+// evaluated expression is false, it causes a compile error which will draw
+// attention to the relevant line.
+//
+// e.g.
+// COMPILER_ASSERT(sizeof(my_int_array) / sizeof(int) == MY_INT_ARRAY_SIZE);
+//
+#define CGLUE(a, b) a##b
+#define CVERIFY(expr, line) typedef char CGLUE(compiler_assert_failed_on_line_, line)[(expr) ? 1 : -1]
+#define COMPILER_ASSERT(expr) CVERIFY(expr, __LINE__)
+
+// Use CF_MUST_CHECK with declarations to force caller to handle return value.
+//
+// e.g.
+// CF_MUST_CHECK int my_function();
+//
+#define CF_MUST_CHECK __attribute__((warn_unused_result))
+
+// Use CF_IGNORE_ERROR() as caller to override CF_MUST_CHECK in declaration.
+//
+// e.g.
+// CF_IGNORE_ERROR(my_function());
+//
+#define CF_IGNORE_ERROR(x) ((void)((x) == 12345))
+
+// Use CF_NEVER_FAILS() as caller to assert that returned value is not negative.
+//
+// e.g.
+// CF_NEVER_FAILS(my_function());
+//
+#define CF_NEVER_FAILS(x) \
+do { \
+	if ((x) < 0) { \
+		cf_crash(CF_MISC, "this cannot happen..."); \
+	} \
+} while (false);
+
+// Use CF_ZSTR_DEFINE() to null-terminate strings conveniently.
+//
+// e.g.
+// CF_ZSTR_DEFINE(zstr, 40, ns_name, name_sz);
+// cf_warning(AS_NAMESPACE, "got namespace %s", zstr);
+//
+#define CF_ZSTR_DEFINE(zstr, max_sz, str, sz) \
+		char zstr[max_sz]; \
+		size_t zstr##len = sz < max_sz ? sz : max_sz - 1; \
+		memcpy(zstr, str, zstr##len); \
+		zstr[zstr##len] = 0;
+
+// Use CF_ZSTRxx() to null-terminate strings conveniently. Useful especially as
+// cf_detail & cf_debug parameters where there's no cost unless the log level
+// is enabled. (Cost may be more than CF_ZSTR_DEFINE() due to copying struct on
+// function return.)
+//
+// e.g.
+// cf_debug(AS_NAMESPACE, "got namespace %s", CF_ZSTR64(ns_name, name_sz));
+//
+
+typedef struct cf_zstr64_s {
+	char s[64];
+} cf_zstr64;
+
+typedef struct cf_zstr1k_s {
+	char s[1024];
+} cf_zstr1k;
+
+static inline cf_zstr64
+cf_null_terminate_64(const char *str, size_t sz)
+{
+	cf_zstr64 zstr;
+	size_t len = sz < sizeof(zstr.s) ? sz : sizeof(zstr.s) - 1;
+
+	memcpy(zstr.s, str, len);
+	zstr.s[len] = 0;
+
+	return zstr;
+}
+
+static inline cf_zstr1k
+cf_null_terminate_1k(const char *str, size_t sz)
+{
+	cf_zstr1k zstr;
+	size_t len = sz < sizeof(zstr.s) ? sz : sizeof(zstr.s) - 1;
+
+	memcpy(zstr.s, str, len);
+	zstr.s[len] = 0;
+
+	return zstr;
+}
+
+#define CF_ZSTR64(str, sz) (cf_null_terminate_64((const char *)str, sz).s)
+#define CF_ZSTR1K(str, sz) (cf_null_terminate_1k((const char *)str, sz).s)
+
 
 /* SYNOPSIS
  * Fault scoping
@@ -38,73 +137,65 @@
  * Examples:
  *    cf_info(CF_MISC, "important message: %s", my_msg);
  *    cf_crash(CF_MISC, "doom!");
- *    cf_assert(my_test, CF_MISC, CF_CRITICAL, "gloom!");
+ *    cf_assert(my_test, CF_MISC, "gloom!");
  */
 
 /* cf_fault_context
  * NB: if you add or remove entries from this enum, you must also change
  * the corresponding strings structure in fault.c */
 typedef enum {
-	CF_MISC = 0,
-	CF_ALLOC = 1,
-	CF_HASH = 2,
-	CF_RCHASH = 3,
-	CF_SHASH = 4,
-	CF_QUEUE = 5,
-	CF_MSG = 6,
-	CF_RB = 7,
-	CF_SOCKET = 8,
-	CF_TIMER = 9,
-	CF_LL = 10,
-	CF_ARENAH = 11,
-	CF_ARENA = 12,
-	AS_CFG = 13,
-	AS_NAMESPACE = 14,
-	AS_AS = 15,
-	AS_BIN = 16,
-	AS_RECORD = 17,
-	AS_PROTO = 18,
-	AS_PARTICLE = 19,
-	AS_DEMARSHAL = 20,
-	AS_WRITE = 21,
-	AS_RW = 22,
-	AS_TSVC = 23,
-	AS_TEST = 24,
-	AS_NSUP = 25,
-	AS_PROXY = 26,
-	AS_HB = 27,
-	AS_FABRIC = 28,
-	AS_PARTITION = 29,
-	AS_PAXOS = 30,
-	AS_MIGRATE = 31,
-	AS_INFO = 32,
-	AS_INFO_PORT = 33,
-	AS_STORAGE = 34,
-	AS_DRV_MEM = 35,
-	AS_DRV_FS = 36,
-	AS_DRV_FILES = 37,
-	AS_DRV_SSD = 38,
-	AS_DRV_KV = 39,
-	AS_SCAN = 40,
-	AS_INDEX = 41,
-	AS_BATCH = 42,
-	AS_TRIAL = 43,
-	AS_XDR = 44,
-	CF_RBUFFER = 45,
-	CF_ARENAX = 46,
-	AS_COMPRESSION = 47,
-	AS_SINDEX = 48,
-	AS_UDF = 49,
-	AS_QUERY = 50,
-	AS_SMD = 51,
-	AS_MON = 52,
-	AS_LDT = 53,
-	CF_JEM = 54,
-	AS_SECURITY = 55,
-	AS_AGGR = 56,
-	AS_JOB = 57,
-	AS_GEO = 58,
-	CF_FAULT_CONTEXT_UNDEF = 59
+	CF_MISC,
+
+	CF_ALLOC,
+	CF_ARENAX,
+	CF_HARDWARE,
+	CF_MSG,
+	CF_RBUFFER,
+	CF_SOCKET,
+	CF_TLS,
+
+	AS_AGGR,
+	AS_AS,
+	AS_BATCH,
+	AS_BIN,
+	AS_CFG,
+	AS_CLUSTERING,
+	AS_COMPRESSION,
+	AS_DEMARSHAL,
+	AS_DRV_SSD,
+	AS_EXCHANGE,
+	AS_FABRIC,
+	AS_GEO,
+	AS_HB,
+	AS_HLC,
+	AS_INDEX,
+	AS_INFO,
+	AS_INFO_PORT,
+	AS_JOB,
+	AS_LDT,
+	AS_MIGRATE,
+	AS_MON,
+	AS_NAMESPACE,
+	AS_NSUP,
+	AS_PARTICLE,
+	AS_PARTITION,
+	AS_PAXOS,
+	AS_PREDEXP,
+	AS_PROTO,
+	AS_PROXY,
+	AS_QUERY,
+	AS_RECORD,
+	AS_RW,
+	AS_SCAN,
+	AS_SECURITY,
+	AS_SINDEX,
+	AS_SMD,
+	AS_STORAGE,
+	AS_TRUNCATE,
+	AS_TSVC,
+	AS_UDF,
+	AS_XDR,
+	CF_FAULT_CONTEXT_UNDEF
 } cf_fault_context;
 
 extern char *cf_fault_context_strings[];
@@ -156,7 +247,6 @@ typedef enum {
 
 // note: passing a null sink sets for all currently known sinks
 extern int cf_fault_sink_addcontext(cf_fault_sink *s, char *context, char *severity);
-extern int cf_fault_sink_setcontext(cf_fault_sink *s, char *context, char *severity);
 extern cf_fault_sink *cf_fault_sink_add(char *path);
 
 extern cf_fault_sink *cf_fault_sink_hold(char *path);
@@ -175,22 +265,35 @@ extern void cf_fault_sink_logroll(void);
 extern void cf_fault_use_local_time(bool val);
 extern bool cf_fault_is_using_local_time();
 
+extern void cf_fault_log_millis(bool log_millis);
+extern bool cf_fault_is_logging_millis();
+
+extern cf_fault_severity cf_fault_filter[];
+
 // Define the mechanism that we'll use to write into the Server Log.
 // cf_fault_event() is "regular" logging
 extern void cf_fault_event(const cf_fault_context,
 		const cf_fault_severity severity, const char *file_name,
-		const char *function_name, const int line, char *msg, ...);
+		const int line, const char *msg, ...)
+		__attribute__ ((format (printf, 5, 6)));
 
 // cf_fault_event2() is for advanced logging, where we want to print some
 // binary object (often a digest).
 extern void cf_fault_event2(const cf_fault_context,
-		const cf_fault_severity severity, const char *file_name,
-		const char *function_name, const int line,
-		void * mem_ptr, size_t len, cf_display_type dt, char *msg, ...);
+		const cf_fault_severity severity, const char *file_name, const int line,
+		void * mem_ptr, size_t len, cf_display_type dt, const char *msg, ...)
+		__attribute__ ((format (printf, 8, 9)));
 
 extern void cf_fault_event_nostack(const cf_fault_context,
 		const cf_fault_severity severity, const char *fn, const int line,
-		char *msg, ...);
+		const char *msg, ...)
+		__attribute__ ((format (printf, 5, 6)));
+
+// For now there's only one cache, dumped by the ticker.
+extern void cf_fault_cache_event(cf_fault_context context,
+		cf_fault_severity severity, const char *file_name, int line,
+		char *msg, ...)
+		__attribute__ ((format (printf, 5, 6)));
 
 // This is ONLY to keep Eclipse happy without having to tell it __FILENAME__ is
 // defined. The make process will define it via the -D mechanism.
@@ -198,50 +301,69 @@ extern void cf_fault_event_nostack(const cf_fault_context,
 #define __FILENAME__ ""
 #endif
 
-// The "no stack" versions.
-#define cf_assert_nostack(a, context, severity, __msg, ...) \
-		((void)((a) ? (void)0 : cf_fault_event_nostack((context), (severity), __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__)))
-#define cf_crash_nostack(context, __msg, ...) \
-		(cf_fault_event_nostack((context), CF_CRITICAL, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__))
-
 // The "regular" version.
-#define cf_assert(a, context, severity, __msg, ...) \
-	((void)((a) ? (void)0 : cf_fault_event((context), (severity), __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__)))
+#define cf_assert(a, context, __msg, ...) \
+		((a) ? (void)0 : \
+			cf_fault_event((context), CF_CRITICAL, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__))
+
+// The "no stack" versions.
+#define cf_assert_nostack(a, context, __msg, ...) \
+		((a) ? (void)0 : \
+			cf_fault_event_nostack((context), CF_CRITICAL, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__))
+#define cf_crash_nostack(context, __msg, ...) \
+		cf_fault_event_nostack((context), CF_CRITICAL, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__)
 
 #define MAX_BACKTRACE_DEPTH 50
 
 // This must literally be the direct clib "free()", because "strings" is
 // allocated by "backtrace_symbols()".
-#define PRINT_STACK() \
+#define PRINT_STACKTRACE() \
 do { \
 	void *bt[MAX_BACKTRACE_DEPTH]; \
 	int sz = backtrace(bt, MAX_BACKTRACE_DEPTH); \
-	cf_warning(AS_AS, "stacktrace: found %d frames", sz); \
+	cf_fault_event(AS_AS, CF_WARNING, __FILENAME__, __LINE__, "stacktrace: found %d frames", sz); \
 	char **strings = backtrace_symbols(bt, sz); \
 	if (strings) { \
 		for (int i = 0; i < sz; i++) { \
-			cf_warning(AS_AS, "stacktrace: frame %d: %s", i, strings[i]); \
+			cf_fault_event(AS_AS, CF_WARNING, __FILENAME__, __LINE__, "stacktrace: frame %d: %s", i, strings[i]); \
 		} \
 		free(strings); \
 	} \
 	else { \
-		cf_warning(AS_AS, "stacktrace: found no symbols"); \
+		cf_fault_event(AS_AS, CF_WARNING, __FILENAME__, __LINE__, "stacktrace: found no symbols"); \
+	} \
+} while (0);
+
+#define PRINT_CALL_STACK(severity) \
+do { \
+	void *bt[MAX_BACKTRACE_DEPTH]; \
+	int sz = backtrace(bt, MAX_BACKTRACE_DEPTH); \
+	cf_fault_event(AS_AS, severity, __FILENAME__, __LINE__, "call stack: found %d frames", sz); \
+	char **strings = backtrace_symbols(bt, sz); \
+	if (strings) { \
+		for (int i = 0; i < sz; i++) { \
+			cf_fault_event(AS_AS, severity, __FILENAME__, __LINE__, "call stack: frame %d: %s", i, strings[i]); \
+		} \
+		free(strings); \
+	} \
+	else { \
+		cf_fault_event(AS_AS, severity, __FILENAME__, __LINE__, "call stack: found no symbols"); \
 	} \
 } while (0);
 
 // The "regular" versions.
-// Note that we use the function name ONLY in crash(), debug() and detail(),
-// as this information is relevant mostly to the Aerospike software engineers.
+#define __SEVLOG(severity, context, __msg, ...) \
+		(severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_event((context), severity, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__))
+
 #define cf_crash(context, __msg, ...) \
-	(cf_fault_event((context), CF_CRITICAL, __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__))
-#define cf_warning(context, __msg, ...) \
-	(cf_fault_event((context), CF_WARNING, __FILENAME__, NULL, __LINE__, (__msg), ##__VA_ARGS__))
-#define cf_info(context, __msg, ...) \
-	(cf_fault_event((context), CF_INFO, __FILENAME__, NULL, __LINE__, (__msg), ##__VA_ARGS__))
-#define cf_debug(context, __msg, ...) \
-	(cf_fault_event((context), CF_DEBUG, __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__))
-#define cf_detail(context, __msg, ...) \
-	(cf_fault_event((context), CF_DETAIL, __FILENAME__, __func__, __LINE__, (__msg), ##__VA_ARGS__))
+		cf_fault_event((context), CF_CRITICAL, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__)
+
+#define cf_warning(...) __SEVLOG(CF_WARNING, ##__VA_ARGS__)
+#define cf_info(...) __SEVLOG(CF_INFO, ##__VA_ARGS__)
+#define cf_debug(...) __SEVLOG(CF_DEBUG, ##__VA_ARGS__)
+#define cf_detail(...) __SEVLOG(CF_DETAIL, ##__VA_ARGS__)
 
 // In addition to the existing LOG calls, we will now add a new mechanism
 // that will the ability to print out a BINARY ARRAY, in a general manner, at
@@ -249,37 +371,55 @@ do { \
 // This is a general mechanism that can be used to express a binary array as
 // a hex or Base64 value, but we'll often use it to print a full Digest Value,
 // in either Hex format or Base64 format.
+#define __BINARY_SEVLOG(severity, context, ptr, len, DT, __msg, ...) \
+		(severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_event2((context), severity, __FILENAME__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
+
 #define cf_crash_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_warning_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_WARNING, __FILENAME__, NULL, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_info_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_INFO, __FILENAME__, NULL, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_debug_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_DEBUG, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
-#define cf_detail_binary(context, ptr, len, DT, __msg, ...) \
-	(cf_fault_event2((context), CF_DETAIL, __FILENAME__, __func__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__))
+		cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __LINE__, ptr, len, DT, (__msg), ##__VA_ARGS__)
+
+#define cf_warning_binary(...) __BINARY_SEVLOG(CF_WARNING, ##__VA_ARGS__)
+#define cf_info_binary(...) __BINARY_SEVLOG(CF_INFO, ##__VA_ARGS__)
+#define cf_debug_binary(...) __BINARY_SEVLOG(CF_DEBUG, ##__VA_ARGS__)
+#define cf_detail_binary(...) __BINARY_SEVLOG(CF_DETAIL, ##__VA_ARGS__)
 
 // This set of log calls specifically handles DIGEST values.
-// Note that we use the function name ONLY in crash(), debug() and detail(),
-// as this information is relevant mostly to the Aerospike software engineers.
+#define __DIGEST_SEVLOG(severity, context, ptr,__msg, ...) \
+		(severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_event2((context), severity, __FILENAME__, __LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
+
 #define cf_crash_digest(context, ptr,__msg, ...) \
-	(cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_warning_digest(context, ptr, __msg, ...) \
-	(cf_fault_event2((context), CF_WARNING, __FILENAME__, NULL,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_info_digest(context, ptr, __msg, ...) \
-	(cf_fault_event2((context), CF_INFO, __FILENAME__, NULL,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_debug_digest(context, ptr, __msg, ...) \
-	(cf_fault_event2((context), CF_DEBUG, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
-#define cf_detail_digest(context, ptr, __msg, ...) \
-	(cf_fault_event2((context), CF_DETAIL, __FILENAME__, __func__,__LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__))
+		cf_fault_event2((context), CF_CRITICAL, __FILENAME__, __LINE__, ptr, 20, CF_DISPLAY_HEX_DIGEST, (__msg), ##__VA_ARGS__)
 
+#define cf_warning_digest(...)  __DIGEST_SEVLOG(CF_WARNING, ##__VA_ARGS__)
+#define cf_info_digest(...)  __DIGEST_SEVLOG(CF_INFO, ##__VA_ARGS__)
+#define cf_debug_digest(...)  __DIGEST_SEVLOG(CF_DEBUG, ##__VA_ARGS__)
+#define cf_detail_digest(...)  __DIGEST_SEVLOG(CF_DETAIL, ##__VA_ARGS__)
 
-// strerror override. GP claims standard strerror has a rare but existant concurrency hole, this fixes that hole
-extern char *cf_strerror(const int err);
+// _GNU_SOURCE gives us a strerror_r() that returns (char *).
+#define cf_strerror(err) strerror_r(err, (char *)alloca(200), 200)
 
 /* cf_context_at_severity
  * Return whether the given context is set to this severity level or higher. */
 extern bool cf_context_at_severity(const cf_fault_context context, const cf_fault_severity severity);
 
 extern void cf_fault_init();
+
+int generate_packed_hex_string(void *mem_ptr, uint32_t len, char* output);
+
+// For now there's only one cache, dumped by the ticker.
+extern void cf_fault_dump_cache();
+
+#define cf_dump_ticker_cache() cf_fault_dump_cache()
+
+#define __CACHE_SEVLOG(severity, context, __msg, ...) \
+		(severity > cf_fault_filter[context] ? \
+				(void)0 : \
+				cf_fault_cache_event((context), severity, __FILENAME__, __LINE__, (__msg), ##__VA_ARGS__))
+
+#define cf_ticker_warning(...) __CACHE_SEVLOG(CF_WARNING, ##__VA_ARGS__)
+#define cf_ticker_info(...) __CACHE_SEVLOG(CF_INFO, ##__VA_ARGS__)
+#define cf_ticker_debug(...) __CACHE_SEVLOG(CF_DEBUG, ##__VA_ARGS__)
+#define cf_ticker_detail(...) __CACHE_SEVLOG(CF_DETAIL, ##__VA_ARGS__)

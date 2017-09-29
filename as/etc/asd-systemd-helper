@@ -17,6 +17,19 @@ if [ ${#mem} -le ${#min} ]; then
     fi
 fi
 
+set_socket_buffer_limit() {
+	name=${1}; path=${2}; size=${3}
+	curr=$(cat ${path})
+
+	if [ ${curr} -lt ${size} ]; then
+		echo "Increasing ${name} socket buffer limit (${path}): ${curr} -> ${size}"
+		echo ${size} >${path}
+	fi
+}
+
+set_socket_buffer_limit read /proc/sys/net/core/rmem_max 15728640
+set_socket_buffer_limit write /proc/sys/net/core/wmem_max 5242880
+
 if [ -f /etc/aerospike/initfns ]
 then
     . /etc/aerospike/initfns

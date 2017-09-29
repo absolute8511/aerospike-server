@@ -133,7 +133,7 @@ typedef struct geojson_flat_s {
 // Forward declarations.
 //
 
-static char const *geojson_mem_jsonstr(geojson_mem *p_geojson_mem, size_t *p_jsonsz);
+static bool geojson_match(bool particle_is_region, uint64_t particle_cellid, geo_region_t particle_region, uint64_t query_cellid, geo_region_t query_region, bool is_strict);
 static inline uint32_t geojson_size(uint32_t n_cells, size_t string_size);
 
 
@@ -330,10 +330,8 @@ geojson_from_asval(const as_val *val, as_particle **pp)
 as_val *
 geojson_to_asval(const as_particle *p)
 {
-	geojson_mem *p_geojson_mem = (geojson_mem *)p;
-
 	size_t jsonsz;
-	char const *jsonptr = geojson_mem_jsonstr(p_geojson_mem, &jsonsz);
+	char const *jsonptr = as_geojson_mem_jsonstr(p, &jsonsz);
 	char *buf = cf_malloc(jsonsz + 1);
 
 	if (! buf) {
@@ -422,13 +420,11 @@ geojson_from_msgpack(const uint8_t *packed, uint32_t packed_size, as_particle **
 
 
 //==========================================================
-// as_bin particle functions specific to GEOJSON.
-// TODO - will change once as_val family is implemented.
+// Particle functions specific to GEOJSON.
 //
 
-// TODO - will we ever need this?
 size_t
-as_bin_particle_geojson_cellids(as_bin *b, uint64_t **ppcells)
+as_bin_particle_geojson_cellids(const as_bin *b, uint64_t **ppcells)
 {
 	geojson_mem *gp = (geojson_mem *)b->particle;
 
@@ -438,9 +434,108 @@ as_bin_particle_geojson_cellids(as_bin *b, uint64_t **ppcells)
 }
 
 bool
-as_bin_particle_geojson_match(as_bin *candidate_bin, uint64_t query_cellid, geo_region_t query_region, bool is_strict)
+as_particle_geojson_match(as_particle *particle, uint64_t query_cellid, geo_region_t query_region, bool is_strict)
 {
-	// Determine whether the candidate bin geometry is a match for the
+	// Determine whether the candidate particle geometry is a match
+	// for the query geometry.
+	//
+	// If query_cellid is non-zero this is a regions-containing-point query.
+	//
+	// If query_region is non-null this is a points-in-region query.
+	//
+	// Candidate geometry can either be a point or a region.  Regions
+	// will have the GEOJSON_ISREGION flag set.
+
+	geojson_mem *gp = (geojson_mem *)particle;
+
+	uint64_t *cells = (uint64_t *)gp->data;
+
+	uint64_t candidate_cellid = cells[0];
+	geo_region_t candidate_region = NULL;
+
+	bool candidate_is_region = (gp->flags & GEOJSON_ISREGION) != 0;
+
+	// If we are a strict RCP query on a region candidate we need to
+	// run the parser to obtain a candidate_region for the matcher.
+	//
+	if (query_cellid != 0 && candidate_is_region && is_strict) {
+		size_t jsonsz;
+		char const *jsonptr = as_geojson_mem_jsonstr(particle, &jsonsz);
+
+		if (! geo_parse(NULL, jsonptr, jsonsz, &candidate_cellid,
+				&candidate_region)) {
+			cf_warning(AS_PARTICLE, "geo_parse() failed - unexpected");
+			geo_region_destroy(candidate_region);
+			return false;
+		}
+	}
+
+	bool ismatch = geojson_match(
+			candidate_is_region,
+			candidate_cellid,
+			candidate_region,
+			query_cellid,
+			query_region,
+			is_strict);
+
+	geo_region_destroy(candidate_region);
+
+	return ismatch;
+}
+
+bool
+as_particle_geojson_match_asval(const as_val *val, uint64_t query_cellid, geo_region_t query_region, bool is_strict)
+{
+	as_geojson *pg = as_geojson_fromval(val);
+	size_t jsonsz = as_geojson_len(pg);
+	char * jsonptr = as_geojson_get(pg);
+
+	uint64_t candidate_cellid = 0;
+	geo_region_t candidate_region = NULL;
+
+	if (! geo_parse(NULL, jsonptr, jsonsz, &candidate_cellid,
+			&candidate_region)) {
+		cf_warning(AS_PARTICLE, "geo_parse() failed - unexpected");
+		geo_region_destroy(candidate_region);
+		return false;
+	}
+
+	bool candidate_is_region = candidate_cellid == 0;
+
+	bool ismatch = geojson_match(
+			candidate_is_region,
+			candidate_cellid,
+			candidate_region,
+			query_cellid,
+			query_region,
+			is_strict);
+
+	geo_region_destroy(candidate_region);
+
+	return ismatch;
+}
+
+char const *
+as_geojson_mem_jsonstr(as_particle const *particle, size_t *p_jsonsz)
+{
+	geojson_mem *p_geojson_mem = (geojson_mem *)particle;
+
+	size_t cellsz = p_geojson_mem->ncells * sizeof(uint64_t);
+
+	*p_jsonsz = p_geojson_mem->sz - sizeof(uint8_t) - sizeof(uint16_t) - cellsz;
+
+	return (char const *)p_geojson_mem->data + cellsz;
+}
+
+
+//==========================================================
+// Local helpers.
+//
+
+static bool
+geojson_match(bool candidate_is_region, uint64_t candidate_cellid, geo_region_t candidate_region, uint64_t query_cellid, geo_region_t query_region, bool is_strict)
+{
+	// Determine whether the candidate geometry is a match for the
 	// query geometry.
 	//
 	// If query_cellid is non-zero this is a regions-containing-point query.
@@ -450,35 +545,19 @@ as_bin_particle_geojson_match(as_bin *candidate_bin, uint64_t query_cellid, geo_
 	// Candidate geometry can either be a point or a region.  Regions
 	// will have the GEOJSON_ISREGION flag set.
 
-	geojson_mem *gp = (geojson_mem *)candidate_bin->particle;
-	
 	// Is this a REGIONS-CONTAINING-POINT query?
 	//
 	if (query_cellid != 0) {
 
-		if ((gp->flags & GEOJSON_ISREGION) != 0) {
+		if (candidate_is_region) {
 			// Candidate is a REGION.
 
 			// Shortcut, if we aren't strict just return true.
 			if (! is_strict) {
 				return true;
 			}
-			
-			size_t jsonsz;
-			char const *jsonptr = geojson_mem_jsonstr(gp, &jsonsz);
-			uint64_t parsed_cellid = 0;
-			geo_region_t parsed_region = NULL;
 
-			if (! geo_parse(NULL, jsonptr, jsonsz, &parsed_cellid, &parsed_region)) {
-				cf_warning(AS_PARTICLE, "geo_parse() failed - unexpected");
-				geo_region_destroy(parsed_region);
-				return false;
-			}
-
-			bool iswithin = geo_point_within(query_cellid, parsed_region);
-
-			geo_region_destroy(parsed_region);
-			return iswithin;
+			return geo_point_within(query_cellid, candidate_region);
 		}
 		else {
 			// Candidate is a POINT, skip it.
@@ -490,22 +569,20 @@ as_bin_particle_geojson_match(as_bin *candidate_bin, uint64_t query_cellid, geo_
 	//
 	if (query_region) {
 
-		uint64_t *cells = (uint64_t *)gp->data;
-
-		// Sanity check, make sure this geometry has been processed.
-		if (cells[0] == 0) {
-			cf_warning(AS_PARTICLE, "first cellid has no value");
-			return false;
-		}
-
-		if ((gp->flags & GEOJSON_ISREGION) != 0) {
+		if (candidate_is_region) {
 			// Candidate is a REGION, skip it.
 			return false;
 		}
 		else {
+			// Sanity check, make sure this geometry has been processed.
+			if (candidate_cellid == 0) {
+				cf_warning(AS_PARTICLE, "candidate cellid has no value");
+				return false;
+			}
+
 			// Candidate is a POINT.
 			if (is_strict) {
-				return geo_point_within(cells[0], query_region);
+				return geo_point_within(candidate_cellid, query_region);
 			}
 			else {
 				return true;
@@ -514,22 +591,6 @@ as_bin_particle_geojson_match(as_bin *candidate_bin, uint64_t query_cellid, geo_
 	}
 
 	return false;
-}
-
-
-//==========================================================
-// Local helpers.
-//
-
-static char const *
-geojson_mem_jsonstr(geojson_mem *p_geojson_mem, size_t *p_jsonsz)
-{
-	// Map the point.
-	size_t cellsz = p_geojson_mem->ncells * sizeof(uint64_t);
-
-	*p_jsonsz = p_geojson_mem->sz - sizeof(uint8_t) - sizeof(uint16_t) - cellsz;
-
-	return (char const *)p_geojson_mem->data + cellsz;
 }
 
 static inline uint32_t

@@ -30,13 +30,5 @@
 
 #include "bt.h"
 
-void printKey(bt *btr, bt_n *x, int i);
-void printDWD(dwd_t dwd, bt *btr);
 void bt_dump_info(FILE *fp, bt *btr);
-void bt_dumptree (FILE *fp, bt *btr, bool is_index, bool is_inode);
-
-/*
- *  Print out the structure and contents of a B-Tree.
- *  Return 0 if successful, -1 otherwise.
- */
-int dump_btree(char *tbl_name, char *filename);
+void bt_dumptree(FILE *fp, bt *btr, bool is_index, bool verbose);
