@@ -53,6 +53,7 @@
 #include "base/stats.h"
 #include "base/thr_batch.h"
 #include "base/transaction.h"
+#include "base/transaction_policy.h"
 #include "base/xdr_serverside.h"
 #include "fabric/fabric.h"
 #include "fabric/partition.h"
@@ -63,21 +64,6 @@
 #include "transaction/read.h"
 #include "transaction/udf.h"
 #include "transaction/write.h"
-
-
-//==========================================================
-// Forward declarations.
-//
-
-void tsvc_add_threads(uint32_t qid, uint32_t n_threads);
-void tsvc_remove_threads(uint32_t qid, uint32_t n_threads);
-void *run_tsvc(void *arg);
-
-static inline bool
-should_security_check_data_op(const as_transaction *tr)
-{
-	return tr->origin == FROM_CLIENT || tr->origin == FROM_BATCH;
-}
 
 
 //==========================================================
@@ -95,6 +81,49 @@ static uint32_t g_current_q = 0;
 
 
 //==========================================================
+// Forward declarations.
+//
+
+void tsvc_add_threads(uint32_t qid, uint32_t n_threads);
+void tsvc_remove_threads(uint32_t qid, uint32_t n_threads);
+void *run_tsvc(void *arg);
+
+
+//==========================================================
+// Inlines & macros.
+//
+
+static inline bool
+should_security_check_data_op(const as_transaction *tr)
+{
+	return tr->origin == FROM_CLIENT || tr->origin == FROM_BATCH;
+}
+
+static inline bool
+read_would_duplicate_resolve(const as_namespace* ns, const as_msg* m)
+{
+	return READ_CONSISTENCY_LEVEL(ns, *m) == AS_READ_CONSISTENCY_LEVEL_ALL;
+}
+
+static const char*
+write_type_tag(const as_transaction *tr)
+{
+	return as_transaction_is_delete(tr) ? "delete" :
+			(as_transaction_is_udf(tr) ? "udf" : "write");
+}
+
+static inline void
+detail_unique_client_rw(const as_transaction *tr, bool is_write)
+{
+	if (tr->origin == FROM_CLIENT) {
+		cf_detail_digest(AS_RW_CLIENT, &tr->keyd, "{%s} client %s %s ",
+				tr->rsv.ns->name, tr->from.proto_fd_h->client,
+				is_write ? write_type_tag(tr) : "read");
+	}
+}
+
+
+//==========================================================
 // Public API.
 //
 
@@ -109,8 +138,6 @@ as_tsvc_init()
 	for (uint32_t qid = 0; qid < g_config.n_transaction_queues; qid++) {
 		g_transaction_queues[qid] =
 				cf_queue_create(AS_TRANSACTION_HEAD_SIZE, true);
-
-		cf_assert(g_transaction_queues[qid], AS_TSVC, "failed to create queue");
 	}
 
 	// Start all the transaction threads.
@@ -127,7 +154,7 @@ as_tsvc_enqueue(as_transaction *tr)
 	uint32_t qid;
 
 	if (g_config.auto_pin == CF_TOPO_AUTO_PIN_NONE ||
-			g_config.n_namespaces_not_in_memory == 0) {
+			g_config.n_namespaces_not_inlined == 0) {
 		cf_debug(AS_TSVC, "no CPU pinning - dispatching transaction round-robin");
 		// Transaction can go on any queue - distribute evenly.
 		qid = (g_current_q++) % g_config.n_transaction_queues;
@@ -137,9 +164,7 @@ as_tsvc_enqueue(as_transaction *tr)
 		cf_debug(AS_TSVC, "transaction on CPU %u", qid);
 	}
 
-	if (cf_queue_push(g_transaction_queues[qid], tr) != CF_QUEUE_OK) {
-		cf_crash(AS_TSVC, "transaction queue push failed - out of memory?");
-	}
+	cf_queue_push(g_transaction_queues[qid], tr);
 }
 
 
@@ -353,37 +378,15 @@ as_tsvc_process_transaction(as_transaction *tr)
 
 	uint32_t pid = as_partition_getid(&tr->keyd);
 	cf_node dest;
-	uint64_t partition_cluster_key = 0;
 
-	if ((tr->from_flags & FROM_FLAG_SHIPPED_OP) != 0) {
-		if (! is_write) {
-			cf_warning(AS_TSVC, "shipped-op is not write - unexpected");
-			as_transaction_error(tr, ns, AS_PROTO_RESULT_FAIL_UNKNOWN);
-			goto Cleanup;
-		}
-
-		// If the transaction is "shipped proxy op" to the winner node then
-		// just do a migrate reservation.
-		as_partition_reserve_migrate(ns, pid, &tr->rsv, &dest);
-
-		if (tr->rsv.n_dupl != 0) {
-			cf_warning(AS_TSVC, "shipped-op rsv has duplicates - unexpected");
-			as_partition_release(&tr->rsv);
-			as_transaction_error(tr, ns, AS_PROTO_RESULT_FAIL_UNKNOWN);
-			goto Cleanup;
-		}
-
-		rv = 0;
-	}
-	else if (is_write) {
+	if (is_write) {
 		if (should_security_check_data_op(tr) &&
 				! as_security_check_data_op(tr, ns, PERM_WRITE)) {
 			as_transaction_error(tr, ns, tr->result_code);
 			goto Cleanup;
 		}
 
-		rv = as_partition_reserve_write(ns, pid, &tr->rsv, &dest,
-				&partition_cluster_key);
+		rv = as_partition_reserve_write(ns, pid, &tr->rsv, &dest);
 	}
 	else if (is_read) {
 		if (should_security_check_data_op(tr) &&
@@ -392,17 +395,8 @@ as_tsvc_process_transaction(as_transaction *tr)
 			goto Cleanup;
 		}
 
-		rv = as_partition_reserve_read(ns, pid, &tr->rsv, &dest,
-				&partition_cluster_key);
-
-		// TODO - is reservation promotion really the best way?
-		if (rv == 0 && as_read_must_duplicate_resolve(tr)) {
-			// Upgrade to a write reservation.
-			as_partition_release(&tr->rsv);
-
-			rv = as_partition_reserve_write(ns, pid, &tr->rsv, &dest,
-					&partition_cluster_key);
-		}
+		rv = as_partition_reserve_read(ns, pid, &tr->rsv,
+				read_would_duplicate_resolve(ns, m), &dest);
 	}
 	else {
 		cf_warning(AS_TSVC, "transaction is neither read nor write - unexpected");
@@ -425,6 +419,7 @@ as_tsvc_process_transaction(as_transaction *tr)
 
 		if (! as_transaction_is_restart(tr)) {
 			tr->benchmark_time = 0;
+			detail_unique_client_rw(tr, is_write);
 		}
 
 		transaction_status status;
@@ -470,13 +465,9 @@ as_tsvc_process_transaction(as_transaction *tr)
 		switch (tr->origin) {
 		case FROM_CLIENT:
 		case FROM_BATCH:
-			if (! as_proxy_divert(dest, tr, ns, partition_cluster_key)) {
-				as_transaction_error(tr, ns, AS_PROTO_RESULT_FAIL_UNKNOWN);
-			}
-			else {
-				// CLIENT: fabric owns msgp, BATCH: it's shared, don't free it.
-				free_msgp = false;
-			}
+			as_proxy_divert(dest, tr, ns);
+			// CLIENT: fabric owns msgp, BATCH: it's shared, don't free it.
+			free_msgp = false;
 			break;
 		case FROM_PROXY:
 			as_proxy_return_to_sender(tr, ns);
@@ -535,13 +526,8 @@ tsvc_remove_threads(uint32_t qid, uint32_t n_threads)
 
 	for (uint32_t n = 0; n < n_threads; n++) {
 		// Send terminator (transaction with NULL msgp).
-		if (cf_queue_push(g_transaction_queues[qid], &death_tr) ==
-				CF_QUEUE_OK) {
-			g_queues_n_threads[qid]--;
-		}
-		else {
-			cf_warning(AS_TSVC, "tsvc queue %u failed thread termination", qid);
-		}
+		cf_queue_push(g_transaction_queues[qid], &death_tr);
+		g_queues_n_threads[qid]--;
 	}
 }
 
@@ -553,7 +539,7 @@ run_tsvc(void *arg)
 	uint32_t qid = (uint32_t)(uint64_t)arg;
 
 	if (g_config.auto_pin != CF_TOPO_AUTO_PIN_NONE &&
-			g_config.n_namespaces_not_in_memory != 0) {
+			g_config.n_namespaces_not_inlined != 0) {
 		cf_detail(AS_TSVC, "pinning thread to CPU %u", qid);
 		cf_topo_pin_to_cpu((cf_topo_cpu_index)qid);
 	}

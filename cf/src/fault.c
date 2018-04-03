@@ -40,7 +40,8 @@
 #include "aerospike/as_log.h"
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_b64.h"
-#include "citrusleaf/cf_shash.h"
+
+#include "shash.h"
 
 
 /*
@@ -66,6 +67,7 @@ char *cf_fault_context_strings[] = {
 		"rbuffer",
 		"socket",
 		"tls",
+		"vmapx",
 
 		"aggr",
 		"as",
@@ -85,7 +87,6 @@ char *cf_fault_context_strings[] = {
 		"info",
 		"info-port",
 		"job",
-		"ldt",
 		"migrate",
 		"mon",
 		"namespace",
@@ -96,9 +97,11 @@ char *cf_fault_context_strings[] = {
 		"predexp",
 		"proto",
 		"proxy",
+		"proxy-divert",
 		"query",
 		"record",
 		"rw",
+		"rw-client",
 		"scan",
 		"security",
 		"sindex",
@@ -127,7 +130,7 @@ cf_fault_severity cf_fault_filter[CF_FAULT_CONTEXT_UNDEF];
 int cf_fault_sinks_inuse = 0;
 int num_held_fault_sinks = 0;
 
-shash *g_ticker_hash = NULL;
+cf_shash *g_ticker_hash = NULL;
 #define CACHE_MSG_MAX_SIZE 128
 
 typedef struct cf_fault_cache_hkey_s {
@@ -137,7 +140,7 @@ typedef struct cf_fault_cache_hkey_s {
 	const char			*file_name;
 	cf_fault_severity	severity;
 	char				msg[CACHE_MSG_MAX_SIZE];
-} cf_fault_cache_hkey;
+} __attribute__((__packed__)) cf_fault_cache_hkey;
 
 bool g_use_local_time = false;
 
@@ -192,10 +195,8 @@ cf_fault_init()
 	}
 
 	// Create the ticker hash.
-	if (shash_create(&g_ticker_hash, cache_hash_fn, sizeof(cf_fault_cache_hkey),
-			sizeof(uint32_t), 256, SHASH_CR_MT_MANYLOCK) != 0) {
-		cf_crash(CF_MISC, "failed ticker hash create");
-	}
+	g_ticker_hash = cf_shash_create(cache_hash_fn, sizeof(cf_fault_cache_hkey),
+			sizeof(uint32_t), 256, CF_SHASH_MANY_LOCK);
 }
 
 
@@ -242,11 +243,6 @@ cf_fault_sink_hold(char *path)
 	cf_fault_sink *s = &cf_fault_sinks[num_held_fault_sinks];
 
 	s->path = cf_strdup(path);
-
-	if (! s->path) {
-		cf_warning(CF_MISC, "failed allocation for sink path");
-		return NULL;
-	}
 
 	// If a context is not added, its runtime default will be CF_INFO.
 	for (int i = 0; i < CF_FAULT_CONTEXT_UNDEF; i++) {
@@ -564,7 +560,7 @@ cf_fault_event(const cf_fault_context context, const cf_fault_severity severity,
  * used in other contexts as a hex number).
  */
 int
-generate_packed_hex_string(void *mem_ptr, uint32_t len, char* output)
+generate_packed_hex_string(const void *mem_ptr, uint32_t len, char* output)
 {
 	uint8_t *d = (uint8_t *) mem_ptr;
 	char* p = output;
@@ -587,7 +583,7 @@ generate_packed_hex_string(void *mem_ptr, uint32_t len, char* output)
  * e.g. fc 86 e8 3a 6d 6d 30 24 65 9e 6f e4 8c 35 1a aa f6 e9 64 a5
  */
 int
-generate_spaced_hex_string(void *mem_ptr, uint32_t len, char* output)
+generate_spaced_hex_string(const void *mem_ptr, uint32_t len, char* output)
 {
 	uint8_t *d = (uint8_t *) mem_ptr;
 	char* p = output;
@@ -610,7 +606,7 @@ generate_spaced_hex_string(void *mem_ptr, uint32_t len, char* output)
  * f6e9 64a5
  */
 int
-generate_column_hex_string(void *mem_ptr, uint32_t len, char* output)
+generate_column_hex_string(const void *mem_ptr, uint32_t len, char* output)
 {
 	uint8_t *d = (uint8_t *) mem_ptr;
 	char* p = output;
@@ -644,7 +640,7 @@ generate_column_hex_string(void *mem_ptr, uint32_t len, char* output)
  * Base 64 Chars:     T(19)      W(22)      F(5)      u(46)
  * and so this string is converted into the Base 64 string: "TWFu"
  */
-int generate_base64_string(void *mem_ptr, uint32_t len, char output_buf[])
+int generate_base64_string(const void *mem_ptr, uint32_t len, char output_buf[])
 {
 	uint32_t encoded_len = cf_b64_encoded_len(len);
 	// TODO - check that output_buf is big enough, and/or truncate.
@@ -662,7 +658,7 @@ int generate_base64_string(void *mem_ptr, uint32_t len, char output_buf[])
  * Print the bits left to right (big to small).
  * This is assuming BIG ENDIAN representation (most significant bit is left).
  */
-int generate_4spaced_bits_string(void *mem_ptr, uint32_t len, char* output)
+int generate_4spaced_bits_string(const void *mem_ptr, uint32_t len, char* output)
 {
 	uint8_t *d = (uint8_t *) mem_ptr;
 	char* p = output;
@@ -689,7 +685,7 @@ int generate_4spaced_bits_string(void *mem_ptr, uint32_t len, char* output)
  * four bit groups.  Columns will be 8 columns of 4 bits.
  * (1 32 bit word per row)
  */
-int generate_column_bits_string(void *mem_ptr, uint32_t len, char* output)
+int generate_column_bits_string(const void *mem_ptr, uint32_t len, char* output)
 {
 	uint8_t *d = (uint8_t *) mem_ptr;
 	char* p = output;
@@ -736,7 +732,7 @@ int generate_column_bits_string(void *mem_ptr, uint32_t len, char* output)
 void
 cf_fault_event2(const cf_fault_context context,
 		const cf_fault_severity severity, const char *file_name, const int line,
-		void * mem_ptr, size_t len, cf_display_type dt, const char *msg, ...)
+		const void *mem_ptr, size_t len, cf_display_type dt, const char *msg, ...)
 {
 	va_list argp;
 	char mbuf[MAX_BINARY_BUF_SZ];
@@ -1045,7 +1041,7 @@ cf_fault_cache_reduce_fn(const void *key, void *data, void *udata)
 	uint32_t *count = (uint32_t*)data;
 
 	if (*count == 0) {
-		return SHASH_REDUCE_DELETE;
+		return CF_SHASH_REDUCE_DELETE;
 	}
 
 	const cf_fault_cache_hkey *hkey = (const cf_fault_cache_hkey*)key;
@@ -1055,7 +1051,7 @@ cf_fault_cache_reduce_fn(const void *key, void *data, void *udata)
 
 	*count = 0;
 
-	return SHASH_OK;
+	return CF_SHASH_OK;
 }
 
 
@@ -1063,7 +1059,7 @@ cf_fault_cache_reduce_fn(const void *key, void *data, void *udata)
 void
 cf_fault_dump_cache()
 {
-	shash_reduce_delete(g_ticker_hash, cf_fault_cache_reduce_fn, NULL);
+	cf_shash_reduce(g_ticker_hash, cf_fault_cache_reduce_fn, NULL);
 }
 
 
@@ -1092,8 +1088,8 @@ cf_fault_cache_event(cf_fault_context context, cf_fault_severity severity,
 		uint32_t *valp = NULL;
 		pthread_mutex_t *lockp = NULL;
 
-		if (shash_get_vlock(g_ticker_hash, &key, (void**)&valp, &lockp) ==
-				SHASH_OK) {
+		if (cf_shash_get_vlock(g_ticker_hash, &key, (void**)&valp, &lockp) ==
+				CF_SHASH_OK) {
 			// Already in hash - increment count and don't log it.
 			(*valp)++;
 			pthread_mutex_unlock(lockp);
@@ -1103,11 +1099,37 @@ cf_fault_cache_event(cf_fault_context context, cf_fault_severity severity,
 
 		uint32_t initv = 1;
 
-		if (shash_put_unique(g_ticker_hash, &key, &initv) == SHASH_ERR_FOUND) {
+		if (cf_shash_put_unique(g_ticker_hash, &key, &initv) ==
+				CF_SHASH_ERR_FOUND) {
 			continue; // other thread beat us to it - loop around and get it
 		}
 
 		cf_fault_event(context, severity, file_name, line, "%s", key.msg);
 		break;
+	}
+}
+
+void
+cf_fault_hex_dump(const char *title, const void *data, size_t len)
+{
+	const uint8_t *data8 = data;
+	char line[8 + 3 * 16 + 17];
+	size_t k;
+
+	cf_info(CF_MISC, "hex dump - %s", title);
+
+	for (size_t i = 0; i < len; i += k) {
+		sprintf(line, "%06zx:                                                                 ", i);
+
+		for (k = 0; i + k < len && k < 16; ++k) {
+			char num[3];
+			uint8_t d = data8[i + k];
+			sprintf(num, "%02x", d);
+			line[8 + 3 *  k + 0] = num[0];
+			line[8 + 3 *  k + 1] = num[1];
+			line[8 + 3 * 16 + k] = d >= 32 && d <= 126 ? d : '.';
+		}
+
+		cf_info(CF_MISC, "%s", line);
 	}
 }

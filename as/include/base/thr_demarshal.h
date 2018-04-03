@@ -23,6 +23,7 @@
 #pragma once
 
 #include "socket.h"
+#include "tls.h"
 #include "base/cfg.h"
 #include "base/transaction.h"
 
@@ -40,5 +41,6 @@ typedef struct as_info_access_s {
 
 extern as_info_access g_access;
 extern cf_serv_cfg g_service_bind;
+extern cf_tls_info *g_service_tls;
 
 void thr_demarshal_rearm(as_file_handle *fd_h);

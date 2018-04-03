@@ -220,7 +220,6 @@ main(int argc, char **argv)
 			return 0;
 		case 'f':
 			config_file = cf_strdup(optarg);
-			cf_assert(config_file, AS_AS, "config filename cf_strdup failed");
 			break;
 		case 'F':
 			// As a "new-style" daemon(*), asd runs in the foreground and

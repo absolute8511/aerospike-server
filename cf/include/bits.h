@@ -1,7 +1,7 @@
 /*
  * bits.h
  *
- * Copyright (C) 2017 Aerospike, Inc.
+ * Copyright (C) 2018 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -45,4 +45,36 @@ cf_msb(uint64_t value)
 	}
 
 	return n;
+}
+
+// Returns number of trailing zeros in a uint64_t, 64 for x == 0.
+static inline uint32_t
+cf_lsb64(uint64_t x)
+{
+	if (x == 0) {
+		return 64;
+	}
+
+	return (uint32_t)__builtin_ctzll(x);
+}
+
+// Returns number of leading zeros in a uint64_t, 64 for x == 0.
+static inline uint32_t
+cf_msb64(uint64_t x)
+{
+	if (x == 0) {
+		return 64;
+	}
+
+	return (uint32_t)__builtin_clzll(x);
+}
+
+static inline uint32_t
+cf_bit_count64(uint64_t x)
+{
+	x -= (x >> 1) & 0x5555555555555555;
+	x = (x & 0x3333333333333333) + ((x >> 2) & 0x3333333333333333);
+	x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0f;
+
+	return (uint32_t)((x * 0x0101010101010101) >> 56);
 }

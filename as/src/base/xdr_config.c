@@ -38,6 +38,7 @@ void xdr_config_defaults()
 	c->xdr_info_port = 0;
 	c->xdr_max_ship_throughput = 0;		// XDR TPS limit
 	c->xdr_max_ship_bandwidth = 0;		// XDR bandwidth limit
+	c->xdr_min_dlog_free_pct = 0;		// Namespace writes are stopped below this limit
 	c->xdr_hotkey_time_ms = 100;		// Expiration time for the de-duplication cache
 	c->xdr_read_threads = 4;			// Number of XDR read threads.
 	c->xdr_write_timeout = 10000;		// Timeout for each element that is shipped.
@@ -62,7 +63,7 @@ void xdr_config_defaults()
 		g_dc_xcfg_opt[index].dc_security_cfg.sec_config_file = NULL;
 		g_dc_xcfg_opt[index].dc_use_alternate_services = false;
 		g_dc_xcfg_opt[index].dc_connections = 64;
-		g_dc_xcfg_opt[index].dc_connections_idle_ms = 0;
+		g_dc_xcfg_opt[index].dc_connections_idle_ms = 55000;
 	}
 }
 

@@ -27,8 +27,10 @@
 
 #include "cf_str.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include <citrusleaf/cf_vector.h>
 
@@ -201,6 +203,32 @@ int cf_str_atoi_u64(char *s, uint64_t *value)
 	}
 	*value = i;
 	return(0);
+}
+
+int cf_str_atoi_x64(const char *s, uint64_t *value)
+{
+	if (! ((*s >= '0' && *s <= '9') ||
+			(*s >= 'a' && *s <= 'f') ||
+			(*s >= 'A' && *s <= 'F'))) {
+		return -1;
+	}
+
+	char* tail = NULL;
+	uint64_t i = strtoul(s, &tail, 16);
+
+	// Check for overflow.
+	if (errno == ERANGE) {
+		return -1;
+	}
+
+	// Don't allow trailing non-hex characters.
+	if (tail && *tail != 0) {
+		return -1;
+	}
+
+	*value = i;
+
+	return 0;
 }
 
 int cf_str_atoi_seconds(char *s, uint64_t *value)

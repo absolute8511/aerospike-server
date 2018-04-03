@@ -101,11 +101,6 @@ as_mon_register(const char *module)
 {
 	if (!module) return AS_MON_ERR;
 	as_mon *mon_obj = (as_mon *) cf_rc_alloc(sizeof(as_mon));
-	if (!mon_obj) {
-		cf_warning(AS_MON, "Failed to allocate as job monitor object %s", module);
-		return AS_MON_ERR;
-	}
-
 	as_mon_cb *cb = cf_malloc(sizeof(as_mon_cb));
 	as_mon_module_slot mod;
 
@@ -177,7 +172,7 @@ as_mon_killjob(const char *module, uint64_t id, cf_dyn_buf *db)
 	if (!mon_object) {
 		cf_warning(AS_MON, "Failed to find module %s", module);
 		cf_dyn_buf_append_string(db, "ERROR:");
-		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 		cf_dyn_buf_append_string(db, ":module \"");
 		cf_dyn_buf_append_string(db, module);
 		cf_dyn_buf_append_string(db, "\" not found");
@@ -192,7 +187,7 @@ as_mon_killjob(const char *module, uint64_t id, cf_dyn_buf *db)
 		}
 		else {
 			cf_dyn_buf_append_string(db, "ERROR:");
-			cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
+			cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 			cf_dyn_buf_append_string(db, ":job not active");
 		}
 	}
@@ -229,7 +224,7 @@ as_mon_set_priority(const char *module, uint64_t id, uint32_t priority, cf_dyn_b
 	if (!mon_object) {
 		cf_warning(AS_MON, "Failed to find module %s", module);
 		cf_dyn_buf_append_string(db, "ERROR:");
-		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 		cf_dyn_buf_append_string(db, ":module \"");
 		cf_dyn_buf_append_string(db, module);
 		cf_dyn_buf_append_string(db, "\" not found");
@@ -244,7 +239,7 @@ as_mon_set_priority(const char *module, uint64_t id, uint32_t priority, cf_dyn_b
 		}
 		else {
 			cf_dyn_buf_append_string(db, "ERROR:");
-			cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
+			cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 			cf_dyn_buf_append_string(db, ":job not active");
 		}
 	}
@@ -377,7 +372,7 @@ as_mon_get_jobstat_all(const char *module, cf_dyn_buf *db)
 
 	if (module && !found_module) {
 		cf_dyn_buf_append_string(db, "ERROR:");
-		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 		cf_dyn_buf_append_string(db, ":module \"");
 		cf_dyn_buf_append_string(db, module);
 		cf_dyn_buf_append_string(db, "\" not found");
@@ -409,7 +404,7 @@ as_mon_get_jobstat(const char *module, uint64_t id, cf_dyn_buf *db)
 	if (!mon_object) {
 		cf_warning(AS_MON, "Failed to find module %s", module);
 		cf_dyn_buf_append_string(db, "ERROR:");
-		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 		cf_dyn_buf_append_string(db, ":module \"");
 		cf_dyn_buf_append_string(db, module);
 		cf_dyn_buf_append_string(db, "\" not found");
@@ -435,7 +430,7 @@ as_mon_get_jobstat(const char *module, uint64_t id, cf_dyn_buf *db)
 	}
 	else {
 		cf_dyn_buf_append_string(db, "ERROR:");
-		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		cf_dyn_buf_append_int(db, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 		cf_dyn_buf_append_string(db, ":job not found");
 	}
 	return retval;

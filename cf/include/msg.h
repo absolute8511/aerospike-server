@@ -91,9 +91,7 @@ typedef struct msg_field_s {
 
 	union {
 		uint32_t ui32;
-		int32_t i32;
 		uint64_t ui64;
-		int64_t i64;
 		char *str;
 		uint8_t *buf;
 		uint32_t *ui32_a;
@@ -152,9 +150,6 @@ extern cf_atomic_int g_num_msgs_by_type[M_TYPE_MAX];
 // Object accounting.
 //
 
-// Limit the maximum number of "msg" objects per type (-1 means unlimited.)
-void msg_set_max_msgs_per_type(int64_t max_msgs);
-
 // Free up a "msg" object. Call this function instead of freeing the msg
 // directly in order to keep track of all msgs.
 void msg_put(msg *m);
@@ -192,9 +187,7 @@ void msg_preserve_all_fields(msg *m);
 //
 
 int msg_set_uint32(msg *m, int field_id, uint32_t v);
-int msg_set_int32(msg *m, int field_id, int32_t v);
 int msg_set_uint64(msg *m, int field_id, uint64_t v);
-int msg_set_int64(msg *m, int field_id, int64_t v);
 int msg_set_str(msg *m, int field_id, const char *v, msg_set_type type);
 int msg_set_buf(msg *m, int field_id, const uint8_t *v, size_t sz, msg_set_type type);
 
@@ -213,9 +206,7 @@ void msg_msgpack_list_set_buf(msg *m, int field_id, const cf_vector *v);
 msg_field_type msg_field_get_type(const msg *m, int field_id);
 bool msg_is_set(const msg *m, int field_id);
 int msg_get_uint32(const msg *m, int field_id, uint32_t *val_r);
-int msg_get_int32(const msg *m, int field_id, int32_t *val_r);
 int msg_get_uint64(const msg *m, int field_id, uint64_t *val_r);
-int msg_get_int64(const msg *m, int field_id, int64_t *val_r);
 int msg_get_str(const msg *m, int field_id, char **str_r, size_t *sz_r, msg_get_type type);
 int msg_get_buf(const msg *m, int field_id, uint8_t **buf_r, size_t *sz_r, msg_get_type type);
 
@@ -224,7 +215,7 @@ int msg_get_uint64_array_count(const msg *m, int field_id, uint32_t *count_r);
 int msg_get_uint64_array(const msg *m, int field_id, uint32_t idx, uint64_t *val_r);
 
 bool msg_msgpack_container_get_count(const msg *m, int field_id, uint32_t *count_r);
-bool msg_msgpack_list_get_uint32_array(const msg *m, int field_id, uint32_t **buf_r, uint32_t *count_r);
+bool msg_msgpack_list_get_uint32_array(const msg *m, int field_id, uint32_t *buf_r, uint32_t *count_r);
 bool msg_msgpack_list_get_buf_array(const msg *m, int field_id, cf_vector *v_r, bool init_vec);
 
 static inline bool

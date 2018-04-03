@@ -20,13 +20,8 @@
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
 
-/*
- * An arena that uses persistent memory.
- */
-
-
 //==========================================================
-// Includes
+// Includes.
 //
 
 #include "arenax.h"
@@ -42,12 +37,8 @@
 
 
 //==========================================================
-// Constants
+// Typedefs & constants.
 //
-
-// Limit so stage_size fits in 32 bits.
-// (Probably unnecessary - size_t is 64 bits on our systems.)
-const uint64_t MAX_STAGE_SIZE = 0xFFFFffff;
 
 // Must be in-sync with cf_arenax_err:
 const char* ARENAX_ERR_STRINGS[] = {
@@ -61,22 +52,18 @@ const char* ARENAX_ERR_STRINGS[] = {
 
 
 //==========================================================
-// Public API
+// Public API.
 //
 
-//------------------------------------------------
-// Return persistent memory size needed. Excludes
-// stages, which cf_arenax handles internally.
-//
+// Return persistent memory size needed. Excludes stages, which cf_arenax
+// handles internally.
 size_t
 cf_arenax_sizeof()
 {
 	return sizeof(cf_arenax);
 }
 
-//------------------------------------------------
 // Convert cf_arenax_err to meaningful string.
-//
 const char*
 cf_arenax_errstr(cf_arenax_err err)
 {
@@ -87,156 +74,128 @@ cf_arenax_errstr(cf_arenax_err err)
 	return ARENAX_ERR_STRINGS[err];
 }
 
-//------------------------------------------------
-// Create a cf_arenax object in persistent memory.
-// Also create and attach the first arena stage in
-// persistent memory.
-//
-cf_arenax_err
-cf_arenax_create(cf_arenax* this, key_t key_base, uint32_t element_size,
+// Create a cf_arenax object in persistent memory. Also create and attach the
+// first arena stage in persistent memory.
+void
+cf_arenax_init(cf_arenax* arena, key_t key_base, uint32_t element_size,
 		uint32_t stage_capacity, uint32_t max_stages, uint32_t flags)
 {
 	if (stage_capacity == 0) {
 		stage_capacity = MAX_STAGE_CAPACITY;
 	}
 	else if (stage_capacity > MAX_STAGE_CAPACITY) {
-		cf_warning(CF_ARENAX, "stage capacity %u too large", stage_capacity);
-		return CF_ARENAX_ERR_BAD_PARAM;
+		cf_crash(CF_ARENAX, "stage capacity %u too large", stage_capacity);
 	}
 
 	if (max_stages == 0) {
 		max_stages = CF_ARENAX_MAX_STAGES;
 	}
 	else if (max_stages > CF_ARENAX_MAX_STAGES) {
-		cf_warning(CF_ARENAX, "max stages %u too large", max_stages);
-		return CF_ARENAX_ERR_BAD_PARAM;
+		cf_crash(CF_ARENAX, "max stages %u too large", max_stages);
 	}
 
-	uint64_t stage_size = (uint64_t)stage_capacity * (uint64_t)element_size;
+	arena->key_base = key_base;
+	arena->element_size = element_size;
+	arena->stage_capacity = stage_capacity;
+	arena->max_stages = max_stages;
+	arena->flags = flags;
 
-	if (stage_size > MAX_STAGE_SIZE) {
-		cf_warning(CF_ARENAX, "stage size %lu too large", stage_size);
-		return CF_ARENAX_ERR_BAD_PARAM;
-	}
+	arena->stage_size = (size_t)stage_capacity * element_size;
 
-	this->key_base = key_base;
-	this->element_size = element_size;
-	this->stage_capacity = stage_capacity;
-	this->max_stages = max_stages;
-	this->flags = flags;
-
-	this->stage_size = (size_t)stage_size;
-
-	this->free_h = 0;
+	arena->free_h = 0;
 
 	// Skip 0:0 so null handle is never used.
-	this->at_stage_id = 0;
-	this->at_element_id = 1;
+	arena->at_stage_id = 0;
+	arena->at_element_id = 1;
 
-	if ((flags & CF_ARENAX_BIGLOCK) &&
-			pthread_mutex_init(&this->lock, 0) != 0) {
-		return CF_ARENAX_ERR_UNKNOWN;
+	if ((flags & CF_ARENAX_BIGLOCK) != 0) {
+		pthread_mutex_init(&arena->lock, NULL);
 	}
 
-	this->stage_count = 0;
-	memset(this->stages, 0, sizeof(this->stages));
+	arena->stage_count = 0;
+	memset(arena->stages, 0, sizeof(arena->stages));
 
 	// Add first stage.
-	cf_arenax_err result = cf_arenax_add_stage(this);
-
-	if (result == CF_ARENAX_OK) {
-		// Clear the null element - allocation bypasses it, but it may be read.
-		memset(cf_arenax_resolve(this, 0), 0, element_size);
-	}
-	// No need to detach - add_stage() won't fail and leave attached stage.
-	else if (this->flags & CF_ARENAX_BIGLOCK) {
-		pthread_mutex_destroy(&this->lock);
+	if (cf_arenax_add_stage(arena) != CF_ARENAX_OK) {
+		cf_crash(CF_ARENAX, "failed to add first stage");
 	}
 
-	return result;
+	// Clear the null element - allocation bypasses it, but it may be read.
+	memset(cf_arenax_resolve(arena, 0), 0, element_size);
 }
 
-//------------------------------------------------
 // Allocate an element within the arena.
-//
 cf_arenax_handle
-cf_arenax_alloc(cf_arenax* this)
+cf_arenax_alloc(cf_arenax* arena)
 {
-	if ((this->flags & CF_ARENAX_BIGLOCK) &&
-			pthread_mutex_lock(&this->lock) != 0) {
-		return 0;
+	if ((arena->flags & CF_ARENAX_BIGLOCK) != 0) {
+		pthread_mutex_lock(&arena->lock);
 	}
 
 	cf_arenax_handle h;
 
 	// Check free list first.
-	if (this->free_h != 0) {
-		h = this->free_h;
+	if (arena->free_h != 0) {
+		h = arena->free_h;
 
-		free_element* p_free_element = cf_arenax_resolve(this, h);
+		free_element* p_free_element = cf_arenax_resolve(arena, h);
 
-		this->free_h = p_free_element->next_h;
+		arena->free_h = p_free_element->next_h;
 	}
 	// Otherwise keep end-allocating.
 	else {
-		if (this->at_element_id >= this->stage_capacity) {
-			if (cf_arenax_add_stage(this) != CF_ARENAX_OK) {
-				if (this->flags & CF_ARENAX_BIGLOCK) {
-					pthread_mutex_unlock(&this->lock);
+		if (arena->at_element_id >= arena->stage_capacity) {
+			if (cf_arenax_add_stage(arena) != CF_ARENAX_OK) {
+				if ((arena->flags & CF_ARENAX_BIGLOCK) != 0) {
+					pthread_mutex_unlock(&arena->lock);
 				}
 
 				return 0;
 			}
 
-			this->at_stage_id++;
-			this->at_element_id = 0;
+			arena->at_stage_id++;
+			arena->at_element_id = 0;
 		}
 
-		cf_arenax_set_handle(&h, this->at_stage_id, this->at_element_id);
+		cf_arenax_set_handle(&h, arena->at_stage_id, arena->at_element_id);
 
-		this->at_element_id++;
+		arena->at_element_id++;
 	}
 
-	if (this->flags & CF_ARENAX_BIGLOCK) {
-		pthread_mutex_unlock(&this->lock);
+	if ((arena->flags & CF_ARENAX_BIGLOCK) != 0) {
+		pthread_mutex_unlock(&arena->lock);
 	}
 
-	if (this->flags & CF_ARENAX_CALLOC) {
-		memset(cf_arenax_resolve(this, h), 0, this->element_size);
+	if ((arena->flags & CF_ARENAX_CALLOC) != 0) {
+		memset(cf_arenax_resolve(arena, h), 0, arena->element_size);
 	}
 
 	return h;
 }
 
-//------------------------------------------------
 // Free an element.
-//
 void
-cf_arenax_free(cf_arenax* this, cf_arenax_handle h)
+cf_arenax_free(cf_arenax* arena, cf_arenax_handle h)
 {
-	free_element* p_free_element = cf_arenax_resolve(this, h);
+	free_element* p_free_element = cf_arenax_resolve(arena, h);
 
-	if ((this->flags & CF_ARENAX_BIGLOCK) &&
-			pthread_mutex_lock(&this->lock) != 0) {
-		// TODO - function doesn't return failure - just press on?
-		return;
+	if ((arena->flags & CF_ARENAX_BIGLOCK) != 0) {
+		pthread_mutex_lock(&arena->lock);
 	}
 
 	p_free_element->magic = FREE_MAGIC;
-	p_free_element->next_h = this->free_h;
-	this->free_h = h;
+	p_free_element->next_h = arena->free_h;
+	arena->free_h = h;
 
-	if (this->flags & CF_ARENAX_BIGLOCK) {
-		pthread_mutex_unlock(&this->lock);
+	if ((arena->flags & CF_ARENAX_BIGLOCK) != 0) {
+		pthread_mutex_unlock(&arena->lock);
 	}
 }
 
-//------------------------------------------------
 // Convert cf_arenax_handle to memory address.
-//
 void*
-cf_arenax_resolve(cf_arenax* this, cf_arenax_handle h)
+cf_arenax_resolve(cf_arenax* arena, cf_arenax_handle h)
 {
-	return this->stages[h >> ELEMENT_ID_NUM_BITS] +
-			((h & ELEMENT_ID_MASK) * this->element_size);
+	return arena->stages[h >> ELEMENT_ID_NUM_BITS] +
+			((h & ELEMENT_ID_MASK) * arena->element_size);
 }

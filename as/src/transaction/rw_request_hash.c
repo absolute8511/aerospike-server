@@ -65,7 +65,7 @@ const msg_template rw_mt[] = {
 		{ RW_FIELD_NS_ID, M_FT_UINT32 },
 		{ RW_FIELD_GENERATION, M_FT_UINT32 },
 		{ RW_FIELD_DIGEST, M_FT_BUF },
-		{ RW_FIELD_VINFOSET, M_FT_BUF },
+		{ RW_FIELD_UNUSED_6, M_FT_BUF },
 		{ RW_FIELD_UNUSED_7, M_FT_BUF },
 		{ RW_FIELD_CLUSTER_KEY, M_FT_UINT64 },
 		{ RW_FIELD_RECORD, M_FT_BUF },
@@ -73,12 +73,12 @@ const msg_template rw_mt[] = {
 		{ RW_FIELD_VOID_TIME, M_FT_UINT32 },
 		{ RW_FIELD_INFO, M_FT_UINT32 },
 		{ RW_FIELD_UNUSED_13, M_FT_BUF },
-		{ RW_FIELD_MULTIOP, M_FT_BUF },
-		{ RW_FIELD_LDT_VERSION, M_FT_UINT64 },
+		{ RW_FIELD_UNUSED_14, M_FT_BUF },
+		{ RW_FIELD_UNUSED_15, M_FT_UINT64 },
 		{ RW_FIELD_LAST_UPDATE_TIME, M_FT_UINT64 },
 		{ RW_FIELD_SET_NAME, M_FT_BUF },
 		{ RW_FIELD_KEY, M_FT_BUF },
-		{ RW_FIELD_LDT_BITS, M_FT_UINT32 }
+		{ RW_FIELD_UNUSED_19, M_FT_UINT32 }
 };
 
 COMPILER_ASSERT(sizeof(rw_mt) / sizeof(msg_template) == NUM_RW_FIELDS);
@@ -87,7 +87,14 @@ COMPILER_ASSERT(sizeof(rw_mt) / sizeof(msg_template) == NUM_RW_FIELDS);
 
 
 //==========================================================
-// Forward Declarations.
+// Globals.
+//
+
+static cf_rchash* g_rw_request_hash = NULL;
+
+
+//==========================================================
+// Forward declarations.
 //
 
 uint32_t rw_request_hash_fn(const void* value, uint32_t value_len);
@@ -101,13 +108,6 @@ int rw_msg_cb(cf_node id, msg* m, void* udata);
 
 
 //==========================================================
-// Globals.
-//
-
-static cf_rchash* g_rw_request_hash = NULL;
-
-
-//==========================================================
 // Public API.
 //
 
@@ -116,7 +116,7 @@ as_rw_init()
 {
 	cf_rchash_create(&g_rw_request_hash, rw_request_hash_fn,
 			rw_request_hdestroy, sizeof(rw_request_hkey), 32 * 1024,
-			CF_RCHASH_CR_MT_MANYLOCK);
+			CF_RCHASH_MANY_LOCK);
 
 	pthread_t thread;
 	pthread_attr_t attrs;
@@ -148,18 +148,14 @@ rw_request_hash_insert(rw_request_hkey* hkey, rw_request* rw,
 
 	while ((insert_rv = cf_rchash_put_unique(g_rw_request_hash, hkey,
 			sizeof(*hkey), rw)) != CF_RCHASH_OK) {
-
-		if (insert_rv != CF_RCHASH_ERR_FOUND) {
-			tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN; // malloc failure
-			return TRANS_DONE_ERROR;
-		}
-		// else - rw_request with this digest already in hash - get it.
+		cf_assert(insert_rv == CF_RCHASH_ERR_FOUND, AS_RW, "put-unique error");
+		// rw_request with this digest already in hash - get it.
 
 		rw_request* rw0;
 		int get_rv = cf_rchash_get(g_rw_request_hash, hkey, sizeof(*hkey),
 				(void**)&rw0);
 
-		if (get_rv == CF_RCHASH_ERR_NOTFOUND) {
+		if (get_rv == CF_RCHASH_ERR_NOT_FOUND) {
 			// Try insertion again immediately.
 			continue;
 		}
@@ -228,13 +224,16 @@ handle_hot_key(rw_request* rw0, as_transaction* tr)
 			rw0->from.proxy_node == tr->from.proxy_node &&
 			rw0->from_data.proxy_tid == tr->from_data.proxy_tid) {
 		// If the new transaction is a retransmitted proxy request, don't
-		// queue it or reply to origin, just drop it and feign success.
+		// queue it or reply to origin, just drop it and feign success. (Older
+		// servers will retransmit proxy requests - must handle them.)
 
 		return TRANS_DONE_SUCCESS;
 	}
 	else if (g_config.transaction_pending_limit != 0 &&
-			rw_request_wait_q_depth(rw0) > g_config.transaction_pending_limit) {
+			rw0->wait_queue_depth > g_config.transaction_pending_limit) {
 		// If we're over the hot key pending limit, fail this transaction.
+		cf_detail_digest(AS_RW, &tr->keyd, "{%s} key busy ", tr->rsv.ns->name);
+
 		cf_atomic64_incr(&tr->rsv.ns->n_fail_key_busy);
 		tr->result_code = AS_PROTO_RESULT_FAIL_KEY_BUSY;
 
@@ -243,16 +242,7 @@ handle_hot_key(rw_request* rw0, as_transaction* tr)
 	else {
 		// Queue this transaction on the original rw_request - it will be
 		// retried when the original is complete.
-
-		rw_wait_ele* e = cf_malloc(sizeof(rw_wait_ele));
-		cf_assert(e, AS_RW, "alloc rw_wait_ele");
-
-		as_transaction_copy_head(&e->tr, tr);
-		tr->from.any = NULL;
-		tr->msgp = NULL;
-
-		e->next = rw0->wait_queue_head;
-		rw0->wait_queue_head = e;
+		rw_request_wait_q_push(rw0, tr);
 
 		return TRANS_WAITING;
 	}
@@ -323,11 +313,6 @@ retransmit_reduce_fn(const void* key, uint32_t keylen, void* data, void* udata)
 void
 update_retransmit_stats(const rw_request* rw)
 {
-	// Note - rw->msgp can be null if it's a ship-op.
-	if (! rw->msgp) {
-		return;
-	}
-
 	as_namespace* ns = rw->rsv.ns;
 	as_msg* m = &rw->msgp->msg;
 	bool is_dup_res = rw->repl_write_cb == NULL;
@@ -386,10 +371,6 @@ update_retransmit_stats(const rw_request* rw)
 			ns->n_retransmit_udf_sub_repl_write++;
 		}
 		break;
-	case FROM_NSUP:
-		// nsup deletes don't duplicate resolve.
-		ns->n_retransmit_nsup_repl_write++;
-		break;
 	default:
 		cf_crash(AS_RW, "unexpected transaction origin %u", rw->origin);
 		break;
@@ -431,25 +412,6 @@ rw_msg_cb(cf_node id, msg* m, void* udata)
 		break;
 	case RW_OP_WRITE_ACK:
 		repl_write_handle_ack(id, m);
-		break;
-
-	//--------------------------------------------
-	// LDT-related:
-	//
-	case RW_OP_MULTI:
-		{
-			uint64_t start_ns = g_config.ldt_benchmarks ?  cf_getns() : 0;
-
-			repl_write_handle_multiop(id, m);
-
-			if (start_ns != 0) {
-				histogram_insert_data_point(g_stats.ldt_multiop_prole_hist,
-						start_ns);
-			}
-		}
-		break;
-	case RW_OP_MULTI_ACK:
-		repl_write_handle_multiop_ack(id, m);
 		break;
 
 	default:

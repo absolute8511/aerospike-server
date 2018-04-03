@@ -26,16 +26,20 @@
 // Includes.
 //
 
-#include <stdbool.h>
 #include <stdint.h>
 
 #include "dynbuf.h"
 #include "node.h"
 
-#include "base/datamodel.h"
-#include "base/proto.h"
-#include "base/transaction.h"
-#include "transaction/rw_request.h"
+
+//==========================================================
+// Forward declarations.
+//
+
+struct as_bin_s;
+struct as_msg_op_s;
+struct as_namespace_s;
+struct as_transaction_s;
 
 
 //==========================================================
@@ -46,16 +50,11 @@ void as_proxy_init();
 
 uint32_t as_proxy_hash_count();
 
-bool as_proxy_divert(cf_node dst, as_transaction* tr, as_namespace* ns,
-		uint64_t cluster_key);
-void as_proxy_return_to_sender(const as_transaction* tr, as_namespace* ns);
+void as_proxy_divert(cf_node dst, struct as_transaction_s* tr, struct as_namespace_s* ns);
+void as_proxy_return_to_sender(const struct as_transaction_s* tr, struct as_namespace_s* ns);
 
 void as_proxy_send_response(cf_node dst, uint32_t proxy_tid,
 		uint32_t result_code, uint32_t generation, uint32_t void_time,
-		as_msg_op** ops, as_bin** bins, uint16_t bin_count, as_namespace* ns,
-		uint64_t trid, const char* set_name);
-void as_proxy_send_ops_response(cf_node dst, uint32_t proxy_tid,
-		cf_dyn_buf* db);
-
-// LDT-related.
-void as_proxy_shipop(cf_node dst, rw_request* rw);
+		struct as_msg_op_s** ops, struct as_bin_s** bins, uint16_t bin_count,
+		struct as_namespace_s* ns, uint64_t trid);
+void as_proxy_send_ops_response(cf_node dst, uint32_t proxy_tid, cf_dyn_buf* db);

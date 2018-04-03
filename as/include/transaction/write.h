@@ -30,7 +30,14 @@
 
 
 //==========================================================
+// Forward declarations.
+//
+
+struct as_transaction_s;
+
+
+//==========================================================
 // Public API.
 //
 
-transaction_status as_write_start(as_transaction* tr);
+transaction_status as_write_start(struct as_transaction_s* tr);

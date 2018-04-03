@@ -86,17 +86,15 @@ by the build environment.  In that case:
 
 #### Python 2
 
-Building the server with ASMalloc support and running the Telemetry
-Agent both require Python 2.6+, which is available by default on most
+Running the Telemetry Agent requires Python 2.6+, which is available by default on most
 platforms, and can be installed on Ubuntu 16.04 as the package `python`.
 
 ### Submodules
 
-The Aerospike Database Server build depends upon (up to) 9 submodules:
+The Aerospike Database Server build depends upon 8 submodules:
 
 | Submodule | Description |
 |---------- | ----------- |
-| asmalloc  | The ASMalloc Memory Allocation Tracking Tool |
 | common    | The Aerospike Common Library |
 | jansson   | C library for encoding, decoding and manipulating JSON data |
 | jemalloc  | The JEMalloc Memory Allocator |
@@ -147,10 +145,6 @@ on multiple CPU cores. For example, to run four parallel jobs:
 	$ make cleangit -- Delete all files untracked by Git.  (Use with caution!)
 
 	$ make strip    -- Build "strip(1)"ed versions of the server executables.
-
-### Advanced Build Options
-
-	$ make asm      -- Build the server with ASMalloc support.
 
 ### Overriding Default Build Options
 

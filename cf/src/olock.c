@@ -28,13 +28,14 @@
 #include "olock.h"
 
 #include <errno.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
 #include <citrusleaf/cf_digest.h>
 #include <citrusleaf/alloc.h>
+
+#include <cf_mutex.h>
 
 
 // This ruins the notion that olocks are a generic class, but...
@@ -56,19 +57,17 @@ olock_lock(olock *ol, cf_digest *d)
 {
 	uint32_t n = OLOCK_HASH(ol, d);
 
-	pthread_mutex_lock(&ol->locks[n]);
+	cf_mutex_lock(&ol->locks[n]);
 }
 
 void
-olock_vlock(olock *ol, cf_digest *d, pthread_mutex_t **vlock)
+olock_vlock(olock *ol, cf_digest *d, cf_mutex **vlock)
 {
 	uint32_t n = OLOCK_HASH(ol, d);
 
 	*vlock = &ol->locks[n];
 
-	if (0 != pthread_mutex_lock(*vlock)) {
-		fprintf(stderr, "olock vlock failed\n");
-	}
+	cf_mutex_lock(*vlock);
 }
 
 void
@@ -76,19 +75,13 @@ olock_unlock(olock *ol, cf_digest *d)
 {
 	uint32_t n = OLOCK_HASH(ol, d);
 
-	if (0 != pthread_mutex_unlock(&ol->locks[n])) {
-		fprintf(stderr, "olock unlock failed %d\n", errno);
-	}
+	cf_mutex_unlock(&ol->locks[n]);
 }
 
 olock *
 olock_create(uint32_t n_locks, bool mutex)
 {
-	olock *ol = cf_malloc(sizeof(olock) + (sizeof(pthread_mutex_t) * n_locks));
-
-	if (! ol) {
-		return 0;
-	}
+	olock *ol = cf_malloc(sizeof(olock) + (sizeof(cf_mutex) * n_locks));
 
 	uint32_t mask = n_locks - 1;
 
@@ -100,13 +93,11 @@ olock_create(uint32_t n_locks, bool mutex)
 	ol->n_locks = n_locks;
 	ol->mask = mask;
 
-	for (int i = 0; i < n_locks; i++) {
-		if (mutex) {
-			pthread_mutex_init(&ol->locks[i], 0);
-		}
-		else {
-			fprintf(stderr, "olock: todo add reader writer locks\n");
-		}
+	if (mutex) {
+		memset(ol->locks, 0, sizeof(cf_mutex) * n_locks);
+	}
+	else {
+		fprintf(stderr, "olock: todo add reader writer locks\n");
 	}
 
 	return ol;
@@ -116,7 +107,7 @@ void
 olock_destroy(olock *ol)
 {
 	for (int i = 0; i < ol->n_locks; i++) {
-		pthread_mutex_destroy(&ol->locks[i]);
+		cf_mutex_destroy(&ol->locks[i]);
 	}
 
 	cf_free(ol);

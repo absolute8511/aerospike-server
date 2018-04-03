@@ -1,7 +1,7 @@
 /*
- * ldt_aerospike.h
+ * meta_batch.h
  *
- * Copyright (C) 2013-2016 Aerospike, Inc.
+ * Copyright (C) 2017 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -22,14 +22,21 @@
 
 #pragma once
 
-#include "base/udf_record.h"
-#include "aerospike/as_aerospike.h"
+//==========================================================
+// Forward declarations.
+//
 
-extern         as_aerospike g_ldt_aerospike;
-extern const   as_aerospike_hooks ldt_aerospike_hooks;
+struct meta_in_q_s;
+struct meta_out_q_s;
 
-as_aerospike * ldt_aerospike_new();
-as_aerospike * ldt_aerospike_init(as_aerospike *);
-int            ldt_init(void);
-void           ldt_record_init(ldt_record *lrecord);
-int            ldt_record_destroy(ldt_record *lrecord);
+
+//==========================================================
+// Public API.
+//
+
+struct meta_in_q_s *meta_in_q_create();
+void meta_in_q_destroy(struct meta_in_q_s *iq);
+void meta_in_q_rejected(struct meta_in_q_s *iq);
+
+struct meta_out_q_s *meta_out_q_create();
+void meta_out_q_destroy(struct meta_out_q_s *oq);

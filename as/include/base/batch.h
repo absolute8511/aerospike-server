@@ -29,8 +29,7 @@ typedef struct as_batch_shared_s as_batch_shared;
 
 int as_batch_init();
 int as_batch_queue_task(as_transaction* tr);
-void as_batch_add_result(as_transaction* tr, const char* setname, uint32_t generation,
-		uint32_t void_time, uint16_t n_bins, as_bin** bins, as_msg_op** ops);
+void as_batch_add_result(as_transaction* tr, uint16_t n_bins, as_bin** bins, as_msg_op** ops);
 void as_batch_add_proxy_result(as_batch_shared* shared, uint32_t index, cf_digest* digest, cl_msg* cmsg, size_t size);
 void as_batch_add_error(as_batch_shared* shared, uint32_t index, int result_code);
 int as_batch_threads_resize(uint32_t threads);

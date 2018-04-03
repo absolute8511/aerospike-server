@@ -40,9 +40,10 @@
 // Typedefs
 //
 
+// Values stored on drive - be careful.
 typedef enum {
 	CL_REC_PROPS_FIELD_SET_NAME	= 0,
-	CL_REC_PROPS_FIELD_LDT_TYPE	= 1,
+	CL_REC_PROPS_FIELD_UNUSED_1	= 1,
 	CL_REC_PROPS_FIELD_KEY		= 2,
 	CL_REC_PROPS_FIELD_LAST_PLUS_1
 } as_rec_props_field_id;
@@ -72,7 +73,7 @@ void as_rec_props_add_field_null_terminate(as_rec_props *_this,
 		as_rec_props_field_id id, uint32_t value_len, const uint8_t *p_value);
 
 size_t as_rec_props_size_all(const uint8_t *set_name, size_t set_name_len,
-		const uint8_t *key, size_t key_size, uint32_t ldt_bits);
+		const uint8_t *key, size_t key_size);
 void as_rec_props_fill_all(as_rec_props *_this, uint8_t *p_data,
 		const uint8_t *set_name, size_t set_name_len, const uint8_t *key,
-		size_t key_size, uint32_t ldt_bits);
+		size_t key_size);

@@ -29,15 +29,22 @@
 #include "msg.h"
 #include "node.h"
 
-#include "base/transaction.h"
 #include "transaction/rw_request.h"
+
+
+//==========================================================
+// Forward declarations.
+//
+
+struct as_transaction_s;
+struct rw_request_s;
 
 
 //==========================================================
 // Public API.
 //
 
-bool dup_res_make_message(rw_request* rw, as_transaction* tr);
-void dup_res_setup_rw(rw_request* rw, as_transaction* tr, dup_res_done_cb dup_res_cb, timeout_done_cb timeout_cb);
+void dup_res_make_message(struct rw_request_s* rw, struct as_transaction_s* tr);
+void dup_res_setup_rw(struct rw_request_s* rw, struct as_transaction_s* tr, dup_res_done_cb dup_res_cb, timeout_done_cb timeout_cb);
 void dup_res_handle_request(cf_node node, msg* m);
 void dup_res_handle_ack(cf_node node, msg* m);

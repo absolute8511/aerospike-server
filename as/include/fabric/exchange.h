@@ -122,3 +122,15 @@ as_exchange_info_get_succession(cf_dyn_buf* db);
  */
 cf_node
 as_exchange_principal();
+
+/**
+ * Lock before setting or getting exchanged info from non-exchange thread.
+ */
+void
+as_exchange_info_lock();
+
+/**
+ * Unlock after setting or getting exchanged info from non-exchange thread.
+ */
+void
+as_exchange_info_unlock();

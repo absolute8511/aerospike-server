@@ -41,9 +41,9 @@
  *
  * Relies on a global 64 bit variable that has the logical time.
  * The 48 MSBs include the physical component of the timestamp and the least
- * significant 16 bits include the logical
- * component. 48 bits for milliseconds since epoch gives us (8925 - years
- * elapsed since epoch today) years before wrap around.
+ * significant 16 bits include the logical component. 48 bits for milliseconds
+ * since epoch gives us (8925 - years elapsed since epoch today) years before
+ * wrap around.
  *
  * The notion of HLC is to bound the skew between the logical clock and phsycial
  * clock. This requires rejecting updates to the clock from nodes with large
@@ -68,26 +68,35 @@
  * Not guaranteed (requires hlc persistence across service restarts)
  * ==============
  * 1. On service restart the HLC clock will not start where it left off, however
- * it
- * will eventually leapfrog the older value. Fixing this requires the
- * persistence which is not implemented. eventually leapfrogging is alright for
- * all current requirements.
- * 2. If a as_hlc_msg_timestamp is persisted and compares with a current running
+ * it will eventually leapfrog the older value. Fixing this requires persistence
+ * which is not implemented. eventually leapfrogging is alright for all current
+ * requirements.
+ * 2. If a as_hlc_msg_timestamp is persisted and compared with a current running
  * value, the result may not be correct.
  *
  *
  * Requirements
  * ============
  * Subsystems that reply on hlc should have their network messages timestamped
- * with hlc timestamps and should invoke the as_hlc_timestamp_update on
- * receipt of every message. This will ensure the hlc are in sync across the
- * cluster and (send hlc ts)  < (message receive hlc ts).
+ * with hlc timestamps and should invoke the as_hlc_timestamp_update on receipt
+ * of every message. This will ensure the hlc are in sync across the cluster and
+ * (send hlc ts)  < (message receive hlc ts).
  */
 
 /**
  * Global timestamp with current hlc value.
  */
 static as_hlc_timestamp g_now;
+
+/**
+ * Previous value of the physical component.
+ */
+static cf_atomic64 g_prev_physical_component;
+
+/**
+ * Previous value of the wall clock, when the physical component changed.
+ */
+static cf_atomic64 g_prev_wall_clock;
 
 /*
  * ----------------------------------------------------------------------------
@@ -103,13 +112,6 @@ static as_hlc_timestamp g_now;
  * Mask for logical component of a hls timestamp.
  */
 #define LOGICAL_TS_MASK 0x000000000000ffff
-
-/**
- * Increment the logical timestamp and deal with a wrap around by incrementing
- * the physical timestamp.
- */
-#define LOGICAL_TS_INCR(logical_ts, physical_ts)		\
-{logical_ts++; if (logical_ts == 0) {physical_ts++;}}
 
 /**
  * Print the skew warning once every five seconds.
@@ -145,10 +147,12 @@ hlc_logical_ts_get(as_hlc_timestamp hlc_ts);
 static void
 hlc_physical_ts_set(as_hlc_timestamp* hlc_ts, cf_clock physical_ts);
 static void
+hlc_physical_ts_on_set(cf_clock physical_ts, cf_clock wall_clock_now);
+static void
 hlc_logical_ts_set(as_hlc_timestamp* hlc_ts, uint16_t logical_ts);
-static bool
-hlc_is_skew_tolerable(cf_node source, cf_clock send_ts_physical_ts,
-		cf_clock wall_clock_physical_ts, cf_clock current_hlc_physical_ts);
+static void
+hlc_logical_ts_incr(uint16_t* logical_ts, cf_clock* physical_ts,
+		cf_clock wall_clock_now);
 
 /*
  * ----------------------------------------------------------------------------
@@ -162,6 +166,8 @@ void
 as_hlc_init()
 {
 	g_now = 0;
+	g_prev_physical_component = 0;
+	g_prev_wall_clock = 0;
 }
 
 /**
@@ -175,35 +181,33 @@ as_hlc_physical_ts_get(as_hlc_timestamp hlc_ts)
 }
 
 /**
- * Return a hlc timestamp representing the hlc time "now". The notion is to
- * make the minimum increment to the hlc timestamp necessary.
+ * Return a hlc timestamp representing the hlc time "now". The notion is to make
+ * the minimum increment to the hlc timestamp necessary.
  */
 as_hlc_timestamp
 as_hlc_timestamp_now()
 {
-	// Keep trying till an atomic operation succeeds. Looks like a
-	// tight loop but even with reasonable contention should not
-	// take more then a few iterations to succeed.
+	// Keep trying till an atomic operation succeeds. Looks like a tight loop
+	// but even with reasonable contention should not take more then a few
+	// iterations to succeed.
 	while (true) {
 		as_hlc_timestamp current_hlc_ts = hlc_ts_get();
 
-		// Initialize the new physical and logical values to current
-		// values.
+		// Initialize the new physical and logical values to current values.
 		cf_clock new_hlc_physical_ts = hlc_physical_ts_get(current_hlc_ts);
 		uint16_t new_hlc_logical_ts = hlc_logical_ts_get(current_hlc_ts);
 
 		cf_clock wall_clock_physical_ts = hlc_wall_clock_get();
 
 		if (new_hlc_physical_ts >= wall_clock_physical_ts) {
-			// The HLC physical component is greater than the
-			// physical wall time, just advance the logical
-			// timestamp.
-			LOGICAL_TS_INCR(new_hlc_logical_ts, new_hlc_physical_ts);
-
+			// The HLC physical component is greater than the physical wall
+			// time. Advance the logical timestamp.
+			hlc_logical_ts_incr(&new_hlc_logical_ts, &new_hlc_physical_ts,
+					wall_clock_physical_ts);
 		}
 		else {
-			// The wall clocl has is greater, use this as the
-			// physical component and reset the logical timestamp.
+			// The wall clock is greater, use this as the physical component and
+			// reset the logical timestamp.
 			new_hlc_physical_ts = wall_clock_physical_ts;
 			new_hlc_logical_ts = 0;
 		}
@@ -214,7 +218,8 @@ as_hlc_timestamp_now()
 		hlc_logical_ts_set(&new_hlc_ts, new_hlc_logical_ts);
 
 		if (hlc_ts_set(current_hlc_ts, new_hlc_ts)) {
-			DETAIL("Changed HLC value from %" PRIu64 " to %" PRIu64,
+			hlc_physical_ts_on_set(new_hlc_physical_ts, wall_clock_physical_ts);
+			DETAIL("changed HLC value from %" PRIu64 " to %" PRIu64,
 					current_hlc_ts, new_hlc_ts);
 			return new_hlc_ts;
 		}
@@ -237,11 +242,10 @@ as_hlc_timestamp_update(cf_node source, as_hlc_timestamp send_ts,
 	cf_clock send_ts_physical_ts = hlc_physical_ts_get(send_ts);
 	uint16_t send_ts_logical_ts = hlc_logical_ts_get(send_ts);
 
-	// Keep trying till an atomic operation succeeds. Looks like a
-	// tight loop but even with reasonable contention should not
-	// take more then a few iterations to succeed.
+	// Keep trying till an atomic operation succeeds. Looks like a tight loop
+	// but even with reasonable contention should not take more then a few
+	// iterations to succeed.
 	while (true) {
-
 		as_hlc_timestamp current_hlc_ts = hlc_ts_get();
 
 		cf_clock current_hlc_physical_ts = hlc_physical_ts_get(current_hlc_ts);
@@ -256,43 +260,34 @@ as_hlc_timestamp_update(cf_node source, as_hlc_timestamp send_ts,
 
 		if (new_hlc_physical_ts == current_hlc_physical_ts
 				&& new_hlc_physical_ts == send_ts_physical_ts) {
-			// There is no change in the physical components of all
-			// three clocks. Set logical component to max of the two
-			// values and increment.
+			// There is no change in the physical components of peer and local
+			// hlc clocks. Set logical component to max of the two values and
+			// increment.
 			new_hlc_logical_ts = MAX(current_hlc_logical_ts,
 					send_ts_logical_ts);
-			LOGICAL_TS_INCR(new_hlc_logical_ts, new_hlc_physical_ts);
-
+			hlc_logical_ts_incr(&new_hlc_logical_ts, &new_hlc_physical_ts,
+					wall_clock_physical_ts);
 		}
 		else if (new_hlc_physical_ts == current_hlc_physical_ts) {
-			// The physical component of the send timestamp is
-			// smaller than our current physical component. We just
-			// need to increment the logical component.
+			// The physical component of the send timestamp is smaller than our
+			// current physical component. We just need to increment the logical
+			// component.
 			new_hlc_logical_ts = current_hlc_ts;
-			LOGICAL_TS_INCR(new_hlc_logical_ts, new_hlc_physical_ts);
+			hlc_logical_ts_incr(&new_hlc_logical_ts, &new_hlc_physical_ts,
+					wall_clock_physical_ts);
 		}
 		else if (new_hlc_physical_ts == send_ts_physical_ts) {
-			if (!hlc_is_skew_tolerable(source, send_ts_physical_ts,
-					wall_clock_physical_ts, current_hlc_physical_ts)) {
-				// Reject the update.
-				if (msg_ts) {
-					msg_ts->send_ts = send_ts;
-					msg_ts->recv_ts = as_hlc_timestamp_now();
-				}
-				return;
-			}
-			// Current physical component is lesser than the
-			// incoming physical component. We need to ensure that
-			// the updated logical component is greater than he
-			// send logical component.
+			// Current physical component is lesser than the incoming physical
+			// component. We need to ensure that the updated logical component
+			// is greater than the send logical component.
 			new_hlc_logical_ts = send_ts_logical_ts;
-			LOGICAL_TS_INCR(new_hlc_logical_ts, new_hlc_physical_ts);
+			hlc_logical_ts_incr(&new_hlc_logical_ts, &new_hlc_physical_ts,
+					wall_clock_physical_ts);
 		}
 		else {
-			// Our physical clock is greater than current physical
-			// component and the send physical component. We can
-			// reset the logical clock to zero and still maintain
-			// the send and receive ordering.
+			// Our physical clock is greater than current physical component and
+			// the send physical component. We can reset the logical clock to
+			// zero and still maintain the send and receive ordering.
 			new_hlc_logical_ts = 0;
 		}
 
@@ -302,10 +297,8 @@ as_hlc_timestamp_update(cf_node source, as_hlc_timestamp send_ts,
 		hlc_logical_ts_set(&new_hlc_ts, new_hlc_logical_ts);
 
 		if (hlc_ts_set(current_hlc_ts, new_hlc_ts)) {
-			DETAIL("Message received from node %" PRIx64
-					" with HLC %" PRIu64
-					". Changed HLC value from %" PRIu64
-					" to %" PRIu64,
+			hlc_physical_ts_on_set(new_hlc_physical_ts, wall_clock_physical_ts);
+			DETAIL("message received from node %" PRIx64 " with HLC %" PRIu64 " - changed HLC value from %" PRIu64 " to %" PRIu64,
 					source, send_ts, current_hlc_ts, new_hlc_ts);
 			if (msg_ts) {
 				msg_ts->send_ts = send_ts;
@@ -318,10 +311,10 @@ as_hlc_timestamp_update(cf_node source, as_hlc_timestamp send_ts,
 
 /**
  * Return the difference in milliseconds between two hlc timestamps. Note this
- * difference may be greater than or equal to (but never less than)  the
- * physical wall call difference, because HLC can have non linear jumps,
- * whenever the clock is adjusted. The
- * difference should be used as an estimate rather than an absolute difference.
+ * difference may be greater than or equal to (but never less than)
+ * the physical wall call difference, because HLC can have non linear jumps,
+ * whenever the clock is adjusted. The difference should be used as an estimate
+ * rather than an absolute difference.
  * For e.g. use the difference to check that the real time difference is most
  * some number of milliseconds. However do not use this for interval statistics
  * or to check if the difference in time is at least some number of
@@ -329,8 +322,8 @@ as_hlc_timestamp_update(cf_node source, as_hlc_timestamp send_ts,
  *
  * @param ts1 the first timestamp.
  * @param ts2 the seconds timestamp.
- * @return ts1 - ts2 in milliseconds. if ts1 < ts2 the result is negative, else
- * it is positive or zero.
+ * @return ts1 - ts2 in milliseconds. if ts1 < ts2 the result is negative,
+ * else it is positive or zero.
  */
 int64_t
 as_hlc_timestamp_diff_ms(as_hlc_timestamp ts1, as_hlc_timestamp ts2)
@@ -359,8 +352,8 @@ as_hlc_send_timestamp_order(as_hlc_timestamp local_ts,
 		as_hlc_msg_timestamp* msg_ts)
 {
 	if (local_ts > msg_ts->recv_ts) {
-		// The local event happened after the local message received
-		// timestamp and therefore after the remote send as well.
+		// The local event happened after the local message received timestamp
+		// and therefore after the remote send as well.
 		return AS_HLC_HAPPENS_AFTER;
 	}
 
@@ -368,8 +361,8 @@ as_hlc_send_timestamp_order(as_hlc_timestamp local_ts,
 	uint64_t offset = abs(msg_ts->send_ts - msg_ts->recv_ts);
 
 	if (local_ts > (msg_ts->recv_ts - offset)) {
-		// Local timestamp is in the uncertainty window. We cannot tell
-		// the order.
+		// Local timestamp is in the uncertainty window. We cannot tell the
+		// order.
 		return AS_HLC_ORDER_INDETERMINATE;
 	}
 
@@ -378,8 +371,8 @@ as_hlc_send_timestamp_order(as_hlc_timestamp local_ts,
 
 	if ((recv_physical_ts - local_physical_ts)
 			< g_config.fabric_latency_max_ms) {
-		// Consider the max network delay worth of time to also be part
-		// of the uncertainty window.
+		// Consider the max network delay worth of time to also be part of the
+		// uncertainty window.
 		return AS_HLC_ORDER_INDETERMINATE;
 	}
 
@@ -409,12 +402,12 @@ as_hlc_timestamp_order_get(as_hlc_timestamp ts1, as_hlc_timestamp ts2)
 }
 
 /**
- * Substract milliseconds worth of time from the timestamp.
+ * Subtract milliseconds worth of time from the timestamp.
  * @param timestamp the input timestamp.
- * @param ms the number of milliseconds to substract.
+ * @param ms the number of milliseconds to subtract.
  */
 as_hlc_timestamp
-as_hlc_timestamp_substract_ms(as_hlc_timestamp timestamp, int ms)
+as_hlc_timestamp_subtract_ms(as_hlc_timestamp timestamp, int ms)
 {
 	cf_clock physical_ts = hlc_physical_ts_get(timestamp);
 	uint16_t logical_ts = hlc_logical_ts_get(timestamp);
@@ -436,12 +429,9 @@ as_hlc_dump(bool verbose)
 	cf_clock current_hlc_physical_ts = hlc_physical_ts_get(now);
 	uint16_t current_hlc_logical_ts = hlc_logical_ts_get(now);
 
-	INFO("HLC Ts:%" PRIu64 " HLC Physical Ts:%" PRIu64
-			" HLC Logical Ts:%d Wall Clock:%" PRIu64
-			" Tolerable skew:%d ms",
+	INFO("HLC Ts:%" PRIu64 " HLC Physical Ts:%" PRIu64 " HLC Logical Ts:%d Wall Clock:%" PRIu64,
 			now, current_hlc_physical_ts, current_hlc_logical_ts,
-			hlc_wall_clock_get(),
-			g_config.clock_skew_max_ms);
+			hlc_wall_clock_get());
 }
 
 /*
@@ -449,14 +439,15 @@ as_hlc_dump(bool verbose)
  * Private functions.
  * ----------------------------------------------------------------------------
  */
+
 /**
  * Return this node's wall clock.
  */
 static cf_clock
 hlc_wall_clock_get()
 {
-	// Unix timestamps will be 48 bits for a reasonable future. We will use
-	// only 48 bits.
+	// Unix timestamps will be 48 bits for a reasonable future. We will use only
+	// 48 bits.
 	return cf_clock_getabsolute();
 }
 
@@ -494,6 +485,41 @@ hlc_physical_ts_set(as_hlc_timestamp* hlc_ts, cf_clock physical_ts)
 }
 
 /**
+ * Handle setting updating the physical component of the hlc timestamp.
+ */
+static void
+hlc_physical_ts_on_set(cf_clock physical_ts, cf_clock wall_clock_now)
+{
+	if (g_prev_physical_component != physical_ts) {
+		g_prev_physical_component = physical_ts;
+		g_prev_wall_clock = wall_clock_now;
+	}
+}
+
+/**
+ * Increment the logical timestamp and deal with a wrap around by incrementing
+ * the physical timestamp and ensure physical component moves at least at the
+ * rate of the wall clock to ensure hlc can be used as a crude measure of time
+ * intervals.
+ */
+static void
+hlc_logical_ts_incr(uint16_t* logical_ts, cf_clock* physical_ts,
+		cf_clock wall_clock_now)
+{
+	(*logical_ts)++;
+	if (logical_ts == 0) {
+		(*physical_ts)++;
+	}
+	cf_clock physical_component_diff = *physical_ts - g_prev_physical_component;
+	cf_clock wall_clock_diff =
+			(wall_clock_now > g_prev_wall_clock) ?
+					wall_clock_now - g_prev_wall_clock : 0;
+	if (physical_component_diff < wall_clock_diff) {
+		*physical_ts += wall_clock_diff - physical_component_diff;
+	}
+}
+
+/**
  * Set the logical component of a hlc timestamp.
  * @param hlc_ts the timestamp
  * @param logical_ts the logical timestamp whose value should be set into the
@@ -528,41 +554,4 @@ hlc_ts_set(as_hlc_timestamp old_value, as_hlc_timestamp new_value)
 {
 	// Default to ck atomic check and set.
 	return ck_pr_cas_64(&g_now, old_value, new_value);
-}
-
-/**
- * Check if the skew exceeds configured offset.
- * @param source the source node for the incoming message.
- * @param send_ts_physical_ts the physical component of the message send
- * timestamp.
- * @param wall_clock_physical_ts the current wall clock.
- * @param current_hlc_physical_ts current hlc's physical component.
- */
-static bool
-hlc_is_skew_tolerable(cf_node source, cf_clock send_ts_physical_ts,
-		cf_clock wall_clock_physical_ts, cf_clock current_hlc_physical_ts)
-{
-	// Control the rate of print of clock skew exceeded warnings.
-	static cf_clock last_skew_warning_print = 0;
-
-	if (g_config.clock_skew_max_ms > 0&&
-	send_ts_physical_ts - wall_clock_physical_ts >
-	g_config.clock_skew_max_ms &&
-	last_skew_warning_print !=
-	cf_getms() / SKEW_WARNING_INTERVAL_MS()) {
-
-		// Incoming message is causing a large jump in
-		// physical component.
-		WARNING("HLC jumped by %" PRIu64
-				" milliseconds with message from %" PRIx64
-				". Current physical clock:%" PRIu64
-				" Current HLC:%" PRIu64 " Incoming HLC:%" PRIu64
-				" Tolerable skew:%d ms",
-				send_ts_physical_ts - wall_clock_physical_ts, source,
-				wall_clock_physical_ts, current_hlc_physical_ts,
-				send_ts_physical_ts,
-				g_config.clock_skew_max_ms);
-	}
-
-	return true;
 }

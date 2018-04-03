@@ -20,9 +20,11 @@
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
 
-// Internode network communications.
-
 #pragma once
+
+//==========================================================
+// Includes.
+//
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -31,8 +33,15 @@
 #include "msg.h"
 #include "node.h"
 #include "socket.h"
+#include "tls.h"
 
-#include "fabric/hb.h"
+
+//==========================================================
+// Forward declarations.
+//
+
+struct as_endpoint_list_s;
+struct as_hb_plugin_node_data_s;
 
 
 //==========================================================
@@ -40,33 +49,21 @@
 //
 
 #define AS_FABRIC_SUCCESS			(0)
-#define AS_FABRIC_ERR_UNKNOWN		(-1)
-#define AS_FABRIC_ERR_QUEUE_FULL	(-2)
+#define AS_FABRIC_ERR_UNKNOWN		(-1)	// used by transact
 #define AS_FABRIC_ERR_NO_NODE		(-3)
-#define AS_FABRIC_ERR_BAD_MSG		(-4)
-#define AS_FABRIC_ERR_UNINITIALIZED	(-5)
-#define AS_FABRIC_ERR_TIMEOUT		(-6)
+#define AS_FABRIC_ERR_TIMEOUT		(-6)	// used by transact
 
 typedef enum {
 	AS_FABRIC_CHANNEL_RW = 0,	// duplicate resolution and replica writes
 	AS_FABRIC_CHANNEL_CTRL = 1,	// clustering, migration ctrl and services info
 	AS_FABRIC_CHANNEL_BULK = 2,	// migrate records
-	AS_FABRIC_CHANNEL_META = 3, // smd
+	AS_FABRIC_CHANNEL_META = 3,	// smd
 
 	AS_FABRIC_N_CHANNELS
 } as_fabric_channel;
 
-// Fabric must support the maximum cluster size.
-#define MAX_NODES_LIST (AS_CLUSTER_SZ)
-
 #define MAX_FABRIC_CHANNEL_THREADS 128
 #define MAX_FABRIC_CHANNEL_SOCKETS 128
-
-typedef struct as_node_list_t {
-	uint32_t sz;
-	uint32_t alloc_sz;
-	cf_node nodes[MAX_NODES_LIST];
-} as_node_list;
 
 typedef struct fabric_rate_s {
 	uint64_t s_bytes[AS_FABRIC_N_CHANNELS];
@@ -75,7 +72,7 @@ typedef struct fabric_rate_s {
 
 typedef int (*as_fabric_msg_fn) (cf_node node_id, msg *m, void *udata);
 typedef int (*as_fabric_transact_recv_fn) (cf_node node_id, msg *m, void *transact_data, void *udata);
-typedef int (*as_fabric_transact_complete_fn) (msg *rsp, void *udata, int as_fabric_err);
+typedef int (*as_fabric_transact_complete_fn) (msg *rsp, void *udata, int err);
 
 
 //==========================================================
@@ -83,7 +80,7 @@ typedef int (*as_fabric_transact_complete_fn) (msg *rsp, void *udata, int as_fab
 //
 
 extern cf_serv_cfg g_fabric_bind;
-extern cf_ip_port g_fabric_port;
+extern cf_tls_info *g_fabric_tls;
 
 
 //==========================================================
@@ -94,9 +91,9 @@ extern cf_ip_port g_fabric_port;
 // msg
 //
 
-msg *as_fabric_msg_get(msg_type t);
-void as_fabric_msg_put(msg *);
-void as_fabric_msg_queue_dump();
+msg *as_fabric_msg_get(msg_type type);
+void as_fabric_msg_put(msg *m);
+void as_fabric_msg_queue_dump(void);
 
 //------------------------------------------------
 // as_fabric
@@ -106,8 +103,11 @@ int as_fabric_init(void);
 int as_fabric_start(void);
 void as_fabric_set_recv_threads(as_fabric_channel channel, uint32_t count);
 int as_fabric_send(cf_node node_id, msg *m, as_fabric_channel channel);
-int as_fabric_send_list(cf_node *node_ids, int nodes_sz, msg *m, as_fabric_channel channel);
-void as_fabric_register_msg_fn(msg_type type, const msg_template *mt, size_t mt_sz, size_t scratch_sz, as_fabric_msg_fn msg_cb, void *udata_msg);
+int as_fabric_send_list(const cf_node *nodes, uint32_t node_count, msg *m, as_fabric_channel channel);
+void as_fabric_register_msg_fn(msg_type type, const msg_template *mt, size_t mt_sz, size_t scratch_sz, as_fabric_msg_fn msg_cb, void *msg_udata);
+void as_fabric_info_peer_endpoints_get(cf_dyn_buf *db);
+bool as_fabric_is_published_endpoint_list(const struct as_endpoint_list_s *list);
+struct as_endpoint_list_s *as_fabric_hb_plugin_get_endpoint_list(struct as_hb_plugin_node_data_s *plugin_data);
 void as_fabric_rate_capture(fabric_rate *rate);
 void as_fabric_dump(bool verbose);
 

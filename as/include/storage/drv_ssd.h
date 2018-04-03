@@ -34,8 +34,10 @@
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_queue.h"
 
+#include "cf_mutex.h"
 #include "hist.h"
 
+#include "base/datamodel.h"
 #include "fabric/partition.h"
 
 
@@ -67,6 +69,9 @@ struct drv_ssd_s;
 // 1 - original
 // 2 - minimum storage increment (RBLOCK_SIZE) from 512 to 128 bytes
 
+// Device header flags.
+#define SSD_HEADER_FLAG_ENCRYPTED	0x01
+
 #define MAX_SSD_THREADS 20
 
 
@@ -78,7 +83,8 @@ typedef struct {
 	uint64_t	random;			// a random value - good for telling all disks are of the same state
 	uint32_t	write_block_size;
 	uint32_t	last_evict_void_time;
-	uint16_t	version;
+	uint8_t		version;
+	uint8_t		flags;
 	uint16_t	devices_n;		// number of devices
 	uint32_t	header_length;
 	char		namespace[32];	// ascii representation of the namespace name, null-terminated
@@ -89,6 +95,15 @@ typedef struct {
 
 
 //------------------------------------------------
+// A defragged wblock waiting to be freed.
+//
+typedef struct vacated_wblock_s {
+	uint32_t file_id;
+	uint32_t wblock_id;
+} vacated_wblock;
+
+
+//------------------------------------------------
 // Write buffer - where records accumulate until
 // (the full buffer is) flushed to a device.
 //
@@ -96,6 +111,9 @@ typedef struct {
 	cf_atomic32			rc;
 	cf_atomic32			n_writers;	// number of concurrent writers
 	bool				skip_post_write_q;
+	uint32_t			n_vacated;
+	uint32_t			vacated_capacity;
+	vacated_wblock		*vacated_wblocks;
 	struct drv_ssd_s	*ssd;
 	uint32_t			wblock_id;
 	uint32_t			pos;
@@ -107,10 +125,11 @@ typedef struct {
 // Per-wblock information.
 //
 typedef struct ssd_wblock_state_s {
-	pthread_mutex_t		LOCK;		// transactions, write_worker, and defrag all are interested in wblock_state
-	uint32_t			state;		// for now just a defrag flag
 	cf_atomic32			inuse_sz;	// number of bytes currently used in the wblock
+	cf_mutex			LOCK;		// transactions, write_worker, and defrag all are interested in wblock_state
 	ssd_write_buf		*swb;		// pending writes for the wblock, also treated as a cache for reads
+	uint32_t			state;		// for now just a defrag flag
+	cf_atomic32			n_vac_dests; // number of wblocks into which this wblock defragged
 } ssd_wblock_state;
 
 // wblock state
@@ -176,12 +195,12 @@ typedef struct drv_ssd_s
 
 	cf_atomic32		defrag_sweep;		// defrag sweep flag
 
-	off_t			file_size;
+	uint64_t		file_size;
 	int				file_id;
 
 	uint32_t		open_flag;
 	bool			data_in_memory;
-	bool			started_fresh;		// relevant only for warm restart
+	bool			started_fresh;		// relevant only for warm or cool restart
 
 	uint64_t		io_min_size;		// device IO operations are aligned and sized in multiples of this
 
@@ -189,25 +208,18 @@ typedef struct drv_ssd_s
 
 	uint32_t		write_block_size;	// number of bytes to write at a time
 
-	uint64_t		header_size;
-
-	bool			has_ldt;
-	bool			sub_sweep;
-
-	uint32_t		cold_start_block_counter;		// large blocks read
+	uint32_t		sweep_wblock_id;				// wblocks read at startup
 	uint64_t		record_add_older_counter;		// records not inserted due to better existing one
 	uint64_t		record_add_expired_counter;		// records not inserted due to expiration
 	uint64_t		record_add_max_ttl_counter;		// records not inserted due to max-ttl
 	uint64_t		record_add_replace_counter;		// records reinserted
 	uint64_t		record_add_unique_counter;		// records inserted
-	uint64_t		record_add_sigfail_counter;
 
 	ssd_alloc_table	*alloc_table;
 
 	pthread_t		maintenance_thread;
 	pthread_t		write_worker_thread[MAX_SSD_THREADS];
 	pthread_t		shadow_worker_thread;
-	pthread_t		load_device_thread;
 	pthread_t		defrag_thread;
 
 	histogram		*hist_read;
@@ -239,8 +251,28 @@ typedef struct drv_ssds_s
 // Private API - for enterprise separation only
 //
 
+// SSD_HEADER_SIZE must be a power of 2 and >= MAX_WRITE_BLOCK_SIZE.
+// Do NOT change SSD_HEADER_SIZE!
+#define SSD_HEADER_SIZE			(1024 * 1024)
+
+// Artificial limit on write-block-size, in case we ever move to an
+// SSD_HEADER_SIZE that's too big to be a write-block size limit.
+// MAX_WRITE_BLOCK_SIZE must be power of 2 and <= SSD_HEADER_SIZE.
+#define MAX_WRITE_BLOCK_SIZE	(1024 * 1024)
+
+// Artificial limit on write-block-size, must be power of 2 and >= RBLOCK_SIZE.
+#define MIN_WRITE_BLOCK_SIZE	(1024 * 1)
+
 #define SSD_BLOCK_MAGIC		0x037AF200
 #define LENGTH_BASE			offsetof(struct drv_ssd_block_s, keyd)
+
+typedef struct ssd_load_records_info_s {
+	drv_ssds *ssds;
+	drv_ssd *ssd;
+	cf_queue *complete_q;
+	void *complete_udata;
+	void *complete_rc;
+} ssd_load_records_info;
 
 // Per-record metadata on device.
 typedef struct drv_ssd_block_s {
@@ -256,15 +288,38 @@ typedef struct drv_ssd_block_s {
 	uint8_t			data[];
 } __attribute__ ((__packed__)) drv_ssd_block;
 
-// Warm restart.
+// Per-bin metadata on device.
+typedef struct drv_ssd_bin_s {
+	char		name[AS_ID_BIN_SZ];	// 15 aligns well
+	uint8_t		version;			// now unused
+	uint32_t	offset;				// offset of bin data within block
+	uint32_t	len;				// size of bin data
+	uint32_t	next;				// location of next bin: block offset
+} __attribute__ ((__packed__)) drv_ssd_bin;
+
+// Warm and cool restart.
 void ssd_resume_devices(drv_ssds *ssds);
+void *run_ssd_cool_start(void *udata);
+void ssd_load_wblock_queues(drv_ssds *ssds);
+void ssd_start_maintenance_threads(drv_ssds *ssds);
+void ssd_start_write_worker_threads(drv_ssds *ssds);
+void ssd_start_defrag_threads(drv_ssds *ssds);
+bool is_valid_record(const drv_ssd_block *block, const char *ns_name);
+void apply_rec_props(struct as_index_s *r, struct as_namespace_s *ns, const struct as_rec_props_s *p_props);
 
 // Tomb raider.
 void ssd_cold_start_adjust_cenotaph(struct as_namespace_s *ns, const drv_ssd_block *block, struct as_index_s *r);
 void ssd_cold_start_transition_record(struct as_namespace_s *ns, const drv_ssd_block *block, struct as_index_s *r, bool is_create);
 void ssd_cold_start_drop_cenotaphs(struct as_namespace_s *ns);
 
+// Record encryption.
+void ssd_init_encryption_key(struct as_namespace_s *ns);
+void ssd_do_encrypt(const uint8_t *key, uint64_t off, drv_ssd_block *block);
+void ssd_do_decrypt(const uint8_t *key, uint64_t off, drv_ssd_block *block);
+
 // Miscellaneous.
+void ssd_header_init_cfg(const struct as_namespace_s *ns, ssd_device_header *header);
+bool ssd_header_is_valid_cfg(const struct as_namespace_s *ns, const ssd_device_header *header);
 bool ssd_cold_start_is_valid_n_bins(uint32_t n_bins);
 bool ssd_cold_start_is_record_truncated(struct as_namespace_s *ns, const drv_ssd_block *block, const struct as_rec_props_s *p_props);
 
@@ -351,4 +406,25 @@ can_convert_storage_version(uint16_t version)
 	return version == 1
 			// In case I bump version 2 and forget to tweak conversion code:
 			&& SSD_VERSION == 2;
+}
+
+
+//
+// Record encryption.
+//
+
+static inline void
+ssd_encrypt(drv_ssd *ssd, uint64_t off, drv_ssd_block *block)
+{
+	if (ssd->ns->storage_encryption_key_file != NULL) {
+		ssd_do_encrypt(ssd->ns->storage_encryption_key, off, block);
+	}
+}
+
+static inline void
+ssd_decrypt(drv_ssd *ssd, uint64_t off, drv_ssd_block *block)
+{
+	if (ssd->ns->storage_encryption_key_file != NULL) {
+		ssd_do_decrypt(ssd->ns->storage_encryption_key, off, block);
+	}
 }

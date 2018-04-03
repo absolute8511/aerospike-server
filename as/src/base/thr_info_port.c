@@ -92,9 +92,6 @@ thr_info_port_readable(info_port_state *ips)
 	if (ips->recv_alloc - ips->recv_pos < sz) {
 		int new_sz = sz + ips->recv_pos + 100;
 		ips->recv_buf = cf_realloc(ips->recv_buf, new_sz);
-		if (!ips->recv_buf) {
-			return -1;
-		}
 		ips->recv_alloc = new_sz;
 	}
 
@@ -245,10 +242,6 @@ thr_info_port_fn(void *arg)
 
 				cf_detail(AS_INFO_PORT, "New connection: %s", cf_sock_addr_print(&addr));
 				info_port_state *ips = cf_malloc(sizeof(info_port_state));
-
-				if (!ips) {
-					cf_crash(AS_INFO_PORT, "Out of memory");
-				}
 
 				ips->recv_pos = 0;
 				ips->recv_alloc = 100;

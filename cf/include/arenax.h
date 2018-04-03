@@ -19,15 +19,11 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
-/*
- * An arena that may use persistent memory.
- */
 
 #pragma once
 
-
 //==========================================================
-// Includes
+// Includes.
 //
 
 #include <pthread.h>
@@ -38,7 +34,7 @@
 
 
 //==========================================================
-// Typedefs & Constants
+// Typedefs & constants.
 //
 
 #define CF_ARENAX_BIGLOCK	(1 << 0)
@@ -61,38 +57,38 @@ typedef enum {
 } cf_arenax_err;
 
 //------------------------------------------------
-// Private - for enterprise separation only
+// For enterprise separation only.
 //
 
 // Element is indexed by 24 bits.
-#define ELEMENT_ID_NUM_BITS	24
-#define ELEMENT_ID_MASK		0xFFffFFL // least significant 24 bits (3 bytes)
+#define ELEMENT_ID_NUM_BITS 24
+#define ELEMENT_ID_MASK ((1UL << ELEMENT_ID_NUM_BITS) - 1) // 0xFFffff
 
 #define MAX_STAGE_CAPACITY (1 << ELEMENT_ID_NUM_BITS) // 16 M
 
 // DO NOT access this member data directly - use the API!
 typedef struct cf_arenax_s {
-	// Configuration (passed in constructors)
+	// Configuration (passed in constructors).
 	key_t				key_base;
 	uint32_t			element_size;
 	uint32_t			stage_capacity;
 	uint32_t			max_stages;
 	uint32_t			flags;
 
-	// Configuration (derived)
+	// Configuration (derived).
 	size_t				stage_size;
 
-	// Free-element List
+	// Free-element list.
 	cf_arenax_handle	free_h;
 
-	// Where to End-allocate
+	// Where to end-allocate.
 	uint32_t			at_stage_id;
 	uint32_t			at_element_id;
 
-	// Thread Safety
+	// Thread safety.
 	pthread_mutex_t		lock;
 
-	// Current Stages
+	// Current stages.
 	uint32_t			stage_count;
 	uint8_t*			stages[CF_ARENAX_MAX_STAGES];
 } cf_arenax;
@@ -106,40 +102,23 @@ typedef struct free_element_s {
 
 
 //==========================================================
-// Public API
+// Public API.
 //
 
-//------------------------------------------------
-// Persisted Size (excluding stages)
-//
 size_t cf_arenax_sizeof();
-
-//------------------------------------------------
-// Get Error Description
-//
 const char* cf_arenax_errstr(cf_arenax_err err);
 
-//------------------------------------------------
-// Constructor
-//
-cf_arenax_err cf_arenax_create(cf_arenax* _this, key_t key_base,
-		uint32_t element_size, uint32_t stage_capacity, uint32_t max_stages,
-		uint32_t flags);
+void cf_arenax_init(cf_arenax* arena, key_t key_base, uint32_t element_size,
+		uint32_t stage_capacity, uint32_t max_stages, uint32_t flags);
 
-//------------------------------------------------
-// Allocate/Free an Element
-//
-cf_arenax_handle cf_arenax_alloc(cf_arenax* _this);
-void cf_arenax_free(cf_arenax* _this, cf_arenax_handle h);
+cf_arenax_handle cf_arenax_alloc(cf_arenax* arena);
+void cf_arenax_free(cf_arenax* arena, cf_arenax_handle h);
 
-//------------------------------------------------
-// Convert Handle to Pointer
-//
-void* cf_arenax_resolve(cf_arenax* _this, cf_arenax_handle h);
+void* cf_arenax_resolve(cf_arenax* arena, cf_arenax_handle h);
 
 
 //==========================================================
-// Private API - for enterprise separation only
+// Private API - for enterprise separation only.
 //
 
 static inline void
@@ -149,4 +128,4 @@ cf_arenax_set_handle(cf_arenax_handle* h, uint32_t stage_id,
 	*h = ((uint64_t)stage_id << ELEMENT_ID_NUM_BITS) | element_id;
 }
 
-cf_arenax_err cf_arenax_add_stage(cf_arenax* _this);
+cf_arenax_err cf_arenax_add_stage(cf_arenax* arena);

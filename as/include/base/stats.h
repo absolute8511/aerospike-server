@@ -36,7 +36,7 @@
 
 
 //==========================================================
-// Typedefs.
+// Typedefs & constants.
 //
 
 typedef struct as_stats_s {
@@ -59,9 +59,6 @@ typedef struct as_stats_s {
 
 	// Info stats.
 	cf_atomic64		info_complete;
-
-	// Proxy stats.
-	uint64_t		proxy_retry; // not in ticker - incremented only in proxy retransmit thread
 
 	// Early transaction errors.
 	cf_atomic64		n_demarshal_error;
@@ -120,12 +117,6 @@ typedef struct as_stats_s {
 	histogram*		fabric_send_fragment_hists[AS_FABRIC_N_CHANNELS];
 	histogram*		fabric_recv_fragment_hists[AS_FABRIC_N_CHANNELS];
 	histogram*		fabric_recv_cb_hists[AS_FABRIC_N_CHANNELS];
-
-	histogram*		ldt_multiop_prole_hist; // tracks LDT multi op replication performance (in fabric)
-	histogram*		ldt_update_record_cnt_hist; // tracks number of records written (write/update) by LDT UDF excluding parent record
-	histogram*		ldt_io_record_cnt_hist; // tracks number of records opened (write/update) by LDT UDF excluding parent record
-	histogram*		ldt_update_io_bytes_hist; // tracks number bytes written by LDT every transaction - TODO - unused?
-	histogram*		ldt_hist; // tracks ldt performance
 
 } as_stats;
 

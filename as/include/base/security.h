@@ -22,11 +22,21 @@
 
 #pragma once
 
+//==========================================================
+// Includes.
+//
+
 #include <stdbool.h>
 #include <stdint.h>
-#include "base/datamodel.h"
-#include "base/proto.h"
-#include "base/transaction.h"
+
+
+//==========================================================
+// Forward declarations.
+//
+
+struct as_file_handle_s;
+struct as_namespace_s;
+struct as_transaction_s;
 
 
 //==========================================================
@@ -87,12 +97,10 @@ typedef struct as_sec_msg_s {
 //
 
 void as_security_init();
-uint8_t as_security_check(const as_file_handle* fd_h, as_sec_perm perm);
-bool as_security_check_data_op(as_transaction* tr, as_namespace* ns,
-		as_sec_perm perm);
+uint8_t as_security_check(const struct as_file_handle_s* fd_h, as_sec_perm perm);
+bool as_security_check_data_op(struct as_transaction_s* tr, struct as_namespace_s* ns, as_sec_perm perm);
 void* as_security_filter_create();
 void as_security_filter_destroy(void* pv_filter);
-void as_security_log(const as_file_handle* fd_h, uint8_t result,
-		as_sec_perm perm, const char* action, const char* detail);
-void as_security_refresh(as_file_handle* fd_h);
-void as_security_transact(as_transaction* tr);
+void as_security_log(const struct as_file_handle_s* fd_h, uint8_t result, as_sec_perm perm, const char* action, const char* detail);
+void as_security_refresh(struct as_file_handle_s* fd_h);
+void as_security_transact(struct as_transaction_s* tr);

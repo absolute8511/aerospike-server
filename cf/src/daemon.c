@@ -124,7 +124,9 @@ cf_process_daemonize(int *fd_ignore_list, int list_size)
 	}
 
 	if (0 != p) {
-		exit(0);
+		// Prefer _exit() over exit(), as we don't want the parent to
+		// do any cleanups.
+		_exit(0);
 	}
 
 	// Get a new session.

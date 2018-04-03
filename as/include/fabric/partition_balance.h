@@ -47,6 +47,20 @@ struct as_namespace_s;
 // Typedefs & constants.
 //
 
+typedef enum {
+	PB_TASK_EMIG_TRANSFER,
+	PB_TASK_EMIG_SIGNAL_ALL_DONE
+} pb_task_type;
+
+typedef struct pb_task_s {
+	cf_node dest;
+	struct as_namespace_s* ns;
+	uint32_t pid;
+	uint64_t cluster_key;
+	pb_task_type type;
+	uint32_t tx_flags;
+} pb_task;
+
 #define MAX_RACK_ID 1000000
 
 
@@ -54,7 +68,6 @@ struct as_namespace_s;
 // Public API - regulate migrations.
 //
 
-void as_partition_balance_allow_migrations();
 void as_partition_balance_disallow_migrations();
 bool as_partition_balance_are_migrations_allowed();
 void as_partition_balance_synchronize_migrations();

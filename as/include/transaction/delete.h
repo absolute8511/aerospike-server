@@ -28,22 +28,29 @@
 
 #include <stdbool.h>
 
-#include "base/index.h"
 #include "base/transaction.h"
-#include "transaction/rw_request.h"
+
+
+//==========================================================
+// Forward declarations.
+//
+
+struct as_index_ref_s;
+struct as_transaction_s;
+struct rw_request_s;
 
 
 //==========================================================
 // Public API.
 //
 
-transaction_status as_delete_start(as_transaction* tr);
+transaction_status as_delete_start(struct as_transaction_s* tr);
 
 
 //==========================================================
 // Private API - for enterprise separation only.
 //
 
-bool delete_storage_overloaded(as_transaction* tr);
-transaction_status delete_master(as_transaction* tr, rw_request* rw);
-transaction_status drop_master(as_transaction* tr, as_index_ref* r_ref, rw_request* rw);
+bool delete_storage_overloaded(struct as_transaction_s* tr);
+transaction_status delete_master(struct as_transaction_s* tr, struct rw_request_s* rw);
+transaction_status drop_master(struct as_transaction_s* tr, struct as_index_ref_s* r_ref, struct rw_request_s* rw);

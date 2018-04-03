@@ -1,7 +1,7 @@
 /*
  * proto.h
  *
- * Copyright (C) 2008-2015 Aerospike, Inc.
+ * Copyright (C) 2008-2017 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -51,7 +51,7 @@ struct as_transaction_s;
 
 #define AS_PROTO_RESULT_OK							0
 #define AS_PROTO_RESULT_FAIL_UNKNOWN				1	// unknown failure - consider retry
-#define AS_PROTO_RESULT_FAIL_NOTFOUND				2
+#define AS_PROTO_RESULT_FAIL_NOT_FOUND				2
 #define AS_PROTO_RESULT_FAIL_GENERATION				3
 #define AS_PROTO_RESULT_FAIL_PARAMETER				4
 #define AS_PROTO_RESULT_FAIL_RECORD_EXISTS			5	// if 'WRITE_ADD', could fail because already exists
@@ -59,7 +59,7 @@ struct as_transaction_s;
 #define AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH	7
 #define AS_PROTO_RESULT_FAIL_OUT_OF_SPACE			8
 #define AS_PROTO_RESULT_FAIL_TIMEOUT				9
-#define AS_PROTO_RESULT_FAIL_UNUSED_10				10	// recycle - was AS_PROTO_RESULT_FAIL_NOXDR
+#define AS_PROTO_RESULT_FAIL_ALWAYS_FORBIDDEN		10	// operation not allowed for current (static) configuration
 #define AS_PROTO_RESULT_FAIL_UNAVAILABLE			11	// error returned during node down and partition isn't available
 #define AS_PROTO_RESULT_FAIL_INCOMPATIBLE_TYPE		12	// op and bin type incompatibility
 #define AS_PROTO_RESULT_FAIL_RECORD_TOO_BIG			13
@@ -71,7 +71,7 @@ struct as_transaction_s;
 #define AS_PROTO_RESULT_FAIL_KEY_MISMATCH			19
 #define AS_PROTO_RESULT_FAIL_NAMESPACE				20
 #define AS_PROTO_RESULT_FAIL_BIN_NAME				21
-#define AS_PROTO_RESULT_FAIL_FORBIDDEN				22	// operation (perhaps temporarily) not possible
+#define AS_PROTO_RESULT_FAIL_FORBIDDEN				22	// operation temporarily not possible
 #define AS_PROTO_RESULT_FAIL_ELEMENT_NOT_FOUND		23
 #define AS_PROTO_RESULT_FAIL_ELEMENT_EXISTS			24
 #define AS_PROTO_RESULT_FAIL_ENTERPRISE_ONLY		25	// attempting enterprise functionality on community build
@@ -103,9 +103,6 @@ struct as_transaction_s;
 
 // UDF Errors (100 - 109)
 #define AS_PROTO_RESULT_FAIL_UDF_EXECUTION     100
-
-// LDT (and general collection) Errors (125 - 129)
-#define AS_PROTO_RESULT_FAIL_COLLECTION_ITEM_NOT_FOUND 125 // Item not found
 
 // Batch Errors (150 - 159)
 #define AS_PROTO_RESULT_FAIL_BATCH_DISABLED		150 // batch functionality has been disabled
@@ -159,8 +156,6 @@ struct as_transaction_s;
 #define PROTO_TYPE_MAX					6 // if you see 6, it's illegal
 
 #define PROTO_SIZE_MAX (128 * 1024 * 1024) // used simply for validation, as we've been corrupting msgp's
-
-#define PROTO_NFIELDS_MAX_WARNING 32
 
 #define PROTO_FIELD_LENGTH_MAX	1024
 #define PROTO_OP_LENGTH_MAX		131072
@@ -297,18 +292,6 @@ static inline uint32_t as_msg_field_get_value_sz(as_msg_field *f)
 	return f->field_sz - 1;
 }
 
-static inline uint32_t as_msg_op_get_value_sz_unswap(as_msg_op *op)
-{
-	uint32_t sz = ntohl(op->op_sz);
-	return sz - (4 + op->name_sz);
-}
-
-static inline uint32_t as_msg_field_get_value_sz_unswap(as_msg_field *f)
-{
-	uint32_t sz = ntohl(f->field_sz);
-	return sz - 1;
-}
-
 static inline uint32_t as_msg_field_get_strncpy(as_msg_field *f, char *dst, int sz)
 {
 	int fsz = f->field_sz - 1;
@@ -352,7 +335,7 @@ typedef struct cl_msg_s {
 // (Note:  Bit 2 is unused.)
 #define AS_MSG_INFO1_BATCH				(1 << 3) // new batch protocol
 #define AS_MSG_INFO1_XDR				(1 << 4) // operation is being performed by XDR
-#define AS_MSG_INFO1_GET_NOBINDATA		(1 << 5) // Do not get information about bins and its data
+#define AS_MSG_INFO1_GET_NO_BINS		(1 << 5) // get record metadata only - no bin metadata or data
 #define AS_MSG_INFO1_CONSISTENCY_LEVEL_B0	(1 << 6) // read consistency level - bit 0
 #define AS_MSG_INFO1_CONSISTENCY_LEVEL_B1	(1 << 7) // read consistency level - bit 1
 
@@ -374,7 +357,7 @@ typedef struct cl_msg_s {
 // (Note:  Bit 6 is unused.)
 // (Note:  Bit 7 is unused.)
 
-#define AS_MSG_FIELD_SCAN_INCLUDE_LDT_DATA			(0x02) // whether to send ldt bin data back to the client
+#define AS_MSG_FIELD_SCAN_UNUSED_2					(0x02) // was - whether to send ldt bin data back to the client
 #define AS_MSG_FIELD_SCAN_DISCONNECTED_JOB			(0x04) // for sproc jobs that won't be sending results back to the client [UNUSED]
 #define AS_MSG_FIELD_SCAN_FAIL_ON_CLUSTER_CHANGE	(0x08) // if we should fail when cluster is migrating or cluster changes
 #define AS_MSG_FIELD_SCAN_PRIORITY(__cl_byte)		((0xF0 & __cl_byte)>>4) // 4 bit value indicating the scan priority
@@ -383,12 +366,6 @@ static inline as_msg_field *
 as_msg_field_get_next(as_msg_field *mf)
 {
 	return (as_msg_field*)(((uint8_t*)mf) + sizeof(mf->field_sz) + mf->field_sz);
-}
-
-static inline as_msg_field *
-as_msg_field_get_next_unswap(as_msg_field *mf)
-{
-	return (as_msg_field*)(((uint8_t*)mf) + sizeof(mf->field_sz) + ntohl(mf->field_sz));
 }
 
 static inline uint8_t *
@@ -435,7 +412,8 @@ static inline uint8_t *
 as_msg_op_skip(as_msg_op *op)
 {
 	// At least 4 bytes always follow op_sz.
-	return op->op_sz < 4 ? NULL : (uint8_t*)op + sizeof(op->op_sz) + op->op_sz;
+	return (uint32_t)op->name_sz + 4 > op->op_sz ?
+			NULL : (uint8_t*)op + sizeof(op->op_sz) + op->op_sz;
 }
 
 /* as_msg_field_getnext
@@ -494,41 +472,35 @@ as_proto_wrapped_is_valid(const as_proto *proto, size_t size)
 			as_proto_size_get(proto) == size;
 }
 
-extern void as_proto_swap(as_proto *m);
-extern void as_msg_swap_header(as_msg *m);
-extern void as_msg_swap_field(as_msg_field *mf);
-extern void as_msg_swap_op(as_msg_op *op);
-extern int as_msg_send_reply(struct as_file_handle_s *fd_h, uint32_t result_code,
-		uint32_t generation, uint32_t void_time, as_msg_op **ops,
-		struct as_bin_s **bins, uint16_t bin_count, struct as_namespace_s *ns,
-		uint64_t trid, const char *setname);
-extern int as_msg_send_ops_reply(struct as_file_handle_s *fd_h, cf_dyn_buf *db);
+void as_proto_swap(as_proto *proto);
+void as_msg_swap_header(as_msg *m);
+void as_msg_swap_field(as_msg_field *mf);
+void as_msg_swap_op(as_msg_op *op);
 
-extern cl_msg *as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
+cl_msg *as_msg_create_internal(const char *ns_name, const cf_digest *keyd,
+		uint8_t info1, uint8_t info2, uint8_t info3);
+
+cl_msg *as_msg_make_response_msg(uint32_t result_code, uint32_t generation,
 		uint32_t void_time, as_msg_op **ops, struct as_bin_s **bins,
 		uint16_t bin_count, struct as_namespace_s *ns, cl_msg *msgp_in,
-		size_t *msg_sz_in, uint64_t trid, const char *setname);
-extern int as_msg_make_response_bufbuilder(struct as_index_s *r, struct as_storage_rd_s *rd,
-		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets, bool include_key, bool skip_empty_records, cf_vector *);
-extern int as_msg_make_error_response_bufbuilder(cf_digest *keyd, int result_code,
-		cf_buf_builder **bb_r, char *nsname);
-extern size_t as_msg_get_bufbuilder_newsize(struct as_index_s *r, struct as_storage_rd_s *rd,
-		cf_buf_builder **bb_r, bool nobindata, char *nsname, bool use_sets, cf_vector *);
-extern size_t as_msg_response_msgsize(struct as_index_s *r, struct as_storage_rd_s *rd,
-		bool nobindata, char *nsname, bool use_sets, cf_vector *binlist);
-extern int as_msg_make_val_response_bufbuilder(const as_val *val, cf_buf_builder **bb_r, int val_sz, bool);
+		size_t *msg_sz_in, uint64_t trid);
+int32_t as_msg_make_response_bufbuilder(cf_buf_builder **bb_r,
+		struct as_storage_rd_s *rd, bool no_bin_data, bool include_key,
+		bool skip_empty_records, cf_vector *select_bins);
+cl_msg *as_msg_make_val_response(bool success, const as_val *val,
+		uint32_t result_code, uint32_t generation, uint32_t void_time,
+		uint64_t trid, size_t *p_msg_sz);
+void as_msg_make_val_response_bufbuilder(const as_val *val,
+		cf_buf_builder **bb_r, uint32_t val_sz, bool);
 
-extern int as_msg_send_response(cf_socket *sock, uint8_t* buf, size_t len, int flags);
-extern int as_msg_send_fin(cf_socket *sock, uint32_t result_code);
-
-extern bool as_msg_peek_data_in_memory(const as_msg *m);
-
-extern uint8_t * as_msg_write_fields(uint8_t *buf, const char *ns, int ns_len,
-		const char *set, int set_len, const cf_digest *d, uint64_t trid);
-
-extern uint8_t * as_msg_write_header(uint8_t *buf, size_t msg_sz, uint8_t info1,
-		uint8_t info2, uint8_t info3, uint32_t generation, uint32_t record_ttl,
-		uint32_t transaction_ttl, uint32_t n_fields, uint32_t n_ops);
+int as_msg_send_reply(struct as_file_handle_s *fd_h, uint32_t result_code,
+		uint32_t generation, uint32_t void_time, as_msg_op **ops,
+		struct as_bin_s **bins, uint16_t bin_count, struct as_namespace_s *ns,
+		uint64_t trid);
+int as_msg_send_ops_reply(struct as_file_handle_s *fd_h, cf_dyn_buf *db);
+bool as_msg_send_fin(cf_socket *sock, uint32_t result_code);
+size_t as_msg_send_fin_timeout(cf_socket *sock, uint32_t result_code,
+		int32_t timeout);
 
 // Async IO
 typedef int (* as_netio_finish_cb) (void *udata, int retcode);
@@ -547,7 +519,7 @@ typedef struct as_netio_s {
 } as_netio;
 
 void as_netio_init();
-int as_netio_send(as_netio *io, void *q, bool);
+int as_netio_send(as_netio *io, bool slow, bool blocking);
 
 #define AS_NETIO_OK        0
 #define AS_NETIO_CONTINUE  1
@@ -589,32 +561,77 @@ typedef enum result_type_e {
 	RESULT_TYPE_REVRANK_RANGE	= 12,
 } result_type_t;
 
+typedef enum {
+	AS_CDT_OP_FLAG_RESULT_MASK = 0x0000ffff,
+	AS_CDT_OP_FLAG_INVERTED = 0x00010000
+} as_cdt_op_flags;
+
+typedef enum {
+	AS_CDT_SORT_ASCENDING = 0,
+	AS_CDT_SORT_DESCENDING = 1,
+	AS_CDT_SORT_DROP_DUPLICATES = 2
+} as_cdt_sort_flags;
+
+typedef enum {
+	AS_CDT_LIST_MODIFY_DEFAULT = 0x00,
+	AS_CDT_LIST_ADD_UNIQUE = 0x01,
+	AS_CDT_LIST_INSERT_BOUNDED = 0x02
+} as_cdt_list_modify_flags;
+
 typedef enum as_cdt_optype_e {
 	// ------------------------------------------------------------------------
 	// List Operation
 
-	// Add to list
+	AS_CDT_OP_LIST_SET_TYPE      = 0,
+
+	// Adds
 	AS_CDT_OP_LIST_APPEND        = 1,
 	AS_CDT_OP_LIST_APPEND_ITEMS  = 2,
 	AS_CDT_OP_LIST_INSERT        = 3,
 	AS_CDT_OP_LIST_INSERT_ITEMS  = 4,
 
-	// Remove from list
+	// Removes
 	AS_CDT_OP_LIST_POP           = 5,
 	AS_CDT_OP_LIST_POP_RANGE     = 6,
 	AS_CDT_OP_LIST_REMOVE        = 7,
 	AS_CDT_OP_LIST_REMOVE_RANGE  = 8,
 
-	// Other list modifies
+	// Modifies
 	AS_CDT_OP_LIST_SET           = 9,
 	AS_CDT_OP_LIST_TRIM          = 10,
 	AS_CDT_OP_LIST_CLEAR         = 11,
-	AS_CDT_OP_LIST_INCREMENT_BY  = 12,
+	AS_CDT_OP_LIST_INCREMENT     = 12,
 
-	// Read from list
+	AS_CDT_OP_LIST_SORT          = 13,
+
+	// Reads
 	AS_CDT_OP_LIST_SIZE          = 16,
 	AS_CDT_OP_LIST_GET           = 17,
 	AS_CDT_OP_LIST_GET_RANGE     = 18,
+
+	// GET_BYs
+	AS_CDT_OP_LIST_GET_BY_INDEX             = 19,
+	AS_CDT_OP_LIST_GET_BY_VALUE             = 20,
+	AS_CDT_OP_LIST_GET_BY_RANK              = 21,
+
+	AS_CDT_OP_LIST_GET_ALL_BY_VALUE         = 22,
+	AS_CDT_OP_LIST_GET_ALL_BY_VALUE_LIST    = 23,
+
+	AS_CDT_OP_LIST_GET_BY_INDEX_RANGE       = 24,
+	AS_CDT_OP_LIST_GET_BY_VALUE_INTERVAL    = 25,
+	AS_CDT_OP_LIST_GET_BY_RANK_RANGE        = 26,
+
+	// REMOVE_BYs
+	AS_CDT_OP_LIST_REMOVE_BY_INDEX          = 32,
+	AS_CDT_OP_LIST_REMOVE_BY_VALUE          = 33,
+	AS_CDT_OP_LIST_REMOVE_BY_RANK           = 34,
+
+	AS_CDT_OP_LIST_REMOVE_ALL_BY_VALUE      = 35,
+	AS_CDT_OP_LIST_REMOVE_ALL_BY_VALUE_LIST = 36,
+
+	AS_CDT_OP_LIST_REMOVE_BY_INDEX_RANGE    = 37,
+	AS_CDT_OP_LIST_REMOVE_BY_VALUE_INTERVAL = 38,
+	AS_CDT_OP_LIST_REMOVE_BY_RANK_RANGE     = 39,
 
 	// ------------------------------------------------------------------------
 	// Map Operation
@@ -668,6 +685,9 @@ typedef enum as_cdt_optype_e {
 	AS_CDT_OP_MAP_GET_BY_VALUE_INTERVAL				= 105,
 	AS_CDT_OP_MAP_GET_BY_RANK_RANGE					= 106,
 
+	AS_CDT_OP_MAP_GET_BY_KEY_LIST					= 107,
+	AS_CDT_OP_MAP_GET_BY_VALUE_LIST					= 108,
+
 } as_cdt_optype;
 
-#define AS_CDT_OP_LIST_LAST	AS_CDT_OP_LIST_GET_RANGE
+#define AS_CDT_OP_LIST_LAST AS_CDT_OP_LIST_REMOVE_BY_RANK_RANGE

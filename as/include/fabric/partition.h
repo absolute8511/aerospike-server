@@ -38,6 +38,7 @@
 #include "dynbuf.h"
 #include "node.h"
 
+#include "base/cfg.h"
 #include "fabric/hb.h"
 
 
@@ -50,7 +51,7 @@ struct as_namespace_s;
 
 
 //==========================================================
-// Typedefs and constants.
+// Typedefs & constants.
 //
 
 #define AS_PARTITIONS 4096
@@ -69,6 +70,8 @@ typedef struct as_partition_version_s {
 	uint64_t evade:1;
 } as_partition_version;
 
+COMPILER_ASSERT(sizeof(as_partition_version) == sizeof(uint64_t));
+
 typedef struct as_partition_version_string_s {
 	char s[19 + 1]; // format CCCCccccCCCC.F.mse - F may someday be 2 characters
 } as_partition_version_string;
@@ -79,7 +82,6 @@ typedef struct as_partition_s {
 	uint32_t id;
 
 	struct as_index_tree_s* vp;
-	struct as_index_tree_s* sub_vp;
 
 	cf_atomic64 n_tombstones; // relevant only for enterprise edition
 	cf_atomic64 max_void_time; // TODO - convert to 32-bit ...
@@ -90,35 +92,26 @@ typedef struct as_partition_s {
 
 	// Rebalance & migration related:
 
-	uint64_t cluster_key;
 	as_partition_version final_version;
 	as_partition_version version;
 	int pending_emigrations;
 	int pending_immigrations;
 	bool immigrators[AS_CLUSTER_SZ];
 
-	cf_node origin;
-	cf_node target;
+	cf_node working_master;
 
 	uint32_t n_dupl;
 	cf_node dupls[AS_CLUSTER_SZ];
 
 	uint32_t n_witnesses;
 	cf_node witnesses[AS_CLUSTER_SZ];
-
-	// LDT related.
-	uint64_t current_outgoing_ldt_version;
-	uint64_t current_incoming_ldt_version;
 } as_partition;
 
 typedef struct as_partition_reservation_s {
 	struct as_namespace_s* ns;
 	as_partition* p;
 	struct as_index_tree_s* tree;
-	struct as_index_tree_s* sub_tree;
-	uint64_t cluster_key;
-	bool reject_repl_write;
-	// 3 unused bytes
+	// 4 unused bytes
 	uint32_t n_dupl;
 	cf_node dupl_nodes[AS_CLUSTER_SZ];
 } as_partition_reservation;
@@ -127,9 +120,6 @@ typedef struct repl_stats_s {
 	uint64_t n_master_objects;
 	uint64_t n_prole_objects;
 	uint64_t n_non_replica_objects;
-	uint64_t n_master_sub_objects;
-	uint64_t n_prole_sub_objects;
-	uint64_t n_non_replica_sub_objects;
 	uint64_t n_master_tombstones;
 	uint64_t n_prole_tombstones;
 	uint64_t n_non_replica_tombstones;
@@ -153,33 +143,6 @@ typedef enum {
 
 
 //==========================================================
-// Macros.
-//
-
-#define AS_PARTITION_ID_UNDEF ((uint16_t)0xFFFF)
-
-#define AS_PARTITION_RESERVATION_INIT(__rsv) \
-	__rsv.ns = NULL; \
-	__rsv.p = NULL; \
-	__rsv.tree = NULL; \
-	__rsv.sub_tree = NULL; \
-	__rsv.cluster_key = 0; \
-	__rsv.reject_repl_write = false; \
-	__rsv.n_dupl = 0;
-
-#define AS_PARTITION_RESERVATION_INITP(__rsv) \
-	__rsv->ns = NULL; \
-	__rsv->p = NULL; \
-	__rsv->tree = NULL; \
-	__rsv->sub_tree = NULL; \
-	__rsv->cluster_key = 0; \
-	__rsv->reject_repl_write = false; \
-	__rsv->n_dupl = 0;
-
-#define VERSION_AS_STRING(v_ptr) (as_partition_version_as_string(v_ptr).s)
-
-
-//==========================================================
 // Public API.
 //
 
@@ -199,10 +162,11 @@ void as_partition_get_replicas_all_str(cf_dyn_buf* db);
 
 void as_partition_get_replica_stats(struct as_namespace_s* ns, repl_stats* p_stats);
 
-int as_partition_reserve_write(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv, cf_node* node, uint64_t* cluster_key);
-int as_partition_reserve_read(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv, cf_node* node, uint64_t* cluster_key);
-void as_partition_reserve_migrate(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv, cf_node* node);
-int as_partition_reserve_migrate_timeout(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv, cf_node* node, int timeout_ms );
+void as_partition_reserve(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv);
+int as_partition_reserve_timeout(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv, int timeout_ms);
+int as_partition_reserve_replica(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv);
+int as_partition_reserve_write(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv, cf_node* node);
+int as_partition_reserve_read(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv, bool would_dup_res, cf_node* node);
 int as_partition_prereserve_query(struct as_namespace_s* ns, bool can_partition_query[], as_partition_reservation rsv[]);
 int as_partition_reserve_query(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv);
 int as_partition_reserve_xdr_read(struct as_namespace_s* ns, uint32_t pid, as_partition_reservation* rsv);
@@ -212,7 +176,7 @@ void as_partition_release(as_partition_reservation* rsv);
 
 void as_partition_getinfo_str(cf_dyn_buf* db);
 
-// Use VERSION_AS_STRING() - see above.
+// Use VERSION_AS_STRING() - see below.
 static inline as_partition_version_string
 as_partition_version_as_string(const as_partition_version* version)
 {
@@ -258,22 +222,32 @@ as_partition_getid(const cf_digest* d)
 }
 
 static inline int
-index_of_node(const cf_node* nodes, uint32_t n_nodes, cf_node node)
+find_self_in_replicas(const as_partition* p)
 {
-	for (uint32_t n = 0; n < n_nodes; n++) {
-		if (node == nodes[n]) {
-			return (int)n;
-		}
-	}
-
-	return -1;
+	return index_of_node(p->replicas, p->n_replicas, g_config.self_node);
 }
 
 static inline bool
-contains_node(const cf_node* nodes, uint32_t n_nodes, cf_node node)
+is_self_replica(const as_partition* p)
 {
-	return index_of_node(nodes, n_nodes, node) != -1;
+	return contains_node(p->replicas, p->n_replicas, g_config.self_node);
 }
+
+static inline bool
+contains_self(const cf_node* nodes, uint32_t n_nodes)
+{
+	return contains_node(nodes, n_nodes, g_config.self_node);
+}
+
+#define AS_PARTITION_ID_UNDEF ((uint16_t)0xFFFF)
+
+#define AS_PARTITION_RESERVATION_INIT(__rsv) \
+	__rsv.ns = NULL; \
+	__rsv.p = NULL; \
+	__rsv.tree = NULL; \
+	__rsv.n_dupl = 0;
+
+#define VERSION_AS_STRING(v_ptr) (as_partition_version_as_string(v_ptr).s)
 
 
 //==========================================================

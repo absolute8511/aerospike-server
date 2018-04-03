@@ -39,6 +39,7 @@
 #include "fault.h"
 
 #include "base/datamodel.h"
+#include "base/proto.h"
 #include "base/rec_props.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
@@ -61,7 +62,6 @@ rw_request*
 rw_request_create(cf_digest* keyd)
 {
 	rw_request* rw = cf_rc_alloc(sizeof(rw_request));
-	cf_assert(rw, AS_RW, "alloc rw_request");
 
 	// as_transaction look-alike:
 	rw->msgp				= NULL;
@@ -77,18 +77,20 @@ rw_request_create(cf_digest* keyd)
 	AS_PARTITION_RESERVATION_INIT(rw->rsv);
 
 	rw->end_time			= 0;
+	rw->result_code			= AS_PROTO_RESULT_OK;
+	rw->flags				= 0;
 	rw->generation			= 0;
 	rw->void_time			= 0;
+	rw->last_update_time	= 0;
 	// End of as_transaction look-alike.
 
 	pthread_mutex_init(&rw->lock, NULL);
 
 	rw->wait_queue_head = NULL;
+	rw->wait_queue_tail = NULL;
+	rw->wait_queue_depth = 0;
 
 	rw->is_set_up = false;
-	rw->has_udf = false;
-	rw->is_multiop = false;
-	rw->respond_client_on_master_completion = false;
 
 	rw->pickled_buf = NULL;
 	rw->pickled_sz = 0;
@@ -101,6 +103,7 @@ rw_request_create(cf_digest* keyd)
 
 	rw->tid = cf_atomic32_incr(&g_rw_tid);
 	rw->dup_res_complete = false;
+	rw->repl_write_complete = false;
 	rw->dup_res_cb = NULL;
 	rw->repl_write_cb = NULL;
 	rw->timeout_cb = NULL;
@@ -110,6 +113,11 @@ rw_request_create(cf_digest* keyd)
 	rw->retry_interval_ms = 0;
 
 	rw->n_dest_nodes = 0;
+
+	rw->best_dup_msg = NULL;
+	rw->best_dup_result_code = AS_PROTO_RESULT_OK;
+	rw->best_dup_gen = 0;
+	rw->best_dup_lut = 0;
 
 	return rw;
 }
@@ -138,16 +146,13 @@ rw_request_destroy(rw_request* rw)
 
 	cf_dyn_buf_free(&rw->response_db);
 
-	if (rw->is_set_up) {
-		if (rw->dest_msg) {
-			as_fabric_msg_put(rw->dest_msg);
-		}
+	if (rw->dest_msg) {
+		as_fabric_msg_put(rw->dest_msg);
+	}
 
-		// Can't use rw->n_dest_nodes - might now count replica-write nodes.
-		for (int i = 0; i < rw->rsv.n_dupl; i++) {
-			if (rw->dup_msg[i]) {
-				as_fabric_msg_put(rw->dup_msg[i]);
-			}
+	if (rw->is_set_up) {
+		if (rw->best_dup_msg) {
+			as_fabric_msg_put(rw->best_dup_msg);
 		}
 
 		as_partition_release(&rw->rsv);
@@ -166,4 +171,28 @@ rw_request_destroy(rw_request* rw)
 		cf_free(e);
 		e = next;
 	}
+}
+
+
+void
+rw_request_wait_q_push(rw_request* rw, as_transaction* tr)
+{
+	rw_wait_ele* e = cf_malloc(sizeof(rw_wait_ele));
+
+	as_transaction_copy_head(&e->tr, tr);
+	tr->from.any = NULL;
+	tr->msgp = NULL;
+
+	e->next = NULL;
+
+	if (rw->wait_queue_tail) {
+		rw->wait_queue_tail->next = e;
+		rw->wait_queue_tail = e;
+	}
+	else {
+		rw->wait_queue_head = e;
+		rw->wait_queue_tail = e;
+	}
+
+	rw->wait_queue_depth++;
 }

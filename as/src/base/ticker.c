@@ -64,7 +64,7 @@
 
 
 //==========================================================
-// Forward Declarations.
+// Forward declarations.
 //
 
 extern int as_nsup_queue_get_size();
@@ -83,22 +83,21 @@ void log_line_batch_index();
 
 void log_line_objects(as_namespace* ns, uint64_t n_objects,
 		repl_stats* mp);
-void log_line_sub_objects(as_namespace* ns, uint64_t n_sub_objects,
-		repl_stats* mp);
 void log_line_tombstones(as_namespace* ns, uint64_t n_tombstones,
 		repl_stats* mp);
 void log_line_migrations(as_namespace* ns);
 void log_line_memory_usage(as_namespace* ns, size_t total_mem, size_t index_mem,
 		size_t sindex_mem, size_t data_mem);
 void log_line_device_usage(as_namespace* ns);
-void log_line_ldt_gc(as_namespace* ns);
 
 void log_line_client(as_namespace* ns);
+void log_line_xdr_client(as_namespace* ns);
 void log_line_batch_sub(as_namespace* ns);
 void log_line_scan(as_namespace* ns);
 void log_line_query(as_namespace* ns);
 void log_line_udf_sub(as_namespace* ns);
 void log_line_retransmits(as_namespace* ns);
+void log_line_special_errors(as_namespace* ns);
 
 void dump_global_histograms();
 void dump_namespace_histograms(as_namespace* ns);
@@ -182,11 +181,9 @@ log_ticker_frame(uint64_t delta_time)
 		as_namespace* ns = g_config.namespaces[i];
 
 		uint64_t n_objects = ns->n_objects;
-		uint64_t n_sub_objects = ns->n_sub_objects;
 		uint64_t n_tombstones = ns->n_tombstones;
 
-		size_t index_mem = as_index_size_get(ns) *
-				(n_objects + n_sub_objects + n_tombstones);
+		size_t index_mem = as_index_size_get(ns) * (n_objects + n_tombstones);
 		size_t sindex_mem = ns->n_bytes_sindex_memory;
 		size_t data_mem = ns->n_bytes_memory;
 		size_t total_mem = index_mem + sindex_mem + data_mem;
@@ -197,19 +194,19 @@ log_ticker_frame(uint64_t delta_time)
 		as_partition_get_replica_stats(ns, &mp);
 
 		log_line_objects(ns, n_objects, &mp);
-		log_line_sub_objects(ns, n_sub_objects, &mp);
 		log_line_tombstones(ns, n_tombstones, &mp);
 		log_line_migrations(ns);
 		log_line_memory_usage(ns, total_mem, index_mem, sindex_mem, data_mem);
 		log_line_device_usage(ns);
-		log_line_ldt_gc(ns);
 
 		log_line_client(ns);
+		log_line_xdr_client(ns);
 		log_line_batch_sub(ns);
 		log_line_scan(ns);
 		log_line_query(ns);
 		log_line_udf_sub(ns);
 		log_line_retransmits(ns);
+		log_line_special_errors(ns);
 
 		dump_namespace_histograms(ns);
 	}
@@ -380,26 +377,6 @@ log_line_objects(as_namespace* ns, uint64_t n_objects, repl_stats* mp)
 
 
 void
-log_line_sub_objects(as_namespace* ns, uint64_t n_sub_objects, repl_stats* mp)
-{
-	if ((n_sub_objects |
-			mp->n_master_sub_objects |
-			mp->n_prole_sub_objects |
-			mp->n_non_replica_sub_objects) == 0) {
-		return;
-	}
-
-	cf_info(AS_INFO, "{%s} sub-objects: all %lu master %lu prole %lu non-replica %lu",
-			ns->name,
-			n_sub_objects,
-			mp->n_master_sub_objects,
-			mp->n_prole_sub_objects,
-			mp->n_non_replica_sub_objects
-			);
-}
-
-
-void
 log_line_tombstones(as_namespace* ns, uint64_t n_tombstones, repl_stats* mp)
 {
 	if ((n_tombstones |
@@ -513,30 +490,6 @@ log_line_device_usage(as_namespace* ns)
 
 
 void
-log_line_ldt_gc(as_namespace* ns)
-{
-	if (! ns->ldt_enabled) {
-		return;
-	}
-
-	uint64_t cnt = ns->lstats.ldt_gc_processed;
-	uint64_t io = ns->lstats.ldt_gc_io;
-	uint64_t gc = ns->lstats.ldt_gc_cnt;
-	uint64_t no_esr = ns->lstats.ldt_gc_no_esr_cnt;
-	uint64_t no_parent = ns->lstats.ldt_gc_no_parent_cnt;
-	uint64_t version_mismatch = ns->lstats.ldt_gc_parent_version_mismatch_cnt;
-
-	cf_info(AS_INFO, "{%s} ldt-gc: cnt %lu io %lu gc %lu (%lu,%lu,%lu)",
-			ns->name,
-			cnt,
-			io,
-			gc,
-			no_esr, no_parent, version_mismatch
-			);
-}
-
-
-void
 log_line_client(as_namespace* ns)
 {
 	uint64_t n_tsvc_error = ns->n_client_tsvc_error;
@@ -582,6 +535,30 @@ log_line_client(as_namespace* ns)
 			n_delete_success, n_delete_error, n_delete_timeout, n_delete_not_found,
 			n_udf_complete, n_udf_error, n_udf_timeout,
 			n_lang_read_success, n_lang_write_success, n_lang_delete_success, n_lang_error
+			);
+}
+
+
+void
+log_line_xdr_client(as_namespace* ns)
+{
+	uint64_t n_write_success = ns->n_xdr_write_success;
+	uint64_t n_write_error = ns->n_xdr_write_error;
+	uint64_t n_write_timeout = ns->n_xdr_write_timeout;
+	uint64_t n_delete_success = ns->n_xdr_delete_success;
+	uint64_t n_delete_error = ns->n_xdr_delete_error;
+	uint64_t n_delete_timeout = ns->n_xdr_delete_timeout;
+	uint64_t n_delete_not_found = ns->n_xdr_delete_not_found;
+
+	if ((n_write_success | n_write_error | n_write_timeout |
+			n_delete_success | n_delete_error | n_delete_timeout | n_delete_not_found) == 0) {
+		return;
+	}
+
+	cf_info(AS_INFO, "{%s} xdr-client: write (%lu,%lu,%lu) delete (%lu,%lu,%lu,%lu)",
+			ns->name,
+			n_write_success, n_write_error, n_write_timeout,
+			n_delete_success, n_delete_error, n_delete_timeout, n_delete_not_found
 			);
 }
 
@@ -709,7 +686,6 @@ log_line_retransmits(as_namespace* ns)
 	uint64_t n_batch_sub_dup_res = ns->n_retransmit_batch_sub_dup_res;
 	uint64_t n_udf_sub_dup_res = ns->n_retransmit_udf_sub_dup_res;
 	uint64_t n_udf_sub_repl_write = ns->n_retransmit_udf_sub_repl_write;
-	uint64_t n_nsup_repl_write = ns->n_retransmit_nsup_repl_write;
 
 	if ((n_migrate_record_retransmits |
 			n_client_read_dup_res |
@@ -717,12 +693,11 @@ log_line_retransmits(as_namespace* ns)
 			n_client_delete_dup_res | n_client_delete_repl_write |
 			n_client_udf_dup_res | n_client_udf_repl_write |
 			n_batch_sub_dup_res |
-			n_udf_sub_dup_res | n_udf_sub_repl_write |
-			n_nsup_repl_write) == 0) {
+			n_udf_sub_dup_res | n_udf_sub_repl_write) == 0) {
 		return;
 	}
 
-	cf_info(AS_INFO, "{%s} retransmits: migration %lu client-read %lu client-write (%lu,%lu) client-delete (%lu,%lu) client-udf (%lu,%lu) batch-sub %lu udf-sub (%lu,%lu) nsup %lu",
+	cf_info(AS_INFO, "{%s} retransmits: migration %lu client-read %lu client-write (%lu,%lu) client-delete (%lu,%lu) client-udf (%lu,%lu) batch-sub %lu udf-sub (%lu,%lu)",
 			ns->name,
 			n_migrate_record_retransmits,
 			n_client_read_dup_res,
@@ -730,8 +705,26 @@ log_line_retransmits(as_namespace* ns)
 			n_client_delete_dup_res, n_client_delete_repl_write,
 			n_client_udf_dup_res, n_client_udf_repl_write,
 			n_batch_sub_dup_res,
-			n_udf_sub_dup_res, n_udf_sub_repl_write,
-			n_nsup_repl_write
+			n_udf_sub_dup_res, n_udf_sub_repl_write
+			);
+}
+
+
+void
+log_line_special_errors(as_namespace* ns)
+{
+	uint64_t n_fail_key_busy = ns->n_fail_key_busy;
+	uint64_t n_fail_record_too_big = ns->n_fail_record_too_big;
+
+	if ((n_fail_key_busy |
+			n_fail_record_too_big) == 0) {
+		return;
+	}
+
+	cf_info(AS_INFO, "{%s} special-errors: key-busy %lu record-too-big %lu",
+			ns->name,
+			n_fail_key_busy,
+			n_fail_record_too_big
 			);
 }
 
@@ -772,14 +765,6 @@ dump_global_histograms()
 	}
 
 	as_query_histogram_dumpall();
-
-	if (g_config.ldt_benchmarks) {
-		histogram_dump(g_stats.ldt_multiop_prole_hist);
-		histogram_dump(g_stats.ldt_update_record_cnt_hist);
-		histogram_dump(g_stats.ldt_io_record_cnt_hist);
-		histogram_dump(g_stats.ldt_update_io_bytes_hist);
-		histogram_dump(g_stats.ldt_hist);
-	}
 }
 
 

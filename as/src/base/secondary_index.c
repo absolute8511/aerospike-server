@@ -81,6 +81,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
@@ -100,6 +101,7 @@
 #include "bt_iterator.h"
 #include "cf_str.h"
 #include "fault.h"
+#include "shash.h"
 
 #include "base/cdt.h"
 #include "base/cfg.h"
@@ -256,7 +258,7 @@ as_sindex_can_defrag_record(as_namespace *ns, cf_digest *keyd)
 	uint32_t pid = as_partition_getid(keyd);
 
 	int timeout_ms = 2;
-	if (as_partition_reserve_migrate_timeout(ns, pid, &rsv, 0, timeout_ms) != 0 ) {
+	if (as_partition_reserve_timeout(ns, pid, &rsv, timeout_ms) != 0 ) {
 		cf_atomic64_incr(&g_stats.sindex_gc_timedout);
 		return AS_SINDEX_GC_SKIP_ITERATION;
 	}
@@ -556,20 +558,17 @@ as_sindex__put_in_set_binid_hash(as_namespace * ns, char * set, int binid, int c
 	}
 
 	// Get the linked list from the hash
-	int rv      = shash_get(ns->sindex_set_binid_hash, (void *)si_prop, (void *)&simatch_ll);
+	int rv      = cf_shash_get(ns->sindex_set_binid_hash, (void *)si_prop, (void *)&simatch_ll);
 
 	// If linked list does not exist then make one and put it in the hash
-	if (rv && rv != SHASH_ERR_NOTFOUND) {
+	if (rv && rv != CF_SHASH_ERR_NOT_FOUND) {
 		cf_debug(AS_SINDEX, "shash get failed with error %d", rv);
 		return AS_SINDEX_ERR;
 	};
-	if (rv == SHASH_ERR_NOTFOUND) {
+	if (rv == CF_SHASH_ERR_NOT_FOUND) {
 		simatch_ll = cf_malloc(sizeof(cf_ll));
 		cf_ll_init(simatch_ll, as_sindex__set_binid_hash_destroy, false);
-		if (SHASH_OK != shash_put(ns->sindex_set_binid_hash, (void *)si_prop, (void *)&simatch_ll)) {
-			cf_warning(AS_SINDEX, "shash put failed for key %s", si_prop);
-			return AS_SINDEX_ERR;
-		}
+		cf_shash_put(ns->sindex_set_binid_hash, (void *)si_prop, (void *)&simatch_ll);
 	}
 	if (!simatch_ll) {
 		return AS_SINDEX_ERR;
@@ -612,14 +611,14 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 
 	// Get the sindex list corresponding to key
 	cf_ll * simatch_ll = NULL;
-	int rv             = shash_get(ns->sindex_set_binid_hash, (void *)si_prop, (void *)&simatch_ll);
+	int rv             = cf_shash_get(ns->sindex_set_binid_hash, (void *)si_prop, (void *)&simatch_ll);
 
 	// If the list does not exist, return does not exist
-	if (rv && rv != SHASH_ERR_NOTFOUND) {
+	if (rv && rv != CF_SHASH_ERR_NOT_FOUND) {
 		cf_debug(AS_SINDEX, "shash get failed with error %d", rv);
 		return AS_SINDEX_ERR_NOTFOUND;
 	};
-	if (rv == SHASH_ERR_NOTFOUND) {
+	if (rv == CF_SHASH_ERR_NOT_FOUND) {
 		return AS_SINDEX_ERR_NOTFOUND;
 	}
 
@@ -654,7 +653,7 @@ as_sindex__delete_from_set_binid_hash(as_namespace * ns, as_sindex_metadata * im
 	// 			If the list size becomes 0
 	// 				Delete the entry from the hash
 	if (cf_ll_size(simatch_ll) == 0) {
-		rv = shash_delete(ns->sindex_set_binid_hash, si_prop);
+		rv = cf_shash_delete(ns->sindex_set_binid_hash, si_prop);
 		if (rv) {
 			cf_debug(AS_SINDEX, "shash_delete fails with error %d", rv);
 		}
@@ -694,7 +693,7 @@ as_sindex__simatch_list_by_set_binid(as_namespace * ns, const char *set, int bin
 	}
 
 	// Look for the key in set_binid_hash
-	int rv             = shash_get(ns->sindex_set_binid_hash, (void *)si_prop, (void *)simatch_ll);
+	int rv             = cf_shash_get(ns->sindex_set_binid_hash, (void *)si_prop, (void *)simatch_ll);
 
 	// If not found return NULL
 	if (rv || !(*simatch_ll)) {
@@ -850,7 +849,7 @@ as_sindex__simatch_by_iname(as_namespace *ns, char *idx_name)
 	strcpy(iname, idx_name);
 
 	int simatch = -1;
-	int rv = shash_get(ns->sindex_iname_hash, (void *)iname, (void *)&simatch);
+	int rv = cf_shash_get(ns->sindex_iname_hash, (void *)iname, (void *)&simatch);
 	cf_detail(AS_SINDEX, "Found iname simatch %s->%d rv=%d", iname, simatch, rv);
 
 	if (rv) {
@@ -1035,39 +1034,31 @@ as_sindex__config_default(as_sindex *si)
 void
 as_sindex__setup_histogram(as_sindex *si)
 {
-	char hist_name[AS_ID_INAME_SZ+64];
+	char hist_name[AS_ID_INAME_SZ + 64];
+
 	sprintf(hist_name, "%s_write_us", si->imd->iname);
-	if (NULL == (si->stats._write_hist = histogram_create(hist_name, HIST_MICROSECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex write histogram");
+	si->stats._write_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "%s_si_prep_us", si->imd->iname);
-	if (NULL == (si->stats._si_prep_hist = histogram_create(hist_name, HIST_MICROSECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex prepare histogram");
+	si->stats._si_prep_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "%s_delete_us", si->imd->iname);
-	if (NULL == (si->stats._delete_hist = histogram_create(hist_name, HIST_MICROSECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex delete histogram");
+	si->stats._delete_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "%s_query", si->imd->iname);
-	if (NULL == (si->stats._query_hist = histogram_create(hist_name, HIST_MILLISECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex query histogram");
+	si->stats._query_hist = histogram_create(hist_name, HIST_MILLISECONDS);
 
 	sprintf(hist_name, "%s_query_batch_lookup_us", si->imd->iname);
-	if (NULL == (si->stats._query_batch_lookup = histogram_create(hist_name, HIST_MICROSECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex query batch-lookup histogram");
+	si->stats._query_batch_lookup = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "%s_query_batch_io_us", si->imd->iname);
-	if (NULL == (si->stats._query_batch_io = histogram_create(hist_name, HIST_MICROSECONDS)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex query io histogram");
+	si->stats._query_batch_io = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "%s_query_row_count", si->imd->iname);
-	if (NULL == (si->stats._query_rcnt_hist = histogram_create(hist_name, HIST_COUNT)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex query row count histogram");
+	si->stats._query_rcnt_hist = histogram_create(hist_name, HIST_COUNT);
 
 	sprintf(hist_name, "%s_query_diff_count", si->imd->iname);
-	if (NULL == (si->stats._query_diff_hist = histogram_create(hist_name, HIST_COUNT)))
-		cf_warning(AS_SINDEX, "couldn't create histogram for sindex query diff histogram");
-
+	si->stats._query_diff_hist = histogram_create(hist_name, HIST_COUNT);
 }
 
 int
@@ -1284,22 +1275,19 @@ as_sindex_reserve(as_sindex *si, char *fname, int lineno)
  * Release, queue up the request for the destroy to clean up Aerospike Index thread,
  * Not done inline because main write thread could release the last reference.
  */
-int
+void
 as_sindex_release(as_sindex *si, char *fname, int lineno)
 {
 	if (! si) {
-	   	return AS_SINDEX_OK;
+	   	return;
 	}
 
 	uint64_t val = cf_rc_release(si->imd);
 
 	if (val == 0) {
 		si->flag |= AS_SINDEX_FLAG_DESTROY_CLEANUP;
-		if (CF_QUEUE_OK != cf_queue_push(g_sindex_destroy_q, &si)) {
-			return AS_SINDEX_ERR;
-		}
+		cf_queue_push(g_sindex_destroy_q, &si);
 	}
-	return AS_SINDEX_OK;
 }
 
 as_sindex_status
@@ -1496,16 +1484,7 @@ sindex_create_lockless(as_namespace *ns, as_sindex_metadata *imd)
 	char iname[AS_ID_INAME_SZ];
 	memset(iname, 0, AS_ID_INAME_SZ);
 	snprintf(iname, strlen(imd->iname)+1, "%s", imd->iname);
-	if (SHASH_OK != shash_put(ns->sindex_iname_hash, (void *)iname, (void *)&chosen_id)) {
-		cf_warning(AS_SINDEX, "Internal error ... Duplicate element found sindex iname hash [%s %s]",
-				imd->iname, as_bin_get_name_from_id(ns, imd->binid));
-
-		rv = as_sindex__delete_from_set_binid_hash(ns, imd);
-		if (rv) {
-			cf_warning(AS_SINDEX, "Delete from set_binid hash fails with error %d", rv);
-		}
-		return AS_SINDEX_ERR;
-	}
+	cf_shash_put(ns->sindex_iname_hash, (void *)iname, (void *)&chosen_id);
 	cf_detail(AS_SINDEX, "Put iname simatch %s:%zu->%d", iname, strlen(imd->iname), chosen_id);
 
 	// Init SI
@@ -1543,12 +1522,7 @@ sindex_create_lockless(as_namespace *ns, as_sindex_metadata *imd)
 	if (g_sindex_boot_done) {
 		// Reserve for ref in queue
 		AS_SINDEX_RESERVE(si);
-		int rv = cf_queue_push(g_sindex_populate_q, &si);
-		if (CF_QUEUE_OK != rv) {
-			cf_warning(AS_SINDEX, "Failed to queue up for population... index=%s "
-					"Internal Queue Error rv=%d, try dropping and recreating",
-					si->imd->iname, rv);
-		}
+		cf_queue_push(g_sindex_populate_q, &si);
 	}
 
 	return AS_SINDEX_OK;
@@ -1835,15 +1809,14 @@ as_sindex_boot_populateall()
 			continue;
 		}
 
-		// If FAST START
-		// OR (Data not in memory AND COLD START)
-		if (!ns->cold_start
-			|| (!ns->storage_data_in_memory)) {
-			// reserve all sindexes
+		if (! ns->storage_data_in_memory) {
+			// Data-not-in-memory (cold or warm restart) - have not yet built
+			// sindex, build it now.
 			as_sindex_populator_reserve_all(ns);
 			as_sbld_build_all(ns);
 			cf_info(AS_SINDEX, "Queuing namespace %s for sindex population ", ns->name);
 		} else {
+			// Data-in-memory (cold or cool restart) - already built sindex.
 			as_sindex_boot_populateall_done(ns);
 		}
 		ns_cnt++;
@@ -1861,9 +1834,8 @@ as_sindex_boot_populateall()
 			continue;
 		}
 
-		// If FAST START
-		// OR (Data not in memory AND COLD START)
-		if (!ns->cold_start || (!ns->storage_data_in_memory)) {
+		if (! ns->storage_data_in_memory) {
+			// Data-not-in-memory - finished sindex building job.
 			as_sindex_populator_release_all(ns);
 		}
 	}
@@ -2671,11 +2643,6 @@ as_sindex_rangep_from_msg(as_namespace *ns, as_msg *msgp, as_sindex_range **sran
 	// first element.  Geospatial queries use one element per region
 	// cell, up to MAX_REGION_CELLS.
 	*srange         = cf_malloc(sizeof(as_sindex_range) * MAX_REGION_CELLS);
-	if (!(*srange)) {
-		cf_warning(AS_SINDEX,
-                 "Could not Allocate memory for range key. Aborting Query ...");
-		return AS_SINDEX_ERR_NO_MEMORY;
-	}
 
 	int ret = as_sindex_range_from_msg(ns, msgp, *srange);
 	if (AS_SINDEX_OK != ret) {
@@ -2924,10 +2891,6 @@ as_sindex_add_sbin_value_in_heap(as_sindex_bin * sbin, void * val)
 		}
 
 		sbin->values  = cf_malloc(data_sz * size);
-		if (!sbin->values) {
-			cf_warning(AS_SINDEX, "malloc failed");
-			return AS_SINDEX_ERR;
-		}
 		sbin->to_free = true;
 		sbin->heap_capacity = size;
 
@@ -2951,11 +2914,6 @@ as_sindex_add_sbin_value_in_heap(as_sindex_bin * sbin, void * val)
 		if (sbin->heap_capacity ==  sbin->num_values) {
 			sbin->heap_capacity = 2 * sbin->heap_capacity;
 			sbin->values = cf_realloc(sbin->values, sbin->heap_capacity * data_sz);
-			if (!sbin->values) {
-				cf_warning(AS_SINDEX, "Realloc failed for size %d", sbin->heap_capacity * data_sz);
-				sbin->heap_capacity = sbin->heap_capacity / 2;
-				return AS_SINDEX_ERR;
-			}
 		}
 	}
 
@@ -3355,7 +3313,7 @@ static void
 packed_val_init_unpacker(const cdt_payload *val, as_unpacker *pk)
 {
 	pk->buffer = val->ptr;
-	pk->length = val->size;
+	pk->length = val->sz;
 	pk->offset = 0;
 }
 
@@ -3397,7 +3355,7 @@ packed_val_make_skey(const cdt_payload *val, as_val_t type, void *skey)
 }
 
 static bool
-packed_val_add_sbin_or_update_shash(cdt_payload *val, as_sindex_bin *sbin, shash *hash, as_val_t type)
+packed_val_add_sbin_or_update_shash(cdt_payload *val, as_sindex_bin *sbin, cf_shash *hash, as_val_t type)
 {
 	uint8_t skey[sizeof(cf_digest)];
 
@@ -3408,37 +3366,32 @@ packed_val_add_sbin_or_update_shash(cdt_payload *val, as_sindex_bin *sbin, shash
 
 	bool found = false;
 
-	if (shash_get(hash, skey, &found) != SHASH_OK) {
+	if (cf_shash_get(hash, skey, &found) != CF_SHASH_OK) {
 		// Item not in hash, add to sbin.
 		return as_sindex_bin_add_skey(sbin, skey, type);
 	}
 	else {
 		// Item is in hash, set it to true.
 		found = true;
+		cf_shash_put(hash, skey, &found);
 
-		if (shash_put(hash, skey, &found) == SHASH_OK) {
-			return true;
-		}
+		return true;
 	}
 
 	return false;
 }
 
-static bool
-shash_add_packed_val(shash *h, const cdt_payload *val, as_val_t type, bool value)
+static void
+shash_add_packed_val(cf_shash *h, const cdt_payload *val, as_val_t type, bool value)
 {
 	uint8_t skey[sizeof(cf_digest)];
 
 	if (! packed_val_make_skey(val, type, skey)) {
 		// packed_vals that aren't of type are ignored.
-		return true;
+		return;
 	}
 
-	if (shash_put(h, skey, &value) != SHASH_OK) {
-		return false;
-	}
-
-	return true;
+	cf_shash_put(h, skey, &value);
 }
 
 static int
@@ -3507,45 +3460,62 @@ as_sindex_sbins_sindex_list_diff_populate(as_sindex_bin *sbins, as_sindex *si, c
 	packed_val_init_unpacker(&old_val, &pk_old);
 	packed_val_init_unpacker(&new_val, &pk_new);
 
-	int old_list_size = as_unpack_list_header_element_count(&pk_old);
-	int new_list_size = as_unpack_list_header_element_count(&pk_new);
+	int64_t old_list_count = as_unpack_list_header_element_count(&pk_old);
+	int64_t new_list_count = as_unpack_list_header_element_count(&pk_new);
 
-	if (old_list_size < 0 || new_list_size < 0) {
+	if (old_list_count < 0 || new_list_count < 0) {
 		return -1;
 	}
 
-	bool old_list_is_short = old_list_size < new_list_size;
+	// Skip msgpack ext if it exist as the first element.
+	if (old_list_count != 0 && as_unpack_peek_is_ext(&pk_old)) {
+		if (as_unpack_size(&pk_old) < 0) {
+			return -1;
+		}
 
-	uint32_t short_list_size;
-	uint32_t long_list_size;
+		old_list_count--;
+	}
+
+	if (new_list_count != 0 && as_unpack_peek_is_ext(&pk_new)) {
+		if (as_unpack_size(&pk_new) < 0) {
+			return -1;
+		}
+
+		new_list_count--;
+	}
+
+	bool old_list_is_short = old_list_count < new_list_count;
+
+	uint32_t short_list_count;
+	uint32_t long_list_count;
 	as_unpacker *pk_short;
 	as_unpacker *pk_long;
 
 	if (old_list_is_short) {
-		short_list_size		= old_list_size;
-		long_list_size		= new_list_size;
+		short_list_count	= (uint32_t)old_list_count;
+		long_list_count		= (uint32_t)new_list_count;
 		pk_short			= &pk_old;
 		pk_long				= &pk_new;
 	}
 	else {
-		short_list_size		= new_list_size;
-		long_list_size		= old_list_size;
+		short_list_count	= (uint32_t)new_list_count;
+		long_list_count		= (uint32_t)old_list_count;
 		pk_short			= &pk_new;
 		pk_long				= &pk_old;
 	}
 
-	if (short_list_size == 0) {
-		if (long_list_size == 0) {
+	if (short_list_count == 0) {
+		if (long_list_count == 0) {
 			return 0;
 		}
 
 		as_sindex_init_sbin(sbins, old_list_is_short ? AS_SINDEX_OP_INSERT : AS_SINDEX_OP_DELETE, type, si);
 
-		for (uint32_t i = 0; i < long_list_size; i++) {
+		for (uint32_t i = 0; i < long_list_count; i++) {
 			cdt_payload ele;
 
 			ele.ptr = pk_long->buffer + pk_long->offset;
-			ele.size = as_unpack_size(pk_long);
+			ele.sz = as_unpack_size(pk_long);
 
 			// sizeof(cf_digest) is big enough for all key types we support so far.
 			uint8_t skey[sizeof(cf_digest)];
@@ -3565,14 +3535,10 @@ as_sindex_sbins_sindex_list_diff_populate(as_sindex_bin *sbins, as_sindex *si, c
 		return sbins->num_values == 0 ? 0 : 1;
 	}
 
-	shash *hash;
-	if (shash_create(&hash, cf_shash_fn_u32, data_size, 1, short_list_size, 0) != SHASH_OK) {
-		cf_warning(AS_SINDEX, "as_sindex_sbins_sindex_list_diff_populate() failed to create hash");
-		return -1;
-	}
+	cf_shash *hash = cf_shash_create(cf_shash_fn_u32, data_size, 1, short_list_count, 0);
 
 	// Add elements of shorter list into hash with value = false.
-	for (uint32_t i = 0; i < short_list_size; i++) {
+	for (uint32_t i = 0; i < short_list_count; i++) {
 		cdt_payload ele = {
 				.ptr = pk_short->buffer + pk_short->offset
 		};
@@ -3581,31 +3547,26 @@ as_sindex_sbins_sindex_list_diff_populate(as_sindex_bin *sbins, as_sindex *si, c
 
 		if (size < 0) {
 			cf_warning(AS_SINDEX, "as_sindex_sbins_sindex_list_diff_populate() list unpack failed");
-			shash_destroy(hash);
+			cf_shash_destroy(hash);
 			return -1;
 		}
 
-		ele.size = size;
-
-		if (! shash_add_packed_val(hash, &ele, expected_type, false)) {
-			cf_warning(AS_SINDEX, "as_sindex_sbins_sindex_list_diff_populate() hash add failed");
-			shash_destroy(hash);
-			return -1;
-		}
+		ele.sz = size;
+		shash_add_packed_val(hash, &ele, expected_type, false);
 	}
 
 	as_sindex_init_sbin(sbins, old_list_is_short ? AS_SINDEX_OP_INSERT : AS_SINDEX_OP_DELETE, type, si);
 
-	for (uint32_t i = 0; i < long_list_size; i++) {
+	for (uint32_t i = 0; i < long_list_count; i++) {
 		cdt_payload ele;
 
 		ele.ptr = pk_long->buffer + pk_long->offset;
-		ele.size = as_unpack_size(pk_long);
+		ele.sz = as_unpack_size(pk_long);
 
 		if (! packed_val_add_sbin_or_update_shash(&ele, sbins, hash, expected_type)) {
 			cf_warning(AS_SINDEX, "as_sindex_sbins_sindex_list_diff_populate() hash update failed");
 			as_sindex_sbin_free(sbins);
-			shash_destroy(hash);
+			cf_shash_destroy(hash);
 			return -1;
 		}
 	}
@@ -3622,9 +3583,9 @@ as_sindex_sbins_sindex_list_diff_populate(as_sindex_bin *sbins, as_sindex *si, c
 	as_sindex_init_sbin(sbins, old_list_is_short ? AS_SINDEX_OP_DELETE : AS_SINDEX_OP_INSERT, type, si);
 
 	// Iterate through all the elements of hash.
-	if (shash_reduce(hash, shash_diff_reduce_fn, sbins) != 0) {
+	if (cf_shash_reduce(hash, shash_diff_reduce_fn, sbins) != 0) {
 		as_sindex_sbin_freeall(start_sbin, found + 1);
-		shash_destroy(hash);
+		cf_shash_destroy(hash);
 		return -1;
 	}
 
@@ -3632,7 +3593,7 @@ as_sindex_sbins_sindex_list_diff_populate(as_sindex_bin *sbins, as_sindex *si, c
 		found++;
 	}
 
-	shash_destroy(hash);
+	cf_shash_destroy(hash);
 
 	return found;
 }
@@ -4112,7 +4073,24 @@ as_sindex_put_rd(as_sindex *si, as_storage_rd *rd)
  */
 
 // Global flag to signal that all secondary index SMD is restored.
-bool g_sindex_smd_restored = false;
+static bool g_sindex_smd_restored = false;
+
+void
+as_sindex_init_smd()
+{
+	int retval = as_smd_create_module(SINDEX_MODULE,
+				as_smd_majority_consensus_merge, NULL,
+				NULL, NULL,
+				as_sindex_smd_accept_cb, NULL,
+				NULL, NULL);
+
+	cf_assert(retval == 0, AS_SINDEX, "failed to create sindex SMD module (rv %d)", retval);
+
+	// Wait for Secondary Index SMD to be completely restored.
+	while (! g_sindex_smd_restored) {
+		usleep(1000);
+	}
+}
 
 /*
  * This function is called when the SMD has resolved the correct state of
@@ -4522,11 +4500,6 @@ as_sindex_init(as_namespace *ns)
 {
 	ns->sindex = cf_malloc(sizeof(as_sindex) * AS_SINDEX_MAX);
 
-	if (! ns->sindex) {
-		cf_crash(AS_SINDEX,
-				"Could not allocation memory for secondary index");
-	}
-
 	ns->sindex_cnt = 0;
 	for (int i = 0; i < AS_SINDEX_MAX; i++) {
 		as_sindex *si                    = &ns->sindex[i];
@@ -4541,18 +4514,12 @@ as_sindex_init(as_namespace *ns)
 	}
 
 	// binid to simatch lookup
-	if (SHASH_OK != shash_create(&ns->sindex_set_binid_hash,
-						cf_shash_fn_zstr, AS_SINDEX_PROP_KEY_SIZE, sizeof(cf_ll *),
-						AS_SINDEX_MAX, 0)) {
-		cf_crash(AS_AS, "Couldn't create sindex binid hash");
-	}
+	ns->sindex_set_binid_hash = cf_shash_create(cf_shash_fn_zstr,
+			AS_SINDEX_PROP_KEY_SIZE, sizeof(cf_ll *), AS_SINDEX_MAX, 0);
 
 	// iname to simatch lookup
-	if (SHASH_OK != shash_create(&ns->sindex_iname_hash,
-						cf_shash_fn_zstr, AS_ID_INAME_SZ, sizeof(uint32_t),
-						AS_SINDEX_MAX, 0)) {
-		cf_crash(AS_AS, "Couldn't create sindex iname hash");
-	}
+	ns->sindex_iname_hash = cf_shash_create(cf_shash_fn_zstr, AS_ID_INAME_SZ,
+			sizeof(uint32_t), AS_SINDEX_MAX, 0);
 
 	// Init binid_has_sindex to zero
 	memset(ns->binid_has_sindex, 0, sizeof(uint32_t)*AS_BINID_HAS_SINDEX_SIZE);

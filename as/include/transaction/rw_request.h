@@ -34,7 +34,6 @@
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_byte_order.h"
-#include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_digest.h"
 
 #include "dynbuf.h"
@@ -44,7 +43,7 @@
 #include "base/proto.h"
 #include "base/rec_props.h"
 #include "base/transaction.h"
-#include "base/transaction_policy.h"
+#include "fabric/hb.h"
 #include "fabric/partition.h"
 
 
@@ -52,19 +51,20 @@
 // Forward declarations.
 //
 
-struct rw_request_s;
-struct iudf_origin_s;
 struct as_batch_shared_s;
+struct as_file_handle_s;
+struct cl_msg_s;
+struct iudf_origin_s;
+struct rw_request_s;
 
 
 //==========================================================
-// Typedefs.
+// Typedefs & constants.
 //
 
 typedef bool (*dup_res_done_cb) (struct rw_request_s* rw);
 typedef void (*repl_write_done_cb) (struct rw_request_s* rw);
 typedef void (*timeout_done_cb) (struct rw_request_s* rw);
-
 
 typedef struct rw_wait_ele_s {
 	as_transaction			tr; // TODO - only needs to be transaction head
@@ -78,7 +78,7 @@ typedef struct rw_request_s {
 	// Matches as_transaction.
 	//
 
-	cl_msg*				msgp;
+	struct cl_msg_s*	msgp;
 	uint32_t			msg_fields;
 
 	uint8_t				origin;
@@ -86,7 +86,7 @@ typedef struct rw_request_s {
 
 	union {
 		void*						any;
-		as_file_handle*				proto_fd_h;
+		struct as_file_handle_s*	proto_fd_h;
 		cf_node						proxy_node;
 		struct iudf_origin_s*		iudf_orig;
 		struct as_batch_shared_s*	batch_shared;
@@ -100,16 +100,17 @@ typedef struct rw_request_s {
 
 	cf_digest			keyd;
 
-	cf_clock			start_time;
-	cf_clock			benchmark_time;
+	uint64_t			start_time;
+	uint64_t			benchmark_time;
 
 	as_partition_reservation rsv;
 
-	cf_clock			end_time;
-	// Don't (yet) need result or flags.
+	uint64_t			end_time;
+	uint8_t				result_code;
+	uint8_t				flags;
 	uint16_t			generation;
 	uint32_t			void_time;
-	// Don't (yet) need last_update_time.
+	uint64_t			last_update_time;
 
 	//
 	// End of as_transaction look-alike.
@@ -118,11 +119,10 @@ typedef struct rw_request_s {
 	pthread_mutex_t		lock;
 
 	rw_wait_ele*		wait_queue_head;
+	rw_wait_ele*		wait_queue_tail;
+	uint32_t			wait_queue_depth;
 
 	bool				is_set_up; // TODO - redundant with timeout_cb
-	bool				has_udf; // TODO - only for stats?
-	bool				is_multiop;
-	bool				respond_client_on_master_completion;
 
 	// Store pickled data, for use in replica write.
 	uint8_t*			pickled_buf;
@@ -136,6 +136,7 @@ typedef struct rw_request_s {
 	// alternatively, timeouts.
 	uint32_t			tid;
 	bool				dup_res_complete;
+	bool				repl_write_complete;
 	dup_res_done_cb		dup_res_cb;
 	repl_write_done_cb	repl_write_cb;
 	timeout_done_cb		timeout_cb;
@@ -144,16 +145,20 @@ typedef struct rw_request_s {
 	// write request. Message is kept in case it needs to be retransmitted.
 	msg*				dest_msg;
 
-	cf_clock			xmit_ms; // time of next retransmit
+	uint64_t			xmit_ms; // time of next retransmit
 	uint32_t			retry_interval_ms; // interval to add for next retransmit
 
 	// Destination info for duplicate resolution and replica write requests.
-	int					n_dest_nodes;
+	uint32_t			n_dest_nodes;
 	cf_node				dest_nodes[AS_CLUSTER_SZ];
 	bool				dest_complete[AS_CLUSTER_SZ];
 
 	// Duplicate resolution response messages from nodes with duplicates.
-	msg*				dup_msg[AS_CLUSTER_SZ];
+	msg*				best_dup_msg;
+	// TODO - could store best dup node-id - worth it?
+	uint8_t				best_dup_result_code;
+	uint16_t			best_dup_gen;
+	uint64_t			best_dup_lut;
 
 } rw_request;
 
@@ -164,6 +169,7 @@ typedef struct rw_request_s {
 
 rw_request* rw_request_create();
 void rw_request_destroy(rw_request* rw);
+void rw_request_wait_q_push(rw_request* rw, as_transaction* tr);
 
 
 static inline void
@@ -183,27 +189,11 @@ rw_request_release(rw_request* rw)
 }
 
 
-static inline uint32_t
-rw_request_wait_q_depth(rw_request* rw)
-{
-	uint32_t depth = 0;
-	rw_wait_ele* e = rw->wait_queue_head;
-
-	while (e) {
-		depth++;
-		e = e->next;
-	}
-
-	return depth;
-}
-
-
 // See as_transaction_trid().
 static inline uint64_t
 rw_request_trid(const rw_request* rw)
 {
-	// Note - rw->msgp can be null if it's a ship-op.
-	if ((rw->msg_fields & AS_MSG_FIELD_BIT_TRID) == 0 || ! rw->msgp) {
+	if ((rw->msg_fields & AS_MSG_FIELD_BIT_TRID) == 0) {
 		return 0;
 	}
 

@@ -23,6 +23,7 @@
 #include "fabric/exchange.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <sys/param.h> // For MAX() and MIN().
 
@@ -30,10 +31,10 @@
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
 #include "citrusleaf/cf_queue.h"
-#include "citrusleaf/cf_shash.h"
 
 #include "dynbuf.h"
 #include "fault.h"
+#include "shash.h"
 #include "socket.h"
 
 #include "base/cfg.h"
@@ -445,7 +446,7 @@ typedef struct as_exchange_s
 	 * Will have an as_exchange_node_state entry for every node in the
 	 * succession list.
 	 */
-	shash* nodeid_to_node_state;
+	cf_shash* nodeid_to_node_state;
 
 	/**
 	 * This node's data payload for current round.
@@ -562,6 +563,11 @@ static const msg_template exchange_msg_template[] = {
 
 COMPILER_ASSERT(sizeof(exchange_msg_template) / sizeof(msg_template) ==
 		NUM_EXCHANGE_MSG_FIELDS);
+
+/**
+ * Global lock to set or get exchanged info from other threads.
+ */
+pthread_mutex_t g_exchanged_info_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /**
  * Global lock to serialize all reads and writes to the exchange state.
@@ -761,32 +767,6 @@ static pthread_mutex_t g_external_event_publisher_lock =
 			(uint8_t*)STACK_VAR(buff, __LINE__), buffer_size,						\
 			VECTOR_FLAG_INITZERO);													\
 	STACK_VAR(vector, __LINE__);													\
-})
-
-/**
- * Put a key into a hash or crash with an error message on failure.
- */
-#define SHASH_PUT_OR_DIE(hash, key, value, error, ...)							\
-if (SHASH_OK != shash_put(hash, key, value)) {CRASH(error, ##__VA_ARGS__);}
-
-/**
- * Delete a key from hash or on failure crash with an error message. Key not
- * found is NOT considered an error.
- */
-#define SHASH_DELETE_OR_DIE(hash, key, error, ...)							\
-if (SHASH_ERR == shash_delete(hash, key)) {CRASH(error, ##__VA_ARGS__);}
-
-/**
- * Read value for a key and crash if there is an error. Key not found is NOT
- * considered an error.
- */
-#define SHASH_GET_OR_DIE(hash, key, value, error, ...)	\
-({														\
-	int retval = shash_get(hash, key, value);			\
-	if (retval == SHASH_ERR) {							\
-		CRASH(error, ##__VA_ARGS__);					\
-	}													\
-	retval;												\
 })
 
 /*
@@ -1068,8 +1048,7 @@ static void
 external_event_publisher_stop()
 {
 	EXTERNAL_EVENT_PUBLISHER_LOCK();
-	g_external_event_publisher.sys_state =
-			AS_EXCHANGE_SYS_STATE_SHUTTING_DOWN;
+	g_external_event_publisher.sys_state = AS_EXCHANGE_SYS_STATE_SHUTTING_DOWN;
 	EXTERNAL_EVENT_PUBLISHER_UNLOCK();
 
 	exchange_external_event_publisher_thr_wakeup();
@@ -1096,7 +1075,6 @@ exchange_node_state_init(as_exchange_node_state* node_state)
 	memset(node_state, 0, sizeof(*node_state));
 
 	node_state->data = cf_calloc(1, sizeof(as_exchange_node_data));
-	// FIXME - assert on failure?
 }
 
 /**
@@ -1144,11 +1122,11 @@ exchange_node_states_reset_reduce(const void* key, void* data, void* udata)
 	if (node_index < 0) {
 		// Node not in succession list
 		exchange_node_state_destroy(node_state);
-		return SHASH_REDUCE_DELETE;
+		return CF_SHASH_REDUCE_DELETE;
 	}
 
 	exchange_node_state_reset(node_state);
-	return SHASH_OK;
+	return CF_SHASH_OK;
 }
 
 /**
@@ -1163,7 +1141,7 @@ exchange_node_states_reset()
 
 	// Fix existing entries by reseting entries in succession and removing
 	// entries not in succession list.
-	shash_reduce_delete(g_exchange.nodeid_to_node_state,
+	cf_shash_reduce(g_exchange.nodeid_to_node_state,
 			exchange_node_states_reset_reduce, NULL);
 
 	// Add missing entries.
@@ -1174,13 +1152,11 @@ exchange_node_states_reset()
 		cf_node nodeid;
 
 		cf_vector_get(&g_exchange.succession_list, i, &nodeid);
-		if (shash_get(g_exchange.nodeid_to_node_state, &nodeid, &temp_state)
-				== SHASH_ERR_NOTFOUND) {
+		if (cf_shash_get(g_exchange.nodeid_to_node_state, &nodeid, &temp_state)
+				== CF_SHASH_ERR_NOT_FOUND) {
 			exchange_node_state_init(&temp_state);
 
-			SHASH_PUT_OR_DIE(g_exchange.nodeid_to_node_state, &nodeid,
-					&temp_state,
-					"error creating new shash entry for node %"PRIx64, nodeid);
+			cf_shash_put(g_exchange.nodeid_to_node_state, &nodeid, &temp_state);
 		}
 	}
 
@@ -1201,7 +1177,7 @@ exchange_nodes_find_send_unacked_reduce(const void* key, void* data,
 	if (!node_state->send_acked) {
 		cf_vector_append(unacked, node);
 	}
-	return SHASH_OK;
+	return CF_SHASH_OK;
 }
 
 /**
@@ -1210,7 +1186,7 @@ exchange_nodes_find_send_unacked_reduce(const void* key, void* data,
 static void
 exchange_nodes_find_send_unacked(cf_vector* unacked)
 {
-	shash_reduce_delete(g_exchange.nodeid_to_node_state,
+	cf_shash_reduce(g_exchange.nodeid_to_node_state,
 			exchange_nodes_find_send_unacked_reduce, unacked);
 }
 
@@ -1229,7 +1205,7 @@ exchange_nodes_find_not_received_reduce(const void* key, void* data,
 	if (!node_state->received) {
 		cf_vector_append(not_received, node);
 	}
-	return SHASH_OK;
+	return CF_SHASH_OK;
 }
 
 /**
@@ -1238,7 +1214,7 @@ exchange_nodes_find_not_received_reduce(const void* key, void* data,
 static void
 exchange_nodes_find_not_received(cf_vector* not_received)
 {
-	shash_reduce_delete(g_exchange.nodeid_to_node_state,
+	cf_shash_reduce(g_exchange.nodeid_to_node_state,
 			exchange_nodes_find_not_received_reduce, not_received);
 }
 
@@ -1256,7 +1232,7 @@ exchange_nodes_find_not_ready_to_commit_reduce(const void* key, void* data,
 	if (!node_state->is_ready_to_commit) {
 		cf_vector_append(not_ready_to_commit, node);
 	}
-	return SHASH_OK;
+	return CF_SHASH_OK;
 }
 
 /**
@@ -1265,7 +1241,7 @@ exchange_nodes_find_not_ready_to_commit_reduce(const void* key, void* data,
 static void
 exchange_nodes_find_not_ready_to_commit(cf_vector* not_ready_to_commit)
 {
-	shash_reduce_delete(g_exchange.nodeid_to_node_state,
+	cf_shash_reduce(g_exchange.nodeid_to_node_state,
 			exchange_nodes_find_not_ready_to_commit_reduce,
 			not_ready_to_commit);
 }
@@ -1276,8 +1252,7 @@ exchange_nodes_find_not_ready_to_commit(cf_vector* not_ready_to_commit)
 static void
 exchange_node_state_update(cf_node nodeid, as_exchange_node_state* node_state)
 {
-	SHASH_PUT_OR_DIE(g_exchange.nodeid_to_node_state, &nodeid, node_state,
-			"error updating node state from hash for node %"PRIx64, nodeid);
+	cf_shash_put(g_exchange.nodeid_to_node_state, &nodeid, node_state);
 }
 
 /**
@@ -1287,8 +1262,8 @@ exchange_node_state_update(cf_node nodeid, as_exchange_node_state* node_state)
 static void
 exchange_node_state_get_safe(cf_node nodeid, as_exchange_node_state* node_state)
 {
-	if (SHASH_GET_OR_DIE(g_exchange.nodeid_to_node_state, &nodeid, node_state,
-			"error reading node state from hash") == SHASH_ERR_NOTFOUND) {
+	if (cf_shash_get(g_exchange.nodeid_to_node_state, &nodeid, node_state)
+			== CF_SHASH_ERR_NOT_FOUND) {
 		CRASH(
 				"node entry for node %"PRIx64"  missing from node state hash", nodeid);
 	}
@@ -1382,6 +1357,8 @@ exchange_msg_data_payload_set(msg* msg)
 	cf_vector_define(partition_versions, sizeof(msg_buf_ele), ns_count, 0);
 	uint32_t rack_ids[ns_count];
 
+	pthread_mutex_lock(&g_exchanged_info_lock);
+
 	for (uint32_t ns_ix = 0; ns_ix < ns_count; ns_ix++) {
 		as_namespace* ns = g_config.namespaces[ns_ix];
 
@@ -1405,6 +1382,8 @@ exchange_msg_data_payload_set(msg* msg)
 			&partition_versions);
 	msg_msgpack_list_set_uint32(msg, AS_EXCHANGE_MSG_NS_RACK_IDS, rack_ids,
 			ns_count);
+
+	pthread_mutex_unlock(&g_exchanged_info_lock);
 }
 
 /**
@@ -1598,7 +1577,7 @@ exchange_data_ack_msg_send(cf_node dest)
  * Add a pid to the namespace hash for the input vinfo.
  */
 static void
-exchange_namespace_hash_pid_add(shash* ns_hash, as_partition_version* vinfo,
+exchange_namespace_hash_pid_add(cf_shash* ns_hash, as_partition_version* vinfo,
 		uint16_t pid)
 {
 	if (as_partition_version_is_null(vinfo)) {
@@ -1609,13 +1588,11 @@ exchange_namespace_hash_pid_add(shash* ns_hash, as_partition_version* vinfo,
 	cf_vector* pid_vector;
 
 	// Append the hash.
-	if (SHASH_GET_OR_DIE(ns_hash, vinfo, &pid_vector,
-			"error reading the namespace hash") != SHASH_OK) {
+	if (cf_shash_get(ns_hash, vinfo, &pid_vector) != CF_SHASH_OK) {
 		// We are seeing this vinfo for the first time.
 		pid_vector = cf_vector_create(sizeof(uint16_t),
 		AS_EXCHANGE_VINFO_NUM_PIDS_AVG, 0);
-		SHASH_PUT_OR_DIE(ns_hash, vinfo, &pid_vector,
-				"error adding the the namespace hash");
+		cf_shash_put(ns_hash, vinfo, &pid_vector);
 	}
 
 	cf_vector_append(pid_vector, &pid);
@@ -1629,7 +1606,7 @@ exchange_namespace_hash_destroy_reduce(const void* key, void* data, void* udata)
 {
 	cf_vector* pid_vector = *(cf_vector**)data;
 	cf_vector_destroy(pid_vector);
-	return SHASH_REDUCE_DELETE;
+	return CF_SHASH_REDUCE_DELETE;
 }
 
 /**
@@ -1656,7 +1633,7 @@ exchange_namespace_hash_serialize_reduce(const void* key, void* data,
 		cf_dyn_buf_append_buf(dyn_buf, (uint8_t*)pid, sizeof(*pid));
 	}
 
-	return SHASH_OK;
+	return CF_SHASH_OK;
 }
 
 /**
@@ -1671,13 +1648,9 @@ exchange_data_namespace_payload_add(as_namespace* ns, cf_dyn_buf* dyn_buf)
 {
 	// A hash from each unique non null vinfo to a vector of partition ids
 	// having the vinfo.
-	shash* ns_hash;
-
-	if (shash_create(&ns_hash, exchange_vinfo_shash,
+	cf_shash* ns_hash = cf_shash_create(exchange_vinfo_shash,
 			sizeof(as_partition_version), sizeof(cf_vector*),
-			AS_EXCHANGE_UNIQUE_VINFO_MAX_SIZE_SOFT, 0) != SHASH_OK) {
-		CRASH("error creating namespace payload hash");
-	}
+			AS_EXCHANGE_UNIQUE_VINFO_MAX_SIZE_SOFT, 0);
 
 	as_partition* partitions = ns->partitions;
 
@@ -1689,19 +1662,19 @@ exchange_data_namespace_payload_add(as_namespace* ns, cf_dyn_buf* dyn_buf)
 
 	// We are ready to populate the dyn buffer with this ns's data.
 	DEBUG("namespace %s has %d unique vinfos", ns->name,
-			shash_get_size(ns_hash));
+			cf_shash_get_size(ns_hash));
 
 	// Append the vinfo count.
-	uint32_t num_vinfos = shash_get_size(ns_hash);
+	uint32_t num_vinfos = cf_shash_get_size(ns_hash);
 	cf_dyn_buf_append_buf(dyn_buf, (uint8_t*)&num_vinfos, sizeof(num_vinfos));
 
 	// Append vinfos and partitions.
-	shash_reduce(ns_hash, exchange_namespace_hash_serialize_reduce, dyn_buf);
+	cf_shash_reduce(ns_hash, exchange_namespace_hash_serialize_reduce, dyn_buf);
 
 	// Destroy the intermediate hash and the pid vectors.
-	shash_reduce_delete(ns_hash, exchange_namespace_hash_destroy_reduce, NULL);
+	cf_shash_reduce(ns_hash, exchange_namespace_hash_destroy_reduce, NULL);
 
-	shash_destroy(ns_hash);
+	cf_shash_destroy(ns_hash);
 }
 
 /**
@@ -1948,6 +1921,23 @@ exchange_reset_for_new_round(cf_vector* new_succession_list,
 }
 
 /**
+ * Commit exchange state to reflect self node being an orphan.
+ */
+static void
+exchange_orphan_commit()
+{
+	EXCHANGE_LOCK();
+	g_exchange.committed_cluster_key = 0;
+	g_exchange.committed_cluster_size = 0;
+	g_exchange.committed_principal = 0;
+	vector_clear(&g_exchange.committed_succession_list);
+	WARNING("blocking client transactions in orphan state!");
+	as_partition_balance_revert_to_orphan();
+	g_exchange.orphan_state_are_transactions_blocked = true;
+	EXCHANGE_UNLOCK();
+}
+
+/**
  * Receive an orphaned event and abort current round.
  */
 static void
@@ -1970,10 +1960,12 @@ exchange_orphaned_handle(as_clustering_event* orphaned_event)
 	as_partition_balance_disallow_migrations();
 	as_partition_balance_synchronize_migrations();
 
-	// We have not yet blocked transactions for this orphan transition.
-	g_exchange.orphan_state_are_transactions_blocked = false;
 	// Update the time this node got into orphan state.
 	g_exchange.orphan_state_start_time = cf_getms();
+
+	// Potentially temporary orphan state. We will timeout and commit orphan
+	// state if this persists for long.
+	g_exchange.orphan_state_are_transactions_blocked = false;
 
 	EXCHANGE_UNLOCK();
 }
@@ -2035,6 +2027,7 @@ exchange_clustering_event_handle(as_exchange_event* exchange_clustering_event)
  * Orphan state event handling
  * ----------------------------------------------------------------------------
  */
+
 /**
  * The wait time in orphan state after which client transactions and transaction
  * related interactions (e.g. valid partitoion map publishing) should be
@@ -2058,22 +2051,13 @@ exchange_orphan_transaction_block_timeout()
 static void
 exchange_orphan_timer_event_handle()
 {
-	bool invoke_transaction_block = false;
 	uint32_t timeout = exchange_orphan_transaction_block_timeout();
 	EXCHANGE_LOCK();
 	if (!g_exchange.orphan_state_are_transactions_blocked
 			&& g_exchange.orphan_state_start_time + timeout < cf_getms()) {
-		g_exchange.orphan_state_are_transactions_blocked = true;
-		invoke_transaction_block = true;
+		exchange_orphan_commit();
 	}
 	EXCHANGE_UNLOCK();
-
-	if (invoke_transaction_block) {
-		WARNING(
-				"blocking client transactions - in orphan state for more than %d milliseconds!",
-				timeout);
-		as_partition_balance_revert_to_orphan();
-	}
 }
 
 /**
@@ -2222,8 +2206,8 @@ exchange_exchanging_data_msg_handle(as_exchange_event* msg_event)
 	exchange_node_state_get_safe(msg_event->msg_source, &node_state);
 
 	if (!node_state.received) {
-		uint32_t num_namespaces_sent =
-				exchange_data_msg_get_num_namespaces(msg_event);
+		uint32_t num_namespaces_sent = exchange_data_msg_get_num_namespaces(
+				msg_event);
 
 		if (num_namespaces_sent == 0) {
 			WARNING("ignoring invalid exchange data from node %"PRIx64,
@@ -2231,8 +2215,10 @@ exchange_exchanging_data_msg_handle(as_exchange_event* msg_event)
 			goto Exit;
 		}
 
-		cf_vector_define(namespace_list, sizeof(msg_buf_ele), num_namespaces_sent, 0);
-		cf_vector_define(partition_versions, sizeof(msg_buf_ele), num_namespaces_sent, 0);
+		cf_vector_define(namespace_list, sizeof(msg_buf_ele),
+				num_namespaces_sent, 0);
+		cf_vector_define(partition_versions, sizeof(msg_buf_ele),
+				num_namespaces_sent, 0);
 		uint32_t rack_ids[num_namespaces_sent];
 
 		if (!msg_msgpack_list_get_buf_array_presized(msg_event->msg,
@@ -2250,17 +2236,19 @@ exchange_exchanging_data_msg_handle(as_exchange_event* msg_event)
 		}
 
 		uint32_t num_rack_ids = num_namespaces_sent;
-		uint32_t* rack_ids_array = rack_ids;
+
 		if (!msg_msgpack_list_get_uint32_array(msg_event->msg,
-				AS_EXCHANGE_MSG_NS_RACK_IDS, &rack_ids_array, &num_rack_ids)) {
+				AS_EXCHANGE_MSG_NS_RACK_IDS, rack_ids, &num_rack_ids)) {
 			WARNING("received invalid cluster groups from node %"PRIx64,
 					msg_event->msg_source);
 			goto Exit;
 		}
 
+		node_state.data->num_namespaces = 0;
+
 		for (uint32_t i = 0; i < num_namespaces_sent; i++) {
-			msg_buf_ele* namespace_name_element =
-					cf_vector_getp(&namespace_list, i);
+			msg_buf_ele* namespace_name_element = cf_vector_getp(
+					&namespace_list, i);
 
 			// Find a match for the namespace.
 			as_namespace* matching_namespace = as_namespace_get_bybuf(
@@ -2290,17 +2278,9 @@ exchange_exchanging_data_msg_handle(as_exchange_event* msg_event)
 				goto Exit;
 			}
 
-			as_exchange_ns_vinfos_payload* new_partition_versions =
-					cf_realloc(namespace_data->partition_versions, partition_versions_element->sz);
-
-			if (!new_partition_versions) {
-				WARNING(
-						"failed malloc partition versions for namespace %s from node %"PRIx64,
-						matching_namespace->name, msg_event->msg_source);
-				goto Exit;
-			}
-
-			namespace_data->partition_versions = new_partition_versions;
+			namespace_data->partition_versions = cf_realloc(
+					namespace_data->partition_versions,
+					partition_versions_element->sz);
 
 			memcpy(namespace_data->partition_versions,
 					partition_versions_element->ptr,
@@ -2407,9 +2387,10 @@ exchange_exchanging_timer_event_handle(as_exchange_event* msg_event)
 	cf_clock min_timeout = EXCHANGE_SEND_MIN_TIMEOUT();
 	cf_clock max_timeout = EXCHANGE_SEND_MAX_TIMEOUT();
 	uint32_t step_interval = EXCHANGE_SEND_STEP_INTERVAL();
-	cf_clock timeout =
-			MAX(min_timeout,
-					MIN(max_timeout, min_timeout * ((now - g_exchange.send_ts) / step_interval)));
+	cf_clock timeout = MAX(min_timeout,
+			MIN(max_timeout,
+					min_timeout
+							* ((now - g_exchange.send_ts) / step_interval)));
 
 	if (g_exchange.send_ts + timeout < now) {
 		send_data = true;
@@ -2560,6 +2541,8 @@ exchange_data_commit()
 	INFO("data exchange completed with cluster key %"PRIx64,
 			g_exchange.cluster_key);
 
+	pthread_mutex_lock(&g_exchanged_info_lock);
+
 	// Reset exchange data for all namespaces.
 	for (int i = 0; i < g_config.n_namespaces; i++) {
 		as_namespace* ns = g_config.namespaces[i];
@@ -2592,6 +2575,9 @@ exchange_data_commit()
 			&g_exchange.succession_list);
 
 	as_partition_balance();
+
+	// Must cover partition balance since it may manipulate ns->cluster_size.
+	pthread_mutex_unlock(&g_exchanged_info_lock);
 
 	EXCHANGE_UNLOCK();
 }
@@ -2853,11 +2839,9 @@ exchange_init()
 	g_exchange.orphan_state_are_transactions_blocked = true;
 
 	// Initialize the adjacencies.
-	if (shash_create(&g_exchange.nodeid_to_node_state, cf_nodeid_shash_fn,
+	g_exchange.nodeid_to_node_state = cf_shash_create(cf_nodeid_shash_fn,
 			sizeof(cf_node), sizeof(as_exchange_node_state),
-			AS_EXCHANGE_CLUSTER_MAX_SIZE_SOFT, 0) != SHASH_OK) {
-		CRASH("error creating node state hash");
-	}
+			AS_EXCHANGE_CLUSTER_MAX_SIZE_SOFT, 0);
 
 	cf_vector_init(&g_exchange.succession_list, sizeof(cf_node),
 	AS_EXCHANGE_CLUSTER_MAX_SIZE_SOFT, VECTOR_FLAG_INITZERO);
@@ -3050,4 +3034,22 @@ cf_node
 as_exchange_principal()
 {
 	return g_exchange.committed_principal;
+}
+
+/**
+ * Lock before setting or getting exchanged info from non-exchange thread.
+ */
+void
+as_exchange_info_lock()
+{
+	pthread_mutex_lock(&g_exchanged_info_lock);
+}
+
+/**
+ * Unlock after setting or getting exchanged info from non-exchange thread.
+ */
+void
+as_exchange_info_unlock()
+{
+	pthread_mutex_unlock(&g_exchanged_info_lock);
 }

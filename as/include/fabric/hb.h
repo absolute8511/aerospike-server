@@ -30,6 +30,7 @@
 
 #include "msg.h"
 #include "socket.h"
+#include "tls.h"
 
 #include "fabric/hlc.h"
 
@@ -81,7 +82,8 @@ typedef enum
 {
 	AS_HB_NODE_ARRIVE,
 	AS_HB_NODE_DEPART,
-	AS_HB_AUTO_RESET
+	AS_HB_NODE_ADJACENCY_CHANGED,
+	AS_HB_NODE_EVENT_SENTINEL
 } as_hb_event_type;
 
 /**
@@ -105,6 +107,10 @@ typedef enum
 	 * The clustering subsystem.
 	 */
 	AS_HB_PLUGIN_CLUSTERING,
+	/**
+	 * The skew monitor.
+	 */
+	AS_HB_PLUGIN_SKEW_MONITOR,
 	/**
 	 * Dummy sentinel enum value. Should be the last.
 	 */
@@ -179,7 +185,12 @@ typedef enum
 	/**
 	 * Contains the cluster key and succession list.
 	 */
-	AS_HB_MSG_PAXOS_DATA
+	AS_HB_MSG_PAXOS_DATA,
+
+	/**
+	 * Local physical clock monotonic timestamp for when the message was sent.
+	 */
+	AS_HB_MSG_SKEW_MONITOR_DATA
 } as_hb_msg_fields;
 
 /**
@@ -196,6 +207,12 @@ typedef struct as_hb_config_s
 	 * Binding interface config.
 	 */
 	cf_serv_cfg bind_cfg;
+
+	/**
+	 * Global TLS configuration.
+	 */
+
+	cf_tls_info *tls;
 
 	/**
 	 * Multicast mode only config for multicast groups.
@@ -234,6 +251,7 @@ typedef struct as_hb_config_s
 	 */
 	char* mesh_seed_addrs[AS_CLUSTER_SZ];
 	int mesh_seed_ports[AS_CLUSTER_SZ];
+	bool mesh_seed_tls[AS_CLUSTER_SZ];
 
 } as_hb_config;
 
@@ -338,7 +356,7 @@ typedef struct as_hb_plugin_s
 	size_t wire_size_fixed;
 
 	/**
-	 * Fixed plugin data size on wire.
+	 * Additional plugin data size on wire per node in the adjacency list.
 	 */
 	size_t wire_size_per_node;
 
@@ -373,6 +391,8 @@ void as_hb_init();
 void as_hb_start();
 
 void as_hb_shutdown();
+
+bool as_hb_self_is_duplicate();
 
 bool as_hb_node_is_adjacent(cf_node nodeid);
 
@@ -434,16 +454,18 @@ void as_hb_info_endpoints_get(cf_dyn_buf* db);
 
 void as_hb_info_listen_addr_get(as_hb_mode* mode, char* addr_port, size_t addr_port_capacity);
 
+void as_hb_info_duplicates_get(cf_dyn_buf* db);
+
 /*
  * -----------------------------------------------------------------
  * Mesh mode public API
  * -----------------------------------------------------------------
  */
 
-int as_hb_mesh_tip(char* host, int port);
+int as_hb_mesh_tip(char* host, int port, bool tls);
 
 int as_hb_mesh_tip_clear(char* host, int port);
 
-int as_hb_mesh_tip_clear_all();
+int as_hb_mesh_tip_clear_all(uint32_t* cleared);
 
 void as_hb_config_validate();

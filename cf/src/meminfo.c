@@ -78,6 +78,7 @@ cf_meminfo(uint64_t *physmem, uint64_t *freemem, int *freepct, bool *swapping)
 	char *buffersMemStr = "Buffers"; uint64_t buffersMem = 0;
 	char *swapTotalStr = "SwapTotal"; uint64_t swapTotal = 0;
 	char *swapFreeStr = "SwapFree"; uint64_t swapFree = 0;
+	char *sharedMemStr = "Shmem"; uint64_t sharedMem = 0;
 
 	// parse each line - always three tokens, the name, the integer, and 'kb'
 	char *cur = buf;
@@ -106,6 +107,8 @@ cf_meminfo(uint64_t *physmem, uint64_t *freemem, int *freepct, bool *swapping)
 				cachedMem = atoi(tok2);
 			else if (strcmp(tok1, buffersMemStr) == 0)
 				buffersMem = atoi(tok2);
+			else if (strcmp(tok1, sharedMemStr) == 0)
+				sharedMem = atoi(tok2);
 		}
 
 	} while(tok1 && tok2 && tok3);
@@ -115,8 +118,9 @@ cf_meminfo(uint64_t *physmem, uint64_t *freemem, int *freepct, bool *swapping)
 	//   Start with the total physical memory in the system.
 	//   Next, subtract out the total of the active and inactive VM.
 	//   Finally, add back in the cached memory and buffers, which are effectively available if & when needed.
+	//   Caution: Subtract the shared memory, which is included in the cached memory, but is not available.
 	//
-	uint64_t availableMem = physMem - activeMem - inactiveMem + cachedMem + buffersMem;
+	uint64_t availableMem = physMem - activeMem - inactiveMem + cachedMem + buffersMem - sharedMem;
 
 	if (physmem) *physmem = physMem * 1024L;
 	if (freemem) *freemem = availableMem * 1024L;

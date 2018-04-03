@@ -76,7 +76,6 @@ else
 	install -pm 644 $(EEREPO)/LICENSE.EE $(OPT_AS)/doc/LICENSE
 endif
 	cat $(DEPTH)/LICENSE.3rdParty >> $(OPT_AS)/doc/LICENSE
-	install -pm 644 $(OPT_AS)/doc/LICENSE $(PKG)/packages
 
 ifeq ($(EDITION),community)
   ifeq ($(USE_SYSTEMD),1)
@@ -99,13 +98,17 @@ endif
 	install -d $(OPT_AS)/data
 	install -d $(OPT_AS)/smd
 	install -d $(OPT_AS)/sys/udf/lua/external
-	install -d $(OPT_AS)/sys/udf/lua/ldt
 	install -d $(OPT_AS)/usr/udf/lua
 	install -pm 644 $(DEPTH)/modules/lua-core/src/*.lua $(OPT_AS)/sys/udf/lua
-	install -pm 644 $(DEPTH)/modules/lua-core/src/external/* $(OPT_AS)/sys/udf/lua/external
-	install -pm 644 $(DEPTH)/modules/lua-core/src/ldt/* $(OPT_AS)/sys/udf/lua/ldt
+	for FILE in `find $(DEPTH)/modules/lua-core/src/external -type f` ; do \
+	   install -pm 644 $$FILE $(OPT_AS)/sys/udf/lua/external ; \
+	done
+
+	install -d $(OPT_AS)/bin
+	install -pm 755 $(DEPTH)/tools/memacct/asparsemem $(OPT_AS)/bin
 
 package:
+	install -pm 644 $(OPT_AS)/doc/LICENSE $(PKG)/packages
 	install -d $(SOURCE_ROOT)/RPMS/x86_64
 
 	sed 's/@VERSION@/'$(REV)'/g' < $(PKG)/rpm/server-spec-base > $(PKG)/rpm/aerospike.spec

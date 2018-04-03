@@ -26,32 +26,26 @@
 // Includes.
 //
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-
 #include "msg.h"
 #include "node.h"
 
-#include "base/datamodel.h"
-#include "base/rec_props.h"
-#include "base/transaction.h"
 #include "transaction/rw_request.h"
+
+
+//==========================================================
+// Forward declarations.
+//
+
+struct as_transaction_s;
+struct rw_request_s;
 
 
 //==========================================================
 // Public API.
 //
 
-bool repl_write_make_message(rw_request* rw, as_transaction* tr);
-void repl_write_setup_rw(rw_request* rw, as_transaction* tr, repl_write_done_cb repl_write_cb, timeout_done_cb timeout_cb);
-void repl_write_reset_rw(rw_request* rw, as_transaction* tr, repl_write_done_cb cb);
+void repl_write_make_message(struct rw_request_s* rw, struct as_transaction_s* tr);
+void repl_write_setup_rw(struct rw_request_s* rw, struct as_transaction_s* tr, repl_write_done_cb repl_write_cb, timeout_done_cb timeout_cb);
+void repl_write_reset_rw(struct rw_request_s* rw, struct as_transaction_s* tr, repl_write_done_cb cb);
 void repl_write_handle_op(cf_node node, msg* m);
 void repl_write_handle_ack(cf_node node, msg* m);
-
-// For LDTs only:
-void repl_write_ldt_make_message(msg* m, as_transaction* tr,
-		uint8_t** p_pickled_buf, size_t pickled_sz,
-		as_rec_props* p_pickled_rec_props, bool is_subrec);
-void repl_write_handle_multiop(cf_node node, msg* m);
-void repl_write_handle_multiop_ack(cf_node node, msg* m);

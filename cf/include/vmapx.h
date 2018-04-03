@@ -22,33 +22,39 @@
 
 #pragma once
 
+//==========================================================
+// Includes.
+//
 
 #include <pthread.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 
+//==========================================================
+// Typedefs & constants.
+//
+
 typedef struct vhash_s vhash;
 
 // DO NOT access this member data directly - use the API!
-// Caution - changing this struct could break warm restart.
+// Caution - changing this struct could break warm or cool restart.
 typedef struct cf_vmapx_s {
-	// vector-related
+	// Vector-related.
 	uint32_t			value_size;
 	uint32_t			max_count;
 	volatile uint32_t	count;
 
-	// hash-related
+	// Hash-related.
 	uint32_t			key_size;
-	vhash*				p_hash;
+	vhash*				hash;
 
-	// generic
+	// Generic.
 	pthread_mutex_t		write_lock;
 
 	//<><><><><><><><><><><> 64 bytes <><><><><><><><><><><>
 
-	// vector data
+	// Vector data.
 	uint8_t				values[];
 } cf_vmapx;
 
@@ -62,33 +68,33 @@ typedef enum {
 } cf_vmapx_err;
 
 
-//------------------------------------------------
+//==========================================================
 // Public API.
 //
 
 size_t cf_vmapx_sizeof(uint32_t value_size, uint32_t max_count);
 
-cf_vmapx_err cf_vmapx_create(cf_vmapx* _this, uint32_t value_size, uint32_t max_count, uint32_t hash_size, uint32_t max_name_size);
-void cf_vmapx_release(cf_vmapx* _this);
+void cf_vmapx_init(cf_vmapx* vmap, uint32_t value_size, uint32_t max_count, uint32_t hash_size, uint32_t max_name_size);
+void cf_vmapx_release(cf_vmapx* vmap);
 
-uint32_t cf_vmapx_count(const cf_vmapx* _this);
+uint32_t cf_vmapx_count(const cf_vmapx* vmap);
 
-cf_vmapx_err cf_vmapx_get_by_index(const cf_vmapx* _this, uint32_t index, void** pp_value);
-cf_vmapx_err cf_vmapx_get_by_name(const cf_vmapx* _this, const char* name, void** pp_value);
+cf_vmapx_err cf_vmapx_get_by_index(const cf_vmapx* vmap, uint32_t index, void** pp_value);
+cf_vmapx_err cf_vmapx_get_by_name(const cf_vmapx* vmap, const char* name, void** pp_value);
 
-cf_vmapx_err cf_vmapx_get_index(const cf_vmapx* _this, const char* name, uint32_t* p_index);
-cf_vmapx_err cf_vmapx_get_index_w_len(const cf_vmapx* _this, const char* name, size_t name_len, uint32_t* p_index);
+cf_vmapx_err cf_vmapx_get_index(const cf_vmapx* vmap, const char* name, uint32_t* p_index);
+cf_vmapx_err cf_vmapx_get_index_w_len(const cf_vmapx* vmap, const char* name, size_t name_len, uint32_t* p_index);
 
-cf_vmapx_err cf_vmapx_put_unique(cf_vmapx* _this, const char* name, uint32_t* p_index);
-cf_vmapx_err cf_vmapx_put_unique_w_len(cf_vmapx* _this, const char* name, size_t name_len, uint32_t* p_index);
+cf_vmapx_err cf_vmapx_put_unique(cf_vmapx* vmap, const char* name, uint32_t* p_index);
+cf_vmapx_err cf_vmapx_put_unique_w_len(cf_vmapx* vmap, const char* name, size_t name_len, uint32_t* p_index);
 
 
-//------------------------------------------------
+//==========================================================
 // Private API - for enterprise separation only.
 //
 
-void* cf_vmapx_value_ptr(const cf_vmapx* _this, uint32_t index);
+void* vmapx_value_ptr(const cf_vmapx* vmap, uint32_t index);
 
 vhash* vhash_create(uint32_t key_size, uint32_t n_rows);
 void vhash_destroy(vhash* h);
-bool vhash_put(vhash* h, const char* key, size_t key_len, uint32_t value);
+void vhash_put(vhash* h, const char* key, size_t key_len, uint32_t value);

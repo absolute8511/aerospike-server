@@ -68,7 +68,6 @@ static ai_arr *
 ai_arr_new()
 {
 	ai_arr *arr = cf_malloc(sizeof(ai_arr) + (INIT_CAPACITY * CF_DIGEST_KEY_SZ));
-	if (!arr) return NULL;
 	arr->capacity = INIT_CAPACITY;
 	arr->used = 0;
 	return arr;
@@ -135,10 +134,6 @@ ai_arr_shrink(ai_arr *arr)
 	}
 
 	ai_arr * temp_arr = cf_realloc(arr, sizeof(ai_arr) + (size * CF_DIGEST_KEY_SZ));
-	if (!temp_arr) {
-		cf_warning(AS_SINDEX, "Shrink Failed ... ignoring...");
-		return arr;
-	}
 	temp_arr->capacity = size;
 	return temp_arr;
 }
@@ -178,9 +173,6 @@ ai_arr_expand(ai_arr *arr)
 
 	arr = cf_realloc(arr, sizeof(ai_arr) + (size * CF_DIGEST_KEY_SZ));
 	//cf_info(AS_SINDEX, "EXPAND REALLOC to %d", size);
-	if (!arr) {
-		return NULL;
-	}
 	arr->capacity = size;
 	return arr;
 }
@@ -201,9 +193,6 @@ ai_arr_insert(ai_arr *arr, cf_digest *dig, bool *found)
 	}
 	if (arr->used == arr->capacity) {
 		arr = ai_arr_expand(arr);
-	}
-	if (!arr) {
-		return NULL;
 	}
 	memcpy(&arr->data[arr->used * CF_DIGEST_KEY_SZ], dig, CF_DIGEST_KEY_SZ);
 	arr->used++;
@@ -275,9 +264,6 @@ anbtr_check_init(ai_nbtr *anbtr, col_type_t sktype)
 	// create array or btree
 	if (create_arr) {
 		anbtr->u.arr = ai_arr_new();
-		if (!anbtr->u.arr) {
-			return -1;
-		}
 		return ai_arr_size(anbtr->u.arr);
 	} else if (create_nbtr) {
 		anbtr->u.nbtr = createNBT(sktype);
@@ -320,10 +306,6 @@ reduced_iAdd(bt *ibtr, ai_obj *acol, ai_obj *apk, col_type_t sktype)
 	if (!anbtr) {
 		anbtr = cf_malloc(sizeof(ai_nbtr));
 		aa += sizeof(ai_nbtr);
-		if (!anbtr) {
-			cf_warning(AS_SINDEX, "Allocation failure for anbtr");
-			return AS_SINDEX_ERR;
-		}
 		memset(anbtr, 0, sizeof(ai_nbtr));
 		allocated_anbtr = true;
 	}
@@ -369,9 +351,7 @@ reduced_iAdd(bt *ibtr, ai_obj *acol, ai_obj *apk, col_type_t sktype)
 		ba += ai_arr_size(anbtr->u.arr);
 		bool found = false;
 		ai_arr *t_arr = ai_arr_insert(arr, (cf_digest *)&apk->y, &found);
-		if (!t_arr) {
-			return AS_SINDEX_ERR;
-		} else if (found) {
+		if (found) {
 			return AS_SINDEX_KEY_FOUND;
 		}
 		anbtr->u.arr = t_arr;

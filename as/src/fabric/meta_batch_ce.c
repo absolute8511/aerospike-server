@@ -1,7 +1,7 @@
 /*
- * tls_mode.h
+ * meta_batch.c
  *
- * Copyright (C) 2016 Aerospike, Inc.
+ * Copyright (C) 2017 Aerospike, Inc.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -20,10 +20,46 @@
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
 
-#pragma once
+//==========================================================
+// Includes.
+//
 
-typedef enum cf_tls_mode_enum {
-	CF_TLS_MODE_AUTHENTICATE_BOTH,
-	CF_TLS_MODE_AUTHENTICATE_SERVER,
-	CF_TLS_MODE_ENCRYPT_ONLY
-} cf_tls_mode;
+#include "fabric/meta_batch.h"
+
+#include <stddef.h>
+
+
+//==========================================================
+// Public API.
+//
+
+struct meta_in_q_s *
+meta_in_q_create()
+{
+	return NULL;
+}
+
+
+void
+meta_in_q_destroy(struct meta_in_q_s *iq)
+{
+}
+
+
+void
+meta_in_q_rejected(struct meta_in_q_s *iq)
+{
+}
+
+
+struct meta_out_q_s *
+meta_out_q_create()
+{
+	return NULL;
+}
+
+
+void
+meta_out_q_destroy(struct meta_out_q_s *oq)
+{
+}

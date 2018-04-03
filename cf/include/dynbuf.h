@@ -43,16 +43,17 @@ typedef struct cf_dyn_buf_s {
 #define cf_dyn_buf_define(__x)  uint8_t dyn_buf##__x[1024]; cf_dyn_buf __x = { dyn_buf##__x, true, 1024, 0 }
 #define cf_dyn_buf_define_size(__x, __sz)  uint8_t dyn_buf##__x[__sz]; cf_dyn_buf __x = { dyn_buf##__x, true, __sz, 0 }
 
-extern int cf_dyn_buf_init_heap(cf_dyn_buf *db, size_t sz);
-extern int cf_dyn_buf_reserve(cf_dyn_buf *db, size_t sz, uint8_t **from);
-extern int cf_dyn_buf_append_string(cf_dyn_buf *db, const char *s);
-extern int cf_dyn_buf_append_char(cf_dyn_buf *db, char c);
-extern int cf_dyn_buf_append_buf(cf_dyn_buf *db, uint8_t *buf, size_t sz);
-extern int cf_dyn_buf_append_int(cf_dyn_buf *db, int i);
-extern int cf_dyn_buf_append_uint64_x(cf_dyn_buf *db, uint64_t i); // HEX FORMAT!
-extern int cf_dyn_buf_append_uint64(cf_dyn_buf *db, uint64_t i);
-extern int cf_dyn_buf_append_uint32(cf_dyn_buf *db, uint32_t i);
-extern int cf_dyn_buf_chomp(cf_dyn_buf *db);
+extern void cf_dyn_buf_init_heap(cf_dyn_buf *db, size_t sz);
+extern void cf_dyn_buf_reserve(cf_dyn_buf *db, size_t sz, uint8_t **from);
+extern void cf_dyn_buf_append_string(cf_dyn_buf *db, const char *s);
+extern void cf_dyn_buf_append_char(cf_dyn_buf *db, char c);
+extern void cf_dyn_buf_append_bool(cf_dyn_buf *db, bool b);
+extern void cf_dyn_buf_append_buf(cf_dyn_buf *db, uint8_t *buf, size_t sz);
+extern void cf_dyn_buf_append_int(cf_dyn_buf *db, int i);
+extern void cf_dyn_buf_append_uint64_x(cf_dyn_buf *db, uint64_t i); // HEX FORMAT!
+extern void cf_dyn_buf_append_uint64(cf_dyn_buf *db, uint64_t i);
+extern void cf_dyn_buf_append_uint32(cf_dyn_buf *db, uint32_t i);
+extern void cf_dyn_buf_chomp(cf_dyn_buf *db);
 extern char *cf_dyn_buf_strdup(cf_dyn_buf *db);
 extern void cf_dyn_buf_free(cf_dyn_buf *db);
 
@@ -75,27 +76,27 @@ extern cf_buf_builder *cf_buf_builder_create();
 extern cf_buf_builder *cf_buf_builder_create_size(size_t sz);
 extern void cf_buf_builder_free(cf_buf_builder *bb);
 extern void cf_buf_builder_reset(cf_buf_builder *bb);
-extern int cf_buf_builder_chomp(cf_buf_builder *bb_r);
+extern void cf_buf_builder_chomp(cf_buf_builder *bb_r);
 // If you use any binary components, this strdup thing is a bad idea:
 extern char *cf_buf_builder_strdup(cf_buf_builder *bb_r);
 
-extern int cf_buf_builder_append_string(cf_buf_builder **bb_r, const char *s);
-extern int cf_buf_builder_append_char(cf_buf_builder **bb_r, char c);
-extern int cf_buf_builder_append_buf(cf_buf_builder **bb_r, uint8_t *buf, size_t sz);
+extern void cf_buf_builder_append_string(cf_buf_builder **bb_r, const char *s);
+extern void cf_buf_builder_append_char(cf_buf_builder **bb_r, char c);
+extern void cf_buf_builder_append_buf(cf_buf_builder **bb_r, uint8_t *buf, size_t sz);
 // These append ASCII versions:
-extern int cf_buf_builder_append_ascii_uint64_x(cf_buf_builder **bb_r, uint64_t i); // HEX FORMAT!
-extern int cf_buf_builder_append_ascii_uint64(cf_buf_builder **bb_r, uint64_t i);
-extern int cf_buf_builder_append_ascii_uint32(cf_buf_builder **bb_r, uint32_t i);
-extern int cf_buf_builder_append_ascii_int(cf_buf_builder **bb_r, int i);
+extern void cf_buf_builder_append_ascii_uint64_x(cf_buf_builder **bb_r, uint64_t i); // HEX FORMAT!
+extern void cf_buf_builder_append_ascii_uint64(cf_buf_builder **bb_r, uint64_t i);
+extern void cf_buf_builder_append_ascii_uint32(cf_buf_builder **bb_r, uint32_t i);
+extern void cf_buf_builder_append_ascii_int(cf_buf_builder **bb_r, int i);
 // These append network-order bytes:
-extern int cf_buf_builder_append_uint64(cf_buf_builder **bb_r, uint64_t i);
-extern int cf_buf_builder_append_uint32(cf_buf_builder **bb_r, uint32_t i);
-extern int cf_buf_builder_append_uint16(cf_buf_builder **bb_r, uint16_t i);
-extern int cf_buf_builder_append_uint8(cf_buf_builder **bb_r, uint8_t i);
+extern void cf_buf_builder_append_uint64(cf_buf_builder **bb_r, uint64_t i);
+extern void cf_buf_builder_append_uint32(cf_buf_builder **bb_r, uint32_t i);
+extern void cf_buf_builder_append_uint16(cf_buf_builder **bb_r, uint16_t i);
+extern void cf_buf_builder_append_uint8(cf_buf_builder **bb_r, uint8_t i);
 // Reserve the bytes and give me the handle to the spot reserved:
-extern int cf_buf_builder_reserve(cf_buf_builder **bb_r, int sz, uint8_t **buf);
+extern void cf_buf_builder_reserve(cf_buf_builder **bb_r, int sz, uint8_t **buf);
 extern int cf_buf_builder_size(cf_buf_builder *bb);
-extern size_t cf_dyn_buf_get_newsize(int alloc, int used, int requested);
+extern size_t get_new_size(int alloc, int used, int requested);
 
 // TODO - We've only implemented a few cf_ll_buf methods for now. We'll add more
 // functionality if and when it's needed.
@@ -121,5 +122,5 @@ typedef struct cf_ll_buf_s {
 		ll_buf_stage##__x->used_sz = 0; \
 		cf_ll_buf __x = { true, ll_buf_stage##__x, ll_buf_stage##__x }
 
-extern int cf_ll_buf_reserve(cf_ll_buf *llb, size_t sz, uint8_t **from);
+extern void cf_ll_buf_reserve(cf_ll_buf *llb, size_t sz, uint8_t **from);
 extern void cf_ll_buf_free(cf_ll_buf *llb);

@@ -457,20 +457,20 @@ as_batch_buffer_pop(as_batch_shared* shared, uint32_t size)
 		else if (status == CF_QUEUE_EMPTY) {
 			// Queue is empty.  Create new buffer.
 			buffer = as_batch_buffer_create(batch_buffer_pool.buffer_size);
+		}
+		else {
+			cf_warning(AS_BATCH, "Failed to pop new batch buffer: %d", status);
+			// Try to allocate small buffer with just header.
+			as_batch_buffer* buffer = cf_malloc(sizeof(as_batch_buffer));
+			buffer->capacity = 0;
+			buffer->size = 0;
+			buffer->tran_count = 1;
+			buffer->writers = 2;
+			shared->buffer = buffer;
+			shared->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
+			return 0;
+		}
 	}
-	else {
-		cf_warning(AS_BATCH, "Failed to pop new batch buffer: %d", status);
-		// Try to allocate small buffer with just header.
-		as_batch_buffer* buffer = cf_malloc(sizeof(as_batch_buffer));
-		buffer->capacity = 0;
-		buffer->size = 0;
-		buffer->tran_count = 1;
-		buffer->writers = 2;
-		shared->buffer = buffer;
-		shared->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		return 0;
-	}
-}
 
 	// Reserve a slot in new buffer.
 	buffer->size = size;
@@ -528,7 +528,7 @@ as_batch_reserve(as_batch_shared* shared, uint32_t size, int result_code, as_bat
 		as_batch_buffer_complete(shared, prev_buffer);
 	}
 
-	if (! (result_code == AS_PROTO_RESULT_OK || result_code == AS_PROTO_RESULT_FAIL_NOTFOUND)) {
+	if (! (result_code == AS_PROTO_RESULT_OK || result_code == AS_PROTO_RESULT_FAIL_NOT_FOUND)) {
 		// Result code can be set outside of lock because it doesn't matter which transaction's
 		// result code is used as long as it's an error.
 		shared->result_code = result_code;
@@ -636,7 +636,7 @@ as_batch_queue_task(as_transaction* btr)
 	as_proto* bproto = &btr->msgp->proto;
 
 	if (bproto->sz > PROTO_SIZE_MAX) {
-		cf_warning(AS_BATCH, "can't process message: invalid size %"PRIu64" should be %d or less",
+		cf_warning(AS_BATCH, "can't process message: invalid size %lu should be %d or less",
 				(uint64_t)bproto->sz, PROTO_SIZE_MAX);
 		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_PARAMETER);
 	}
@@ -701,11 +701,6 @@ as_batch_queue_task(as_transaction* btr)
 	// Initialize shared data
 	as_batch_shared* shared = cf_malloc(sizeof(as_batch_shared));
 
-	if (! shared) {
-		cf_warning(AS_BATCH, "Batch shared malloc failed");
-		return as_batch_send_error(btr, AS_PROTO_RESULT_FAIL_UNKNOWN);
-	}
-
 	memset(shared, 0, sizeof(as_batch_shared));
 
 	if (pthread_mutex_init(&shared->lock, NULL)) {
@@ -755,9 +750,9 @@ as_batch_queue_task(as_transaction* btr)
 	uint32_t tran_row = 0;
 	uint8_t info = *data++;  // allow transaction inline.
 
-	bool allow_inline = (g_config.n_namespaces_in_memory != 0 && info);
-	bool check_inline = (allow_inline && g_config.n_namespaces_not_in_memory != 0);
-	bool should_inline = (allow_inline && g_config.n_namespaces_not_in_memory == 0);
+	bool allow_inline = (g_config.n_namespaces_inlined != 0 && info);
+	bool check_inline = (allow_inline && g_config.n_namespaces_not_inlined != 0);
+	bool should_inline = (allow_inline && g_config.n_namespaces_not_inlined == 0);
 
 	// Split batch rows into separate single record read transactions.
 	// The read transactions are located in the same memory block as
@@ -888,8 +883,8 @@ TranEnd:
 }
 
 void
-as_batch_add_result(as_transaction* tr, const char* setname, uint32_t generation,
-		uint32_t void_time, uint16_t n_bins, as_bin** bins, as_msg_op** ops)
+as_batch_add_result(as_transaction* tr, uint16_t n_bins, as_bin** bins,
+		as_msg_op** ops)
 {
 	as_namespace* ns = tr->rsv.ns;
 
@@ -898,13 +893,6 @@ as_batch_add_result(as_transaction* tr, const char* setname, uint32_t generation
 	size += sizeof(as_msg_field) + sizeof(cf_digest);
 
 	uint16_t n_fields = 1;
-	uint32_t setname_len = 0;
-
-	if (setname) {
-		setname_len = strlen(setname);
-		size += sizeof(as_msg_field) + setname_len;
-		n_fields++;
-	}
 
 	for (uint16_t i = 0; i < n_bins; i++) {
 		as_bin* bin = bins[i];
@@ -947,8 +935,8 @@ as_batch_add_result(as_transaction* tr, const char* setname, uint32_t generation
 		m->info3 = 0;
 		m->unused = 0;
 		m->result_code = tr->result_code;
-		m->generation = generation;
-		m->record_ttl = void_time;
+		m->generation = tr->generation;
+		m->record_ttl = tr->void_time;
 
 		// Overload transaction_ttl to store batch index.
 		m->transaction_ttl = tr->from_data.batch_index;
@@ -964,15 +952,6 @@ as_batch_add_result(as_transaction* tr, const char* setname, uint32_t generation
 		memcpy(field->data, &tr->keyd, sizeof(cf_digest));
 		as_msg_swap_field(field);
 		p += sizeof(as_msg_field) + sizeof(cf_digest);
-
-		if (setname) {
-			field = (as_msg_field*)p;
-			field->field_sz = setname_len + 1;
-			field->type = AS_MSG_FIELD_TYPE_SET;
-			memcpy(field->data, setname, setname_len);
-			as_msg_swap_field(field);
-			p += sizeof(as_msg_field) + setname_len;
-		}
 
 		for (uint16_t i = 0; i < n_bins; i++) {
 			as_bin* bin = bins[i];

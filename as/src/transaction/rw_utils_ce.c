@@ -38,6 +38,7 @@
 #include "base/transaction.h"
 #include "base/udf_record.h"
 #include "storage/storage.h"
+#include "transaction/rw_request.h"
 #include "transaction/udf.h"
 
 
@@ -99,17 +100,32 @@ udf_finish_delete(udf_record* urecord)
 }
 
 
-void
-dup_res_flag_pickle(const uint8_t* buf, uint32_t* info)
+uint32_t
+dup_res_pack_info(const as_record* r, as_namespace* ns)
 {
-	// Do nothing.
+	return 0;
 }
 
 
 bool
-dup_res_ignore_pickle(const uint8_t* buf, const msg* m)
+dup_res_ignore_pickle(const uint8_t* buf, uint32_t info)
 {
 	return as_record_pickle_is_binless(buf);
+}
+
+
+bool
+dup_res_should_retry_transaction(rw_request* rw, uint32_t result_code)
+{
+	// TODO - JUMP - can get this from 3.14.x nodes or older - retry if so.
+	return result_code == AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH;
+}
+
+
+void
+dup_res_translate_result_code(rw_request* rw)
+{
+	rw->result_code = AS_PROTO_RESULT_OK;
 }
 
 
@@ -125,4 +141,17 @@ bool
 repl_write_pickle_is_drop(const uint8_t* buf, uint32_t info)
 {
 	return as_record_pickle_is_binless(buf);
+}
+
+
+bool
+repl_write_should_retransmit_replicas(rw_request* rw, uint32_t result_code)
+{
+	switch (result_code) {
+	case AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH:
+		rw->xmit_ms = 0; // force retransmit on next cycle
+		return true;
+	default:
+		return false;
+	}
 }

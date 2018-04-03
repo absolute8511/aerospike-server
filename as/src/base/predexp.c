@@ -22,6 +22,7 @@
 
 #include "base/predexp.h"
 
+#include <inttypes.h>
 #include <regex.h>
 
 #include <aerospike/as_arraylist.h>
@@ -978,10 +979,6 @@ build_value(predexp_eval_t** stackpp, uint32_t len, uint8_t* pp, uint16_t tag)
 
 	if (mem_size != 0) {
 		dp->bin.particle = cf_malloc((size_t)mem_size);
-		if (! dp->bin.particle) {
-			// FIXME - Could this ever happen?
-			cf_crash(AS_PREDEXP, "cf_malloc failed");
-		}
 	}
 
 	int result = particle_vtable[type]->from_wire_fn(type,

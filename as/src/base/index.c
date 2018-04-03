@@ -26,7 +26,6 @@
 
 #include "base/index.h"
 
-#include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -41,6 +40,7 @@
 #include "citrusleaf/cf_queue.h"
 
 #include "arenax.h"
+#include "cf_mutex.h"
 #include "fault.h"
 #include "olock.h"
 
@@ -180,13 +180,11 @@ as_index_tree_gc_queue_size()
 as_index_tree *
 as_index_tree_create(as_index_tree_shared *shared, cf_arenax *arena)
 {
-	size_t locks_size = sizeof(pthread_mutex_t) * shared->n_lock_pairs * 2;
+	size_t locks_size = sizeof(cf_mutex) * shared->n_lock_pairs * 2;
 	size_t sprigs_size = sizeof(as_sprig) * shared->n_sprigs;
 	size_t tree_size = sizeof(as_index_tree) + locks_size + sprigs_size;
 
 	as_index_tree *tree = cf_rc_alloc(tree_size);
-
-	cf_assert(tree, AS_INDEX, "failed to allocate tree (%lu bytes)", tree_size);
 
 	tree->shared = shared;
 	tree->arena = arena;
@@ -195,8 +193,8 @@ as_index_tree_create(as_index_tree_shared *shared, cf_arenax *arena)
 	as_lock_pair *pair_end = pair + shared->n_lock_pairs;
 
 	while (pair < pair_end) {
-		pthread_mutex_init(&pair->lock, NULL);
-		pthread_mutex_init(&pair->reduce_lock, NULL);
+		cf_mutex_init(&pair->lock);
+		cf_mutex_init(&pair->reduce_lock);
 		pair++;
 	}
 
@@ -222,9 +220,7 @@ as_index_tree_release(as_index_tree *tree)
 
 	// TODO - call as_index_tree_destroy() directly if tree is empty?
 
-	if (cf_queue_push(&g_gc_queue, &tree) != CF_QUEUE_OK) {
-		cf_crash(AS_INDEX, "failed push to garbage collection queue");
-	}
+	cf_queue_push(&g_gc_queue, &tree);
 
 	return 0;
 }
@@ -326,8 +322,8 @@ as_index_get_vlock(as_index_tree *tree, cf_digest *keyd,
 // Returns:
 //		 1 - created and inserted (reference returned in index_ref)
 //		 0 - found already existing (reference returned in index_ref)
-//		-1 - error - found "half created" or deleted record
-//		-2 - error - could not allocate arena stage
+//		-1 - error - could not allocate arena stage
+//		-2 - error - found "half created" or deleted record
 int
 as_index_get_insert_vlock(as_index_tree *tree, cf_digest *keyd,
 		as_index_ref *index_ref)
@@ -394,8 +390,8 @@ as_index_tree_destroy(as_index_tree *tree)
 	as_lock_pair *pair_end = pair + tree->shared->n_lock_pairs;
 
 	while (pair < pair_end) {
-		pthread_mutex_destroy(&pair->lock);
-		pthread_mutex_destroy(&pair->reduce_lock);
+		cf_mutex_destroy(&pair->lock);
+		cf_mutex_destroy(&pair->reduce_lock);
 		pair++;
 	}
 
@@ -431,7 +427,7 @@ as_index_sprig_invalid_record_done(as_index_sprig *isprig,
 	}
 
 	if (! index_ref->skip_lock) {
-		pthread_mutex_unlock(index_ref->olock);
+		cf_mutex_unlock(index_ref->olock);
 	}
 
 	as_index_sprig_done(isprig, index_ref->r, index_ref->r_h);
@@ -452,7 +448,7 @@ as_index_sprig_reduce_partial(as_index_sprig *isprig, uint64_t sample_count,
 {
 	bool reduce_all = sample_count == AS_REDUCE_ALL;
 
-	pthread_mutex_lock(&isprig->pair->reduce_lock);
+	cf_mutex_lock(&isprig->pair->reduce_lock);
 
 	if (reduce_all || sample_count > isprig->sprig->n_elements) {
 		sample_count = isprig->sprig->n_elements;
@@ -460,7 +456,7 @@ as_index_sprig_reduce_partial(as_index_sprig *isprig, uint64_t sample_count,
 
 	// Common to encounter empty sprigs.
 	if (sample_count == 0) {
-		pthread_mutex_unlock(&isprig->pair->reduce_lock);
+		cf_mutex_unlock(&isprig->pair->reduce_lock);
 		return 0;
 	}
 
@@ -469,18 +465,7 @@ as_index_sprig_reduce_partial(as_index_sprig *isprig, uint64_t sample_count,
 	as_index_ph_array *v_a;
 	uint8_t buf[MAX_STACK_ARRAY_BYTES];
 
-	if (sz > MAX_STACK_ARRAY_BYTES) {
-		v_a = cf_malloc(sz);
-
-		if (! v_a) {
-			cf_warning(AS_INDEX, "index reduce failed to allocate ref array");
-			pthread_mutex_unlock(&isprig->pair->reduce_lock);
-			return 0;
-		}
-	}
-	else {
-		v_a = (as_index_ph_array*)buf;
-	}
+	v_a = sz > MAX_STACK_ARRAY_BYTES ? cf_malloc(sz) : (as_index_ph_array*)buf;
 
 	v_a->alloc_sz = sample_count;
 	v_a->pos = 0;
@@ -493,7 +478,7 @@ as_index_sprig_reduce_partial(as_index_sprig *isprig, uint64_t sample_count,
 
 	cf_detail(AS_INDEX, "sprig reduce took %lu ms", cf_getms() - start_ms);
 
-	pthread_mutex_unlock(&isprig->pair->reduce_lock);
+	cf_mutex_unlock(&isprig->pair->reduce_lock);
 
 	uint64_t i;
 
@@ -574,11 +559,11 @@ as_index_sprig_traverse_purge(as_index_sprig *isprig, cf_arenax_handle r_h)
 int
 as_index_sprig_exists(as_index_sprig *isprig, cf_digest *keyd)
 {
-	pthread_mutex_lock(&isprig->pair->lock);
+	cf_mutex_lock(&isprig->pair->lock);
 
 	int rv = as_index_sprig_search_lockless(isprig, keyd, NULL, NULL);
 
-	pthread_mutex_unlock(&isprig->pair->lock);
+	cf_mutex_unlock(&isprig->pair->lock);
 
 	return rv;
 }
@@ -588,19 +573,19 @@ int
 as_index_sprig_get_vlock(as_index_sprig *isprig, cf_digest *keyd,
 		as_index_ref *index_ref)
 {
-	pthread_mutex_lock(&isprig->pair->lock);
+	cf_mutex_lock(&isprig->pair->lock);
 
 	int rv = as_index_sprig_search_lockless(isprig, keyd, &index_ref->r,
 			&index_ref->r_h);
 
 	if (rv != 0) {
-		pthread_mutex_unlock(&isprig->pair->lock);
+		cf_mutex_unlock(&isprig->pair->lock);
 		return rv;
 	}
 
 	as_index_reserve(index_ref->r);
 
-	pthread_mutex_unlock(&isprig->pair->lock);
+	cf_mutex_unlock(&isprig->pair->lock);
 
 	if (! index_ref->skip_lock) {
 		olock_vlock(g_record_locks, keyd, &index_ref->olock);
@@ -632,7 +617,7 @@ as_index_sprig_get_insert_vlock(as_index_sprig *isprig, cf_digest *keyd,
 	do {
 		ele = eles;
 
-		pthread_mutex_lock(&isprig->pair->lock);
+		cf_mutex_lock(&isprig->pair->lock);
 
 		// Search for the specified element, or a parent to insert it under.
 
@@ -659,7 +644,7 @@ as_index_sprig_get_insert_vlock(as_index_sprig *isprig, cf_digest *keyd,
 
 				as_index_reserve(t);
 
-				pthread_mutex_unlock(&isprig->pair->lock);
+				cf_mutex_unlock(&isprig->pair->lock);
 
 				if (! index_ref->skip_lock) {
 					olock_vlock(g_record_locks, keyd, &index_ref->olock);
@@ -670,7 +655,7 @@ as_index_sprig_get_insert_vlock(as_index_sprig *isprig, cf_digest *keyd,
 
 				// Fail if the record is "half created" or deleted.
 				if (as_index_sprig_invalid_record_done(isprig, index_ref)) {
-					return -1;
+					return -2;
 				}
 
 				return 0;
@@ -684,14 +669,14 @@ as_index_sprig_get_insert_vlock(as_index_sprig *isprig, cf_digest *keyd,
 
 		retry = false;
 
-		if (EBUSY == pthread_mutex_trylock(&isprig->pair->reduce_lock)) {
+		if (! cf_mutex_trylock(&isprig->pair->reduce_lock)) {
 			// The tree is being reduced - could take long, unlock so reads and
 			// overwrites aren't blocked.
-			pthread_mutex_unlock(&isprig->pair->lock);
+			cf_mutex_unlock(&isprig->pair->lock);
 
 			// Wait until the tree reduce is done...
-			pthread_mutex_lock(&isprig->pair->reduce_lock);
-			pthread_mutex_unlock(&isprig->pair->reduce_lock);
+			cf_mutex_lock(&isprig->pair->reduce_lock);
+			cf_mutex_unlock(&isprig->pair->reduce_lock);
 
 			// ... and start over - we unlocked, so the tree may have changed.
 			retry = true;
@@ -708,9 +693,9 @@ as_index_sprig_get_insert_vlock(as_index_sprig *isprig, cf_digest *keyd,
 
 	if (n_h == 0) {
 		cf_warning(AS_INDEX, "arenax alloc failed");
-		pthread_mutex_unlock(&isprig->pair->reduce_lock);
-		pthread_mutex_unlock(&isprig->pair->lock);
-		return -2;
+		cf_mutex_unlock(&isprig->pair->reduce_lock);
+		cf_mutex_unlock(&isprig->pair->lock);
+		return -1;
 	}
 
 	as_index *n = RESOLVE_H(n_h);
@@ -748,8 +733,8 @@ as_index_sprig_get_insert_vlock(as_index_sprig *isprig, cf_digest *keyd,
 
 	isprig->sprig->n_elements++;
 
-	pthread_mutex_unlock(&isprig->pair->reduce_lock);
-	pthread_mutex_unlock(&isprig->pair->lock);
+	cf_mutex_unlock(&isprig->pair->reduce_lock);
+	cf_mutex_unlock(&isprig->pair->lock);
 
 	if (! index_ref->skip_lock) {
 		olock_vlock(g_record_locks, keyd, &index_ref->olock);
@@ -779,7 +764,7 @@ as_index_sprig_delete(as_index_sprig *isprig, cf_digest *keyd)
 	do {
 		ele = eles;
 
-		pthread_mutex_lock(&isprig->pair->lock);
+		cf_mutex_lock(&isprig->pair->lock);
 
 		root_parent.left_h = isprig->sprig->root_h;
 		root_parent.color = AS_BLACK;
@@ -810,7 +795,7 @@ as_index_sprig_delete(as_index_sprig *isprig, cf_digest *keyd)
 		}
 
 		if (r_h == SENTINEL_H) {
-			pthread_mutex_unlock(&isprig->pair->lock);
+			cf_mutex_unlock(&isprig->pair->lock);
 			return -1; // not found, nothing to delete
 		}
 
@@ -818,14 +803,14 @@ as_index_sprig_delete(as_index_sprig *isprig, cf_digest *keyd)
 
 		retry = false;
 
-		if (EBUSY == pthread_mutex_trylock(&isprig->pair->reduce_lock)) {
+		if (! cf_mutex_trylock(&isprig->pair->reduce_lock)) {
 			// The tree is being reduced - could take long, unlock so reads and
 			// overwrites aren't blocked.
-			pthread_mutex_unlock(&isprig->pair->lock);
+			cf_mutex_unlock(&isprig->pair->lock);
 
 			// Wait until the tree reduce is done...
-			pthread_mutex_lock(&isprig->pair->reduce_lock);
-			pthread_mutex_unlock(&isprig->pair->reduce_lock);
+			cf_mutex_lock(&isprig->pair->reduce_lock);
+			cf_mutex_unlock(&isprig->pair->reduce_lock);
 
 			// ... and start over - we unlocked, so the tree may have changed.
 			retry = true;
@@ -917,8 +902,8 @@ as_index_sprig_delete(as_index_sprig *isprig, cf_digest *keyd)
 
 	isprig->sprig->n_elements--;
 
-	pthread_mutex_unlock(&isprig->pair->reduce_lock);
-	pthread_mutex_unlock(&isprig->pair->lock);
+	cf_mutex_unlock(&isprig->pair->reduce_lock);
+	cf_mutex_unlock(&isprig->pair->lock);
 
 	return 0;
 }

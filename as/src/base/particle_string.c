@@ -133,10 +133,6 @@ string_to_asval(const as_particle *p)
 
 	uint8_t *value = cf_malloc(p_string_mem->sz + 1);
 
-	if (! value) {
-		return NULL;
-	}
-
 	memcpy(value, p_string_mem->data, p_string_mem->sz);
 	value[p_string_mem->sz] = 0;
 

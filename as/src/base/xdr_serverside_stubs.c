@@ -64,7 +64,7 @@ void xdr_add_dirty_bin(as_namespace *ns, xdr_dirty_bins *dirty, const char *name
 {
 }
 
-void xdr_write(as_namespace *ns, cf_digest keyd, as_generation generation, cf_node masternode, xdr_op_type op_type, uint16_t set_id, xdr_dirty_bins *dirty)
+void xdr_write(as_namespace *ns, cf_digest *keyd, uint16_t generation, cf_node masternode, xdr_op_type op_type, uint16_t set_id, xdr_dirty_bins *dirty)
 {
 }
 
@@ -109,12 +109,17 @@ bool is_xdr_delete_shipping_enabled()
 	return false;
 }
 
-bool is_xdr_nsup_deletes_enabled()
+bool is_xdr_digestlog_low(as_namespace *ns)
 {
 	return false;
 }
 
 bool is_xdr_forwarding_enabled()
+{
+	return false;
+}
+
+bool is_xdr_nsup_deletes_enabled()
 {
 	return false;
 }

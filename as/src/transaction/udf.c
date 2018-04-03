@@ -51,8 +51,6 @@
 
 #include "base/cfg.h"
 #include "base/datamodel.h"
-#include "base/ldt.h"
-#include "base/ldt_aerospike.h"
 #include "base/proto.h"
 #include "base/secondary_index.h"
 #include "base/transaction.h"
@@ -89,25 +87,27 @@ typedef struct udf_call_s {
 	as_transaction* tr;
 } udf_call;
 
-typedef struct pickle_info_s {
-	uint8_t*	rec_props_data;
-	uint32_t	rec_props_size;
-	uint8_t*	buf;
-	size_t		buf_size;
-} pickle_info;
+
+//==========================================================
+// Globals.
+//
+
+as_aerospike g_as_aerospike;
 
 
 //==========================================================
-// Forward Declarations.
+// Forward declarations.
 //
 
 bool log_callback(as_log_level level, const char* func, const char* file,
 		uint32_t line, const char* fmt, ...);
 
-bool start_udf_dup_res(rw_request* rw, as_transaction* tr);
-bool start_udf_repl_write(rw_request* rw, as_transaction* tr);
+void start_udf_dup_res(rw_request* rw, as_transaction* tr);
+void start_udf_repl_write(rw_request* rw, as_transaction* tr);
+void start_udf_repl_write_forget(rw_request* rw, as_transaction* tr);
 bool udf_dup_res_cb(rw_request* rw);
-bool udf_repl_write_after_dup_res(rw_request* rw, as_transaction* tr);
+void udf_repl_write_after_dup_res(rw_request* rw, as_transaction* tr);
+void udf_repl_write_forget_after_dup_res(rw_request* rw, as_transaction* tr);
 void udf_repl_write_cb(rw_request* rw);
 
 void send_udf_response(as_transaction* tr, cf_dyn_buf* db);
@@ -117,27 +117,24 @@ transaction_status udf_master(rw_request* rw, as_transaction* tr);
 udf_optype udf_master_apply(udf_call* call, rw_request* rw);
 int udf_apply_record(udf_call* call, as_rec* rec, as_result* result);
 uint64_t udf_end_time(time_tracker* tt);
-int udf_finish(ldt_record* lrecord, rw_request* rw, udf_optype* lrecord_op,
-		uint16_t set_id);
+void udf_finish(udf_record* urecord, rw_request* rw, udf_optype* record_op);
 udf_optype udf_finish_op(udf_record* urecord);
-void udf_post_processing(udf_record* urecord, udf_optype urecord_op,
-		uint16_t set_id);
-void write_udf_post_processing(as_transaction* tr, as_storage_rd* rd,
-		uint8_t** pickled_buf, size_t* pickled_sz,
-		as_rec_props* p_pickled_rec_props);
-bool udf_pickle_all(as_storage_rd* rd, pickle_info* pickle);
+void udf_post_processing(udf_record* urecord, rw_request* rw,
+		udf_optype urecord_op);
 
-void update_ldt_stats(as_namespace* ns, udf_optype op, int ret,
-		bool is_success);
 void update_lua_complete_stats(uint8_t origin, as_namespace* ns, udf_optype op,
 		int ret, bool is_success);
 
 void process_failure_str(udf_call* call, const char* err_str, size_t len,
 		cf_dyn_buf* db);
 void process_result(const as_result* result, udf_call* call, cf_dyn_buf* db);
-void process_udf_failure(udf_call* call, const as_string* s, cf_dyn_buf* db);
-void process_response(udf_call* call, const char* bin_name, const as_val* val,
+void process_response(udf_call* call, bool success, const as_val* val,
 		cf_dyn_buf* db);
+
+
+//==========================================================
+// Inlines & macros.
+//
 
 static inline void
 client_udf_update_stats(as_namespace* ns, uint8_t result_code)
@@ -181,21 +178,14 @@ udf_zero_bins_left(udf_record* urecord)
 static inline void
 process_failure(udf_call* call, const as_val* val, cf_dyn_buf* db)
 {
-	process_response(call, "FAILURE", val, db);
+	process_response(call, false, val, db);
 }
 
 static inline void
 process_success(udf_call* call, const as_val* val, cf_dyn_buf* db)
 {
-	process_response(call, "SUCCESS", val, db);
+	process_response(call, true, val, db);
 }
-
-
-//==========================================================
-// Globals.
-//
-
-as_aerospike g_as_aerospike;
 
 
 //==========================================================
@@ -209,7 +199,6 @@ as_udf_init()
 	as_log_set_callback(log_callback);
 	udf_cask_init();
 	as_aerospike_init(&g_as_aerospike, NULL, &udf_aerospike_hooks);
-	ldt_init();
 }
 
 
@@ -275,7 +264,7 @@ as_udf_start(as_transaction* tr)
 
 	// Apply XDR filter.
 	if (! xdr_allows_write(tr)) {
-		tr->result_code = AS_PROTO_RESULT_FAIL_FORBIDDEN;
+		tr->result_code = AS_PROTO_RESULT_FAIL_ALWAYS_FORBIDDEN;
 		send_udf_response(tr, NULL);
 		return TRANS_DONE_ERROR;
 	}
@@ -304,7 +293,7 @@ as_udf_start(as_transaction* tr)
 	}
 	// else - rw_request is now in hash, continue...
 
-	if (g_config.write_duplicate_resolution_disable) {
+	if (tr->rsv.ns->write_dup_res_disabled) {
 		// Note - preventing duplicate resolution this way allows
 		// rw_request_destroy() to handle dup_msg[] cleanup correctly.
 		tr->rsv.n_dupl = 0;
@@ -312,17 +301,16 @@ as_udf_start(as_transaction* tr)
 
 	// If there are duplicates to resolve, start doing so.
 	if (tr->rsv.n_dupl != 0) {
-		if (! start_udf_dup_res(rw, tr)) {
-			rw_request_hash_delete(&hkey, rw);
-			tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-			send_udf_response(tr, NULL);
-			return TRANS_DONE_ERROR;
-		}
+		start_udf_dup_res(rw, tr);
 
 		// Started duplicate resolution.
 		return TRANS_IN_PROGRESS;
 	}
 	// else - no duplicate resolution phase, apply operation to master.
+
+	// Set up the nodes to which we'll write replicas.
+	rw->n_dest_nodes = as_partition_get_other_replicas(tr->rsv.p,
+			rw->dest_nodes);
 
 	status = udf_master(rw, tr);
 
@@ -336,29 +324,22 @@ as_udf_start(as_transaction* tr)
 		return status;
 	}
 
-	// Set up the nodes to which we'll write replicas.
-	rw->n_dest_nodes = as_partition_get_other_replicas(tr->rsv.p,
-			rw->dest_nodes);
-
 	// If we don't need replica writes, transaction is finished.
-	// TODO - consider a single-node fast path bypassing hash and pickling?
 	if (rw->n_dest_nodes == 0) {
-		// LDT multi-ops don't generate pickle if replication is not needed.
-		if (rw->pickled_buf) {
-			clear_delete_response_metadata(rw, tr);
-		}
-
 		send_udf_response(tr, &rw->response_db);
 		rw_request_hash_delete(&hkey, rw);
 		return TRANS_DONE_SUCCESS;
 	}
 
-	if (! start_udf_repl_write(rw, tr)) {
+	// If we don't need to wait for replica write acks, fire and forget.
+	if (respond_on_master_complete(tr)) {
+		start_udf_repl_write_forget(rw, tr);
+		send_udf_response(tr, &rw->response_db);
 		rw_request_hash_delete(&hkey, rw);
-		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		send_udf_response(tr, NULL);
-		return TRANS_DONE_ERROR;
+		return TRANS_DONE_SUCCESS;
 	}
+
+	start_udf_repl_write(rw, tr);
 
 	// Started replica write.
 	return TRANS_IN_PROGRESS;
@@ -396,16 +377,12 @@ log_callback(as_log_level level, const char* func, const char* file,
 // Local helpers - transaction flow.
 //
 
-bool
+void
 start_udf_dup_res(rw_request* rw, as_transaction* tr)
 {
 	// Finish initializing rw, construct and send dup-res message.
 
-	if (! dup_res_make_message(rw, tr)) {
-		return false;
-	}
-
-	rw->respond_client_on_master_completion = respond_on_master_complete(tr);
+	dup_res_make_message(rw, tr);
 
 	pthread_mutex_lock(&rw->lock);
 
@@ -413,27 +390,15 @@ start_udf_dup_res(rw_request* rw, as_transaction* tr)
 	send_rw_messages(rw);
 
 	pthread_mutex_unlock(&rw->lock);
-
-	return true;
 }
 
 
-bool
+void
 start_udf_repl_write(rw_request* rw, as_transaction* tr)
 {
 	// Finish initializing rw, construct and send repl-write message.
 
-	if (! repl_write_make_message(rw, tr)) {
-		return false;
-	}
-
-	rw->respond_client_on_master_completion = respond_on_master_complete(tr);
-
-	if (rw->respond_client_on_master_completion) {
-		// Don't wait for replication. When replication is complete, we won't
-		// call send_udf_response() again.
-		send_udf_response(tr, &rw->response_db);
-	}
+	repl_write_make_message(rw, tr);
 
 	pthread_mutex_lock(&rw->lock);
 
@@ -441,8 +406,16 @@ start_udf_repl_write(rw_request* rw, as_transaction* tr)
 	send_rw_messages(rw);
 
 	pthread_mutex_unlock(&rw->lock);
+}
 
-	return true;
+
+void
+start_udf_repl_write_forget(rw_request* rw, as_transaction* tr)
+{
+	// Construct and send repl-write message. No need to finish rw setup.
+
+	repl_write_make_message(rw, tr);
+	send_rw_messages_forget(rw);
 }
 
 
@@ -454,6 +427,11 @@ udf_dup_res_cb(rw_request* rw)
 
 	as_transaction tr;
 	as_transaction_init_from_rw(&tr, rw);
+
+	if (tr.result_code != AS_PROTO_RESULT_OK) {
+		send_udf_response(&tr, NULL);
+		return true;
+	}
 
 	transaction_status status = udf_master(rw, &tr);
 
@@ -471,46 +449,44 @@ udf_dup_res_cb(rw_request* rw)
 
 	// If we don't need replica writes, transaction is finished.
 	if (rw->n_dest_nodes == 0) {
-		// LDT multi-ops don't generate pickle if replication is not needed.
-		if (rw->pickled_buf) {
-			clear_delete_response_metadata(rw, &tr);
-		}
-
 		send_udf_response(&tr, &rw->response_db);
 		return true;
 	}
 
-	if (! udf_repl_write_after_dup_res(rw, &tr)) {
-		tr.result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		send_udf_response(&tr, NULL);
+	// If we don't need to wait for replica write acks, fire and forget.
+	if (respond_on_master_complete(&tr)) {
+		udf_repl_write_forget_after_dup_res(rw, &tr);
+		send_udf_response(&tr, &rw->response_db);
 		return true;
 	}
+
+	udf_repl_write_after_dup_res(rw, &tr);
 
 	// Started replica write - don't delete rw_request from hash.
 	return false;
 }
 
 
-bool
+void
 udf_repl_write_after_dup_res(rw_request* rw, as_transaction* tr)
 {
 	// Recycle rw_request that was just used for duplicate resolution to now do
 	// replica writes. Note - we are under the rw_request lock here!
 
-	if (! repl_write_make_message(rw, tr)) {
-		return false;
-	}
-
-	if (rw->respond_client_on_master_completion) {
-		// Don't wait for replication. When replication is complete, we won't
-		// call send_udf_response() again.
-		send_udf_response(tr, &rw->response_db);
-	}
-
+	repl_write_make_message(rw, tr);
 	repl_write_reset_rw(rw, tr, udf_repl_write_cb);
 	send_rw_messages(rw);
+}
 
-	return true;
+
+void
+udf_repl_write_forget_after_dup_res(rw_request* rw, as_transaction* tr)
+{
+	// Send replica writes. Not waiting for acks, so need to reset rw_request.
+	// Note - we are under the rw_request lock here!
+
+	repl_write_make_message(rw, tr);
+	send_rw_messages_forget(rw);
 }
 
 
@@ -545,6 +521,8 @@ send_udf_response(as_transaction* tr, cf_dyn_buf* db)
 	// Note - if tr was setup from rw, rw->from.any has been set null and
 	// informs timeout it lost the race.
 
+	clear_delete_response_metadata(tr);
+
 	switch (tr->origin) {
 	case FROM_CLIENT:
 		if (db && db->used_sz != 0) {
@@ -552,8 +530,8 @@ send_udf_response(as_transaction* tr, cf_dyn_buf* db)
 		}
 		else {
 			as_msg_send_reply(tr->from.proto_fd_h, tr->result_code,
-					tr->generation, tr->void_time, NULL, NULL, 0, NULL,
-					as_transaction_trid(tr), NULL);
+					tr->generation, tr->void_time, NULL, NULL, 0, tr->rsv.ns,
+					as_transaction_trid(tr));
 		}
 		BENCHMARK_NEXT_DATA_POINT(tr, udf, response);
 		HIST_TRACK_ACTIVATE_INSERT_DATA_POINT(tr, udf_hist);
@@ -567,7 +545,7 @@ send_udf_response(as_transaction* tr, cf_dyn_buf* db)
 		else {
 			as_proxy_send_response(tr->from.proxy_node, tr->from_data.proxy_tid,
 					tr->result_code, tr->generation, tr->void_time, NULL, NULL,
-					0, NULL, as_transaction_trid(tr), NULL);
+					0, tr->rsv.ns, as_transaction_trid(tr));
 		}
 		break;
 	case FROM_IUDF:
@@ -578,15 +556,12 @@ send_udf_response(as_transaction* tr, cf_dyn_buf* db)
 		BENCHMARK_NEXT_DATA_POINT(tr, udf_sub, response);
 		udf_sub_udf_update_stats(tr->rsv.ns, tr->result_code);
 		break;
-	case FROM_BATCH:
-	case FROM_NSUP:
-		// Should be impossible for batch reads and nsup deletes to get here.
 	default:
 		cf_crash(AS_RW, "unexpected transaction origin %u", tr->origin);
 		break;
 	}
 
-	tr->from.any = NULL; // needed only for respond-on-master-complete
+	tr->from.any = NULL; // pattern, not needed
 }
 
 
@@ -600,7 +575,7 @@ udf_timeout_cb(rw_request* rw)
 	switch (rw->origin) {
 	case FROM_CLIENT:
 		as_msg_send_reply(rw->from.proto_fd_h, AS_PROTO_RESULT_FAIL_TIMEOUT, 0,
-				0, NULL, NULL, 0, NULL, rw_request_trid(rw), NULL);
+				0, NULL, NULL, 0, rw->rsv.ns, rw_request_trid(rw));
 		// Timeouts aren't included in histograms.
 		client_udf_update_stats(rw->rsv.ns, AS_PROTO_RESULT_FAIL_TIMEOUT);
 		break;
@@ -612,9 +587,6 @@ udf_timeout_cb(rw_request* rw)
 		// Timeouts aren't included in histograms.
 		udf_sub_udf_update_stats(rw->rsv.ns, AS_PROTO_RESULT_FAIL_TIMEOUT);
 		break;
-	case FROM_BATCH:
-	case FROM_NSUP:
-		// Should be impossible for batch reads and nsup deletes to get here.
 	default:
 		cf_crash(AS_RW, "unexpected transaction origin %u", rw->origin);
 		break;
@@ -632,8 +604,6 @@ transaction_status
 udf_master(rw_request* rw, as_transaction* tr)
 {
 	CF_ALLOC_SET_NS_ARENA(tr->rsv.ns);
-
-	rw->has_udf = true;
 
 	udf_def def;
 	udf_call call = { &def, tr };
@@ -668,10 +638,28 @@ udf_master_apply(udf_call* call, rw_request* rw)
 	as_transaction* tr = call->tr;
 	as_namespace* ns = tr->rsv.ns;
 
-	// Prepare UDF record.
+	// Find record in index.
 
 	as_index_ref r_ref;
 	r_ref.skip_lock = false;
+
+	int get_rv = as_record_get(tr->rsv.tree, &tr->keyd, &r_ref);
+
+	if (get_rv == 0 && as_record_is_doomed(r_ref.r, ns)) {
+		// If record is expired or truncated, pretend it was not found.
+		as_record_done(&r_ref, ns);
+		get_rv = -1;
+	}
+
+	if (tr->origin == FROM_IUDF &&
+			(get_rv == -1 || ! as_record_is_live(r_ref.r))) {
+		// Internal UDFs must not create records.
+		tr->result_code = AS_PROTO_RESULT_FAIL_NOT_FOUND;
+		process_failure(call, NULL, &rw->response_db);
+		return UDF_OPTYPE_NONE;
+	}
+
+	// Open storage record.
 
 	as_storage_rd rd;
 
@@ -687,42 +675,6 @@ udf_master_apply(udf_call* call, rw_request* rw)
 	urecord.dirty	= &dirty_bins;
 	urecord.keyd	= tr->keyd;
 
-	// Prepare LDT record.
-
-	ldt_record lrecord;
-	ldt_record_init(&lrecord);
-
-	as_rec urec;
-	as_rec_init(&urec, &urecord, &udf_record_hooks);
-
-	// Link lrecord and urecord.
-	lrecord.h_urec	= &urec;
-	urecord.lrecord	= &lrecord;
-
-	// Find record in index.
-
-	int get_rv = as_record_get(tr->rsv.tree, &tr->keyd, &r_ref);
-
-	if (get_rv == 0 && as_record_is_doomed(r_ref.r, ns)) {
-		// If record is expired or truncated, pretend it was not found.
-		as_record_done(&r_ref, ns);
-		get_rv = -1;
-	}
-
-	if (tr->origin == FROM_IUDF &&
-			(get_rv == -1 || ! as_record_is_live(r_ref.r))) {
-		// Internal UDFs must not create records.
-		tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND;
-		process_failure(call, NULL, &rw->response_db);
-		ldt_record_destroy(&lrecord);
-		return UDF_OPTYPE_NONE;
-	}
-
-	// Needed for XDR shipping.
-	uint32_t set_id = INVALID_SET_ID;
-
-	// Open storage record.
-
 	if (get_rv == 0) {
 		urecord.flag |= (UDF_RECORD_FLAG_OPEN | UDF_RECORD_FLAG_PREEXISTS);
 
@@ -730,7 +682,6 @@ udf_master_apply(udf_call* call, rw_request* rw)
 			udf_record_close(&urecord);
 			tr->result_code = AS_PROTO_RESULT_FAIL_BIN_NAME; // overloaded... add bin_count error?
 			process_failure(call, NULL, &rw->response_db);
-			ldt_record_destroy(&lrecord);
 			return UDF_OPTYPE_NONE;
 		}
 
@@ -742,9 +693,8 @@ udf_master_apply(udf_call* call, rw_request* rw)
 			if (! predexp_matches_record(tr->from.iudf_orig->predexp,
 					&predargs)) {
 				udf_record_close(&urecord);
-				tr->result_code = AS_PROTO_RESULT_FAIL_NOTFOUND; // not ideal
+				tr->result_code = AS_PROTO_RESULT_FAIL_NOT_FOUND; // not ideal
 				process_failure(call, NULL, &rw->response_db);
-				ldt_record_destroy(&lrecord);
 				return UDF_OPTYPE_NONE;
 			}
 		}
@@ -757,7 +707,6 @@ udf_master_apply(udf_call* call, rw_request* rw)
 				udf_record_close(&urecord);
 				tr->result_code = AS_PROTO_RESULT_FAIL_KEY_MISMATCH;
 				process_failure(call, NULL, &rw->response_db);
-				ldt_record_destroy(&lrecord);
 				return UDF_OPTYPE_NONE;
 			}
 		}
@@ -767,20 +716,11 @@ udf_master_apply(udf_call* call, rw_request* rw)
 				udf_record_close(&urecord);
 				tr->result_code = AS_PROTO_RESULT_FAIL_UNSUPPORTED_FEATURE;
 				process_failure(call, NULL, &rw->response_db);
-				ldt_record_destroy(&lrecord);
 				return UDF_OPTYPE_NONE;
 			}
 
 			urecord.flag |= UDF_RECORD_FLAG_METADATA_UPDATED;
 		}
-
-		if (as_ldt_parent_storage_get_version(&rd, &lrecord.version, false,
-				__FILE__, __LINE__)) {
-			lrecord.version = as_ldt_generate_version();
-		}
-
-		// Save the set-ID for XDR in case record is deleted.
-		set_id = as_index_get_set_id(urecord.r_ref->r);
 	}
 	else {
 		urecord.flag &= ~(UDF_RECORD_FLAG_OPEN |
@@ -792,33 +732,20 @@ udf_master_apply(udf_call* call, rw_request* rw)
 
 	// This as_rec needs to be in the heap - once passed into the lua scope it
 	// gets garbage collected later. Also, the destroy hook is set to NULL so
-	// garbage collection has nothing to do. For ldt_record, clean up and post-
-	// processing has to be in process context under transactional protection.
-	as_rec* lrec = as_rec_new(&lrecord, &ldt_record_hooks);
-	as_val_reserve(lrec);
+	// garbage collection has nothing to do.
+	as_rec* urec = as_rec_new(&urecord, &udf_record_hooks);
+
+	as_val_reserve(urec); // for lua
 
 	as_result result;
 	as_result_init(&result);
 
+	int apply_rv = udf_apply_record(call, urec, &result);
+
 	udf_optype optype = UDF_OPTYPE_NONE;
 
-	int apply_rv = udf_apply_record(call, lrec, &result);
-
 	if (apply_rv == 0) {
-		if ((lrecord.udf_context & UDF_CONTEXT_LDT) != 0) {
-			histogram_insert_raw(g_stats.ldt_io_record_cnt_hist,
-					lrecord.subrec_io + 1);
-		}
-
-		if (udf_finish(&lrecord, rw, &optype, set_id) != 0) {
-			cf_warning(AS_UDF, "failed udf_finish");
-			// ... and ???
-		}
-
-		if (! result.is_success) {
-			ldt_update_err_stats(ns, result.value);
-		}
-
+		udf_finish(&urecord, rw, &optype);
 		process_result(&result, call, &rw->response_db);
 	}
 	else {
@@ -831,17 +758,11 @@ udf_master_apply(udf_call* call, rw_request* rw)
 		cf_free(rs);
 	}
 
-	if ((lrecord.udf_context & UDF_CONTEXT_LDT) != 0) {
-		update_ldt_stats(ns, optype, apply_rv, result.is_success);
-	}
-	else {
-		update_lua_complete_stats(tr->origin, ns, optype, apply_rv,
-				result.is_success);
-	}
+	update_lua_complete_stats(tr->origin, ns, optype, apply_rv,
+			result.is_success);
 
 	as_result_destroy(&result);
-	as_rec_destroy(lrec);
-	ldt_record_destroy(&lrecord);
+	udf_record_destroy(urec);
 
 	return optype;
 }
@@ -861,23 +782,13 @@ udf_apply_record(udf_call* call, as_rec* rec, as_result* result)
 	as_timer_init(&timer, &udf_timer_tracker, &udf_timer_hooks);
 
 	as_udf_context ctx = {
-		.as			= &g_ldt_aerospike,
+		.as			= &g_as_aerospike,
 		.timer		= &timer,
 		.memtracker	= NULL
 	};
 
-	uint64_t start_time = g_config.ldt_benchmarks ? cf_getns() : 0;
-
 	int apply_rv = as_module_apply_record(&mod_lua, &ctx, call->def->filename,
 			call->def->function, rec, call->def->arglist, result);
-
-	if (start_time != 0) {
-		ldt_record* lrecord = (ldt_record*)as_rec_source(rec);
-
-		if ((lrecord->udf_context & UDF_CONTEXT_LDT) != 0) {
-			histogram_insert_data_point(g_stats.ldt_hist, start_time);
-		}
-	}
 
 	udf_timer_cleanup();
 
@@ -888,13 +799,7 @@ udf_apply_record(udf_call* call, as_rec* rec, as_result* result)
 uint64_t
 udf_end_time(time_tracker* tt)
 {
-	ldt_record* lrecord = (ldt_record*)tt->udata;
-
-	if (! lrecord) {
-		return -1; // TODO - should be impossible.
-	}
-
-	udf_record* urecord = (udf_record*)as_rec_source(lrecord->h_urec);
+	udf_record* urecord = (udf_record*)tt->udata;
 
 	if (! urecord) {
 		return -1; // TODO - should be impossible.
@@ -904,82 +809,22 @@ udf_end_time(time_tracker* tt)
 }
 
 
-int
-udf_finish(ldt_record* lrecord, rw_request* rw, udf_optype* lrecord_op,
-		uint16_t set_id)
+void
+udf_finish(udf_record* urecord, rw_request* rw, udf_optype* record_op)
 {
-	*lrecord_op = UDF_OPTYPE_READ;
+	*record_op = UDF_OPTYPE_READ;
 
-	int ret = 0;
-	int subrec_count = 0;
+	udf_optype final_op = udf_finish_op(urecord);
 
-	udf_record* h_urecord = as_rec_source(lrecord->h_urec);
-	udf_optype h_urecord_op = udf_finish_op(h_urecord);
-
-	if (h_urecord_op == UDF_OPTYPE_DELETE) {
-		*lrecord_op = UDF_OPTYPE_DELETE;
-
-		udf_post_processing(h_urecord, h_urecord_op, set_id);
-
-		rw->pickled_buf			= h_urecord->pickled_buf;
-		rw->pickled_sz			= h_urecord->pickled_sz;
-		rw->pickled_rec_props	= h_urecord->pickled_rec_props;
-
-		udf_record_cleanup(h_urecord, false);
+	if (final_op == UDF_OPTYPE_DELETE) {
+		*record_op = UDF_OPTYPE_DELETE;
+		urecord->tr->flags |= AS_TRANSACTION_FLAG_IS_DELETE;
 	}
-	else {
-		if (h_urecord_op == UDF_OPTYPE_WRITE) {
-			*lrecord_op = UDF_OPTYPE_WRITE;
-		}
-
-		FOR_EACH_SUBRECORD(i, j, lrecord) {
-			udf_record* c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
-			udf_optype c_urecord_op = udf_finish_op(c_urecord);
-
-			if (c_urecord_op == UDF_OPTYPE_WRITE) {
-				rw->is_multiop = true;
-				subrec_count++;
-			}
-
-			udf_post_processing(c_urecord, c_urecord_op, set_id);
-		}
-
-		// Process the parent record last .. this is to make sure the lock is
-		// held until the end.
-		udf_post_processing(h_urecord, h_urecord_op, set_id);
-
-		if (rw->is_multiop) {
-			// Create the multiop pickled buf.
-			ret = as_ldt_record_pickle(lrecord, &rw->pickled_buf,
-					&rw->pickled_sz);
-
-			FOR_EACH_SUBRECORD(i, j, lrecord) {
-				udf_record* c_urecord = &lrecord->chunk[i].slots[j].c_urecord;
-				// Cleanup in case pickle code bailed out, either:
-				// - single node, no replica
-				// - failed to pack stuff up
-				udf_record_cleanup(c_urecord, true);
-			}
-
-			udf_record_cleanup(h_urecord, true);
-		}
-		else {
-			// Normal UDF case - pass on pickled buf created for the record.
-			rw->pickled_buf			= h_urecord->pickled_buf;
-			rw->pickled_sz			= h_urecord->pickled_sz;
-			rw->pickled_rec_props	= h_urecord->pickled_rec_props;
-
-			udf_record_cleanup(h_urecord, false);
-		}
+	else if (final_op == UDF_OPTYPE_WRITE) {
+		*record_op = UDF_OPTYPE_WRITE;
 	}
 
-	if (*lrecord_op == UDF_OPTYPE_WRITE &&
-			(lrecord->udf_context & UDF_CONTEXT_LDT) != 0) {
-		histogram_insert_raw(g_stats.ldt_update_record_cnt_hist,
-				subrec_count + 1);
-	}
-
-	return ret;
+	udf_post_processing(urecord, rw, final_op);
 }
 
 
@@ -1005,16 +850,15 @@ udf_finish_op(udf_record* urecord)
 
 
 void
-udf_post_processing(udf_record* urecord, udf_optype urecord_op, uint16_t set_id)
+udf_post_processing(udf_record* urecord, rw_request* rw, udf_optype urecord_op)
 {
-	as_storage_rd* rd	= urecord->rd;
-	as_transaction* tr	= urecord->tr;
-	as_index_ref* r_ref	= urecord->r_ref;
+	as_storage_rd* rd = urecord->rd;
+	as_transaction* tr = urecord->tr;
+	as_record* r = rd->r;
 
-	urecord->pickled_buf = NULL;
-	urecord->pickled_sz = 0;
-	as_rec_props_clear(&urecord->pickled_rec_props);
-	bool udf_xdr_ship_op = false;
+	uint16_t generation = 0;
+	uint16_t set_id = 0;
+	xdr_dirty_bins dirty_bins;
 
 	if (urecord_op == UDF_OPTYPE_WRITE || urecord_op == UDF_OPTYPE_DELETE) {
 		size_t rec_props_data_size = as_storage_record_rec_props_size(rd);
@@ -1032,158 +876,63 @@ udf_post_processing(udf_record* urecord, udf_optype urecord_op, uint16_t set_id)
 			m->record_ttl = TTL_NAMESPACE_DEFAULT;
 		}
 
-		write_udf_post_processing(tr, rd, &urecord->pickled_buf,
-			&urecord->pickled_sz, &urecord->pickled_rec_props);
+		update_metadata_in_index(tr, true, r);
+
+		pickle_all(rd, rw);
+
+		tr->generation = r->generation;
+		tr->void_time = r->void_time;
+		tr->last_update_time = r->last_update_time;
 
 		// Now ok to accommodate a new stored key...
-		if (! as_index_is_flag_set(r_ref->r, AS_INDEX_FLAG_KEY_STORED) &&
-				rd->key) {
+		if (r->key_stored == 0 && rd->key) {
 			if (rd->ns->storage_data_in_memory) {
-				as_record_allocate_key(r_ref->r, rd->key, rd->key_size);
+				as_record_allocate_key(r, rd->key, rd->key_size);
 			}
 
-			as_index_set_flags(r_ref->r, AS_INDEX_FLAG_KEY_STORED);
+			r->key_stored = 1;
 		}
 		// ... or drop a stored key.
-		else if (as_index_is_flag_set(r_ref->r, AS_INDEX_FLAG_KEY_STORED) &&
-				! rd->key) {
+		else if (r->key_stored == 1 && ! rd->key) {
 			if (rd->ns->storage_data_in_memory) {
-				as_record_remove_key(r_ref->r);
+				as_record_remove_key(r);
 			}
 
-			as_index_clear_flags(r_ref->r, AS_INDEX_FLAG_KEY_STORED);
+			r->key_stored = 0;
 		}
 
 		as_storage_record_adjust_mem_stats(rd, urecord->starting_memory_bytes);
-		udf_xdr_ship_op = true;
-	}
 
-	// Collect information for XDR before closing the record.
+		// Collect information for XDR before closing the record.
+		generation = r->generation;
+		set_id = as_index_get_set_id(r);
 
-	as_generation generation = 0;
-
-	if ((urecord->flag & UDF_RECORD_FLAG_OPEN) != 0) {
-		generation = r_ref->r->generation;
-		set_id = as_index_get_set_id(r_ref->r);
-	}
-
-	urecord->op = urecord_op;
-
-	xdr_dirty_bins dirty_bins;
-	xdr_clear_dirty_bins(&dirty_bins);
-
-	if (urecord->dirty && udf_xdr_ship_op && urecord_op == UDF_OPTYPE_WRITE) {
-		xdr_copy_dirty_bins(urecord->dirty, &dirty_bins);
+		if (urecord->dirty && urecord_op == UDF_OPTYPE_WRITE) {
+			xdr_clear_dirty_bins(&dirty_bins);
+			xdr_copy_dirty_bins(urecord->dirty, &dirty_bins);
+		}
 	}
 
 	// Close the record for all the cases.
 	udf_record_close(urecord);
 
 	// Write to XDR pipe.
-	if (udf_xdr_ship_op) {
-		if (urecord_op == UDF_OPTYPE_WRITE) {
-			xdr_write(tr->rsv.ns, tr->keyd, generation, 0, XDR_OP_TYPE_WRITE,
-					set_id, &dirty_bins);
-		}
-		else if (urecord_op == UDF_OPTYPE_DELETE) {
-			xdr_write(tr->rsv.ns, tr->keyd, 0, 0,
-					as_transaction_is_durable_delete(tr) ?
-							XDR_OP_TYPE_DURABLE_DELETE : XDR_OP_TYPE_DROP,
-					set_id, NULL);
-		}
+	if (urecord_op == UDF_OPTYPE_WRITE) {
+		xdr_write(tr->rsv.ns, &tr->keyd, generation, 0, XDR_OP_TYPE_WRITE,
+				set_id, &dirty_bins);
 	}
-}
-
-
-void
-write_udf_post_processing(as_transaction* tr, as_storage_rd* rd,
-		uint8_t** pickled_buf, size_t* pickled_sz,
-		as_rec_props* p_pickled_rec_props)
-{
-	update_metadata_in_index(tr, true, rd->r);
-
-	pickle_info pickle;
-
-	udf_pickle_all(rd, &pickle);
-
-	*pickled_buf = pickle.buf;
-	*pickled_sz = pickle.buf_size;
-	p_pickled_rec_props->p_data = pickle.rec_props_data;
-	p_pickled_rec_props->size = pickle.rec_props_size;
-
-	tr->generation = rd->r->generation;
-	tr->void_time = rd->r->void_time;
-	tr->last_update_time = rd->r->last_update_time;
-}
-
-
-bool
-udf_pickle_all(as_storage_rd* rd, pickle_info* pickle)
-{
-	if (as_record_pickle(rd->r, rd, &pickle->buf, &pickle->buf_size) != 0) {
-		return false;
+	else if (urecord_op == UDF_OPTYPE_DELETE) {
+		xdr_write(tr->rsv.ns, &tr->keyd, 0, 0,
+				as_transaction_is_durable_delete(tr) ?
+						XDR_OP_TYPE_DURABLE_DELETE : XDR_OP_TYPE_DROP,
+				set_id, NULL);
 	}
-
-	pickle->rec_props_data = NULL;
-	pickle->rec_props_size = 0;
-
-	// TODO - we could avoid this copy (and maybe even not do this here at all)
-	// if all callers malloced rdp->rec_props.p_data upstream for hand-off...
-	if (rd->rec_props.p_data) {
-		pickle->rec_props_size = rd->rec_props.size;
-		pickle->rec_props_data = cf_malloc(pickle->rec_props_size);
-
-		if (! pickle->rec_props_data) {
-			cf_free(pickle->buf);
-			return false;
-		}
-
-		memcpy(pickle->rec_props_data, rd->rec_props.p_data,
-				pickle->rec_props_size);
-	}
-
-	return true;
 }
 
 
 //==========================================================
 // Local helpers - statistics.
 //
-
-void
-update_ldt_stats(as_namespace* ns, udf_optype op, int ret, bool is_success)
-{
-	if (op == UDF_OPTYPE_READ) {
-		cf_atomic_int_incr(&ns->lstats.ldt_read_reqs);
-	}
-	else if (op == UDF_OPTYPE_DELETE) {
-		cf_atomic_int_incr(&ns->lstats.ldt_delete_reqs);
-	}
-	else if (op == UDF_OPTYPE_WRITE) {
-		cf_atomic_int_incr(&ns->lstats.ldt_write_reqs);
-	}
-
-	if (ret == 0) {
-		if (is_success) {
-			if (op == UDF_OPTYPE_READ) {
-				cf_atomic_int_incr(&ns->lstats.ldt_read_success);
-			}
-			else if (op == UDF_OPTYPE_DELETE) {
-				cf_atomic_int_incr(&ns->lstats.ldt_delete_success);
-			}
-			else if (op == UDF_OPTYPE_WRITE) {
-				cf_atomic_int_incr(&ns->lstats.ldt_write_success);
-			}
-		}
-		else {
-			cf_atomic_int_incr(&ns->lstats.ldt_errs);
-		}
-	}
-	else {
-		cf_atomic_int_incr(&ns->lstats.ldt_errs);
-	}
-}
-
 
 void
 update_lua_complete_stats(uint8_t origin, as_namespace* ns, udf_optype op,
@@ -1229,8 +978,6 @@ update_lua_complete_stats(uint8_t origin, as_namespace* ns, udf_optype op,
 			cf_atomic_int_incr(&ns->n_udf_sub_lang_error);
 		}
 		break;
-	case FROM_BATCH:
-	case FROM_NSUP:
 	default:
 		cf_crash(AS_UDF, "unexpected transaction origin %u", origin);
 		break;
@@ -1272,7 +1019,8 @@ process_result(const as_result* result, udf_call* call, cf_dyn_buf* db)
 	// Failures...
 
 	if (as_val_type(val) == AS_STRING) {
-		process_udf_failure(call, as_string_fromval(val), db);
+		call->tr->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
+		process_failure(call, val, db);
 		return;
 	}
 
@@ -1287,48 +1035,7 @@ process_result(const as_result* result, udf_call* call, cf_dyn_buf* db)
 
 
 void
-process_udf_failure(udf_call* call, const as_string* s, cf_dyn_buf* db)
-{
-	char* val = as_string_tostring(s);
-	size_t vlen = as_string_len((as_string*)s);
-	// TODO - make as_string_len() take const.
-
-	long error_code = ldt_get_error_code(val, vlen);
-
-	if (error_code != AS_PROTO_RESULT_FAIL_NOTFOUND &&
-			error_code != AS_PROTO_RESULT_FAIL_COLLECTION_ITEM_NOT_FOUND) {
-		call->tr->result_code = AS_PROTO_RESULT_FAIL_UDF_EXECUTION;
-		process_failure(call, as_string_toval(s), db);
-		return;
-	}
-
-	call->tr->result_code = (uint8_t)error_code;
-
-	// Send an "empty" response, with no failure bin.
-
-	as_transaction* tr = call->tr;
-
-	size_t msg_sz = 0;
-	uint8_t* msgp = (uint8_t*)as_msg_make_response_msg(tr->result_code,
-			0, 0, NULL, NULL, 0, tr->rsv.ns, NULL, &msg_sz,
-			as_transaction_trid(tr), NULL);
-
-	if (! msgp)	{
-		cf_warning_digest(AS_RW, &tr->keyd,
-				"{%s} LDT UDF failed to make response msg ",
-				tr->rsv.ns->name);
-		return;
-	}
-
-	db->buf = msgp;
-	db->is_stack = false;
-	db->alloc_sz = msg_sz;
-	db->used_sz = msg_sz;
-}
-
-
-void
-process_response(udf_call* call, const char* bin_name, const as_val* val,
+process_response(udf_call* call, bool success, const as_val* val,
 		cf_dyn_buf* db)
 {
 	// No response for background (internal) UDF.
@@ -1341,52 +1048,12 @@ process_response(udf_call* call, const char* bin_name, const as_val* val,
 	// Note - this function quietly handles a null val. The response call will
 	// be given a bin with a name but not 'in use', and it does the right thing.
 
-	as_bin stack_bin;
-	as_bin* bin = &stack_bin;
-
-	uint32_t particle_size = as_particle_size_from_asval(val);
-
-	static const size_t MAX_STACK_SIZE = 32 * 1024;
-	uint8_t stack_particle[particle_size > MAX_STACK_SIZE ? 0 : particle_size];
-	uint8_t* particle_buf = stack_particle;
-
-	if (particle_size > MAX_STACK_SIZE) {
-		particle_buf = (uint8_t*)cf_malloc(particle_size);
-
-		if (! particle_buf) {
-			cf_warning(AS_UDF, "failed alloc particle size %u", particle_size);
-			tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-			return;
-		}
-	}
-
-	as_namespace* ns = tr->rsv.ns;
-
-	as_bin_init(ns, bin, bin_name);
-	as_bin_particle_stack_from_asval(bin, particle_buf, val);
-
 	size_t msg_sz = 0;
-	uint8_t* msgp = (uint8_t *)as_msg_make_response_msg(tr->result_code,
-			tr->generation, tr->void_time, NULL, &bin, 1, ns, NULL, &msg_sz,
-			as_transaction_trid(tr), NULL);
 
-	if (! msgp)	{
-		cf_warning(AS_RW, "failed to make response msg");
+	db->buf = (uint8_t *)as_msg_make_val_response(success, val, tr->result_code,
+			tr->generation, tr->void_time, as_transaction_trid(tr), &msg_sz);
 
-		if (particle_buf != stack_particle) {
-			cf_free(particle_buf);
-		}
-
-		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		return;
-	}
-
-	db->buf = msgp;
 	db->is_stack = false;
 	db->alloc_sz = msg_sz;
 	db->used_sz = msg_sz;
-
-	if (particle_buf != stack_particle) {
-		cf_free(particle_buf);
-	}
 }

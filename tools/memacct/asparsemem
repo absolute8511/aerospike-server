@@ -3,10 +3,20 @@
 from __future__ import print_function
 from sys import stdin, stdout, stderr
 from optparse import OptionParser
-from subprocess import check_output, CalledProcessError
+from subprocess import Popen, PIPE, CalledProcessError
 from re import match
 
 addr_map = {}
+
+def check_output(args):
+	proc = Popen(args, stdout = PIPE)
+	out, _ = proc.communicate()
+	res = proc.poll()
+
+	if res != 0:
+		raise CalledProcessError(res, args[0])
+
+	return out
 
 def map_address(addr, asd_path):
 	if not addr in addr_map:
@@ -37,10 +47,10 @@ def parse_mem(in_path):
 
 			if m:
 				new_time = m.group(1)
-				print("Processing memory dump of {}".format(new_time), file = stderr)
+				print("Processing memory dump of {0}".format(new_time), file = stderr)
 
 				if time:
-					print("More than one memory dump in {}".format(in_path), file = stderr)
+					print("More than one memory dump in {0}".format(in_path), file = stderr)
 					raise SystemExit(1)
 
 				time = new_time
@@ -67,11 +77,11 @@ def parse_mem(in_path):
 				aggr[addr] += size
 				continue
 
-			print("Invalid line in {}: {}".format(in_path, line), file = stderr)
+			print("Invalid line in {0}: {1}".format(in_path, line), file = stderr)
 			raise SystemExit(1)
 
 	except IOError:
-		print("Cannot open file {}".format(in_path), file = stderr)
+		print("Cannot open file {0}".format(in_path), file = stderr)
 		raise SystemExit(1)
 
 	return aggr
@@ -98,14 +108,14 @@ try:
 	f = stdout if opts.out_path == '-' else open(opts.out_path, "w")
 
 	for addr in sorted(aggr):
-		addr_s = "0x{:x}".format(addr)
+		addr_s = "0x{0:x}".format(addr)
 		site = map_address(addr_s, opts.asd_path)
 
 		if aggr[addr] > 0:
-			print("{}|{}|{}".format(site, addr_s, aggr[addr]), file = f)
+			print("{0}|{1}|{2}".format(site, addr_s, aggr[addr]), file = f)
 
 except IOError:
-	print("Cannot open file {}".format(opts.out_path), file = stderr)
+	print("Cannot open file {0}".format(opts.out_path), file = stderr)
 	raise SystemExit(1)
 
 raise SystemExit(0)

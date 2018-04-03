@@ -147,11 +147,11 @@ as_hlc_timestamp_order as_hlc_timestamp_order_get(as_hlc_timestamp ts1,
 						  as_hlc_timestamp ts2);
 
 /**
- * Substract milliseconds worth of time from the timestamp.
+ * Subtract milliseconds worth of time from the timestamp.
  * @param timestamp the input timestamp.
- * @param ms the number of milliseconds to substract.
+ * @param ms the number of milliseconds to subtract.
  */
-as_hlc_timestamp as_hlc_timestamp_substract_ms(as_hlc_timestamp timestamp,
+as_hlc_timestamp as_hlc_timestamp_subtract_ms(as_hlc_timestamp timestamp,
 					       int ms);
 
 /**

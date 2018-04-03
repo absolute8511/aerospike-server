@@ -147,8 +147,8 @@ typedef enum {
 	FROM_UNDEF	= 0
 } transaction_origin;
 
-struct iudf_origin_s;
 struct as_batch_shared_s;
+struct iudf_origin_s;
 
 typedef struct as_transaction_s {
 
@@ -168,8 +168,8 @@ typedef struct as_transaction_s {
 		void*						any;
 		as_file_handle*				proto_fd_h;
 		cf_node						proxy_node;
-		struct iudf_origin_s*		iudf_orig;
 		struct as_batch_shared_s*	batch_shared;
+		struct iudf_origin_s*		iudf_orig;
 	} from;
 
 	union {
@@ -203,13 +203,12 @@ typedef struct as_transaction_s {
 #define AS_TRANSACTION_HEAD_SIZE (offsetof(as_transaction, rsv))
 
 // 'from_flags' bits - set before queuing transaction head:
-#define FROM_FLAG_NSUP_DELETE	0x0001
-#define FROM_FLAG_BATCH_SUB		0x0002
-#define FROM_FLAG_SHIPPED_OP	0x0004
-#define FROM_FLAG_RESTART		0x0008
+#define FROM_FLAG_BATCH_SUB		0x0001
+#define FROM_FLAG_RESTART		0x0002
 
 // 'flags' bits - set in transaction body after queuing:
 #define AS_TRANSACTION_FLAG_SINDEX_TOUCHED	0x01
+#define AS_TRANSACTION_FLAG_IS_DELETE		0x02
 
 
 void as_transaction_init_head(as_transaction *tr, cf_digest *, cl_msg *);
@@ -223,8 +222,7 @@ void as_transaction_init_from_rw(as_transaction *tr, struct rw_request_s *rw);
 void as_transaction_init_head_from_rw(as_transaction *tr, struct rw_request_s *rw);
 
 bool as_transaction_set_msg_field_flag(as_transaction *tr, uint8_t type);
-bool as_transaction_demarshal_prepare(as_transaction *tr);
-void as_transaction_proxyee_prepare(as_transaction *tr);
+bool as_transaction_prepare(as_transaction *tr, bool swap);
 
 static inline bool
 as_transaction_is_restart(const as_transaction *tr)
@@ -352,14 +350,13 @@ as_transaction_is_xdr(const as_transaction *tr)
 	return (tr->msgp->msg.info1 & AS_MSG_INFO1_XDR) != 0;
 }
 
-// TODO - just use origin and deprecate FROM_FLAG_NSUP_DELETE?
 static inline bool
 as_transaction_is_nsup_delete(const as_transaction *tr)
 {
-	return (tr->from_flags & FROM_FLAG_NSUP_DELETE) != 0;
+	return tr->origin == FROM_NSUP;
 }
 
-int as_transaction_init_iudf(as_transaction *tr, struct as_namespace_s *ns, cf_digest *keyd, struct iudf_origin_s *iudf_orig, bool is_durable_delete);
+void as_transaction_init_iudf(as_transaction *tr, struct as_namespace_s *ns, cf_digest *keyd, struct iudf_origin_s *iudf_orig, bool is_durable_delete);
 
 void as_transaction_demarshal_error(as_transaction *tr, uint32_t error_code);
 void as_transaction_error(as_transaction *tr, struct as_namespace_s *ns, uint32_t error_code);

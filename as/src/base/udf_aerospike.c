@@ -43,7 +43,6 @@
 
 #include "base/datamodel.h"
 #include "base/index.h"
-#include "base/ldt.h"
 #include "base/secondary_index.h"
 #include "base/transaction.h"
 #include "base/truncate.h"
@@ -93,14 +92,14 @@ static int udf_aerospike_rec_remove(const as_aerospike *, const as_rec *);
 static int
 udf_aerospike_delbin(udf_record * urecord, const char * bname)
 {
+	as_storage_rd *rd = urecord->rd;
+	as_namespace *ns = rd->ns;
+
 	// Check that bname is not completely invalid
-	if ( !bname || !bname[0] ) {
-		cf_warning(AS_UDF, "udf_aerospike_delbin: Invalid Parameters [No bin name supplied]... Fail");
+	if (bname == NULL || (ns->single_bin && bname[0] != 0) || (! ns->single_bin && bname[0] == 0)) {
+		cf_warning(AS_UDF, "udf_aerospike_delbin: Invalid Parameters: [Invalid bin name supplied]... Fail");
 		return -1;
 	}
-
-	as_storage_rd  *rd      = urecord->rd;
-	as_transaction *tr      = urecord->tr;
 
 	// Check quality of bname -- check that it is proper length, then make sure
 	// that the bin exists.
@@ -116,24 +115,24 @@ udf_aerospike_delbin(udf_record * urecord, const char * bname)
 		return -1;
 	}
 
-	const char * set_name = as_index_get_set_name(rd->r, rd->ns);
+	const char * set_name = as_index_get_set_name(rd->r, ns);
 	
-	bool has_sindex = record_has_sindex(rd->r, rd->ns);
-	SINDEX_BINS_SETUP(sbins, rd->ns->sindex_cnt);
-	as_sindex * si_arr[rd->ns->sindex_cnt];
+	bool has_sindex = record_has_sindex(rd->r, ns);
+	SINDEX_BINS_SETUP(sbins, ns->sindex_cnt);
+	as_sindex * si_arr[ns->sindex_cnt];
 	int si_arr_index = 0;
 	int sbins_populated  = 0;
 	if (has_sindex) {
-		si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(rd->ns, set_name, b->id, &si_arr[si_arr_index]);
-		sbins_populated += as_sindex_sbins_from_bin(rd->ns, set_name, b, sbins, AS_SINDEX_OP_DELETE);
+		si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(ns, set_name, b->id, &si_arr[si_arr_index]);
+		sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, sbins, AS_SINDEX_OP_DELETE);
 	}
 
 	int32_t i = as_bin_get_index(rd, bname);
 	if (i != -1) {
 		if (has_sindex) {
 			if (sbins_populated > 0) {	
-				tr->flags |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
-				as_sindex_update_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), sbins, sbins_populated, &rd->r->keyd);
+				urecord->tr->flags |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
+				as_sindex_update_by_sbin(ns, as_index_get_set_name(rd->r, ns), sbins, sbins_populated, &rd->r->keyd);
 			}
 		}
 		as_bin_destroy(rd, i);
@@ -199,9 +198,7 @@ udf__aerospike_get_particle_buf(udf_record *urecord, udf_record_bin *ubin, uint3
 			// the buffer. After this point the record size check will
 			// trip instead of at the code when bin value is set.
 			ubin->particle_buf = cf_malloc(alloc_size);
-			if (ubin->particle_buf) {
-				buf = ubin->particle_buf;
-			}
+			buf = ubin->particle_buf;
 		}
 	}
 	return buf;
@@ -246,10 +243,13 @@ udf__aerospike_get_particle_buf(udf_record *urecord, udf_record_bin *ubin, uint3
  * 		          changed
  */
 static int
-udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const as_val * val, bool is_hidden)
+udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const as_val * val)
 {
-	if (bname == NULL || bname[0] == 0 ) {
-		cf_warning(AS_UDF, "udf_aerospike_setbin: Invalid Parameters: [No bin name supplied]... Fail");
+	as_storage_rd *rd = urecord->rd;
+	as_namespace *ns = rd->ns;
+
+	if (bname == NULL || (ns->single_bin && bname[0] != 0) || (! ns->single_bin && bname[0] == 0)) {
+		cf_warning(AS_UDF, "udf_aerospike_setbin: Invalid Parameters: [Invalid bin name supplied]... Fail");
 		return -1;
 	}
 
@@ -259,14 +259,6 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 	}
 
 	uint8_t type = as_val_type(val);
-	if (is_hidden &&
-			((type != AS_MAP) && (type != AS_LIST))) {
-		cf_warning(AS_UDF, "udf_aerospike_setbin: Invalid Operation [Hidden %d type Not allowed]... Fail", type);
-		return -3;
-	}
-
-	as_storage_rd * rd      = urecord->rd;
-	as_transaction *tr      = urecord->tr;
 
 	as_bin * b = as_bin_get_or_create(rd, bname);
 
@@ -275,16 +267,16 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 		return -1;
 	}
 
-	bool has_sindex = record_has_sindex(rd->r, rd->ns);
-	SINDEX_BINS_SETUP(sbins, 2 * rd->ns->sindex_cnt);
-	as_sindex * si_arr[2 * rd->ns->sindex_cnt];
+	bool has_sindex = record_has_sindex(rd->r, ns);
+	SINDEX_BINS_SETUP(sbins, 2 * ns->sindex_cnt);
+	as_sindex * si_arr[2 * ns->sindex_cnt];
 	int sbins_populated = 0;
 	int si_arr_index = 0;
-	const char * set_name = as_index_get_set_name(rd->r, rd->ns);
+	const char * set_name = as_index_get_set_name(rd->r, ns);
 
 	if (has_sindex ) {
-		si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(rd->ns, set_name, b->id, &si_arr[si_arr_index]);
-		sbins_populated += as_sindex_sbins_from_bin(rd->ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
+		si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(ns, set_name, b->id, &si_arr[si_arr_index]);
+		sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_DELETE);
 	}
 
 	// we know we are doing an update now, make sure there is particle data,
@@ -293,7 +285,7 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 
 	cf_detail(AS_UDF, "udf_setbin: bin %s type %d ", bname, type );
 
-	if (rd->ns->storage_data_in_memory) {
+	if (ns->storage_data_in_memory) {
 		if (as_bin_particle_replace_from_asval(b, val) != 0) {
 			cf_warning(AS_UDF, "udf_aerospike_setbin: [%s] failed to replace particle", bname);
 			ret = -4;
@@ -312,15 +304,6 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 		}
 	}
 
-	if (is_hidden && ret == 0) {
-		if (type == AS_LIST) {
-			as_bin_particle_list_set_hidden(b);
-		}
-		else if (type == AS_MAP) {
-			as_bin_particle_map_set_hidden(b);
-		}
-	}
-
 	// Update sindex if required
 	if (has_sindex) {
 		if (ret) {
@@ -331,11 +314,11 @@ udf_aerospike_setbin(udf_record * urecord, int offset, const char * bname, const
 			return ret;
 		}
 
-		si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(rd->ns, set_name, b->id, &si_arr[si_arr_index]);
-		sbins_populated += as_sindex_sbins_from_bin(rd->ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
+		si_arr_index += as_sindex_arr_lookup_by_set_binid_lockfree(ns, set_name, b->id, &si_arr[si_arr_index]);
+		sbins_populated += as_sindex_sbins_from_bin(ns, set_name, b, &sbins[sbins_populated], AS_SINDEX_OP_INSERT);
 		if (sbins_populated > 0) {
-			tr->flags |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
-			as_sindex_update_by_sbin(rd->ns, as_index_get_set_name(rd->r, rd->ns), sbins, sbins_populated, &rd->r->keyd);
+			urecord->tr->flags |= AS_TRANSACTION_FLAG_SINDEX_TOUCHED;
+			as_sindex_update_by_sbin(ns, as_index_get_set_name(rd->r, ns), sbins, sbins_populated, &rd->r->keyd);
 			as_sindex_sbin_freeall(sbins, sbins_populated);
 		}
 		as_sindex_release_arr(si_arr, si_arr_index);
@@ -359,7 +342,7 @@ udf_aerospike_param_check(const as_aerospike *as, const as_rec *rec, char *fname
 		return UDF_ERR_INTERNAL_PARAMETER;
 	}
 
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, fname, lineno);
+	int ret = udf_record_param_check(rec, fname, lineno);
 	if (ret) {
 		return ret;
 	}
@@ -411,9 +394,6 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 	as_namespace * ns			= rd->ns;
 	bool has_sindex				= record_has_sindex(rd->r, ns);
 	bool is_record_dirty		= false;
-	bool is_record_flag_dirty	= false;
-	uint8_t old_index_flags		= as_index_get_flags(rd->r);
-	uint8_t new_index_flags		= 0;
 
 	// This will iterate over all the updates and apply them to storage.
 	// The items will remain, and be used as cache values. If an error
@@ -455,13 +435,11 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 
 	// Allocate space for all the new bins that need to be created beforehand
 	if (delta_bins > 0 && rd->ns->storage_data_in_memory && ! rd->ns->single_bin) {
-		as_bin_allocate_bin_space(urecord->r_ref->r, rd, delta_bins);
+		as_bin_allocate_bin_space(rd, delta_bins);
 	}
 
 	if (!rd->ns->storage_data_in_memory && !urecord->particle_data) {
-		// 256 as upper bound on the LDT control bin, we may write version below
-		// leave it at the end for its use
-		urecord->particle_data = cf_malloc(rd->ns->storage_write_block_size + 256);
+		urecord->particle_data = cf_malloc(rd->ns->storage_write_block_size);
 		urecord->cur_particle_data = urecord->particle_data;
 		urecord->end_particle_data = urecord->particle_data + rd->ns->storage_write_block_size;
 	}
@@ -473,19 +451,16 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 	// In second iteration apply updates.
 	for(uint32_t i = 0; i < urecord->nupdates; i++ ) {
 		urecord->updates[i].oldvalue  = NULL;
-		urecord->updates[i].washidden = false;
 		if ( urecord->updates[i].dirty && rc == 0) {
 
 			char *      k = urecord->updates[i].name;
 			as_val *    v = urecord->updates[i].value;
-			bool        h = urecord->updates[i].ishidden;
 
 			if ( k != NULL ) {
 				if ( v == NULL || v->type == AS_NIL ) {
 					// if the value is NIL, then do a delete
 					cf_detail(AS_UDF, "execute update: position %d deletes bin %s", i, k);
 					urecord->updates[i].oldvalue = udf_record_storage_get(urecord, k);
-					urecord->updates[i].washidden = udf_record_bin_ishidden(urecord, k);
 					// Only case delete fails if bin is not found that is 
 					// as good as delete. Ignore return code !!
 					udf_aerospike_delbin(urecord, k);
@@ -498,8 +473,7 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 					// otherwise, it is a set
 					cf_detail(AS_UDF, "execute update: position %d sets bin %s", i, k);
 					urecord->updates[i].oldvalue = udf_record_storage_get(urecord, k);
-					urecord->updates[i].washidden = udf_record_bin_ishidden(urecord, k);
-					rc = udf_aerospike_setbin(urecord, i, k, v, h);
+					rc = udf_aerospike_setbin(urecord, i, k, v);
 					if (rc) {
 						if (urecord->updates[i].oldvalue) {
 							as_val_destroy(urecord->updates[i].oldvalue);
@@ -519,23 +493,6 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 		}
 	}
 
-	if (urecord->ldt_rectype_bit_update) {
-		if (urecord->ldt_rectype_bit_update < 0) {
-			// ldt_rectype_bit_update is negative in case we want to reset the bits 
-			uint8_t rectype_bits = urecord->ldt_rectype_bit_update * -1; 
-			new_index_flags = old_index_flags & ~rectype_bits;
-		} else { 
-			new_index_flags = old_index_flags | urecord->ldt_rectype_bit_update;  
-		} 
-
-		if (new_index_flags != old_index_flags) {
-			as_index_clear_flags(rd->r, old_index_flags);
-			as_index_set_flags(rd->r, new_index_flags);
-			is_record_flag_dirty = true;
-			cf_detail_digest(AS_RW, &urecord->tr->keyd, "Setting index flags from %d to %d new flag %d", old_index_flags, new_index_flags, as_index_get_flags(rd->r));
-		}
-	}
-
 	{
 		// This is _NOT_ for writing to the storage but for simply performing sizing
 		// calculation. If we know the upper bounds of size of rec_props.. we could 
@@ -548,23 +505,6 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 		uint8_t rec_props_data[rec_props_data_size];
 		if (rec_props_data_size > 0) {
 			as_storage_record_set_rec_props(rd, rec_props_data);
-		}
-
-		// Version is set in the end after record size check. Setting version won't change the size of
-		// the record. And if it were before size check then this setting of version as well needs to
-		// be backed out.
-		// TODO: Add backout logic would work till very first create call of LDT end up crossing over
-		// record boundary
-		if (rd->ns->ldt_enabled && as_ldt_record_is_parent(rd->r)) {
-			int rv = as_ldt_parent_storage_set_version(rd, urecord->lrecord->version, urecord->end_particle_data, __FILE__, __LINE__);
-			if (rv < 0) {
-				cf_warning(AS_LDT, "udf_aerospike__apply_update_atomic: Internal Error "
-							" [Failed to set the version on storage rv=%d]... Fail",rv);
-				goto Rollback;
-			}
-			// TODO - if size check below fails, won't write to device -
-			// different behavior than write_to_device flag - OK?
-			is_record_dirty = true;
 		}
 
 		if (! as_storage_record_size_and_check(rd)) {
@@ -599,11 +539,9 @@ udf_aerospike__apply_update_atomic(udf_record *urecord)
 	// If there were updates do miscellaneous successful commit
 	// tasks
 	if (is_record_dirty 
-			|| is_record_flag_dirty
 			|| (urecord->flag & UDF_RECORD_FLAG_METADATA_UPDATED)) {
 		urecord->flag |= UDF_RECORD_FLAG_HAS_UPDATES; // will write to storage
 	}
-	urecord->ldt_rectype_bit_update = 0;
 
 	// Clean up oldvalue cache and reset dirty. All the changes made 
 	// here has made to the particle buffer. Nothing will now be backed out.
@@ -624,7 +562,6 @@ Rollback:
 			char *      k = urecord->updates[i].name;
 			// Pick the oldvalue for rollback
 			as_val *    v = urecord->updates[i].oldvalue;
-			bool        h = urecord->updates[i].washidden;
 			if ( k != NULL ) {
 				if ( v == NULL || v->type == AS_NIL ) {
 					// if the value is NIL, then do a delete
@@ -634,7 +571,7 @@ Rollback:
 				else {
 					// otherwise, it is a set
 					cf_detail(AS_UDF, "execute rollback: position %d sets bin %s", i, k);
-					rc = udf_aerospike_setbin(urecord, i, k, v, h);
+					rc = udf_aerospike_setbin(urecord, i, k, v);
 					if (rc) {
 						cf_warning(AS_UDF, "Rollback failed .. not good ... !!");
 					}
@@ -651,13 +588,6 @@ Rollback:
 		xdr_clear_dirty_bins(urecord->dirty);
 	}
 
-	if (is_record_flag_dirty) {
-		as_index_clear_flags(rd->r, new_index_flags);
-		as_index_set_flags(rd->r, old_index_flags);
-		is_record_flag_dirty = false;
-	}
-	urecord->ldt_rectype_bit_update = 0;
-
 	if (has_sindex) {
 		SINDEX_GRUNLOCK();
 	}
@@ -665,7 +595,7 @@ Rollback:
 	// Reset the flat size in case the stuff is backedout !!! it should not
 	// fail in the backout code ...
 	if (! as_storage_record_size_and_check(rd)) {
-		cf_warning(AS_LDT, "Does not fit even after rollback... it is trouble");
+		cf_warning(AS_UDF, "Does not fit even after rollback... it is trouble");
 	}
 
 	// Do not clean up the cache in case of failure
@@ -698,7 +628,6 @@ udf_aerospike__execute_updates(udf_record * urecord)
 {
 	int rc = 0;
 	as_storage_rd *rd    = urecord->rd;
-	as_index_ref * r_ref = urecord->r_ref;
 
 	if ( urecord->nupdates == 0  &&
 			(urecord->flag & UDF_RECORD_FLAG_METADATA_UPDATED) == 0 ) {
@@ -720,22 +649,10 @@ udf_aerospike__execute_updates(udf_record * urecord)
 	if (rd->ns && rd->ns->storage_data_in_memory && ! rd->ns->single_bin) {
 		int32_t delta_bins = (int32_t)as_bin_inuse_count(rd) - (int32_t)rd->n_bins;
 		if (delta_bins) {
-			as_bin_allocate_bin_space(r_ref->r, rd, delta_bins);
+			as_bin_allocate_bin_space(rd, delta_bins);
 		}
 	}
 	return rc;
-}
-
-as_aerospike *
-udf_aerospike_new()
-{
-	return as_aerospike_new(NULL, &udf_aerospike_hooks);
-}
-
-as_aerospike *
-udf_aerospike_init(as_aerospike * as)
-{
-	return as_aerospike_init(as, NULL, &udf_aerospike_hooks);
 }
 
 static void
@@ -809,17 +726,10 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	as_index_ref   *r_ref = urecord->r_ref;
 	as_storage_rd  *rd    = urecord->rd;
 	as_index_tree  *tree  = tr->rsv.tree;
-	bool is_subrec        = false;
-
-	if (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) {
-		tree      = tr->rsv.sub_tree;
-		is_subrec = true;
-	}
 
 	// make sure we got the record as a create
-	int rv = as_record_get_create(tree, &tr->keyd, r_ref, tr->rsv.ns, is_subrec);
-	cf_detail_digest(AS_UDF, &tr->keyd, "Creating %sRecord",
-			(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) ? "Sub" : "");
+	int rv = as_record_get_create(tree, &tr->keyd, r_ref, tr->rsv.ns);
+	cf_detail_digest(AS_UDF, &tr->keyd, "Creating Record ");
 
 	// rv 0 means record exists, 1 means create, < 0 means fail
 	// TODO: Verify correct result codes.
@@ -827,7 +737,7 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 		// Record created.
 	} else if (rv == 0) {
 		// If it's an expired or truncated record, pretend it's a fresh create.
-		if (! is_subrec && as_record_is_doomed(r_ref->r, tr->rsv.ns)) {
+		if (as_record_is_doomed(r_ref->r, tr->rsv.ns)) {
 			as_record_rescue(r_ref, tr->rsv.ns);
 		} else {
 			cf_warning(AS_UDF, "udf_aerospike_rec_create: Record Already Exists 2");
@@ -874,7 +784,10 @@ udf_aerospike_rec_create(const as_aerospike * as, const as_rec * rec)
 	}
 
 	// if multibin storage, we will use urecord->stack_bins, so set the size appropriately
-	if ( ! rd->ns->storage_data_in_memory && ! rd->ns->single_bin ) {
+	if (rd->ns->single_bin) {
+		rd->n_bins = 1;
+	}
+	else if (! rd->ns->storage_data_in_memory) {
 		rd->n_bins = sizeof(urecord->stack_bins) / sizeof(as_bin);
 	}
 
@@ -1011,7 +924,7 @@ udf_aerospike_rec_remove(const as_aerospike * as, const as_rec * rec)
 		delete_adjust_sindex(rd);
 	}
 
-	as_record_clean_bins(rd);
+	as_record_destroy_bins(rd);
 
 	if (rd->ns->storage_data_in_memory && ! rd->ns->single_bin) {
 		as_record_free_bin_space(rd->r);
@@ -1044,10 +957,6 @@ udf_aerospike_log(const as_aerospike * a, const char * file, const int line, con
 // Would someone please explain the structure of these hooks?  Why are some null?
 const as_aerospike_hooks udf_aerospike_hooks = {
 	.rec_create       = udf_aerospike_rec_create,
-	.open_subrec      = NULL,
-	.close_subrec     = NULL,
-	.update_subrec    = NULL,
-	.create_subrec    = NULL,
 	.rec_update       = udf_aerospike_rec_update,
 	.rec_remove       = udf_aerospike_rec_remove,
 	.rec_exists       = udf_aerospike_rec_exists,

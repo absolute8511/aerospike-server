@@ -118,7 +118,6 @@ aopen(aggr_state *astate, const cf_digest *digest)
 	int pid                = as_partition_getid(digest);
 	urecord->keyd = *digest;
 
-	AS_PARTITION_RESERVATION_INIT(tr->rsv);
 	astate->rsv        = ptn_reserve(astate, pid, &tr->rsv);
 	if (!astate->rsv) {
 		cf_debug(AS_AGGR, "Reservation not done for partition %d", pid);
@@ -128,11 +127,8 @@ aopen(aggr_state *astate, const cf_digest *digest)
 	// NB: Partial Initialization due to heaviness. Not everything needed
 	// TODO: Make such initialization Commodity
 	tr->rsv.ns          = astate->rsv->ns;
-	tr->rsv.reject_repl_write = astate->rsv->reject_repl_write;
 	tr->rsv.p           = astate->rsv->p;
 	tr->rsv.tree        = astate->rsv->tree;
-	tr->rsv.cluster_key = astate->rsv->cluster_key;
-	tr->rsv.sub_tree    = astate->rsv->sub_tree;
 	tr->keyd            = urecord->keyd;
 
 	r_ref->skip_lock    = false;
@@ -272,10 +268,6 @@ as_aggr_aerospike_log(const as_aerospike * a, const char * file, const int line,
 }
 
 static const as_aerospike_hooks as_aggr_aerospike_hooks = {
-	.open_subrec      = NULL,
-	.close_subrec     = NULL,
-	.update_subrec    = NULL,
-	.create_subrec    = NULL,
 	.rec_update       = NULL,
 	.rec_remove       = NULL,
 	.rec_exists       = NULL,

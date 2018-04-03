@@ -22,98 +22,93 @@
 
 #pragma once
 
-/***********************************************************************/
-/*                                                                     */
-/* Note:  The following transaction polices are also declared          */
-/*        identically in (and must be kept in sync. with)              */
-/*        the Aerospike C Client v3 file:                              */
-/*                                                                     */
-/*          aerospike-client-c/src/include/aerospike/as_policy.h       */
-/*                                                                     */
-/***********************************************************************/
+//==========================================================
+// Typedefs & constants.
+//
 
-/**
- *  Consistency Level
- *
- *  Specifies the number of replicas to be consulted
- *  in a read operation to provide the desired
- *  consistency guarantee.
- *
- *  @ingroup client_policies
- */
-typedef enum as_policy_consistency_level_e {
+typedef enum {
+	// Server config override value only - means use policy sent by client.
+	AS_READ_CONSISTENCY_LEVEL_PROTO = -1,
 
-	/**
-	 *  Involve a single replica in the operation.
-	 */
-	AS_POLICY_CONSISTENCY_LEVEL_ONE,
+	// Must match AS_POLICY_CONSISTENCY_LEVEL_ONE in C Client v3 as_policy.h.
+	// Ignore duplicates - i.e. don't duplicate resolve.
+	AS_READ_CONSISTENCY_LEVEL_ONE,
 
-	/**
-	 *  Involve all replicas in the operation.
-	 */
-	AS_POLICY_CONSISTENCY_LEVEL_ALL,
+	// Must match AS_POLICY_CONSISTENCY_LEVEL_ALL in C Client v3 as_policy.h.
+	// Involve all duplicates in the operation - i.e. duplicate resolve.
+	AS_READ_CONSISTENCY_LEVEL_ALL,
+} as_read_consistency_level;
 
-} as_policy_consistency_level;
+typedef enum {
+	// Server config override value only - means use policy sent by client.
+	AS_WRITE_COMMIT_LEVEL_PROTO = -1,
 
-/**
- *  Commit Level
- *
- *  Specifies the number of replicas required to be successfully
- *  committed before returning success in a write operation
- *  to provide the desired consistency guarantee.
- *
- *  @ingroup client_policies
- */
-typedef enum as_policy_commit_level_e {
+	// Must match AS_POLICY_COMMIT_LEVEL_ALL in C Client v3 as_policy.h.
+	// Respond to client only after successfully committing all replicas.
+	AS_WRITE_COMMIT_LEVEL_ALL,
 
-	/**
-	 *  Return success only after successfully committing all replicas.
-	 */
-	AS_POLICY_COMMIT_LEVEL_ALL,
-
-	/**
-	 *  Return success after successfully committing the master replica.
-	 */
-	AS_POLICY_COMMIT_LEVEL_MASTER,
-
-} as_policy_commit_level;
-
+	// Must match AS_POLICY_COMMIT_LEVEL_MASTER in C Client v3 as_policy.h.
+	// Respond to client after successfully committing the master replica.
+	AS_WRITE_COMMIT_LEVEL_MASTER,
+} as_write_commit_level;
 
 
 //==========================================================
-// Per-transaction consistency guarantees.
+// Public API - macros.
 //
-// Client-request guarantee level is respected unless
-// corresponding server's namespace override is enabled.
 
-// Extract the read consistency level from an as_msg.
-// Note: not a strict check: both bits == 0 means the default, anything else
-// means the alternative.
-#define PROTO_CONSISTENCY_LEVEL(asmsg)								\
-	(((asmsg.info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B0) == 0 &&		\
-	  (asmsg.info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B1) == 0) ?		\
-			AS_POLICY_CONSISTENCY_LEVEL_ONE :						\
-			AS_POLICY_CONSISTENCY_LEVEL_ALL)
+//------------------------------------------------
+// Extract levels from an as_msg.
+//
 
-// Extract the write commit level from an as_msg.
-// Note: not a strict check: both bits == 0 means the default, anything else
-// means the alternative.
-#define PROTO_COMMIT_LEVEL(asmsg)									\
-	(((asmsg.info3 & AS_MSG_INFO3_COMMIT_LEVEL_B0) == 0 &&			\
-	  (asmsg.info3 & AS_MSG_INFO3_COMMIT_LEVEL_B1) == 0) ?			\
-			AS_POLICY_COMMIT_LEVEL_ALL :							\
-			AS_POLICY_COMMIT_LEVEL_MASTER)
+// Not a strict check: both bits == 0 means ONE, anything else means ALL.
+#define PROTO_CONSISTENCY_LEVEL(asmsg) \
+	((((asmsg).info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B0) == 0 && \
+	  ((asmsg).info1 & AS_MSG_INFO1_CONSISTENCY_LEVEL_B1) == 0) ? \
+			AS_READ_CONSISTENCY_LEVEL_ONE : AS_READ_CONSISTENCY_LEVEL_ALL)
 
-// Determine the read consistency level for this transaction based upon the
-// server's namespace and client policy settings.
-#define TRANSACTION_CONSISTENCY_LEVEL(tr)							\
-	(tr->rsv.ns->read_consistency_level_override ?					\
-			tr->rsv.ns->read_consistency_level :					\
-			PROTO_CONSISTENCY_LEVEL(tr->msgp->msg))
+// Not a strict check: both bits == 0 means ALL, anything else means MASTER.
+#define PROTO_COMMIT_LEVEL(asmsg) \
+	((((asmsg).info3 & AS_MSG_INFO3_COMMIT_LEVEL_B0) == 0 && \
+	  ((asmsg).info3 & AS_MSG_INFO3_COMMIT_LEVEL_B1) == 0) ? \
+			AS_WRITE_COMMIT_LEVEL_ALL : AS_WRITE_COMMIT_LEVEL_MASTER)
 
-// Determine the write commit level for this transaction based upon the server's
-// namespace and client policy settings.
-#define TRANSACTION_COMMIT_LEVEL(tr)								\
-	(tr->rsv.ns->write_commit_level_override ?						\
-			tr->rsv.ns->write_commit_level :						\
-			PROTO_COMMIT_LEVEL(tr->msgp->msg))
+//------------------------------------------------
+// Get levels for a transaction with reservation.
+//
+
+// Determine read consistency level for a transaction based on everything.
+#define TR_READ_CONSISTENCY_LEVEL(tr) \
+	(tr->rsv.ns->read_consistency_level == AS_READ_CONSISTENCY_LEVEL_PROTO ? \
+		PROTO_CONSISTENCY_LEVEL(tr->msgp->msg) : \
+		tr->rsv.ns->read_consistency_level)
+
+// Determine write commit level for a transaction based on everything.
+#define TR_WRITE_COMMIT_LEVEL(tr) \
+	(tr->rsv.ns->write_commit_level == AS_WRITE_COMMIT_LEVEL_PROTO ? \
+		PROTO_COMMIT_LEVEL(tr->msgp->msg) : \
+		tr->rsv.ns->write_commit_level)
+
+//------------------------------------------------
+// Get levels without need of reservation.
+//
+
+// Same as above, for use before tr->rsv has been made.
+#define READ_CONSISTENCY_LEVEL(ns, asmsg) \
+	(ns->read_consistency_level == AS_READ_CONSISTENCY_LEVEL_PROTO ? \
+		PROTO_CONSISTENCY_LEVEL(asmsg) : \
+		ns->read_consistency_level)
+
+//------------------------------------------------
+// Get config override values' names.
+//
+
+#define NS_READ_CONSISTENCY_LEVEL_NAME() \
+	(ns->read_consistency_level == AS_READ_CONSISTENCY_LEVEL_PROTO ? \
+		"off" : (ns->read_consistency_level == AS_READ_CONSISTENCY_LEVEL_ONE ? \
+			"one" : "all"))
+
+#define NS_WRITE_COMMIT_LEVEL_NAME() \
+	(ns->write_commit_level == AS_WRITE_COMMIT_LEVEL_PROTO ? \
+		"off" : (ns->write_commit_level == AS_WRITE_COMMIT_LEVEL_ALL ? \
+			"all" : "master"))

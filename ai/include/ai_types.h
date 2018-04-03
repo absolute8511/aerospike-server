@@ -33,7 +33,6 @@
 #include <stdio.h>
 #include <sys/types.h>
 
-#include <citrusleaf/cf_shash.h>
 #include <citrusleaf/cf_ll.h>
 #include <base/secondary_index.h>
 

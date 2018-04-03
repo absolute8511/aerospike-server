@@ -22,14 +22,34 @@
 
 #pragma once
 
-#include <stdint.h>
-#include "base/transaction.h"
+//==========================================================
+// Includes.
+//
 
-void as_tsvc_init();
-void as_tsvc_enqueue(as_transaction *tr);
-void as_tsvc_set_threads_per_queue(uint32_t n_threads);
-int as_tsvc_queue_get_size();
-void as_tsvc_process_transaction(as_transaction *tr);
+#include <stdint.h>
+
+
+//==========================================================
+// Forward declarations.
+//
+
+struct as_transaction_s;
+
+
+//==========================================================
+// Typedefs & constants.
+//
 
 #define MAX_TRANSACTION_QUEUES 128
 #define MAX_TRANSACTION_THREADS_PER_QUEUE 256
+
+
+//==========================================================
+// Public API.
+//
+
+void as_tsvc_init();
+void as_tsvc_enqueue(struct as_transaction_s *tr);
+void as_tsvc_set_threads_per_queue(uint32_t n_threads);
+int as_tsvc_queue_get_size();
+void as_tsvc_process_transaction(struct as_transaction_s *tr);

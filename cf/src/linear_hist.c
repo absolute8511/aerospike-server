@@ -86,10 +86,6 @@ linear_hist_create(const char *name, uint32_t start, uint32_t max_offset,
 
 	linear_hist *h = cf_malloc(sizeof(linear_hist));
 
-	if (! h) {
-		cf_crash(AS_INFO, "linear_hist_create - alloc failed");
-	}
-
 	strcpy(h->name, name);
 
 	if (0 != pthread_mutex_init(&h->info_lock, NULL)) {
@@ -99,10 +95,7 @@ linear_hist_create(const char *name, uint32_t start, uint32_t max_offset,
 	h->info_snapshot[0] = 0;
 
 	h->num_buckets = num_buckets;
-
-	if (! (h->counts = cf_malloc(sizeof(uint64_t) * num_buckets))) {
-		cf_crash(AS_INFO, "linear_hist_create - alloc counts failed");
-	}
+	h->counts = cf_malloc(sizeof(uint64_t) * num_buckets);
 
 	linear_hist_clear(h, start, max_offset);
 
@@ -132,16 +125,8 @@ linear_hist_reset(linear_hist *h, uint32_t start, uint32_t max_offset,
 		return;
 	}
 
-	uint64_t *counts = cf_realloc(h->counts, sizeof(uint64_t) * num_buckets);
-
-	if (! counts) {
-		cf_warning(AS_INFO, "failed linear_hist_reset - realloc failed");
-		linear_hist_clear(h, start, max_offset);
-		return;
-	}
-
 	h->num_buckets = num_buckets;
-	h->counts = counts;
+	h->counts = cf_realloc(h->counts, sizeof(uint64_t) * num_buckets);
 	linear_hist_clear(h, start, max_offset);
 }
 

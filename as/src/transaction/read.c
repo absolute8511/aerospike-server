@@ -54,20 +54,31 @@
 
 
 //==========================================================
-// Forward Declarations.
+// Forward declarations.
 //
 
-bool start_read_dup_res(rw_request* rw, as_transaction* tr);
+void start_read_dup_res(rw_request* rw, as_transaction* tr);
 bool read_dup_res_cb(rw_request* rw);
 
 void send_read_response(as_transaction* tr, as_msg_op** ops,
-		as_bin** response_bins, uint16_t n_bins, const char* set_name,
-		cf_dyn_buf* db);
+		as_bin** response_bins, uint16_t n_bins, cf_dyn_buf* db);
 void read_timeout_cb(rw_request* rw);
 
 transaction_status read_local(as_transaction* tr);
 void read_local_done(as_transaction* tr, as_index_ref* r_ref, as_storage_rd* rd,
 		int result_code);
+
+
+//==========================================================
+// Inlines & macros.
+//
+
+static inline bool
+read_must_duplicate_resolve(const as_transaction* tr)
+{
+	return tr->rsv.n_dupl != 0 &&
+			TR_READ_CONSISTENCY_LEVEL(tr) == AS_READ_CONSISTENCY_LEVEL_ALL;
+}
 
 static inline void
 client_read_update_stats(as_namespace* ns, uint8_t result_code)
@@ -82,7 +93,7 @@ client_read_update_stats(as_namespace* ns, uint8_t result_code)
 	default:
 		cf_atomic64_incr(&ns->n_client_read_error);
 		break;
-	case AS_PROTO_RESULT_FAIL_NOTFOUND:
+	case AS_PROTO_RESULT_FAIL_NOT_FOUND:
 		cf_atomic64_incr(&ns->n_client_read_not_found);
 		break;
 	}
@@ -101,7 +112,7 @@ batch_sub_read_update_stats(as_namespace* ns, uint8_t result_code)
 	default:
 		cf_atomic64_incr(&ns->n_batch_sub_read_error);
 		break;
-	case AS_PROTO_RESULT_FAIL_NOTFOUND:
+	case AS_PROTO_RESULT_FAIL_NOT_FOUND:
 		cf_atomic64_incr(&ns->n_batch_sub_read_not_found);
 		break;
 	}
@@ -118,7 +129,7 @@ as_read_start(as_transaction* tr)
 	BENCHMARK_START(tr, read, FROM_CLIENT);
 	BENCHMARK_START(tr, batch_sub, FROM_BATCH);
 
-	if (! as_read_must_duplicate_resolve(tr)) {
+	if (! read_must_duplicate_resolve(tr)) {
 		// No duplicates to resolve, or not configured to duplicate resolve.
 		// Just read local copy - response sent to origin no matter what.
 		return read_local(tr);
@@ -135,19 +146,14 @@ as_read_start(as_transaction* tr)
 		rw_request_release(rw);
 
 		if (status != TRANS_WAITING) {
-			send_read_response(tr, NULL, NULL, 0, NULL, NULL);
+			send_read_response(tr, NULL, NULL, 0, NULL);
 		}
 
 		return status;
 	}
 	// else - rw_request is now in hash, continue...
 
-	if (! start_read_dup_res(rw, tr)) {
-		rw_request_hash_delete(&hkey, rw);
-		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-		send_read_response(tr, NULL, NULL, 0, NULL, NULL);
-		return TRANS_DONE_ERROR;
-	}
+	start_read_dup_res(rw, tr);
 
 	// Started duplicate resolution.
 	return TRANS_IN_PROGRESS;
@@ -158,14 +164,12 @@ as_read_start(as_transaction* tr)
 // Local helpers - transaction flow.
 //
 
-bool
+void
 start_read_dup_res(rw_request* rw, as_transaction* tr)
 {
 	// Finish initializing rw_request, construct and send dup-res message.
 
-	if (! dup_res_make_message(rw, tr)) {
-		return false;
-	}
+	dup_res_make_message(rw, tr);
 
 	pthread_mutex_lock(&rw->lock);
 
@@ -173,8 +177,6 @@ start_read_dup_res(rw_request* rw, as_transaction* tr)
 	send_rw_messages(rw);
 
 	pthread_mutex_unlock(&rw->lock);
-
-	return true;
 }
 
 
@@ -186,6 +188,11 @@ read_dup_res_cb(rw_request* rw)
 
 	as_transaction tr;
 	as_transaction_init_from_rw(&tr, rw);
+
+	if (tr.result_code != AS_PROTO_RESULT_OK) {
+		send_read_response(&tr, NULL, NULL, 0, NULL);
+		return true;
+	}
 
 	// Read the local copy and respond to origin.
 	read_local(&tr);
@@ -201,7 +208,7 @@ read_dup_res_cb(rw_request* rw)
 
 void
 send_read_response(as_transaction* tr, as_msg_op** ops, as_bin** response_bins,
-		uint16_t n_bins, const char* set_name, cf_dyn_buf* db)
+		uint16_t n_bins, cf_dyn_buf* db)
 {
 	// Paranoia - shouldn't get here on losing race with timeout.
 	if (! tr->from.any) {
@@ -221,7 +228,7 @@ send_read_response(as_transaction* tr, as_msg_op** ops, as_bin** response_bins,
 		else {
 			as_msg_send_reply(tr->from.proto_fd_h, tr->result_code,
 					tr->generation, tr->void_time, ops, response_bins, n_bins,
-					tr->rsv.ns, as_transaction_trid(tr), set_name);
+					tr->rsv.ns, as_transaction_trid(tr));
 		}
 		BENCHMARK_NEXT_DATA_POINT(tr, read, response);
 		HIST_TRACK_ACTIVATE_INSERT_DATA_POINT(tr, read_hist);
@@ -235,20 +242,15 @@ send_read_response(as_transaction* tr, as_msg_op** ops, as_bin** response_bins,
 		else {
 			as_proxy_send_response(tr->from.proxy_node, tr->from_data.proxy_tid,
 					tr->result_code, tr->generation, tr->void_time, ops,
-					response_bins, n_bins, tr->rsv.ns, as_transaction_trid(tr),
-					set_name);
+					response_bins, n_bins, tr->rsv.ns, as_transaction_trid(tr));
 		}
 		break;
 	case FROM_BATCH:
 		BENCHMARK_NEXT_DATA_POINT(tr, batch_sub, read_local);
-		as_batch_add_result(tr, set_name, tr->generation, tr->void_time, n_bins,
-				response_bins, ops);
+		as_batch_add_result(tr, n_bins, response_bins, ops);
 		BENCHMARK_NEXT_DATA_POINT(tr, batch_sub, response);
 		batch_sub_read_update_stats(tr->rsv.ns, tr->result_code);
 		break;
-	case FROM_IUDF:
-	case FROM_NSUP:
-		// Should be impossible for internal UDFs and nsup deletes to get here.
 	default:
 		cf_crash(AS_RW, "unexpected transaction origin %u", tr->origin);
 		break;
@@ -268,7 +270,7 @@ read_timeout_cb(rw_request* rw)
 	switch (rw->origin) {
 	case FROM_CLIENT:
 		as_msg_send_reply(rw->from.proto_fd_h, AS_PROTO_RESULT_FAIL_TIMEOUT, 0,
-				0, NULL, NULL, 0, NULL, rw_request_trid(rw), NULL);
+				0, NULL, NULL, 0, rw->rsv.ns, rw_request_trid(rw));
 		// Timeouts aren't included in histograms.
 		client_read_update_stats(rw->rsv.ns, AS_PROTO_RESULT_FAIL_TIMEOUT);
 		break;
@@ -280,9 +282,6 @@ read_timeout_cb(rw_request* rw)
 		// Timeouts aren't included in histograms.
 		batch_sub_read_update_stats(rw->rsv.ns, AS_PROTO_RESULT_FAIL_TIMEOUT);
 		break;
-	case FROM_IUDF:
-	case FROM_NSUP:
-		// Should be impossible for internal UDFs and nsup deletes to get here.
 	default:
 		cf_crash(AS_RW, "unexpected transaction origin %u", rw->origin);
 		break;
@@ -306,7 +305,7 @@ read_local(as_transaction* tr)
 	r_ref.skip_lock = false;
 
 	if (as_record_get_live(tr->rsv.tree, &tr->keyd, &r_ref, ns) != 0) {
-		read_local_done(tr, NULL, NULL, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		read_local_done(tr, NULL, NULL, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 		return TRANS_DONE_ERROR;
 	}
 
@@ -314,7 +313,7 @@ read_local(as_transaction* tr)
 
 	// Check if it's an expired or truncated record.
 	if (as_record_is_doomed(r, ns)) {
-		read_local_done(tr, &r_ref, NULL, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		read_local_done(tr, &r_ref, NULL, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 		return TRANS_DONE_ERROR;
 	}
 
@@ -330,7 +329,7 @@ read_local(as_transaction* tr)
 		return TRANS_DONE_ERROR;
 	}
 
-	if ((m->info1 & AS_MSG_INFO1_GET_NOBINDATA) != 0) {
+	if ((m->info1 & AS_MSG_INFO1_GET_NO_BINS) != 0) {
 		tr->generation = r->generation;
 		tr->void_time = r->void_time;
 		tr->last_update_time = r->last_update_time;
@@ -339,11 +338,21 @@ read_local(as_transaction* tr)
 		return TRANS_DONE_SUCCESS;
 	}
 
-	as_storage_rd_load_n_bins(&rd); // TODO - handle error returned
+	int result = as_storage_rd_load_n_bins(&rd);
+
+	if (result < 0) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: failed as_storage_rd_load_n_bins() ", ns->name);
+		read_local_done(tr, &r_ref, &rd, -result);
+		return TRANS_DONE_ERROR;
+	}
 
 	as_bin stack_bins[ns->storage_data_in_memory ? 0 : rd.n_bins];
 
-	as_storage_rd_load_bins(&rd, stack_bins); // TODO - handle error returned
+	if ((result = as_storage_rd_load_bins(&rd, stack_bins)) < 0) {
+		cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: failed as_storage_rd_load_bins() ", ns->name);
+		read_local_done(tr, &r_ref, &rd, -result);
+		return TRANS_DONE_ERROR;
+	}
 
 	if (! as_bin_inuse_has(&rd)) {
 		cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: found record with no bins ", ns->name);
@@ -375,7 +384,6 @@ read_local(as_transaction* tr)
 		}
 
 		bool respond_all_ops = (m->info2 & AS_MSG_INFO2_RESPOND_ALL_OPS) != 0;
-		int result;
 
 		as_msg_op* op = 0;
 		int n = 0;
@@ -427,24 +435,13 @@ read_local(as_transaction* tr)
 		}
 	}
 
-	const char* set_name = as_msg_is_xdr(m) ?
-			as_index_get_set_name(r, ns) : NULL;
-
 	cf_dyn_buf_define_size(db, 16 * 1024);
 
 	if (tr->origin != FROM_BATCH) {
 		db.used_sz = db.alloc_sz;
 		db.buf = (uint8_t*)as_msg_make_response_msg(tr->result_code,
 				r->generation, r->void_time, p_ops, response_bins, n_bins, ns,
-				(cl_msg*)dyn_bufdb, &db.used_sz, as_transaction_trid(tr),
-				set_name);
-
-		if (! db.buf)	{
-			cf_warning_digest(AS_RW, &tr->keyd, "{%s} read_local: failed make response msg ", ns->name);
-			destroy_stack_bins(result_bins, n_result_bins);
-			read_local_done(tr, &r_ref, &rd, AS_PROTO_RESULT_FAIL_UNKNOWN);
-			return TRANS_DONE_ERROR;
-		}
+				(cl_msg*)dyn_bufdb, &db.used_sz, as_transaction_trid(tr));
 
 		db.is_stack = db.buf == dyn_bufdb;
 		// Note - not bothering to correct alloc_sz if buf was allocated.
@@ -456,7 +453,7 @@ read_local(as_transaction* tr)
 
 		// Since as_batch_add_result() constructs response directly in shared
 		// buffer to avoid extra copies, can't use db.
-		send_read_response(tr, p_ops, response_bins, n_bins, set_name, NULL);
+		send_read_response(tr, p_ops, response_bins, n_bins, NULL);
 	}
 
 	destroy_stack_bins(result_bins, n_result_bins);
@@ -465,7 +462,7 @@ read_local(as_transaction* tr)
 
 	// Now that we're not under the record lock, send the message we just built.
 	if (db.used_sz != 0) {
-		send_read_response(tr, NULL, NULL, 0, NULL, &db);
+		send_read_response(tr, NULL, NULL, 0, &db);
 
 		cf_dyn_buf_free(&db);
 		tr->from.proto_fd_h = NULL;
@@ -489,5 +486,5 @@ read_local_done(as_transaction* tr, as_index_ref* r_ref, as_storage_rd* rd,
 
 	tr->result_code = (uint8_t)result_code;
 
-	send_read_response(tr, NULL, NULL, 0, NULL, NULL);
+	send_read_response(tr, NULL, NULL, 0, NULL);
 }

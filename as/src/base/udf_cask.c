@@ -52,6 +52,8 @@
 char udf_smd_module_name[] = "UDF";
 char *as_udf_type_name[] = {"LUA", 0};
 
+static bool g_udf_smd_loaded = false;
+
 static int file_read(char *, uint8_t **, size_t *, unsigned char *);
 static int file_write(char *, uint8_t *, size_t, unsigned char *);
 static int file_remove(char *);
@@ -408,14 +410,6 @@ int udf_cask_info_put(char *name, char * params, cf_dyn_buf * out) {
 	udf_content_len = atoi(content_len) + 1;
 	udf_content = (char *) cf_malloc(udf_content_len);
 
-	if ( udf_content == NULL ) {
-		cf_info(AS_UDF, "internal allocation error");
-		cf_dyn_buf_append_string(out, "error=internal_error");
-		// As memory is not allocated.
-		// It should not continue.
-		return 0;
-	}
-
 	// cf_info(AS_UDF, "content_len = %s", content_len);
 	// cf_info(AS_UDF, "udf_content_len = %d", udf_content_len);
 
@@ -441,13 +435,6 @@ int udf_cask_info_put(char *name, char * params, cf_dyn_buf * out) {
 	}
 
 	char * decoded_str = cf_malloc(decoded_len);
-
-	if ( ! decoded_str ) {
-		cf_info(AS_UDF, "internal allocation error");
-		cf_dyn_buf_append_string(out, "error=internal_error");
-		cf_free(udf_content);
-		return 0;
-	}
 
 	if ( ! cf_b64_validate_and_decode(udf_content, encoded_len, (uint8_t*)decoded_str, &decoded_len) ) {
 		cf_info(AS_UDF, "invalid base64 content %s", filename);
@@ -628,6 +615,7 @@ udf_cask_smd_accept_fn(char *module, as_smd_item_list_t *items, void *udata, uin
 {
 	if (accept_opt & AS_SMD_ACCEPT_OPT_CREATE) {
 		cf_debug(AS_UDF, "(doing nothing in UDF accept cb for module creation)");
+		g_udf_smd_loaded = true;
 		return 0;
 	}
 
@@ -747,6 +735,10 @@ udf_cask_init()
 	// take the default merge function
 	if (as_smd_create_module(udf_smd_module_name, 0, 0, 0, 0, udf_cask_smd_accept_fn, 0, 0, 0)) {
 		cf_crash(AS_UDF, "failed to create SMD module \"%s\"", udf_smd_module_name);
+	}
+
+	while (! g_udf_smd_loaded) {
+		usleep(1000);
 	}
 
 	// there may be existing data. Read it and populate the local file system.

@@ -68,7 +68,7 @@ void xdr_clear_dirty_bins(xdr_dirty_bins *dirty);
 void xdr_fill_dirty_bins(xdr_dirty_bins *dirty);
 void xdr_copy_dirty_bins(xdr_dirty_bins *from, xdr_dirty_bins *to);
 void xdr_add_dirty_bin(as_namespace *ns, xdr_dirty_bins *dirty, const char *name, size_t name_len);
-void xdr_write(as_namespace *ns, cf_digest keyd, as_generation generation, cf_node masternode, xdr_op_type op_type, uint16_t set_id, xdr_dirty_bins *dirty);
+void xdr_write(as_namespace *ns, cf_digest *keyd, uint16_t generation, cf_node masternode, xdr_op_type op_type, uint16_t set_id, xdr_dirty_bins *dirty);
 void as_xdr_read_txn(as_transaction *txn);
 
 void as_xdr_info_init(void);
@@ -80,7 +80,8 @@ bool as_xdr_set_config(char *params);
 bool as_xdr_set_config_ns(char *ns_name, char *params);
 
 bool is_xdr_delete_shipping_enabled();
-bool is_xdr_nsup_deletes_enabled();
+bool is_xdr_digestlog_low(as_namespace *ns);
 bool is_xdr_forwarding_enabled();
+bool is_xdr_nsup_deletes_enabled();
 
 void xdr_cfg_add_int_ext_mapping(dc_config_opt *dc_cfg, char* orig, char* alt);

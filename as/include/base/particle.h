@@ -90,7 +90,7 @@ typedef struct as_particle_vtable_s {
 	as_particle_size_from_msgpack_fn		size_from_msgpack_fn;
 	as_particle_from_msgpack_fn				from_msgpack_fn;
 
-	as_particle_size_from_flat_fn			size_from_flat_fn;
+	as_particle_size_from_flat_fn			size_from_flat_fn; // TODO - unused - remove?
 	as_particle_cast_from_flat_fn			cast_from_flat_fn;
 	as_particle_from_flat_fn				from_flat_fn;
 	as_particle_flat_size_fn				flat_size_fn;

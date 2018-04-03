@@ -22,6 +22,7 @@
 
 #include "storage/drv_ssd.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "fault.h"
 #include "base/datamodel.h"
@@ -36,6 +37,25 @@ ssd_resume_devices(drv_ssds* ssds)
 	cf_crash(AS_DRV_SSD, "cold start called ssd_resume_devices()");
 }
 
+void*
+run_ssd_cool_start(void* udata)
+{
+	// Should not get here - for enterprise version only.
+	cf_crash(AS_DRV_SSD, "community edition called run_ssd_cool_start()");
+
+	return NULL;
+}
+
+void
+ssd_header_init_cfg(const as_namespace* ns, ssd_device_header* header)
+{
+}
+
+bool
+ssd_header_is_valid_cfg(const as_namespace* ns, const ssd_device_header* header)
+{
+	return true;
+}
 
 bool
 ssd_cold_start_is_valid_n_bins(uint32_t n_bins)
@@ -47,14 +67,12 @@ ssd_cold_start_is_valid_n_bins(uint32_t n_bins)
 	return n_bins <= BIN_NAMES_QUOTA;
 }
 
-
 bool
 ssd_cold_start_is_record_truncated(as_namespace* ns, const drv_ssd_block* block,
 		const as_rec_props* p_props)
 {
 	return false;
 }
-
 
 void
 ssd_cold_start_adjust_cenotaph(as_namespace* ns, const drv_ssd_block* block,
@@ -63,7 +81,6 @@ ssd_cold_start_adjust_cenotaph(as_namespace* ns, const drv_ssd_block* block,
 	// Nothing to do - relevant for enterprise version only.
 }
 
-
 void
 ssd_cold_start_transition_record(as_namespace* ns, const drv_ssd_block* block,
 		as_record* r, bool is_create)
@@ -71,13 +88,11 @@ ssd_cold_start_transition_record(as_namespace* ns, const drv_ssd_block* block,
 	// Nothing to do - relevant for enterprise version only.
 }
 
-
 void
 ssd_cold_start_drop_cenotaphs(as_namespace* ns)
 {
 	// Nothing to do - relevant for enterprise version only.
 }
-
 
 void
 as_storage_start_tomb_raider_ssd(as_namespace* ns)
@@ -85,10 +100,29 @@ as_storage_start_tomb_raider_ssd(as_namespace* ns)
 	// Tomb raider is for enterprise version only.
 }
 
-
 int
 as_storage_record_write_ssd(as_storage_rd* rd)
 {
 	// All record writes except defrag come through here!
 	return as_bin_inuse_has(rd) ? ssd_write(rd) : 0;
+}
+
+
+void
+ssd_init_encryption_key(as_namespace* ns)
+{
+}
+
+void
+ssd_do_encrypt(const uint8_t* key, uint64_t off, drv_ssd_block* block)
+{
+	// Should not get here - for enterprise version only.
+	cf_crash(AS_DRV_SSD, "community edition called ssd_do_encrypt()");
+}
+
+void
+ssd_do_decrypt(const uint8_t* key, uint64_t off, drv_ssd_block* block)
+{
+	// Should not get here - for enterprise version only.
+	cf_crash(AS_DRV_SSD, "community edition called ssd_do_decrypt()");
 }

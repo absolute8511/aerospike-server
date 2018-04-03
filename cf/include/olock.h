@@ -26,20 +26,22 @@
 
 #pragma once
 
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+
 #include <citrusleaf/cf_digest.h>
+
+#include <cf_mutex.h>
 
 
 typedef struct olock_s {
 	uint32_t n_locks;
 	uint32_t mask;
-	pthread_mutex_t locks[];
+	cf_mutex locks[];
 } olock;
 
 void olock_lock(olock *ol, cf_digest *d);
-void olock_vlock(olock *ol, cf_digest *d, pthread_mutex_t **vlock);
+void olock_vlock(olock *ol, cf_digest *d, cf_mutex **vlock);
 void olock_unlock(olock *ol, cf_digest *d);
 olock *olock_create(uint32_t n_locks, bool mutex);
 void olock_destroy(olock *o);

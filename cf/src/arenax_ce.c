@@ -20,6 +20,10 @@
  * along with this program.  If not, see http://www.gnu.org/licenses/
  */
 
+//==========================================================
+// Includes.
+//
+
 #include "arenax.h"
 
 #include <stdint.h>
@@ -27,28 +31,29 @@
 #include "fault.h"
 
 
-//------------------------------------------------
-// Create and attach a persistent memory block,
-// and store its pointer in the stages array.
+//==========================================================
+// Private API - for enterprise separation only.
 //
+
+// Allocate an arena stage, and store its pointer in the stages array.
 cf_arenax_err
-cf_arenax_add_stage(cf_arenax* this)
+cf_arenax_add_stage(cf_arenax* arena)
 {
-	if (this->stage_count >= this->max_stages) {
+	if (arena->stage_count >= arena->max_stages) {
 		cf_warning(CF_ARENAX, "can't allocate more than %u arena stages",
-				this->max_stages);
+				arena->max_stages);
 		return CF_ARENAX_ERR_STAGE_CREATE;
 	}
 
-	uint8_t* p_stage = (uint8_t*)cf_malloc(this->stage_size);
+	uint8_t* p_stage = (uint8_t*)cf_try_malloc(arena->stage_size);
 
 	if (! p_stage) {
-		cf_warning(CF_ARENAX, "could not allocate %lu-byte arena stage %u",
-				this->stage_size, this->stage_count);
+		cf_warning(CF_ARENAX, "could not allocate %zu-byte arena stage %u",
+				arena->stage_size, arena->stage_count);
 		return CF_ARENAX_ERR_STAGE_CREATE;
 	}
 
-	this->stages[this->stage_count++] = p_stage;
+	arena->stages[arena->stage_count++] = p_stage;
 
 	return CF_ARENAX_OK;
 }

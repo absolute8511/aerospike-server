@@ -22,7 +22,6 @@
 
 #pragma once
 
-#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -31,6 +30,7 @@
 #include "citrusleaf/cf_digest.h"
 
 #include "arenax.h"
+#include "cf_mutex.h"
 
 #include "base/datamodel.h"
 
@@ -80,17 +80,19 @@ typedef struct as_index_s {
 	uint64_t set_id_bits: 10;	// do not use directly, used for set-ID
 
 	// offset: 55
-	// In single-bin mode for data-in-memory namespaces, this is cast to an
-	// as_bin, though only the last 4 bits get used (for the iparticle state).
-	// The first 4 bits are used for index flags. Do not use flex_bits
-	// directly - use access functions!
-	uint8_t flex_bits;
+	// In single-bin mode for data-in-memory namespaces, this offset is cast to
+	// an as_bin, but only 4 bits get used (for the iparticle state). The other
+	// 4 bits are used for replication state and index flags.
+	uint8_t repl_state: 2;
+	uint8_t unused_flag: 1;
+	uint8_t key_stored: 1;
+	uint8_t single_bin_state: 4; // used indirectly, only in single-bin mode
 
 	// offset: 56
 	// For data-not-in-memory namespaces, these 8 bytes are currently unused.
 	// For data-in-memory namespaces: in single-bin mode the as_bin is embedded
-	// here (these 8 bytes plus the last 4 bits in flex_bits above), but in
-	// multi-bin mode this is a pointer to either of:
+	// here (these 8 bytes plus 4 bits in flex_bits above), but in multi-bin
+	// mode this is a pointer to either of:
 	// - an as_bin_space containing n_bins and an array of as_bin structs
 	// - an as_rec_space containing an as_bin_space pointer and other metadata
 	void* dim;
@@ -98,6 +100,8 @@ typedef struct as_index_s {
 	// final size: 64
 
 } __attribute__ ((__packed__)) as_index;
+
+#define AS_INDEX_SINGLE_BIN_OFFSET 55 // can't use offsetof() with bit fields
 
 
 //==========================================================
@@ -138,64 +142,24 @@ bool as_index_is_valid_record(as_index *index) {
 
 
 //------------------------------------------------
-// Flex bits - flags.
-//
-
-typedef struct as_index_flag_bits_s {
-	uint8_t flag_bits: 4;
-	uint8_t do_not_use: 4; // These are used in single-bin mode.
-} as_index_flag_bits;
-
-typedef enum {
-	AS_INDEX_FLAG_SPECIAL_BINS	= 0x01, // first user of this is LDT (to denote sub-records)
-	AS_INDEX_FLAG_CHILD_REC		= 0x02, // child record of a regular record (LDT)
-	AS_INDEX_FLAG_CHILD_ESR		= 0x04, // special child existence sub-record (ESR)
-	AS_INDEX_FLAG_KEY_STORED	= 0x08, // for data-in-memory, dim points to as_rec_space
-
-	// Combinations:
-	AS_INDEX_ALL_FLAGS			= 0x0F
-} as_index_flag;
-
-static inline
-bool as_index_is_flag_set(const as_index* index, as_index_flag flag) {
-	return (((as_index_flag_bits*)&index->flex_bits)->flag_bits & flag) != 0;
-}
-
-static inline
-uint8_t as_index_get_flags(const as_index* index) {
-	return ((as_index_flag_bits*)&index->flex_bits)->flag_bits;
-}
-
-static inline
-void as_index_set_flags(as_index* index, as_index_flag flags) {
-	((as_index_flag_bits*)&index->flex_bits)->flag_bits |= flags;
-}
-
-static inline
-void as_index_clear_flags(as_index* index, as_index_flag flags) {
-	((as_index_flag_bits*)&index->flex_bits)->flag_bits &= ~flags;
-}
-
-
-//------------------------------------------------
-// Flex bits - bins, as_bin_space & as_rec_space.
+// Single bin, as_bin_space & as_rec_space.
 //
 
 static inline
 as_bin *as_index_get_single_bin(const as_index *index) {
-	// We're only allowed to use the last 4 bits for the bin state.
-	return (as_bin*)&index->flex_bits;
+	// We only use 4 bits of the first byte for the bin state.
+	return (as_bin*)((uint8_t *)index + AS_INDEX_SINGLE_BIN_OFFSET);
 }
 
 static inline
 as_bin_space* as_index_get_bin_space(const as_index *index) {
-	return as_index_is_flag_set(index, AS_INDEX_FLAG_KEY_STORED) ?
+	return index->key_stored == 1 ?
 		   ((as_rec_space*)index->dim)->bin_space : (as_bin_space*)index->dim;
 }
 
 static inline
 void as_index_set_bin_space(as_index* index, as_bin_space* bin_space) {
-	if (as_index_is_flag_set(index, AS_INDEX_FLAG_KEY_STORED)) {
+	if (index->key_stored == 1) {
 		((as_rec_space*)index->dim)->bin_space = bin_space;
 	}
 	else {
@@ -271,7 +235,7 @@ struct as_index_ref_s {
 	bool				skip_lock;
 	as_index			*r;
 	cf_arenax_handle	r_h;
-	pthread_mutex_t		*olock;
+	cf_mutex			*olock;
 };
 
 
@@ -298,8 +262,8 @@ typedef struct as_index_tree_s {
 
 typedef struct as_lock_pair_s {
 	// Note: reduce_lock's scope is always inside of lock's scope.
-	pthread_mutex_t	lock;        // insert, delete vs. insert, delete, get
-	pthread_mutex_t	reduce_lock; // insert, delete vs. reduce
+	cf_mutex lock;        // insert, delete vs. insert, delete, get
+	cf_mutex reduce_lock; // insert, delete vs. reduce
 } as_lock_pair;
 
 typedef struct as_sprig_s {

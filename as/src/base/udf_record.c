@@ -39,7 +39,6 @@
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/index.h"
-#include "base/ldt.h"
 #include "base/rec_props.h"
 #include "base/transaction.h"
 #include "storage/storage.h"
@@ -47,16 +46,6 @@
 #include "transaction/udf.h"
 
 
-bool
-udf_record_ldt_enabled(const as_rec * rec)
-{
-	udf_record *urecord = (udf_record *)as_rec_source(rec);
-	if (!urecord)         return false;
-	as_namespace *ns    = urecord->tr->rsv.ns;
-	if (!ns)              return false;
-	if (!ns->ldt_enabled) return false;
-	else        		  return true;
-}
 /*
  * Function: Open storage record for passed in udf record
  *           also set up flag like exists / read et al.
@@ -90,7 +79,6 @@ udf_storage_record_open(udf_record *urecord)
 
 	// Deal with delete durability (enterprise only).
 	if ((urecord->flag & UDF_RECORD_FLAG_ALLOW_UPDATES) != 0 &&
-			(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) == 0 &&
 			set_delete_durablility(tr, rd) != 0) {
 		as_storage_record_close(rd);
 		return -1;
@@ -116,14 +104,7 @@ udf_storage_record_open(udf_record *urecord)
 
 	urecord->flag   |= UDF_RECORD_FLAG_STORAGE_OPEN;
 
-	if (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) {
-		urecord->lrecord->subrec_io++;
-	}
-
-	cf_detail_digest(AS_UDF, &tr->keyd, "Storage Open: Rec(%p) flag(%x) Digest:", urecord, urecord->flag );
-	if (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) {
-		as_ldt_subrec_storage_validate(rd, "Reading");
-	}
+	cf_detail_digest(AS_UDF, &tr->keyd, "Storage Open: Rec(%p) flag(%x) Digest:", urecord, urecord->flag);
 	return 0;
 }
 
@@ -157,24 +138,11 @@ udf_storage_record_close(udf_record *urecord)
 		uint8_t rec_props_data[rec_props_data_size];
 		if (urecord->flag & UDF_RECORD_FLAG_ALLOW_UPDATES) {
 			if (rec_props_data_size > 0) {
-				cf_detail(AS_LDT, "LDT_INDEXBITS Setting Property at close time parent=%d, esr=%d, sub=%d",
-						  as_ldt_record_is_parent(rd->r),
-						  as_ldt_record_is_esr(rd->r),
-						  as_ldt_record_is_subrec(rd->r));
 				as_storage_record_set_rec_props(rd, rec_props_data);
 			}
 		}
 
-		bool is_subrec = (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) != 0;
 		bool has_bins = as_bin_inuse_has(rd);
-
-		if (! is_subrec) {
-			if (as_ldt_record_is_parent(rd->r)) {
-				cf_detail_digest(AS_LDT, &rd->r->keyd, "LDT_INDEXBIT Parent @ write: Digest:");
-			}
-		} else if (has_bins) {
-			as_ldt_subrec_storage_validate(rd, "Writing");
-		}
 
 		if (r_ref) {
 			if (urecord->flag & UDF_RECORD_FLAG_HAS_UPDATES) {
@@ -183,8 +151,7 @@ udf_storage_record_close(udf_record *urecord)
 			}
 
 			if (! has_bins) {
-				write_delete_record(r_ref->r, is_subrec ?
-						urecord->tr->rsv.sub_tree : urecord->tr->rsv.tree);
+				write_delete_record(r_ref->r, urecord->tr->rsv.tree);
 			}
 
 			as_storage_record_close(rd);
@@ -217,7 +184,6 @@ udf_storage_record_close(udf_record *urecord)
  *
  * Callers:
  * 		query_agg_istream_read
- * 		ldt_crec_open
  */
 int
 udf_record_open(udf_record * urecord)
@@ -230,22 +196,17 @@ udf_record_open(udf_record * urecord)
 	as_transaction *tr    = urecord->tr;
 	as_index_ref   *r_ref = urecord->r_ref;
 	as_index_tree  *tree  = tr->rsv.tree;
-	bool is_subrec = (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) != 0;
-
-	if (is_subrec) {
-		tree = tr->rsv.sub_tree;
-	}
 
 	int rec_rv = 0;
 	if (!(urecord->flag & UDF_RECORD_FLAG_OPEN)) {
-		cf_detail(AS_UDF, "Opening %sRecord ", is_subrec ? "Sub" : "");
+		cf_detail(AS_UDF, "Opening Record");
 		rec_rv = as_record_get_live(tree, &tr->keyd, r_ref, tr->rsv.ns);
 	}
 
 	if (!rec_rv) {
 		as_index *r = r_ref->r;
 		// check to see this isn't an expired record waiting to die
-		if (! is_subrec && as_record_is_doomed(r, tr->rsv.ns)) {
+		if (as_record_is_doomed(r, tr->rsv.ns)) {
 			as_record_done(r_ref, tr->rsv.ns);
 			cf_detail(AS_UDF, "udf_record_open: Record has expired cannot read");
 			rec_rv = -2;
@@ -256,8 +217,8 @@ udf_record_open(udf_record * urecord)
 			rec_rv = udf_storage_record_open(urecord);
 		}
 	} else {
-		cf_detail_digest(AS_UDF, &urecord->tr->keyd, "udf_record_open: %s rec_get returned with %d", 
-				is_subrec ? "sub" : "", rec_rv);
+		cf_detail_digest(AS_UDF, &urecord->tr->keyd, "udf_record_open: rec_get returned with %d ",
+				rec_rv);
 	}
 	return rec_rv;
 }
@@ -275,7 +236,6 @@ udf_record_open(udf_record * urecord)
  *
  * Callers:
  * 		query_agg_istream_read
- * 		ldt_aerospike_crec_close
  * 		as_query__agg
  * 		udf_record_destroy
  */
@@ -287,8 +247,7 @@ udf_record_close(udf_record *urecord)
 
 	if (urecord->flag & UDF_RECORD_FLAG_OPEN) {
 		as_index_ref   *r_ref = urecord->r_ref;
-		cf_detail(AS_UDF, "Closing %sRecord",
-				  (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) ? "Sub" : "");
+		cf_detail(AS_UDF, "Closing Record");
 		udf_storage_record_close(urecord);
 		as_record_done(r_ref, tr->rsv.ns);
 		urecord->flag &= ~UDF_RECORD_FLAG_OPEN;
@@ -316,7 +275,6 @@ udf_record_close(udf_record *urecord)
  * Return value : Nothing
  *
  * Callers:
- * 		ldt_chunk_init (for chunk)
  * 		udf_rw_local   (parent record before calling UDF)
  */
 void
@@ -327,12 +285,10 @@ udf_record_init(udf_record *urecord, bool allow_updates)
 	urecord->rd                 = NULL;
 	urecord->dirty              = NULL;
 	urecord->nupdates           = 0;
-	urecord->ldt_rectype_bit_update   = 0;
 	urecord->particle_data      = NULL;
 	urecord->cur_particle_data  = NULL;
 	urecord->end_particle_data  = NULL;
 	urecord->starting_memory_bytes = 0;
-	urecord->lrecord            = NULL;
 
 	// Init flag
 	urecord->flag               = UDF_RECORD_FLAG_ISVALID;
@@ -340,48 +296,10 @@ udf_record_init(udf_record *urecord, bool allow_updates)
 	if (allow_updates) {
 		urecord->flag           |= UDF_RECORD_FLAG_ALLOW_UPDATES;
 	}
-	urecord->pickled_buf        = NULL;
-	urecord->pickled_sz         = 0;
 
-	as_rec_props_clear(&urecord->pickled_rec_props);
-
-	urecord->op                 = UDF_OPTYPE_READ;
 	urecord->keyd               = cf_digest_zero;
 	for (uint32_t i = 0; i < UDF_RECORD_BIN_ULIMIT; i++) {
 		urecord->updates[i].particle_buf = NULL;
-	}
-}
-
-/*
- * Function: Cleans up the pickled if it is hanging from the udf_record.
- *           frees it as well if pickled_buf needs to be freed up.
- *
- * Parameters:
- * 		urec	: UDF record
- *
- * Return value : Nothing
- *
- * Callers:
- * 		udf_rw_finish
- */
-void
-udf_record_cleanup(udf_record *urecord, bool dofree)
-{
-	if (urecord->pickled_buf) {
-		if (dofree) {
-			cf_free(urecord->pickled_buf);
-		}
-
-		urecord->pickled_buf       = NULL;
-		urecord->pickled_sz        = 0;
-	}
-
-	if (urecord->pickled_rec_props.p_data) {
-		if (dofree) {
-			cf_free(urecord->pickled_rec_props.p_data);
-		}
-
-		as_rec_props_clear(&urecord->pickled_rec_props);
 	}
 }
 
@@ -417,9 +335,6 @@ static int print_buffer(as_buffer * buff) {
  *
  *           Similar function for get and free of cache
  *
- * Parameters:
- * 		urec    : Parent ldt record
- *
  * Return value :
  * 		value  (as_val) in case of success [for get]
  * 		NULL  in case of failure
@@ -433,11 +348,8 @@ static int print_buffer(as_buffer * buff) {
  *
  * 		FREE
  * 		udf_aerospike__execute_updates (when crossing commit window)
- * 		ldt_aerospike_crec_close       (when closing chunk sub record)
- * 		udf_record_close               (finally closing record/generally subrecord)
- * 		udf_rw_commit                  (commit the udf record or parent ldt record)
- *
- *		ldt_aerospike_crec_create
+ * 		udf_record_close               (finally closing record)
+ * 		udf_rw_commit                  (commit the udf record)
  */
 static as_val *
 udf_record_cache_get(udf_record * urecord, const char * name)
@@ -527,7 +439,6 @@ udf_record_cache_set(udf_record * urecord, const char * name, as_val * value,
 			strncpy(bin->name, name, AS_ID_BIN_SZ);
 			bin->value = (as_val *) value;
 			bin->dirty = dirty;
-			bin->ishidden = false;
 			urecord->nupdates++;
 			cf_detail(AS_UDF, "udf_record_set: %s not modified, add for %p:%p",
 					name, urecord, bin->value);
@@ -538,79 +449,6 @@ udf_record_cache_set(udf_record * urecord, const char * name, as_val * value,
 			urecord->flag |= UDF_RECORD_FLAG_TOO_MANY_BINS;
 		}
 	}
-}
-
-/**
- * Set the cache value for a bin, including flags.
- */
-static void
-udf_record_cache_sethidden(udf_record * urecord, const char * name)
-{
-	int modified = false;
-	for ( uint32_t i = 0; i < urecord->nupdates; i++ ) {
-		udf_record_bin * bin = &(urecord->updates[i]);
-
-		// bin exists, then we will release old value and set new value.
-		if ( strncmp(name, bin->name, AS_ID_BIN_SZ) == 0 ) {
-			cf_detail(AS_UDF, "udf_record_cache_sethidden: %s found", name);
-			// TODO make sure it is initialized to false
-			bin->ishidden = true;
-			modified      = true;
-			break;
-		}
-	}
-
-	// If not modified, then we will add the bin to the cache
-	if ( ! modified ) {
-		if ( urecord->nupdates < UDF_RECORD_BIN_ULIMIT ) {
-			udf_record_bin * bin = &(urecord->updates[urecord->nupdates]);
-			strncpy(bin->name, name, AS_ID_BIN_SZ);
-			bin->ishidden = true;
-			bin->dirty    = true;
-			urecord->nupdates++;
-			cf_detail(AS_UDF, "udf_record_cache_sethidden: %s not modified, add for %p:%p",
-					name, urecord, bin->value);
-		}
-		else {
-			cf_warning(AS_UDF, "UDF bin limit (%d) exceeded (bin %s)",
-					UDF_RECORD_BIN_ULIMIT, name);
-			urecord->flag |= UDF_RECORD_FLAG_TOO_MANY_BINS;
-		}
-	}
-}
-
-/*
- * Internal Function: Read and figure out if the bin is hidden
- *
- * Parameters:
- * 		r    : udf record
- * 		bname: Bin name of the bin which need to be read.
- *
- * Return value :
- * 	 	true:  if hidden
- * 	 	false: o/w or in case bin is not found
- *
- * Description:
- * 		Expectation is the record is already open. No checks are
- * 		performed in this function. Caller needs to make sure the
- * 		record is good to read e.g binname etc.
- *
- * Callers:
- * 		udf_aerospike__apply_update_atomic
- */
-bool
-udf_record_bin_ishidden(const udf_record *urecord, const char *name)
-{
-	if (!name) {
-		return false;
-	}
-	as_bin * bb = as_bin_get(urecord->rd, name);
-
-	if ( !bb ) {
-		cf_detail(AS_UDF, "udf_record_get: bin not found (%s)", name);
-		return false;
-	}
-	return as_bin_is_hidden(bb);
 }
 
 /*
@@ -666,32 +504,67 @@ udf_record_storage_get(const udf_record *urecord, const char *name)
  *
  */
 int
-udf_record_param_check(const as_rec *rec, const char *bname, char *fname, int lineno)
+udf_record_param_check(const as_rec *rec, char *fname, int lineno)
 {
-	if (!rec || !bname) {
-		cf_warning(AS_UDF, "Invalid Paramters: record=%p bname=%p", rec, bname);
+	if (! rec) {
+		cf_warning(AS_UDF, "Invalid Parameter: null record");
 		return UDF_ERR_INTERNAL_PARAMETER;
-	} 
+	}
 
-	udf_record * urecord = (udf_record *) as_rec_source(rec);
+	udf_record *urecord = (udf_record *)as_rec_source(rec);
 	if (!urecord) {
 		return UDF_ERR_INTERNAL_PARAMETER;;
 	}
 
 	if (!(urecord->flag & UDF_RECORD_FLAG_ISVALID)) {
-		if (!(urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD)) {
-			cf_debug(AS_UDF, "(%s:%d): Trying to Open Invalid Record ", fname, lineno);
-		} else {
-			cf_debug(AS_UDF, "(%s:%d): Trying to Open Invalid SubRecord ", fname, lineno);
-		}
+		cf_debug(AS_UDF, "(%s:%d): Trying to Open Invalid Record", fname, lineno);
 		return UDF_ERR_RECORD_NOT_VALID;
 	}
 
-	as_namespace  * ns = urecord->tr->rsv.ns;
-	if (strlen(bname) >= AS_ID_BIN_SZ || !as_bin_name_within_quota(ns, bname)) {
-		cf_debug(AS_UDF, "Invalid Parameter: bin name %s too big", bname);
+	return 0;
+}
+
+static int
+udf_record_param_check_w_bin(const as_rec *rec, const char *bname, char *fname, int lineno)
+{
+	int rv = udf_record_param_check(rec, fname, lineno);
+
+	if (rv != 0) {
+		return rv;
+	}
+
+	if (! bname) {
+		cf_warning(AS_UDF, "Invalid Parameter: null bin name");
+		return UDF_ERR_INTERNAL_PARAMETER;
+	}
+
+	udf_record *urecord = (udf_record *)as_rec_source(rec);
+	as_namespace *ns = urecord->tr->rsv.ns;
+
+	if (ns->single_bin) {
+		if (*bname != 0) {
+			cf_warning(AS_UDF, "Invalid Parameter: non-empty bin name in single-bin namespace");
+			return UDF_ERR_INTERNAL_PARAMETER;
+		}
+
+		return 0;
+	}
+
+	if (*bname == 0) {
+		cf_warning(AS_UDF, "Invalid Parameter: empty bin name");
+		return UDF_ERR_INTERNAL_PARAMETER;
+	}
+
+	if (strlen(bname) >= AS_ID_BIN_SZ) {
+		cf_warning(AS_UDF, "Invalid Parameter: bin name %s too big", bname);
 		return UDF_ERR_PARAMETER;
 	}
+
+	if (! as_bin_name_within_quota(ns, bname)) {
+		cf_warning(AS_UDF, "{%s} exceeded bin name quota", ns->name);
+		return UDF_ERR_PARAMETER;
+	}
+
 	return 0;
 }
 
@@ -703,7 +576,7 @@ udf_record_param_check(const as_rec *rec, const char *bname, char *fname, int li
 static as_val *
 udf_record_get(const as_rec * rec, const char * name)
 {
-	if (udf_record_param_check(rec, name, __FILE__, __LINE__)) {
+	if (udf_record_param_check_w_bin(rec, name, __FILE__, __LINE__)) {
 		return NULL;
 	}
 	udf_record  *   urecord = (udf_record *) as_rec_source(rec);
@@ -751,7 +624,7 @@ udf_record_get(const as_rec * rec, const char * name)
 static int
 udf_record_set(const as_rec * rec, const char * name, const as_val * value)
 {
-	int ret = udf_record_param_check(rec, name, __FILE__, __LINE__);
+	int ret = udf_record_param_check_w_bin(rec, name, __FILE__, __LINE__);
 	if (ret) {
 		return ret;
 	}
@@ -766,85 +639,10 @@ udf_record_set(const as_rec * rec, const char * name, const as_val * value)
 	return 0;
 }
 
-/**
- * Set the flags for a specific bin.  This is how LDTs mark Hidden Bins. Other
- * uses may also apply.
- */
-static int
-udf_record_set_flags(const as_rec * rec, const char * name, uint8_t flags)
-{
-	int ret = udf_record_param_check(rec, name, __FILE__, __LINE__);
-	if (ret) {
-		return ret;
-	}
-
-	udf_record * urecord = (udf_record *) as_rec_source(rec);
-	if (!urecord || !(urecord->flag & UDF_RECORD_FLAG_ALLOW_UPDATES)) {
-		return -1;
-	}
-
-	if (name) {
-		if ((flags & LDT_FLAG_HIDDEN_BIN) != 0 ||
-				(flags & LDT_FLAG_LDT_BIN) != 0 ||
-				(flags & LDT_FLAG_CONTROL_BIN) != 0) {
-			cf_debug(AS_UDF, "LDT flag(%d) Designates Hidden Bin", flags);
-			udf_record_cache_sethidden(urecord, name);
-		} else {
-			cf_warning(AS_UDF, "Unidentified flag setting up %d", flags);
-			return -2;
-		}
-	}
-
-	urecord->flag |= UDF_RECORD_FLAG_METADATA_UPDATED;
-
-	return 0;
-}
-
-/**
- * Set the Record Type bits for a record. Typically, this is how we show that
- * a record is of type LDT (which requires special handling). This function
- * allows us to either SET the record type (the "bits" parm is positive), or
- * UNSET the record type (the "bits" parm is negative).  When we want to
- * turn an "LDT Record" back into a "Normal Record", then we UNSET the LDT
- * flag (with a negative bits value).
- */
-static int
-udf_record_set_type(const as_rec * rec,  int8_t ldt_rectype_bit_update)
-{
-	if (!rec || !ldt_rectype_bit_update) {
-		cf_warning(AS_UDF, "Invalid Paramters: record=%p rec_type_bits=%d", rec, ldt_rectype_bit_update);
-		return 2;
-	}
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
-	if (ret) {
-		return ret;
-	}
-
-	if (!udf_record_ldt_enabled(rec)
-			&& (as_ldt_flag_has_parent(ldt_rectype_bit_update)
-				|| as_ldt_flag_has_sub(ldt_rectype_bit_update))) {
-		cf_warning(AS_LDT, "Cannot Set Large Object Bits .. Not Enabled !!");
-		return -2;
-	}
-
-	udf_record * urecord = (udf_record *) as_rec_source(rec);
-	if (!(urecord->flag & UDF_RECORD_FLAG_ALLOW_UPDATES)) {
-		return -1;
-	}
-
-	urecord->ldt_rectype_bit_update = ldt_rectype_bit_update;
-	cf_detail(AS_RW, "TO URECORD FROM LUA   Digest=%"PRIx64" bits %d",
-			  *(uint64_t *)&urecord->rd->r->keyd.digest[8], urecord->ldt_rectype_bit_update);
-
-	urecord->flag |= UDF_RECORD_FLAG_METADATA_UPDATED;
-
-	return 0;
-}
-
 static int
 udf_record_set_ttl(const as_rec * rec,  uint32_t  ttl)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return ret;
 	}
@@ -863,7 +661,7 @@ udf_record_set_ttl(const as_rec * rec,  uint32_t  ttl)
 static int
 udf_record_drop_key(const as_rec * rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return ret;
 	}
@@ -884,34 +682,10 @@ udf_record_drop_key(const as_rec * rec)
 	return 0;
 }
 
-/* Keep this for reference.
- * typedef enum {
-	// The first two values -- do NOT used in single bin mode
-	AS_INDEX_FLAG_SPECIAL_BINS		= 0x01, // First user of this is @LDT (to denote subrecs)
-	AS_INDEX_FLAG_CHILD_REC 		= 0x02, // Child Record of a regular record (LDT)
-	AS_INDEX_FLAG_CHILD_ESR         = 0x04, // Special Child Existence Sub Record (ESR)
-	AS_INDEX_FLAG_UNUSED_0x08		= 0x08,
-
-	// Combinations:
-	AS_INDEX_ALL_SINGLE_BIN_FLAGS	= 0x0C,
-	AS_INDEX_ALL_MULTI_BIN_FLAGS	= 0x0F
-} as_index_flag;
-
-static inline
-bool as_index_is_flag_set(as_index* index, as_index_flag flag) {
-	return (((as_index_flag_bits*)&index->flex_bits_2)->flag_bits & flag) != 0;
-}
-
-static inline
-void as_index_set_flags(as_index* index, as_index_flag flags) {
-	((as_index_flag_bits*)&index->flex_bits_2)->flag_bits |= flags;
-}
- */
-
 static int
 udf_record_remove(const as_rec * rec, const char * name)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return ret;
 	}
@@ -930,18 +704,12 @@ udf_record_remove(const as_rec * rec, const char * name)
 static uint32_t
 udf_record_ttl(const as_rec * rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return 0;
 	}
 
 	udf_record * urecord = (udf_record *) as_rec_source(rec);
-
-
-	if (urecord->flag & UDF_RECORD_FLAG_IS_SUBRECORD) {
-		cf_debug(AS_UDF, "Return 0 TTL for subrecord ");
-		return 0;
-	}
 
 	if ((urecord->flag & UDF_RECORD_FLAG_STORAGE_OPEN)) {
 		uint32_t now = as_record_void_time_get();
@@ -959,7 +727,7 @@ udf_record_ttl(const as_rec * rec)
 static uint64_t
 udf_record_last_update_time(const as_rec * rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return 0;
 	}
@@ -977,7 +745,7 @@ udf_record_last_update_time(const as_rec * rec)
 static uint16_t
 udf_record_gen(const as_rec * rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return 0;
 	}
@@ -1008,10 +776,6 @@ as_val_from_flat_key(uint8_t * flat_key, uint32_t size)
 		{
 			// Key length is size - 1, then +1 for null-termination.
 			char * buf = cf_malloc(size);
-			if (! buf) {
-				return NULL;
-			}
-
 			uint32_t len = size - 1;
 			memcpy(buf, key, len);
 			buf[len] = '\0';
@@ -1022,9 +786,6 @@ as_val_from_flat_key(uint8_t * flat_key, uint32_t size)
 		{
 			uint32_t blob_size = size - 1;
 			uint8_t *buf = cf_malloc(blob_size);
-			if (! buf) {
-				return NULL;
-			}
 
 			memcpy(buf, key, blob_size);
 
@@ -1038,7 +799,7 @@ as_val_from_flat_key(uint8_t * flat_key, uint32_t size)
 static as_val *
 udf_record_key(const as_rec * rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return NULL;
 	}
@@ -1060,7 +821,7 @@ udf_record_key(const as_rec * rec)
 static const char *
 udf_record_setname(const as_rec * rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return NULL;
 	}
@@ -1084,14 +845,14 @@ udf_record_destroy(as_rec *rec)
 
 	udf_record *urecord = (udf_record *) as_rec_source(rec);
 	udf_record_close(urecord);
-	udf_record_cleanup(urecord, true);
+	as_rec_destroy(rec);
 	return true;
 } 
 
 static as_bytes *
 udf_record_digest(const as_rec *rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return NULL;
 	}
@@ -1099,9 +860,6 @@ udf_record_digest(const as_rec *rec)
 	udf_record *urecord = (udf_record *)as_rec_source(rec);
 	if (urecord && urecord->flag & UDF_RECORD_FLAG_OPEN) {
 		cf_digest *keyd = cf_malloc(sizeof(cf_digest));
-		if (!keyd) {
-			return NULL;
-		}
 		memcpy(keyd, &urecord->keyd, CF_DIGEST_KEY_SZ);
 		as_bytes *b = as_bytes_new_wrap(keyd->digest, CF_DIGEST_KEY_SZ, true);
 		return b;
@@ -1112,7 +870,7 @@ udf_record_digest(const as_rec *rec)
 static int
 udf_record_bin_names(const as_rec *rec, as_rec_bin_names_callback callback, void * udata)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return 1;
 	}
@@ -1155,7 +913,7 @@ udf_record_bin_names(const as_rec *rec, as_rec_bin_names_callback callback, void
 static uint16_t
 udf_record_numbins(const as_rec * rec)
 {
-	int ret = udf_record_param_check(rec, UDF_BIN_NONAME, __FILE__, __LINE__);
+	int ret = udf_record_param_check(rec, __FILE__, __LINE__);
 	if (ret) {
 		return 0;
 	}
@@ -1194,8 +952,6 @@ const as_rec_hooks udf_record_hooks = {
 	.setname	= udf_record_setname,
 	.destroy	= NULL,
 	.digest		= udf_record_digest,
-	.set_flags	= udf_record_set_flags,	// @LDT:: added for control over LDT Bins from Lua
-	.set_type	= udf_record_set_type,	// @LDT:: added for control over Rec Types from Lua
 	.set_ttl	= udf_record_set_ttl,
 	.drop_key	= udf_record_drop_key,
 	.bin_names	= udf_record_bin_names,

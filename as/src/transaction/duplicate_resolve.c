@@ -30,7 +30,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h> // for alloca() only
 #include <string.h>
 
 #include "citrusleaf/cf_atomic.h"
@@ -41,10 +40,10 @@
 #include "node.h"
 
 #include "base/datamodel.h"
-#include "base/ldt.h"
 #include "base/proto.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
+#include "fabric/exchange.h"
 #include "fabric/fabric.h"
 #include "fabric/partition.h"
 #include "storage/storage.h"
@@ -54,26 +53,24 @@
 
 
 //==========================================================
-// Forward Declarations.
+// Forward declarations.
 //
 
-void done_handle_request(as_partition_reservation* rsv, as_index_ref* r_ref);
+void done_handle_request(as_partition_reservation* rsv, as_index_ref* r_ref, as_storage_rd* rd);
 void send_dup_res_ack(cf_node node, msg* m, uint32_t result);
 void send_ack_for_bad_request(cf_node node, msg* m);
-bool apply_winner(rw_request* rw);
-void get_ldt_info(const msg* m, as_record_merge_component* c);
+uint32_t parse_dup_meta(msg* m, uint32_t* p_generation, uint64_t* p_last_update_time);
+void apply_winner(rw_request* rw);
 
 
 //==========================================================
 // Public API.
 //
 
-bool
+void
 dup_res_make_message(rw_request* rw, as_transaction* tr)
 {
-	if (! (rw->dest_msg = as_fabric_msg_get(M_TYPE_RW))) {
-		return false;
-	}
+	rw->dest_msg = as_fabric_msg_get(M_TYPE_RW);
 
 	as_namespace* ns = tr->rsv.ns;
 	msg* m = rw->dest_msg;
@@ -84,8 +81,10 @@ dup_res_make_message(rw_request* rw, as_transaction* tr)
 	msg_set_uint32(m, RW_FIELD_NS_ID, ns->id);
 	msg_set_buf(m, RW_FIELD_DIGEST, (void*)&tr->keyd, sizeof(cf_digest),
 			MSG_SET_COPY);
-	msg_set_uint64(m, RW_FIELD_CLUSTER_KEY, tr->rsv.cluster_key);
 	msg_set_uint32(m, RW_FIELD_TID, rw->tid);
+
+	// TODO - JUMP - send this only because versions up to 3.14.x require it.
+	msg_set_uint64(m, RW_FIELD_CLUSTER_KEY, as_exchange_cluster_key());
 
 	as_index_ref r_ref;
 	r_ref.skip_lock = false;
@@ -98,8 +97,6 @@ dup_res_make_message(rw_request* rw, as_transaction* tr)
 
 		as_record_done(&r_ref, ns);
 	}
-
-	return true;
 }
 
 
@@ -135,10 +132,9 @@ dup_res_setup_rw(rw_request* rw, as_transaction* tr, dup_res_done_cb dup_res_cb,
 
 	rw->n_dest_nodes = tr->rsv.n_dupl;
 
-	for (int i = 0; i < rw->n_dest_nodes; i++) {
+	for (uint32_t i = 0; i < rw->n_dest_nodes; i++) {
 		rw->dest_complete[i] = false;
 		rw->dest_nodes[i] = tr->rsv.dupl_nodes[i];
-		rw->dup_msg[i] = NULL;
 	}
 
 	// Allow retransmit thread to destroy rw as soon as we unlock.
@@ -154,14 +150,6 @@ dup_res_handle_request(cf_node node, msg* m)
 	if (msg_get_buf(m, RW_FIELD_DIGEST, (uint8_t**)&keyd, NULL,
 			MSG_GET_DIRECT) != 0) {
 		cf_warning(AS_RW, "dup-res handler: no digest");
-		send_ack_for_bad_request(node, m);
-		return;
-	}
-
-	uint64_t cluster_key;
-
-	if (msg_get_uint64(m, RW_FIELD_CLUSTER_KEY, &cluster_key) != 0) {
-		cf_warning(AS_RW, "dup-res handler: no cluster key");
 		send_ack_for_bad_request(node, m);
 		return;
 	}
@@ -196,99 +184,68 @@ dup_res_handle_request(cf_node node, msg* m)
 	msg_preserve_fields(m, 3, RW_FIELD_NS_ID, RW_FIELD_DIGEST, RW_FIELD_TID);
 
 	as_partition_reservation rsv;
-	AS_PARTITION_RESERVATION_INIT(rsv); // TODO - not really needed?
 
-	as_partition_reserve_migrate(ns, as_partition_getid(keyd), &rsv, NULL);
-
-	if (rsv.cluster_key != cluster_key) {
-		done_handle_request(&rsv, NULL);
-		send_dup_res_ack(node, m, AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH);
-		return;
-	}
+	as_partition_reserve(ns, as_partition_getid(keyd), &rsv);
 
 	as_index_ref r_ref;
 	r_ref.skip_lock = false;
 
 	if (as_record_get(rsv.tree, keyd, &r_ref) != 0) {
-		done_handle_request(&rsv, NULL);
-		send_dup_res_ack(node, m, AS_PROTO_RESULT_FAIL_NOTFOUND);
+		done_handle_request(&rsv, NULL, NULL);
+		send_dup_res_ack(node, m, AS_PROTO_RESULT_FAIL_NOT_FOUND);
 		return;
 	}
 
 	as_record* r = r_ref.r;
 
+	int result;
+
 	if (local_conflict_check &&
-			0 >= as_record_resolve_conflict(ns->conflict_resolution_policy,
+			(result = as_record_resolve_conflict(ns->conflict_resolution_policy,
 					generation, last_update_time, r->generation,
-					r->last_update_time)) {
-		done_handle_request(&rsv, &r_ref);
-		send_dup_res_ack(node, m, AS_PROTO_RESULT_FAIL_NOTFOUND);
+					r->last_update_time)) <= 0) {
+		done_handle_request(&rsv, &r_ref, NULL);
+		send_dup_res_ack(node, m, result == 0 ?
+				AS_PROTO_RESULT_FAIL_RECORD_EXISTS :
+				AS_PROTO_RESULT_FAIL_GENERATION);
 		return;
 	}
 
-	if (ns->ldt_enabled && as_ldt_record_is_sub(r)) {
-		cf_warning(AS_RW, "invalid dup-res request: for ldt subrecord");
-		done_handle_request(&rsv, &r_ref);
-		send_dup_res_ack(node, m, AS_PROTO_RESULT_FAIL_NOTFOUND); // ???
+	as_storage_rd rd;
+
+	as_storage_record_open(ns, r, &rd);
+
+	if ((result = as_storage_rd_load_n_bins(&rd)) < 0) {
+		done_handle_request(&rsv, &r_ref, &rd);
+		send_dup_res_ack(node, m, (uint32_t)-result);
 		return;
 	}
 
-	if (ns->ldt_enabled && as_ldt_record_is_parent(r)) {
-		msg_set_uint32(m, RW_FIELD_INFO,
-				RW_INFO_LDT_PARENTREC | RW_INFO_LDT_DUMMY);
+	as_bin stack_bins[rd.ns->storage_data_in_memory ? 0 : rd.n_bins];
+
+	if ((result = as_storage_rd_load_bins(&rd, stack_bins)) < 0) {
+		done_handle_request(&rsv, &r_ref, &rd);
+		send_dup_res_ack(node, m, (uint32_t)-result);
+		return;
 	}
-	else {
-		as_storage_rd rd;
 
-		as_storage_record_open(ns, r, &rd);
+	size_t buf_len;
+	uint8_t* buf = as_record_pickle(&rd, &buf_len);
 
-		as_storage_rd_load_n_bins(&rd); // TODO - handle error returned
+	msg_set_buf(m, RW_FIELD_RECORD, (void*)buf, buf_len,
+			MSG_SET_HANDOFF_MALLOC);
 
-		as_bin stack_bins[rd.ns->storage_data_in_memory ? 0 : rd.n_bins];
+	const char* set_name = as_index_get_set_name(r, ns);
 
-		as_storage_rd_load_bins(&rd, stack_bins); // TODO - handle error returned
+	if (set_name) {
+		msg_set_buf(m, RW_FIELD_SET_NAME, (const uint8_t *)set_name,
+				strlen(set_name), MSG_SET_COPY);
+	}
 
-		uint8_t* buf;
-		size_t buf_len;
+	as_storage_record_get_key(&rd);
 
-		if (0 != as_record_pickle(r, &rd, &buf, &buf_len)) {
-			as_storage_record_close(&rd);
-			done_handle_request(&rsv, &r_ref);
-			send_dup_res_ack(node, m, AS_PROTO_RESULT_FAIL_UNKNOWN);
-			return;
-		}
-
-		uint32_t info = 0;
-
-		dup_res_flag_pickle(buf, &info);
-
-		if (info != 0) {
-			msg_set_uint32(m, RW_FIELD_INFO, info);
-		}
-
-		as_storage_record_get_key(&rd);
-
-		const char* set_name = as_index_get_set_name(r, ns);
-
-		if (set_name) {
-			msg_set_buf(m, RW_FIELD_SET_NAME, (const uint8_t *)set_name,
-					strlen(set_name), MSG_SET_COPY);
-		}
-
-		if (rd.key) {
-			msg_set_buf(m, RW_FIELD_KEY, rd.key, rd.key_size, MSG_SET_COPY);
-		}
-
-		uint32_t ldt_bits = (uint32_t)as_ldt_record_get_rectype_bits(r);
-
-		if (ldt_bits != 0) {
-			msg_set_uint32(m, RW_FIELD_LDT_BITS, ldt_bits);
-		}
-
-		as_storage_record_close(&rd);
-
-		msg_set_buf(m, RW_FIELD_RECORD, (void*)buf, buf_len,
-				MSG_SET_HANDOFF_MALLOC);
+	if (rd.key) {
+		msg_set_buf(m, RW_FIELD_KEY, rd.key, rd.key_size, MSG_SET_COPY);
 	}
 
 	msg_set_uint32(m, RW_FIELD_GENERATION, r->generation);
@@ -298,7 +255,13 @@ dup_res_handle_request(cf_node node, msg* m)
 		msg_set_uint32(m, RW_FIELD_VOID_TIME, r->void_time);
 	}
 
-	done_handle_request(&rsv, &r_ref);
+	uint32_t info = dup_res_pack_info(r, ns);
+
+	if (info != 0) {
+		msg_set_uint32(m, RW_FIELD_INFO, info);
+	}
+
+	done_handle_request(&rsv, &r_ref, &rd);
 	send_dup_res_ack(node, m, AS_PROTO_RESULT_OK);
 }
 
@@ -331,14 +294,6 @@ dup_res_handle_ack(cf_node node, msg* m)
 		return;
 	}
 
-	uint32_t result_code;
-
-	if (msg_get_uint32(m, RW_FIELD_RESULT, &result_code) != 0) {
-		cf_warning(AS_RW, "dup-res ack: no result_code");
-		as_fabric_msg_put(m);
-		return;
-	}
-
 	rw_request_hkey hkey = { ns_id, *keyd };
 	rw_request* rw = rw_request_hash_get(&hkey);
 
@@ -350,23 +305,43 @@ dup_res_handle_ack(cf_node node, msg* m)
 
 	pthread_mutex_lock(&rw->lock);
 
-	if (rw->tid != tid) {
-		// Extra ack, rw_request is that of newer transaction for same digest.
+	if (rw->tid != tid || rw->dup_res_complete) {
+		// Extra ack - rw_request is newer transaction for same digest, or ack
+		// is arriving after rw_request was aborted or finished dup-res.
 		pthread_mutex_unlock(&rw->lock);
 		rw_request_release(rw);
 		as_fabric_msg_put(m);
 		return;
 	}
 
-	if (rw->dup_res_complete) {
-		// Ack arriving after rw_request was aborted or finished dup-res.
+	// Find remote node in duplicates list.
+	int i = index_of_node(rw->dest_nodes, rw->n_dest_nodes, node);
+
+	if (i == -1) {
+		cf_warning(AS_RW, "dup-res ack: from non-dest node %lx", node);
 		pthread_mutex_unlock(&rw->lock);
 		rw_request_release(rw);
 		as_fabric_msg_put(m);
 		return;
 	}
 
-	if (result_code == AS_PROTO_RESULT_FAIL_CLUSTER_KEY_MISMATCH) {
+	if (rw->dest_complete[i]) {
+		// Extra ack for this duplicate.
+		pthread_mutex_unlock(&rw->lock);
+		rw_request_release(rw);
+		as_fabric_msg_put(m);
+		return;
+	}
+
+	rw->dest_complete[i] = true;
+
+	uint32_t generation = 0;
+	uint64_t last_update_time = 0;
+	uint32_t result_code = parse_dup_meta(m, &generation, &last_update_time);
+
+	// If it makes sense, retry transaction from the beginning.
+	// TODO - is this retry too fast? Should there be a throttle? If so, how?
+	if (dup_res_should_retry_transaction(rw, result_code)) {
 		if (! rw->from.any) {
 			// Lost race against timeout in retransmit thread.
 			pthread_mutex_unlock(&rw->lock);
@@ -394,57 +369,42 @@ dup_res_handle_ack(cf_node node, msg* m)
 		return;
 	}
 
-	int i;
+	// Compare this duplicate with previous best, if any.
+	bool keep_previous_best = rw->best_dup_msg &&
+			as_record_resolve_conflict(rw->rsv.ns->conflict_resolution_policy,
+					rw->best_dup_gen, rw->best_dup_lut,
+					(uint16_t)generation, last_update_time) <= 0;
 
-	for (i = 0; i < rw->n_dest_nodes; i++) {
-		if (rw->dest_nodes[i] != node) {
-			continue;
-		}
-
-		if (rw->dest_complete[i]) {
-			// Extra ack for this duplicate.
-			pthread_mutex_unlock(&rw->lock);
-			rw_request_release(rw);
-			as_fabric_msg_put(m);
-			return;
-		}
-
-		rw->dest_complete[i] = true;
-		rw->dup_msg[i] = m;
-
-		break;
-	}
-
-	if (i == rw->n_dest_nodes) {
-		cf_warning(AS_RW, "dup-res ack: from non-dest node %lx", node);
-		pthread_mutex_unlock(&rw->lock);
-		rw_request_release(rw);
+	if (keep_previous_best) {
+		// This duplicate is no better than previous best - keep previous best.
 		as_fabric_msg_put(m);
-		return;
+	}
+	else {
+		// No previous best, or this duplicate is better - keep this one.
+		if (rw->best_dup_msg) {
+			as_fabric_msg_put(rw->best_dup_msg);
+		}
+
+		msg_preserve_all_fields(m);
+		rw->best_dup_msg = m;
+		rw->best_dup_result_code = (uint8_t)result_code;
+		rw->best_dup_gen = generation;
+		rw->best_dup_lut = last_update_time;
 	}
 
-	for (int j = 0; j < rw->n_dest_nodes; j++) {
-		if (! rw->dest_complete[j]) {
-			// Still haven't heard from all duplicates, so save this response.
-			msg_preserve_all_fields(rw->dup_msg[i]);
+	// Saved or discarded m - from here down don't call as_fabric_msg_put(m)!
 
+	for (uint32_t j = 0; j < rw->n_dest_nodes; j++) {
+		if (! rw->dest_complete[j]) {
+			// Still haven't heard from all duplicates.
 			pthread_mutex_unlock(&rw->lock);
 			rw_request_release(rw);
-			// Note - don't call as_fabric_msg_put(m)!
 			return;
 		}
 	}
 
-	bool is_ldt_ship_op = apply_winner(rw);
-	// Note - apply_winner() puts all rw->dup_msg[]s including m, so don't call
-	// as_fabric_msg_put(m) afterwards.
-
-	rw->dup_res_complete = true;
-
-	if (is_ldt_ship_op) {
-		pthread_mutex_unlock(&rw->lock);
-		rw_request_release(rw);
-		return;
+	if (rw->best_dup_result_code == AS_PROTO_RESULT_OK) {
+		apply_winner(rw); // sets rw->result_code to pass along to callback
 	}
 
 	// Check for lost race against timeout in retransmit thread *after* applying
@@ -456,7 +416,11 @@ dup_res_handle_ack(cf_node node, msg* m)
 		return;
 	}
 
+	dup_res_translate_result_code(rw);
+
 	bool delete_from_hash = rw->dup_res_cb(rw);
+
+	rw->dup_res_complete = true;
 
 	pthread_mutex_unlock(&rw->lock);
 
@@ -473,8 +437,13 @@ dup_res_handle_ack(cf_node node, msg* m)
 //
 
 void
-done_handle_request(as_partition_reservation* rsv, as_index_ref* r_ref)
+done_handle_request(as_partition_reservation* rsv, as_index_ref* r_ref,
+		as_storage_rd* rd)
 {
+	if (rd) {
+		as_storage_record_close(rd);
+	}
+
 	if (r_ref) {
 		as_record_done(r_ref, rsv->ns);
 	}
@@ -511,148 +480,79 @@ send_ack_for_bad_request(cf_node node, msg* m)
 }
 
 
-bool
-apply_winner(rw_request* rw)
+uint32_t
+parse_dup_meta(msg* m, uint32_t* p_generation, uint64_t* p_last_update_time)
 {
-	uint32_t n = 0;
-	as_record_merge_component dups[rw->n_dest_nodes];
+	uint32_t result_code;
 
-	memset(dups, 0, sizeof(dups));
-
-	for (int i = 0; i < rw->n_dest_nodes; i++) {
-		msg* m = rw->dup_msg[i];
-
-		if (! m) {
-			// We can mark a dest node complete without getting a response.
-			continue;
-		}
-
-		uint32_t result_code;
-
-		// Already made sure this field is present.
-		msg_get_uint32(m, RW_FIELD_RESULT, &result_code);
-
-		if (result_code != AS_PROTO_RESULT_OK) {
-			// Typical result here might be NOT_FOUND.
-			continue;
-		}
-
-		if (msg_get_uint32(m, RW_FIELD_GENERATION, &dups[n].generation) != 0) {
-			cf_warning_digest(AS_RW, &rw->keyd, "dup-res ack: no generation ");
-			continue;
-		}
-
-		if (msg_get_uint64(m, RW_FIELD_LAST_UPDATE_TIME,
-				&dups[n].last_update_time) != 0) {
-			cf_warning_digest(AS_RW, &rw->keyd, "dup-res ack: no last-update-time ");
-			continue;
-		}
-
-		msg_get_uint32(m, RW_FIELD_VOID_TIME, &dups[n].void_time);
-
-		if (rw->rsv.ns->ldt_enabled) {
-			get_ldt_info(m, &dups[n]);
-
-			if (COMPONENT_IS_LDT(&dups[n])) {
-				n++;
-				continue;
-			}
-		}
-
-		if (msg_get_buf(m, RW_FIELD_RECORD, &dups[n].record_buf,
-				&dups[n].record_buf_sz, MSG_GET_DIRECT) != 0) {
-			cf_warning_digest(AS_RW, &rw->keyd, "dup-res ack: no record ");
-			continue;
-		}
-
-		if (dup_res_ignore_pickle(dups[n].record_buf, m)) {
-			cf_warning_digest(AS_RW, &rw->keyd, "dup-res ack: binless pickle ");
-			continue;
-		}
-
-		uint8_t *set_name = NULL;
-		size_t set_name_len = 0;
-
-		msg_get_buf(m, RW_FIELD_SET_NAME, &set_name, &set_name_len,
-				MSG_GET_DIRECT);
-
-		uint8_t *key = NULL;
-		size_t key_size = 0;
-
-		msg_get_buf(m, RW_FIELD_KEY, &key, &key_size, MSG_GET_DIRECT);
-
-		uint32_t ldt_bits = 0;
-
-		msg_get_uint32(m, RW_FIELD_LDT_BITS, &ldt_bits);
-
-		size_t rec_props_data_size = as_rec_props_size_all(set_name,
-				set_name_len, key, key_size, ldt_bits);
-
-		if (rec_props_data_size != 0) {
-			// Use alloca() to last the scope of the function. Note that we're
-			// in a loop - stack usage is duplicates * rec-props data size.
-			dups[n].rec_props.p_data = alloca(rec_props_data_size);
-
-			as_rec_props_fill_all(&dups[n].rec_props,
-					dups[n].rec_props.p_data, set_name, set_name_len, key,
-					key_size, ldt_bits);
-		}
-
-		n++;
+	if (msg_get_uint32(m, RW_FIELD_RESULT, &result_code) != 0) {
+		cf_warning(AS_RW, "dup-res ack: no result_code");
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
-	int rv = 0;
-	int winner_idx = -1;
-
-	if (n > 0) {
-		rv = as_record_flatten(&rw->rsv, &rw->keyd, n, dups, &winner_idx);
+	if (result_code != AS_PROTO_RESULT_OK) {
+		return result_code;
 	}
 
-	for (int i = 0; i < rw->n_dest_nodes; i++) {
-		if (rw->dup_msg[i]) {
-			as_fabric_msg_put(rw->dup_msg[i]);
-			rw->dup_msg[i] = NULL;
-		}
+	if (msg_get_uint32(m, RW_FIELD_GENERATION, p_generation) != 0 ||
+			*p_generation == 0) {
+		cf_warning(AS_RW, "dup-res ack: no or bad generation");
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
-	// LDT-specific:
-	if (rv == -7) {
-		if (winner_idx < 0) {
-			cf_warning(AS_LDT, "unexpected winner @ index %d.. resorting to 0",
-					winner_idx);
-			winner_idx = 0;
-		}
-
-		cf_detail_digest(AS_RW, &rw->keyd,
-				"SHIPPED_OP %s Shipping op to %"PRIx64"",
-				rw->origin == FROM_PROXY ? "NONORIG" : "ORIG",
-				rw->dest_nodes[winner_idx]);
-
-		as_ldt_shipop(rw, rw->dest_nodes[winner_idx]);
-
-		return true; // Don't delete rw from hash - we're not done with it!
+	if (msg_get_uint64(m, RW_FIELD_LAST_UPDATE_TIME, p_last_update_time) != 0) {
+		cf_warning(AS_RW, "dup-res ack: no last-update-time");
+		return AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
-	return false;
+	return AS_PROTO_RESULT_OK;
 }
 
 
 void
-get_ldt_info(const msg* m, as_record_merge_component* c)
+apply_winner(rw_request* rw)
 {
-	c->flag = AS_COMPONENT_FLAG_DUP;
+	msg* m = rw->best_dup_msg;
 
-	uint32_t info;
+	as_remote_record rr = {
+			// Skipping .src for now.
+			.rsv = &rw->rsv,
+			.keyd = &rw->keyd,
+			.generation = rw->best_dup_gen,
+			.last_update_time = rw->best_dup_lut
+	};
 
-	if (msg_get_uint32(m, RW_FIELD_INFO, &info) != 0) {
+	if (msg_get_buf(m, RW_FIELD_RECORD, &rr.record_buf, &rr.record_buf_sz,
+			MSG_GET_DIRECT) != 0 || rr.record_buf_sz < 2) {
+		cf_warning_digest(AS_RW, &rw->keyd, "dup-res ack: no record ");
+		rw->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		return;
 	}
 
-	if ((info & RW_INFO_LDT_PARENTREC) != 0) {
-		c->flag |= AS_COMPONENT_FLAG_LDT_REC;
+	uint32_t info = 0;
+
+	msg_get_uint32(m, RW_FIELD_INFO, &info);
+
+	if (dup_res_ignore_pickle(rr.record_buf, info)) {
+		cf_warning_digest(AS_RW, &rw->keyd, "dup-res ack: binless pickle ");
+		rw->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
+		return;
 	}
 
-	if ((info & RW_INFO_LDT_DUMMY) != 0) {
-		c->flag |= AS_COMPONENT_FLAG_LDT_DUMMY;
+	msg_get_uint32(m, RW_FIELD_VOID_TIME, &rr.void_time);
+
+	msg_get_buf(m, RW_FIELD_SET_NAME, (uint8_t **)&rr.set_name,
+			&rr.set_name_len, MSG_GET_DIRECT);
+
+	msg_get_buf(m, RW_FIELD_KEY, (uint8_t **)&rr.key, &rr.key_size,
+			MSG_GET_DIRECT);
+
+	rw->result_code = (uint8_t)as_record_replace_if_better(&rr, false, false,
+			false);
+
+	// Duplicate resolution just treats these errors as successful no-ops:
+	if (rw->result_code == AS_PROTO_RESULT_FAIL_RECORD_EXISTS ||
+			rw->result_code == AS_PROTO_RESULT_FAIL_GENERATION) {
+		rw->result_code = AS_PROTO_RESULT_OK;
 	}
 }

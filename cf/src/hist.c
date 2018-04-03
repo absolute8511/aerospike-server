@@ -47,19 +47,13 @@
 histogram*
 histogram_create(const char *name, histogram_scale scale)
 {
-	if (! (name && strlen(name) < HISTOGRAM_NAME_SIZE)) {
-		return NULL;
-	}
-
-	if (! (scale >= 0 && scale < HIST_SCALE_MAX_PLUS_1)) {
-		return NULL;
-	}
+	cf_assert(name, AS_INFO, "null histogram name");
+	cf_assert(strlen(name) < HISTOGRAM_NAME_SIZE, AS_INFO,
+			"bad histogram name %s", name);
+	cf_assert(scale >= 0 && scale < HIST_SCALE_MAX_PLUS_1, AS_INFO,
+			"bad histogram scale %d", scale);
 
 	histogram *h = cf_malloc(sizeof(histogram));
-
-	if (! h) {
-		return NULL;
-	}
 
 	strcpy(h->name, name);
 	memset((void *)&h->counts, 0, sizeof(h->counts));

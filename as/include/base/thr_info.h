@@ -73,6 +73,10 @@ extern int as_info_buffer(uint8_t *req_buf, size_t req_buf_len, cf_dyn_buf *rsp)
 // threads, etc.
 extern int as_info_init();
 
+// Needed by heartbeat:
+
+char *as_info_bind_to_string(const cf_serv_cfg *cfg, cf_sock_owner owner);
+
 // Needed by ticker:
 
 int as_info_queue_get_size();

@@ -34,13 +34,13 @@
 #include "citrusleaf/cf_digest.h"
 #include "citrusleaf/cf_queue.h"
 
+#include "cf_mutex.h"
 #include "fault.h"
 #include "olock.h"
 
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/index.h"
-#include "base/ldt.h"
 #include "base/rec_props.h"
 #include "base/thr_info.h"
 #include "fabric/partition.h"
@@ -83,7 +83,7 @@ as_storage_init()
 		void *_t;
 
 		while (CF_QUEUE_OK != cf_queue_pop(complete_q, &_t, 2000)) {
-			as_storage_cold_start_ticker_ssd();
+			as_storage_loading_records_ticker_ssd();
 		}
 	}
 
@@ -398,17 +398,17 @@ as_storage_defrag_sweep(as_namespace *ns)
 // as_storage_info_set
 //
 
-typedef void (*as_storage_info_set_fn)(as_namespace *ns, uint32_t pid, const as_partition_version *version);
+typedef void (*as_storage_info_set_fn)(as_namespace *ns, const as_partition *p, bool flush);
 static const as_storage_info_set_fn as_storage_info_set_table[AS_NUM_STORAGE_ENGINES] = {
 	NULL, // memory doesn't support info
 	as_storage_info_set_ssd
 };
 
 void
-as_storage_info_set(as_namespace *ns, uint32_t pid, const as_partition_version *version)
+as_storage_info_set(as_namespace *ns, const as_partition *p, bool flush)
 {
 	if (as_storage_info_set_table[ns->storage_type]) {
-		as_storage_info_set_table[ns->storage_type](ns, pid, version);
+		as_storage_info_set_table[ns->storage_type](ns, p, flush);
 	}
 }
 
@@ -416,17 +416,17 @@ as_storage_info_set(as_namespace *ns, uint32_t pid, const as_partition_version *
 // as_storage_info_get
 //
 
-typedef void (*as_storage_info_get_fn)(as_namespace *ns, uint32_t pid, as_partition_version *version);
+typedef void (*as_storage_info_get_fn)(as_namespace *ns, as_partition *p);
 static const as_storage_info_get_fn as_storage_info_get_table[AS_NUM_STORAGE_ENGINES] = {
 	NULL, // memory doesn't support info
 	as_storage_info_get_ssd
 };
 
 void
-as_storage_info_get(as_namespace *ns, uint32_t pid, as_partition_version *version)
+as_storage_info_get(as_namespace *ns, as_partition *p)
 {
 	if (as_storage_info_get_table[ns->storage_type]) {
-		as_storage_info_get_table[ns->storage_type](ns, pid, version);
+		as_storage_info_get_table[ns->storage_type](ns, p);
 	}
 }
 
@@ -548,7 +548,7 @@ as_storage_record_get_n_bytes_memory(as_storage_rd *rd)
 	}
 
 	if (! rd->ns->single_bin) {
-		if (as_index_is_flag_set(rd->r, AS_INDEX_FLAG_KEY_STORED)) {
+		if (rd->r->key_stored == 1) {
 			n_bytes_memory += sizeof(as_rec_space) +
 					((as_rec_space*)rd->r->dim)->key_size;
 		}
@@ -596,7 +596,7 @@ as_storage_record_drop_from_mem_stats(as_storage_rd *rd)
 bool
 as_storage_record_get_key(as_storage_rd *rd)
 {
-	if (! as_index_is_flag_set(rd->r, AS_INDEX_FLAG_KEY_STORED)) {
+	if (rd->r->key_stored == 0) {
 		return false;
 	}
 
@@ -616,8 +616,7 @@ as_storage_record_get_key(as_storage_rd *rd)
 size_t
 as_storage_record_rec_props_size(as_storage_rd *rd)
 {
-	size_t rec_props_data_size = as_ldt_record_get_rectype_bits(rd->r) != 0 ?
-			as_rec_props_sizeof_field(sizeof(uint16_t)) : 0;
+	size_t rec_props_data_size = 0;
 
 	const char *set_name = as_index_get_set_name(rd->r, rd->ns);
 
@@ -635,20 +634,12 @@ as_storage_record_rec_props_size(as_storage_rd *rd)
 // Populates rec_props struct in rd, using index info where possible. Assumes
 // relevant information is ready:
 // - set name
-// - LDT flags
 // - record key
 // Relies on caller's properly allocated rec_props_data.
 void
 as_storage_record_set_rec_props(as_storage_rd *rd, uint8_t* rec_props_data)
 {
 	as_rec_props_init(&(rd->rec_props), rec_props_data);
-
-	uint16_t ldt_rectype_bits = as_ldt_record_get_rectype_bits(rd->r);
-
-	if (ldt_rectype_bits != 0) {
-		as_rec_props_add_field(&(rd->rec_props), CL_REC_PROPS_FIELD_LDT_TYPE,
-				sizeof(uint16_t), (uint8_t *)&ldt_rectype_bits);
-	}
 
 	if (as_index_has_set(rd->r)) {
 		const char *set_name = as_index_get_set_name(rd->r, rd->ns);
@@ -662,40 +653,6 @@ as_storage_record_set_rec_props(as_storage_rd *rd, uint8_t* rec_props_data)
 	}
 }
 
-// Populates p_rec_props, doing a malloc for data, using index info where
-// possible (gets key from rd parameters).
-uint32_t
-as_storage_record_copy_rec_props(as_storage_rd *rd, as_rec_props *p_rec_props)
-{
-	uint32_t malloc_size = (uint32_t)as_storage_record_rec_props_size(rd);
-
-	if (malloc_size == 0) {
-		return 0;
-	}
-
-	as_rec_props_init_malloc(p_rec_props, malloc_size);
-
-	uint64_t ldt_rectype_bits = as_ldt_record_get_rectype_bits(rd->r);
-
-	if (ldt_rectype_bits != 0) {
-		as_rec_props_add_field(p_rec_props, CL_REC_PROPS_FIELD_LDT_TYPE,
-				sizeof(uint16_t), (uint8_t *)&ldt_rectype_bits);
-	}
-
-	if (as_index_has_set(rd->r)) {
-		const char *set_name = as_index_get_set_name(rd->r, rd->ns);
-		as_rec_props_add_field(p_rec_props, CL_REC_PROPS_FIELD_SET_NAME,
-				strlen(set_name) + 1, (uint8_t *)set_name);
-	}
-
-	if (rd->key) {
-		as_rec_props_add_field(p_rec_props, CL_REC_PROPS_FIELD_KEY,
-				rd->key_size, rd->key);
-	}
-
-	return malloc_size;
-}
-
 void
 as_storage_shutdown(void)
 {
@@ -705,7 +662,7 @@ as_storage_shutdown(void)
 	// that each write's record lock scope is either completed or never entered.
 
 	for (uint32_t n = 0; n < g_record_locks->n_locks; n++) {
-		pthread_mutex_lock(&g_record_locks->locks[n]);
+		cf_mutex_lock(&g_record_locks->locks[n]);
 	}
 
 	// Now flush everything outstanding to storage devices.

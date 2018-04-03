@@ -55,10 +55,9 @@ dist:
 	install -pm 644 -D $(DEPTH)/modules/lua-core/src/*.lua $(TARGET)/share/udf/lua/.
 
 	install -pm 755 -Dd $(TARGET)/share/udf/lua/external
-	install -pm 644 -D $(DEPTH)/modules/lua-core/src/external/*.lua $(TARGET)/share/udf/lua/external/.
-
-	install -pm 755 -Dd $(TARGET)/share/udf/lua/ldt
-	install -pm 644 -D $(DEPTH)/modules/lua-core/src/ldt/*.lua $(TARGET)/share/udf/lua/ldt/.
+	for FILE in `find $(DEPTH)/modules/lua-core/src/external -type f` ; do \
+	   install -pm 644 $$FILE $(OPT_AS)/sys/udf/lua/external ; \
+	done
 
 tar:
 	tar cvf $(ARCHIVE) -C $(BUILD_ROOT) aerospike-server

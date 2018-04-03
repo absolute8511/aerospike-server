@@ -52,18 +52,6 @@
 #include "citrusleaf/alloc.h"
 #include "citrusleaf/cf_digest.h"
 
-static char *
-safe_strdup(const char *string)
-{
-	char *res = cf_strdup(string);
-
-	if (res == NULL) {
-		cf_crash(CF_SOCKET, "Out of memory");
-	}
-
-	return res;
-}
-
 void
 cf_ip_addr_to_string_safe(const cf_ip_addr *addr, char *string, size_t size)
 {
@@ -917,6 +905,8 @@ cf_socket_available(cf_socket *sock)
 int32_t
 cf_socket_send_to(cf_socket *sock, const void *buff, size_t size, int32_t flags, const cf_sock_addr *addr)
 {
+	cf_assert(sock->ssl == NULL, CF_SOCKET, "cannot use cf_socket_send_to() with TLS");
+
 	struct sockaddr_storage sas;
 	struct sockaddr *sa = NULL;
 	socklen_t sa_len = 0;
@@ -962,6 +952,8 @@ cf_socket_send(cf_socket *sock, const void *buff, size_t size, int32_t flags)
 int32_t
 cf_socket_recv_from(cf_socket *sock, void *buff, size_t size, int32_t flags, cf_sock_addr *addr)
 {
+	cf_assert(sock->ssl == NULL, CF_SOCKET, "cannot use cf_socket_recv_from() with TLS");
+
 	struct sockaddr_storage sas;
 	struct sockaddr *sa = NULL;
 	socklen_t sa_len = 0;
@@ -1044,6 +1036,8 @@ int32_t
 cf_socket_send_to_all(cf_socket *sock, const void *buffp, size_t size, int32_t flags,
 		const cf_sock_addr *addr, int32_t timeout)
 {
+	cf_assert(sock->ssl == NULL, CF_SOCKET, "cannot use cf_socket_send_to_all() with TLS");
+
 	uint8_t *buff = (uint8_t *) buffp;
 	cf_detail(CF_SOCKET, "Blocking send on FD %d, size = %zu", sock->fd, size);
 	size_t off = 0;
@@ -1097,6 +1091,8 @@ int32_t
 cf_socket_recv_from_all(cf_socket *sock, void *buffp, size_t size, int32_t flags,
 		cf_sock_addr *addr, int32_t timeout)
 {
+	cf_assert(sock->ssl == NULL, CF_SOCKET, "cannot use cf_socket_recv_from_all() with TLS");
+
 	uint8_t *buff = (uint8_t *) buffp;
 	cf_detail(CF_SOCKET, "Blocking receive on FD %d, size = %zu", sock->fd, size);
 	size_t off = 0;
@@ -1545,17 +1541,17 @@ cf_poll_destroy(cf_poll poll)
 }
 
 #define RESP_SIZE (2 * 1024 * 1024)
-#define MAX_INTERS 50
-#define MAX_ADDRS 50
+#define MAX_INTERS 500
+#define MAX_ADDRS 20
 
 typedef struct inter_entry_s {
 	uint32_t index;
-	char name[100];
+	char name[50];
 	bool def_route;
 	bool up;
 	uint32_t mtu;
 	uint32_t mac_addr_len;
-	uint8_t mac_addr[100];
+	uint8_t mac_addr[50];
 	uint32_t n_addrs;
 	cf_ip_addr addrs[MAX_ADDRS];
 
@@ -1583,7 +1579,7 @@ typedef struct cb_context_s {
 	bool has_local;
 	bool has_index;
 	bool has_priority;
-	char curr_label[100];
+	char curr_label[50];
 	cf_ip_addr curr_address;
 	uint32_t curr_index;
 	uint32_t curr_priority;
@@ -1656,11 +1652,6 @@ netlink_dump(int32_t type, int32_t filter1, int32_t filter2a, int32_t filter2b, 
 
 	uint8_t *resp = cf_malloc(RESP_SIZE);
 
-	if (resp == NULL) {
-		cf_crash(CF_SOCKET, "Out of memory");
-		goto cleanup1;
-	}
-
 	memset(resp, 0, RESP_SIZE);
 	bool done = false;
 
@@ -1698,7 +1689,9 @@ netlink_dump(int32_t type, int32_t filter1, int32_t filter2a, int32_t filter2b, 
 			}
 
 			if (h->nlmsg_type == NLMSG_ERROR) {
-				cf_warning(CF_SOCKET, "Received netlink error message");
+				int32_t *err = NLMSG_DATA(h);
+				cf_warning(CF_SOCKET, "Received netlink error message: %d (%s)",
+						-*err, cf_strerror(-*err));
 				goto cleanup2;
 			}
 
@@ -2221,7 +2214,7 @@ cf_inter_addr_to_index_and_name(const cf_ip_addr *addr, int32_t *index, char **n
 		for (uint32_t k = 0; k < entry->n_addrs; ++k) {
 			if (cf_ip_addr_compare(&entry->addrs[k], addr) == 0) {
 				if (name != NULL) {
-					*name = safe_strdup(entry->name);
+					*name = cf_strdup(entry->name);
 				}
 
 				if (index != NULL) {
@@ -2256,12 +2249,12 @@ cf_inter_expand_bond(const char *if_name, char **out_names, uint32_t *n_out)
 			cf_crash(CF_SOCKET, "Output buffer overflow");
 		}
 
-		out_names[n] = safe_strdup(entry->name);
+		out_names[n] = cf_strdup(entry->name);
 		++n;
 	}
 
 	if (n == 0) {
-		out_names[0] = safe_strdup(if_name);
+		out_names[0] = cf_strdup(if_name);
 		n = 1;
 	}
 

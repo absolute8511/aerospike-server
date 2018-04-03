@@ -71,10 +71,6 @@ cf_atomic_int g_num_msgs = 0;
 // Total number of "msg" objects allocated per type:
 cf_atomic_int g_num_msgs_by_type[M_TYPE_MAX] = { 0 };
 
-// Number of "msg" objects per type that can be allocated. (Default to -1,
-// meaning there is no limit on allowed number of "msg" objects per type.)
-static int64_t g_max_msgs_per_type = -1;
-
 static msg_type_entry g_mte[M_TYPE_MAX];
 
 
@@ -114,13 +110,6 @@ mf_destroy(msg_field *mf)
 //==========================================================
 // Public API - object accounting.
 //
-
-// Limit the maximum number of "msg" objects per type (-1 means unlimited.)
-void
-msg_set_max_msgs_per_type(int64_t max_msgs)
-{
-	g_max_msgs_per_type = max_msgs;
-}
 
 // Call this instead of freeing msg directly, to keep track of all msgs.
 void
@@ -165,8 +154,6 @@ msg_type_register(msg_type type, const msg_template *mt, size_t mt_sz,
 
 	msg_template *table = cf_calloc(mte->entry_count, sizeof(msg_template));
 
-	cf_assert(table, CF_MSG, "memory");
-
 	for (uint16_t i = 0; i < mt_count; i++) {
 		table[mt[i].id] = mt[i];
 	}
@@ -178,15 +165,8 @@ msg_type_register(msg_type type, const msg_template *mt, size_t mt_sz,
 msg *
 msg_create(msg_type type)
 {
-	if (type >= M_TYPE_MAX || ! g_mte[type].mt) {
-		return NULL;
-	}
-
-	// Place a limit on the number of "msg" objects of each type that may be
-	// allocated at a given time. (The default value of -1 means no limit.)
-	if (g_max_msgs_per_type > 0 &&
-			(int64_t)g_num_msgs_by_type[type] >= g_max_msgs_per_type) {
-		cf_warning(CF_MSG, "refusing to allocate more than %ld msg of type %d", g_max_msgs_per_type, type);
+	// Caller validates type is in range - this validates it's not unused.
+	if (! g_mte[type].mt) {
 		return NULL;
 	}
 
@@ -195,8 +175,6 @@ msg_create(msg_type type)
 	size_t u_sz = sizeof(msg) + (sizeof(msg_field) * mt_count);
 	size_t a_sz = u_sz + (size_t)mte->scratch_sz;
 	msg *m = cf_rc_alloc(a_sz);
-
-	cf_assert(m, CF_MSG, "cf_rc_alloc");
 
 	m->n_fields = mt_count;
 	m->bytes_used = (uint32_t)u_sz;
@@ -513,28 +491,10 @@ msg_set_uint32(msg *m, int field_id, uint32_t v)
 }
 
 int
-msg_set_int32(msg *m, int field_id, int32_t v)
-{
-	m->f[field_id].is_set = true;
-	m->f[field_id].u.i32 = v;
-
-	return 0;
-}
-
-int
 msg_set_uint64(msg *m, int field_id, uint64_t v)
 {
 	m->f[field_id].is_set = true;
 	m->f[field_id].u.ui64 = v;
-
-	return 0;
-}
-
-int
-msg_set_int64(msg *m, int field_id, int64_t v)
-{
-	m->f[field_id].is_set = true;
-	m->f[field_id].u.i64 = v;
 
 	return 0;
 }
@@ -559,7 +519,6 @@ msg_set_str(msg *m, int field_id, const char *v, msg_set_type type)
 		}
 		else {
 			mf->u.str = cf_strdup(v);
-			cf_assert(mf->u.str, CF_MSG, "malloc");
 			mf->is_free = true;
 		}
 	}
@@ -595,7 +554,6 @@ msg_set_buf(msg *m, int field_id, const uint8_t *v, size_t sz,
 		}
 		else {
 			mf->u.buf = cf_malloc(sz);
-			cf_assert(mf->u.buf, CF_MSG, "malloc");
 			mf->is_free = true;
 		}
 
@@ -625,9 +583,6 @@ msg_set_uint32_array_size(msg *m, int field_id, uint32_t count)
 
 	mf->field_sz = (uint32_t)(count * sizeof(uint32_t));
 	mf->u.ui32_a = cf_malloc(mf->field_sz);
-
-	cf_assert(mf->u.ui32_a, CF_MSG, "malloc");
-
 	mf->is_set = true;
 	mf->is_free = true;
 
@@ -656,9 +611,6 @@ msg_set_uint64_array_size(msg *m, int field_id, uint32_t count)
 
 	mf->field_sz = (uint32_t)(count * sizeof(uint64_t));
 	mf->u.ui64_a = cf_malloc(mf->field_sz);
-
-	cf_assert(mf->u.ui64_a, CF_MSG, "malloc");
-
 	mf->is_set = true;
 	mf->is_free = true;
 
@@ -693,8 +645,6 @@ msg_msgpack_list_set_uint32(msg *m, int field_id, const uint32_t *buf,
 
 	mf->field_sz = a_sz;
 	mf->u.any_buf = cf_malloc(a_sz);
-
-	cf_assert(mf->u.any_buf, CF_MSG, "malloc");
 
 	as_packer pk = {
 			.buffer = mf->u.any_buf,
@@ -737,8 +687,6 @@ msg_msgpack_list_set_buf(msg *m, int field_id, const cf_vector *v)
 
 	mf->field_sz = a_sz;
 	mf->u.any_buf = cf_malloc(a_sz);
-
-	cf_assert(mf->u.any_buf, CF_MSG, "malloc");
 
 	as_packer pk = {
 			.buffer = mf->u.any_buf,
@@ -798,18 +746,6 @@ msg_get_uint32(const msg *m, int field_id, uint32_t *val_r)
 }
 
 int
-msg_get_int32(const msg *m, int field_id, int32_t *val_r)
-{
-	if (! &m->f[field_id].is_set) {
-		return -1;
-	}
-
-	*val_r = m->f[field_id].u.i32;
-
-	return 0;
-}
-
-int
 msg_get_uint64(const msg *m, int field_id, uint64_t *val_r)
 {
 	if (! m->f[field_id].is_set) {
@@ -817,18 +753,6 @@ msg_get_uint64(const msg *m, int field_id, uint64_t *val_r)
 	}
 
 	*val_r = m->f[field_id].u.ui64;
-
-	return 0;
-}
-
-int
-msg_get_int64(const msg *m, int field_id, int64_t *val_r)
-{
-	if (! m->f[field_id].is_set) {
-		return -1;
-	}
-
-	*val_r = m->f[field_id].u.i64;
 
 	return 0;
 }
@@ -846,7 +770,6 @@ msg_get_str(const msg *m, int field_id, char **str_r, size_t *sz_r,
 	}
 	else if (type == MSG_GET_COPY_MALLOC) {
 		*str_r = cf_strdup(m->f[field_id].u.str);
-		cf_assert(*str_r, CF_MSG, "malloc");
 	}
 	else {
 		cf_crash(CF_MSG, "msg_get_str: illegal msg_get_type");
@@ -872,7 +795,6 @@ msg_get_buf(const msg *m, int field_id, uint8_t **buf_r, size_t *sz_r,
 	}
 	else if (type == MSG_GET_COPY_MALLOC) {
 		*buf_r = cf_malloc(m->f[field_id].field_sz);
-		cf_assert(*buf_r, CF_MSG, "malloc");
 		memcpy(*buf_r, m->f[field_id].u.buf, m->f[field_id].field_sz);
 	}
 	else {
@@ -887,7 +809,8 @@ msg_get_buf(const msg *m, int field_id, uint8_t **buf_r, size_t *sz_r,
 }
 
 int
-msg_get_uint32_array(const msg *m, int field_id, uint32_t index, uint32_t *val_r)
+msg_get_uint32_array(const msg *m, int field_id, uint32_t index,
+		uint32_t *val_r)
 {
 	const msg_field *mf = &m->f[field_id];
 
@@ -915,7 +838,8 @@ msg_get_uint64_array_count(const msg *m, int field_id, uint32_t *count_r)
 }
 
 int
-msg_get_uint64_array(const msg *m, int field_id, uint32_t index, uint64_t *val_r)
+msg_get_uint64_array(const msg *m, int field_id, uint32_t index,
+		uint64_t *val_r)
 {
 	const msg_field *mf = &m->f[field_id];
 
@@ -969,9 +893,11 @@ msg_msgpack_container_get_count(const msg *m, int field_id, uint32_t *count_r)
 }
 
 bool
-msg_msgpack_list_get_uint32_array(const msg *m, int field_id, uint32_t **buf_r,
+msg_msgpack_list_get_uint32_array(const msg *m, int field_id, uint32_t *buf_r,
 		uint32_t *count_r)
 {
+	cf_assert(buf_r, CF_MSG, "buf_r is null");
+
 	const msg_field *mf = &m->f[field_id];
 
 	if (! mf->is_set) {
@@ -1001,20 +927,7 @@ msg_msgpack_list_get_uint32_array(const msg *m, int field_id, uint32_t **buf_r,
 		return false;
 	}
 
-	bool need_free = false;
-
-	if (! *buf_r) {
-		*buf_r = cf_malloc(sizeof(uint64_t) * (size_t)count);
-
-		if (! *buf_r) {
-			cf_warning(CF_MSG, "malloc failed - count %ld", count);
-			return false;
-		}
-
-		*count_r = (uint32_t)count;
-		need_free = true;
-	}
-	else if (*count_r < (uint32_t)count) {
+	if (*count_r < (uint32_t)count) {
 		cf_warning(CF_MSG, "count_r %u < %ld too small", *count_r, count);
 		return false;
 	}
@@ -1024,17 +937,11 @@ msg_msgpack_list_get_uint32_array(const msg *m, int field_id, uint32_t **buf_r,
 		int ret = as_unpack_uint64(&pk, &val);
 
 		if (ret != 0 || (val & (0xFFFFffffUL << 32)) != 0) {
-			if (need_free) {
-				cf_free(*buf_r);
-				*buf_r = NULL;
-				*count_r = 0;
-			}
-
 			cf_warning(CF_MSG, "i %ld/%ld invalid packed uint32 ret %d val 0x%lx", i, count, ret, val);
 			return false;
 		}
 
-		(*buf_r)[i] = (uint32_t)val;
+		buf_r[i] = (uint32_t)val;
 	}
 
 	*count_r = (uint32_t)count;
@@ -1286,7 +1193,6 @@ msg_field_save(msg *m, msg_field *mf)
 		}
 		else {
 			void *buf = cf_malloc(mf->field_sz);
-			cf_assert(buf, CF_MSG, "malloc");
 
 			memcpy(buf, mf->u.any_buf, mf->field_sz);
 			mf->u.any_buf = buf;

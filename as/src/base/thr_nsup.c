@@ -50,24 +50,32 @@
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/index.h"
-#include "base/ldt.h"
 #include "base/proto.h"
 #include "base/thr_sindex.h"
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
+#include "base/xdr_serverside.h"
 #include "fabric/partition.h"
 #include "storage/storage.h"
 
 
 //==========================================================
-// Globals.
+// Typedefs & constants.
 //
 
-pthread_t g_nsup_thread;
+#define EVAL_STOP_WRITES_PERIOD 10 // seconds
 
 
 //==========================================================
-// Eviction during cold-start.
+// Forward declarations.
+//
+
+static bool eval_stop_writes(as_namespace *ns);
+static bool eval_hwm_breached(as_namespace *ns);
+
+
+//==========================================================
+// Eviction during cold start.
 //
 // No real need for this to be in thr_nsup.c, except maybe
 // for convenient comparison to run-time eviction.
@@ -78,8 +86,8 @@ pthread_t g_nsup_thread;
 
 
 //------------------------------------------------
-// Reduce callback prepares for cold-start eviction.
-// - builds cold-start eviction histogram
+// Reduce callback prepares for cold start eviction.
+// - builds cold start eviction histogram
 //
 typedef struct cold_start_evict_prep_info_s {
 	as_namespace*		ns;
@@ -104,7 +112,7 @@ cold_start_evict_prep_reduce_cb(as_index_ref* r_ref, void* udata)
 }
 
 //------------------------------------------------
-// Threads prepare for cold-start eviction.
+// Threads prepare for cold start eviction.
 //
 typedef struct evict_prep_thread_info_s {
 	as_namespace*		ns;
@@ -140,7 +148,7 @@ run_cold_start_evict_prep(void* udata)
 }
 
 //------------------------------------------------
-// Reduce callback evicts records on cold-start.
+// Reduce callback evicts records on cold start.
 // - evicts based on calculated threshold
 //
 typedef struct cold_start_evict_info_s {
@@ -176,7 +184,7 @@ cold_start_evict_reduce_cb(as_index_ref* r_ref, void* udata)
 }
 
 //------------------------------------------------
-// Threads do cold-start eviction.
+// Threads do cold start eviction.
 //
 typedef struct evict_thread_info_s {
 	as_namespace*	ns;
@@ -220,7 +228,7 @@ run_cold_start_evict(void* udata)
 }
 
 //------------------------------------------------
-// Get the cold-start histogram's TTL range.
+// Get the cold start histogram's TTL range.
 //
 // TODO - ttl_range to 32 bits?
 static uint64_t
@@ -243,12 +251,12 @@ get_cold_start_ttl_range(as_namespace* ns, uint32_t now)
 		max_void_time = cap;
 	}
 
-	// Convert to TTL - used for cold-start histogram range.
+	// Convert to TTL - used for cold start histogram range.
 	return max_void_time > now ? max_void_time - now : 0;
 }
 
 //------------------------------------------------
-// Set cold-start eviction threshold.
+// Set cold start eviction threshold.
 //
 static uint64_t
 set_cold_start_threshold(as_namespace* ns, linear_hist* hist)
@@ -259,10 +267,10 @@ set_cold_start_threshold(as_namespace* ns, linear_hist* hist)
 
 	if (subtotal == 0) {
 		if (all_buckets) {
-			cf_warning(AS_NSUP, "{%s} cold-start found no records eligible for eviction", ns->name);
+			cf_warning(AS_NSUP, "{%s} cold start found no records eligible for eviction", ns->name);
 		}
 		else {
-			cf_warning(AS_NSUP, "{%s} cold-start found no records below eviction void-time %u - threshold bucket %u, width %u sec, count %lu > target %lu (%.1f pct)",
+			cf_warning(AS_NSUP, "{%s} cold start found no records below eviction void-time %u - threshold bucket %u, width %u sec, count %lu > target %lu (%.1f pct)",
 					ns->name, threshold.value, threshold.bucket_index,
 					threshold.bucket_width, threshold.bucket_count,
 					threshold.target_count, (float)ns->evict_tenths_pct / 10.0);
@@ -272,7 +280,7 @@ set_cold_start_threshold(as_namespace* ns, linear_hist* hist)
 	}
 
 	if (all_buckets) {
-		cf_warning(AS_NSUP, "{%s} cold-start would evict all %lu records eligible - not evicting!", ns->name, subtotal);
+		cf_warning(AS_NSUP, "{%s} cold start would evict all %lu records eligible - not evicting!", ns->name, subtotal);
 		return 0;
 	}
 
@@ -282,7 +290,7 @@ set_cold_start_threshold(as_namespace* ns, linear_hist* hist)
 }
 
 //------------------------------------------------
-// Cold-start eviction, called by drv_ssd.c.
+// Cold start eviction, called by drv_ssd.c.
 // Returns false if a serious problem occurred and
 // we can't proceed.
 //
@@ -304,20 +312,15 @@ as_cold_start_evict_if_needed(as_namespace* ns)
 		cf_atomic32_set(&ns->cold_start_threshold_void_time, now);
 	}
 
-	// Evaluate whether or not we need to evict.
-	bool hwm_breached = false, stop_writes = false;
-
-	as_namespace_eval_write_state(ns, &hwm_breached, &stop_writes);
-
 	// Are we out of control?
-	if (stop_writes) {
+	if (eval_stop_writes(ns)) {
 		cf_warning(AS_NSUP, "{%s} hit stop-writes limit", ns->name);
 		pthread_mutex_unlock(&ns->cold_start_evict_lock);
 		return false;
 	}
 
 	// If we don't need to evict, we're done.
-	if (! hwm_breached) {
+	if (! eval_hwm_breached(ns)) {
 		pthread_mutex_unlock(&ns->cold_start_evict_lock);
 		return true;
 	}
@@ -329,8 +332,8 @@ as_cold_start_evict_if_needed(as_namespace* ns)
 		return true;
 	}
 
-	// We may evict - set up the cold-start eviction histogram.
-	cf_info(AS_NSUP, "{%s} cold-start building eviction histogram ...", ns->name);
+	// We may evict - set up the cold start eviction histogram.
+	cf_info(AS_NSUP, "{%s} cold start building eviction histogram ...", ns->name);
 
 	uint32_t ttl_range = (uint32_t)get_cold_start_ttl_range(ns, now);
 	uint32_t n_buckets = MAX(ns->evict_hist_buckets, COLD_START_HIST_MIN_BUCKETS);
@@ -396,7 +399,7 @@ as_cold_start_evict_if_needed(as_namespace* ns)
 		return true;
 	}
 
-	cf_info(AS_NSUP, "{%s} cold-start found %lu records eligible for eviction, evict ttl %u", ns->name, n_evictable, cf_atomic32_get(ns->cold_start_threshold_void_time) - now);
+	cf_info(AS_NSUP, "{%s} cold start found %lu records eligible for eviction, evict ttl %u", ns->name, n_evictable, cf_atomic32_get(ns->cold_start_threshold_void_time) - now);
 
 	// Reduce all partitions to evict based on the thresholds.
 	evict_thread_info thread_info = {
@@ -419,14 +422,14 @@ as_cold_start_evict_if_needed(as_namespace* ns)
 	}
 	// Now we're single-threaded again.
 
-	cf_info(AS_NSUP, "{%s} cold-start evicted %u records, found %u 0-void-time records", ns->name, thread_info.total_evicted, thread_info.total_0_void_time);
+	cf_info(AS_NSUP, "{%s} cold start evicted %u records, found %u 0-void-time records", ns->name, thread_info.total_evicted, thread_info.total_0_void_time);
 
 	pthread_mutex_unlock(&ns->cold_start_evict_lock);
 	return true;
 }
 
 //
-// END - Eviction during cold-start.
+// END - Eviction during cold start.
 //==========================================================
 
 //==========================================================
@@ -459,10 +462,9 @@ static int
 garbage_collect_next_prole_partition(as_namespace* ns, int pid)
 {
 	as_partition_reservation rsv;
-	AS_PARTITION_RESERVATION_INIT(rsv);
 
-	// Look for the next prole partition past pid, but loop only once over all
-	// partitions.
+	// Look for the next non-master partition past pid, but loop only once over
+	// all partitions.
 	for (int n = 0; n < AS_PARTITIONS; n++) {
 		// Increment pid and wrap if necessary.
 		if (++pid == AS_PARTITIONS) {
@@ -471,13 +473,14 @@ garbage_collect_next_prole_partition(as_namespace* ns, int pid)
 
 		// Note - may want a new method to get these under a single partition
 		// lock, but for now just do the two separate reserve calls.
-		if (0 == as_partition_reserve_write(ns, pid, &rsv, 0, 0)) {
+		if (as_partition_reserve_write(ns, pid, &rsv, NULL) == 0) {
 			// This is a master partition - continue.
 			as_partition_release(&rsv);
-			AS_PARTITION_RESERVATION_INIT(rsv);
 		}
-		else if (0 == as_partition_reserve_read(ns, pid, &rsv, 0, 0)) {
-			// This is a prole partition - garbage collect and break.
+		else {
+			as_partition_reserve(ns, pid, &rsv);
+
+			// This is a non-master partition - garbage collect and break.
 			garbage_collect_info cb_info;
 
 			cb_info.ns = ns;
@@ -489,7 +492,7 @@ garbage_collect_next_prole_partition(as_namespace* ns, int pid)
 			as_index_reduce_live(rsv.tree, garbage_collect_reduce_cb, &cb_info);
 
 			if (cb_info.num_deleted != 0) {
-				cf_info(AS_NSUP, "namespace %s pid %d: %u expired proles",
+				cf_info(AS_NSUP, "namespace %s pid %d: %u expired non-masters",
 						ns->name, pid, cb_info.num_deleted);
 			}
 
@@ -509,8 +512,6 @@ garbage_collect_next_prole_partition(as_namespace* ns, int pid)
 
 
 static cf_queue* g_p_nsup_delete_q = NULL;
-static pthread_t g_nsup_delete_thread;
-static pthread_t g_ldt_sub_gc_thread;
 
 int
 as_nsup_queue_get_size()
@@ -521,7 +522,6 @@ as_nsup_queue_get_size()
 // Make sure a huge nsup deletion wave won't blow delete queue up.
 #define DELETE_Q_SAFETY_THRESHOLD	10000
 #define DELETE_Q_SAFETY_SLEEP_us	1000 // 1 millisecond
-#define LDT_SUB_GC_SAFETY_SLEEP_us  1000
 
 // Wait for delete queue to clear.
 #define DELETE_Q_CLEAR_SLEEP_us		1000 // 1 millisecond
@@ -547,55 +547,18 @@ run_nsup_delete(void* pv_data)
 
 		// Generate a delete transaction for this digest, and hand it to tsvc.
 
-		size_t sz = sizeof(cl_msg);
-		size_t ns_name_len = strlen(q_item.ns->name);
+		uint8_t info2 = AS_MSG_INFO2_WRITE | AS_MSG_INFO2_DELETE;
 
-		sz += sizeof(as_msg_field) + ns_name_len;
-		sz += sizeof(as_msg_field) + sizeof(cf_digest);
+		cl_msg *msgp = as_msg_create_internal(q_item.ns->name, &q_item.digest,
+				0, info2, 0);
 
-		cl_msg* msgp = cf_malloc(sz + 32); // TODO - remove the extra 32
-
-		cf_assert(msgp, AS_NSUP, "malloc failed: %s", cf_strerror(errno));
-
-		msgp->proto.version = PROTO_VERSION;
-		msgp->proto.type = PROTO_TYPE_AS_MSG;
-		msgp->proto.sz = sz - sizeof(as_proto);
-		msgp->msg.header_sz = sizeof(as_msg);
-		msgp->msg.info1 = 0;
-		msgp->msg.info2 = AS_MSG_INFO2_WRITE | AS_MSG_INFO2_DELETE;
-		msgp->msg.info3 = 0;
-		msgp->msg.unused = 0;
-		msgp->msg.generation = 0;
-		msgp->msg.record_ttl = 0;
-		msgp->msg.transaction_ttl = 0;
-		msgp->msg.n_fields = 2;
-		msgp->msg.n_ops = 0;
-
-		uint8_t* buf = msgp->msg.data;
-		as_msg_field* fp;
-
-		fp = (as_msg_field*)buf;
-		fp->type = AS_MSG_FIELD_TYPE_NAMESPACE;
-		fp->field_sz = 1 + ns_name_len; // 1 for the type field
-		memcpy(fp->data, q_item.ns->name, ns_name_len);
-		buf += sizeof(as_msg_field) + ns_name_len;
-
-		fp = (as_msg_field*)buf;
-		fp->type = AS_MSG_FIELD_TYPE_DIGEST_RIPE;
-		fp->field_sz = 1 + sizeof(cf_digest); // 1 for the type field
-		*(cf_digest*)fp->data = q_item.digest;
-
-		// Leave in network order. The fact that the digest is filled out means
-		// it won't get swapped back.
-
-		// INIT_TR
 		as_transaction tr;
 		as_transaction_init_head(&tr, NULL, msgp);
-		tr.origin = FROM_NSUP;
-		tr.from_flags |= FROM_FLAG_NSUP_DELETE;
-		tr.start_time = cf_getns();
+
 		as_transaction_set_msg_field_flag(&tr, AS_MSG_FIELD_TYPE_NAMESPACE);
 		as_transaction_set_msg_field_flag(&tr, AS_MSG_FIELD_TYPE_DIGEST_RIPE);
+		tr.origin = FROM_NSUP;
+		tr.start_time = cf_getns();
 
 		as_tsvc_enqueue(&tr);
 
@@ -619,9 +582,7 @@ queue_for_delete(as_namespace* ns, cf_digest* p_digest)
 	q_item.ns = ns; // not bothering with namespace reservation
 	q_item.digest = *p_digest;
 
-	if (CF_QUEUE_OK != cf_queue_push(g_p_nsup_delete_q, (void*)&q_item)) {
-		cf_crash(AS_NSUP, "nsup delete queue push failed");
-	}
+	cf_queue_push(g_p_nsup_delete_q, (void*)&q_item);
 }
 
 //------------------------------------------------
@@ -783,7 +744,7 @@ reduce_master_partitions(as_namespace* ns, as_index_reduce_fn cb, void* udata, u
 	as_partition_reservation rsv;
 
 	for (int n = 0; n < AS_PARTITIONS; n++) {
-		if (0 != as_partition_reserve_write(ns, n, &rsv, 0, 0)) {
+		if (as_partition_reserve_write(ns, n, &rsv, NULL) != 0) {
 			continue;
 		}
 
@@ -795,32 +756,6 @@ reduce_master_partitions(as_namespace* ns, as_index_reduce_fn cb, void* udata, u
 			usleep(DELETE_Q_SAFETY_SLEEP_us);
 			(*p_n_waits)++;
 		}
-
-		cf_debug(AS_NSUP, "{%s} %s done partition index %d, waits %u", ns->name, tag, n, *p_n_waits);
-	}
-}
-
-//------------------------------------------------
-// Reduce all subtrees, using specified
-// functionality.
-//
-static void
-sub_reduce_partitions(as_namespace* ns, as_index_reduce_fn cb, void* udata, uint32_t* p_n_waits, const char* tag)
-{
-	as_partition_reservation rsv;
-
-	for (int n = 0; n < AS_PARTITIONS; n++) {
-		as_partition_reserve_migrate(ns, n, &rsv, 0);
-
-		as_index_reduce(rsv.sub_tree, cb, udata);
-
-		as_partition_release(&rsv);
-
-		usleep(LDT_SUB_GC_SAFETY_SLEEP_us);
-
-		// TODO - add more throttling logic? Also need to become smart about not
-		// reading the record. Can't rely on disk defrag for this because it may
-		// choose not to defrag a block at all.
 
 		cf_debug(AS_NSUP, "{%s} %s done partition index %d, waits %u", ns->name, tag, n, *p_n_waits);
 	}
@@ -869,7 +804,7 @@ get_ttl_range(as_namespace* ns, uint32_t now)
 	as_partition_reservation rsv;
 
 	for (int n = 0; n < AS_PARTITIONS; n++) {
-		if (0 != as_partition_reserve_write(ns, n, &rsv, 0, 0)) {
+		if (as_partition_reserve_write(ns, n, &rsv, NULL) != 0) {
 			continue;
 		}
 
@@ -938,16 +873,12 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 		uint32_t evict_ttl, uint32_t n_general_waits, uint32_t n_clear_waits,
 		uint64_t start_ms)
 {
-	if (n_expired_objects != 0) {
-		cf_atomic64_add(&ns->n_expired_objects, n_expired_objects);
-	}
-
-	if (n_evicted_objects != 0) {
-		cf_atomic64_set(&ns->evict_ttl, evict_ttl);
-		cf_atomic64_add(&ns->n_evicted_objects, n_evicted_objects);
-	}
-
 	ns->non_expirable_objects = n_0_void_time;
+
+	cf_atomic64_add(&ns->n_expired_objects, n_expired_objects);
+	cf_atomic64_add(&ns->n_evicted_objects, n_evicted_objects);
+
+	cf_atomic64_set(&ns->evict_ttl, evict_ttl);
 
 	uint64_t total_duration_ms = cf_getms() - start_ms;
 
@@ -965,45 +896,10 @@ update_stats(as_namespace* ns, uint64_t n_master, uint64_t n_0_void_time,
 }
 
 //------------------------------------------------
-// LDT supervisor thread "run" function.
-//
-void *
-thr_ldt_sup(void *arg)
-{
-	for ( ; ; ) {
-		// Skip 1 second between LDT nsup cycles.
-		struct timespec delay = { 1, 0 };
-		nanosleep(&delay, NULL);
-
-		// Iterate over every namespace.
-		for (int i = 0; i < g_config.n_namespaces; i++) {
-			as_namespace *ns = g_config.namespaces[i];
-
-			if (! ns->ldt_enabled) {
-				cf_detail(AS_LDT, "{%s} ldt sub skip", ns->name);
-				continue;
-			}
-
-			cf_detail(AS_LDT, "{%s} ldt sup start", ns->name);
-
-			ldt_sub_gc_info linfo;
-			linfo.ns = ns;
-
-			uint32_t n_general_waits;
-
-			// Reduce all partitions, cleaning up stale sub-records.
-			sub_reduce_partitions(ns, as_ldt_sub_gc_fn, &linfo, &n_general_waits, "ldt subtree gc");
-		}
-	}
-
-	return NULL;
-}
-
-//------------------------------------------------
 // Namespace supervisor thread "run" function.
 //
 void *
-thr_nsup(void *arg)
+run_nsup(void *arg)
 {
 	// Garbage-collect long-expired proles, one partition per loop.
 	int prole_pids[g_config.n_namespaces];
@@ -1082,15 +978,7 @@ thr_nsup(void *arg)
 
 			// Check whether or not we need to do general eviction.
 
-			bool hwm_breached = false, stop_writes = false;
-
-			as_namespace_eval_write_state(ns, &hwm_breached, &stop_writes);
-
-			// Store the state of the threshold breaches.
-			cf_atomic32_set(&ns->stop_writes, stop_writes ? 1 : 0);
-			cf_atomic32_set(&ns->hwm_breached, hwm_breached ? 1 : 0);
-
-			if (hwm_breached) {
+			if (eval_hwm_breached(ns)) {
 				// Eviction is necessary.
 
 				linear_hist_clear(ns->obj_size_hist, 0, cf_atomic32_get(ns->obj_size_hist_max));
@@ -1204,6 +1092,23 @@ thr_nsup(void *arg)
 }
 
 //------------------------------------------------
+// Namespace stop-writes thread "run" function.
+//
+void *
+run_stop_writes(void *arg)
+{
+	while (true) {
+		sleep(EVAL_STOP_WRITES_PERIOD);
+
+		for (uint32_t ns_ix = 0; ns_ix < g_config.n_namespaces; ns_ix++) {
+			eval_stop_writes(g_config.namespaces[ns_ix]);
+		}
+	}
+
+	return NULL;
+}
+
+//------------------------------------------------
 // Start supervisor threads.
 //
 void
@@ -1213,24 +1118,159 @@ as_nsup_start()
 	srand(time(NULL));
 
 	// Create queue for nsup-generated deletions.
-	if (NULL == (g_p_nsup_delete_q = cf_queue_create(sizeof(record_delete_info), true))) {
-		cf_crash(AS_NSUP, "nsup delete queue create failed");
-	}
+	g_p_nsup_delete_q = cf_queue_create(sizeof(record_delete_info), true);
 
 	cf_info(AS_NSUP, "starting namespace supervisor threads");
 
+	pthread_t thread;
+	pthread_attr_t attrs;
+
+	pthread_attr_init(&attrs);
+	pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_DETACHED);
+
 	// Start thread to handle all nsup-generated deletions.
-	if (0 != pthread_create(&g_nsup_delete_thread, 0, run_nsup_delete, NULL)) {
+	if (0 != pthread_create(&thread, &attrs, run_nsup_delete, NULL)) {
 		cf_crash(AS_NSUP, "nsup delete thread create failed");
 	}
 
 	// Start namespace supervisor thread to do expiration & eviction.
-	if (0 != pthread_create(&g_nsup_thread, NULL, thr_nsup, NULL)) {
+	if (0 != pthread_create(&thread, &attrs, run_nsup, NULL)) {
 		cf_crash(AS_NSUP, "nsup thread create failed");
 	}
 
-	// Start LDT supervisor thread to do all sub-record deletions.
-	if (0 != pthread_create(&g_ldt_sub_gc_thread, 0, thr_ldt_sup, NULL)) {
-		cf_crash(AS_NSUP, "ldt nsup thread create failed");
+	// Start thread to do stop-writes evaluation.
+	if (0 != pthread_create(&thread, &attrs, run_stop_writes, NULL)) {
+		cf_crash(AS_NSUP, "nsup stop-writes thread create failed");
 	}
+}
+
+
+//==========================================================
+// Local helpers.
+//
+
+static bool
+eval_stop_writes(as_namespace *ns)
+{
+	// Compute the high-watermark.
+	uint64_t mem_stop_writes = (ns->memory_size * ns->stop_writes_pct) / 100;
+
+	// Compute device available percent for namespace.
+	int device_avail_pct = 0;
+
+	as_storage_stats(ns, &device_avail_pct, NULL);
+
+	// Compute memory usage for namespace.
+	uint64_t index_sz = ns->n_objects * as_index_size_get(ns);
+	uint64_t tombstone_index_sz = ns->n_tombstones * as_index_size_get(ns);
+	uint64_t sindex_sz = ns->n_bytes_sindex_memory;
+	uint64_t data_in_memory_sz = ns->n_bytes_memory;
+	uint64_t memory_sz = index_sz + tombstone_index_sz + data_in_memory_sz + sindex_sz;
+
+	// Possible reasons for eviction or stopping writes.
+	static const char* reasons[] = {
+			NULL,									// 0x0
+			"(memory)",								// 0x1
+			"(device-avail-pct)",					// 0x2
+			"(memory & device-avail-pct)",			// 0x3 (0x1 | 0x2)
+			"(xdr-log)",							// 0x4
+			"(memory & xdr-log)",					// 0x5 (0x1 | 0x4)
+			"(device-avail-pct & xdr-log)",			// 0x6 (0x2 | 0x4)
+			"(memory & device-avail-pct & xdr-log)"	// 0x7 (0x1 | 0x2 | 0x4)
+	};
+
+	// Check if the writes should be stopped.
+	bool stop_writes = false;
+	uint32_t why_stopped = 0x0;
+
+	if (memory_sz > mem_stop_writes) {
+		stop_writes = true;
+		why_stopped = 0x1;
+	}
+
+	if (device_avail_pct < (int)ns->storage_min_avail_pct) {
+		stop_writes = true;
+		why_stopped |= 0x2;
+	}
+
+	if (is_xdr_digestlog_low(ns)) {
+		stop_writes = true;
+		why_stopped |= 0x4;
+	}
+
+	if (stop_writes) {
+		cf_warning(AS_NSUP, "{%s} breached stop-writes limit %s, memory sz:%lu (%lu + %lu) limit:%lu, disk avail-pct:%d",
+				ns->name, reasons[why_stopped],
+				memory_sz, index_sz, data_in_memory_sz, mem_stop_writes,
+				device_avail_pct);
+	}
+	else {
+		cf_debug(AS_NSUP, "{%s} stop-writes limit not breached, memory sz:%lu (%lu + %lu) limit:%lu, disk avail-pct:%d",
+				ns->name,
+				memory_sz, index_sz, data_in_memory_sz, mem_stop_writes,
+				device_avail_pct);
+	}
+
+	cf_atomic32_set(&ns->stop_writes, stop_writes ? 1 : 0);
+
+	return stop_writes;
+}
+
+static bool
+eval_hwm_breached(as_namespace *ns)
+{
+	// Compute the high-watermark - memory.
+	uint64_t mem_hwm = (ns->memory_size * ns->hwm_memory_pct) / 100;
+
+	// Compute the high-watermark - disk.
+	uint64_t ssd_hwm = (ns->ssd_size * ns->hwm_disk_pct) / 100;
+
+	// Compute disk usage for namespace.
+	uint64_t used_disk_sz = 0;
+
+	as_storage_stats(ns, NULL, &used_disk_sz);
+
+	// Compute memory usage for namespace.
+	uint64_t index_sz = ns->n_objects * as_index_size_get(ns);
+	uint64_t tombstone_index_sz = ns->n_tombstones * as_index_size_get(ns);
+	uint64_t sindex_sz = ns->n_bytes_sindex_memory;
+	uint64_t data_in_memory_sz = ns->n_bytes_memory;
+	uint64_t memory_sz = index_sz + tombstone_index_sz + data_in_memory_sz + sindex_sz;
+
+	// Possible reasons for eviction.
+	// (We don't use all combinations, but in case we change our minds...)
+	static const char* reasons[] = {
+		NULL, "(memory)", "(disk)", "(memory & disk)"
+	};
+
+	// Check if either high water mark is breached.
+	bool hwm_breached = false;
+	uint32_t how_breached = 0x0;
+
+	if (memory_sz > mem_hwm) {
+		hwm_breached = true;
+		how_breached = 0x1;
+	}
+
+	if (used_disk_sz > ssd_hwm) {
+		hwm_breached = true;
+		how_breached |= 0x2;
+	}
+
+	if (hwm_breached) {
+		cf_warning(AS_NSUP, "{%s} breached eviction hwm %s, memory sz:%lu (%lu + %lu) hwm:%lu, disk sz:%lu hwm:%lu",
+				ns->name, reasons[how_breached],
+				memory_sz, index_sz, data_in_memory_sz, mem_hwm,
+				used_disk_sz, ssd_hwm);
+	}
+	else {
+		cf_debug(AS_NSUP, "{%s} neither eviction hwm breached, memory sz:%lu (%lu + %lu) hwm:%lu, disk sz:%lu hwm:%lu",
+				ns->name,
+				memory_sz, index_sz, data_in_memory_sz, mem_hwm,
+				used_disk_sz, ssd_hwm);
+	}
+
+	cf_atomic32_set(&ns->hwm_breached, hwm_breached ? 1 : 0);
+
+	return hwm_breached;
 }

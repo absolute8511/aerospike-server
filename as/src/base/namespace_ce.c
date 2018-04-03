@@ -44,12 +44,12 @@ check_capacity(uint32_t capacity)
 		as_namespace *ns = g_config.namespaces[i];
 		uint64_t stage_size = (uint64_t)as_index_size_get(ns) * capacity;
 
-		if ((test_index_stages[i] = cf_malloc(stage_size)) == NULL) {
+		if ((test_index_stages[i] = cf_try_malloc(stage_size)) == NULL) {
 			break;
 		}
 
 		// Memory for overhead and data, proportional to (= to) stage size.
-		if ((test_data_blocks[i] = cf_malloc(stage_size)) == NULL) {
+		if ((test_data_blocks[i] = cf_try_malloc(stage_size)) == NULL) {
 			cf_free(test_index_stages[i]);
 			break;
 		}
@@ -93,7 +93,7 @@ setup_namespace(as_namespace* ns, uint32_t stage_capacity)
 {
 	ns->cold_start = true;
 
-	cf_info(AS_NAMESPACE, "{%s} beginning COLD start", ns->name);
+	cf_info(AS_NAMESPACE, "{%s} beginning cold start", ns->name);
 
 	//--------------------------------------------
 	// Set up the set name vmap.
@@ -101,15 +101,7 @@ setup_namespace(as_namespace* ns, uint32_t stage_capacity)
 
 	ns->p_sets_vmap = (cf_vmapx*)cf_malloc(cf_vmapx_sizeof(sizeof(as_set), AS_SET_MAX_COUNT));
 
-	if (! ns->p_sets_vmap) {
-		cf_crash(AS_NAMESPACE, "{%s} can't allocate sets vmap", ns->name);
-	}
-
-	cf_vmapx_err vmap_result = cf_vmapx_create(ns->p_sets_vmap, sizeof(as_set), AS_SET_MAX_COUNT, 1024, AS_SET_NAME_MAX_SIZE);
-
-	if (vmap_result != CF_VMAPX_OK) {
-		cf_crash(AS_NAMESPACE, "{%s} can't create sets vmap: %d", ns->name, vmap_result);
-	}
+	cf_vmapx_init(ns->p_sets_vmap, sizeof(as_set), AS_SET_MAX_COUNT, 1024, AS_SET_NAME_MAX_SIZE);
 
 	// Transfer configuration file information about sets.
 	if (! as_namespace_configure_sets(ns)) {
@@ -123,15 +115,7 @@ setup_namespace(as_namespace* ns, uint32_t stage_capacity)
 	if (! ns->single_bin) {
 		ns->p_bin_name_vmap = (cf_vmapx*)cf_malloc(cf_vmapx_sizeof(VMAP_BIN_NAME_MAX_SZ, MAX_BIN_NAMES));
 
-		if (! ns->p_bin_name_vmap) {
-			cf_crash(AS_NAMESPACE, "{%s} can't allocate bins vmap", ns->name);
-		}
-
-		vmap_result = cf_vmapx_create(ns->p_bin_name_vmap, VMAP_BIN_NAME_MAX_SZ, MAX_BIN_NAMES, 4096, VMAP_BIN_NAME_MAX_SZ);
-
-		if (vmap_result != CF_VMAPX_OK) {
-			cf_crash(AS_NAMESPACE, "{%s} can't create bins vmap: %d", ns->name, vmap_result);
-		}
+		cf_vmapx_init(ns->p_bin_name_vmap, VMAP_BIN_NAME_MAX_SZ, MAX_BIN_NAMES, 4096, VMAP_BIN_NAME_MAX_SZ);
 	}
 
 	//--------------------------------------------
@@ -140,15 +124,7 @@ setup_namespace(as_namespace* ns, uint32_t stage_capacity)
 
 	ns->arena = (cf_arenax*)cf_malloc(cf_arenax_sizeof());
 
-	if (! ns->arena) {
-		cf_crash(AS_NAMESPACE, "{%s} can't allocate index arena", ns->name);
-	}
-
-	cf_arenax_err arena_result = cf_arenax_create(ns->arena, 0, as_index_size_get(ns), stage_capacity, 0, CF_ARENAX_BIGLOCK);
-
-	if (arena_result != CF_ARENAX_OK) {
-		cf_crash(AS_NAMESPACE, "{%s} can't create arena: %s", ns->name, cf_arenax_errstr(arena_result));
-	}
+	cf_arenax_init(ns->arena, 0, as_index_size_get(ns), stage_capacity, 0, CF_ARENAX_BIGLOCK);
 }
 
 void

@@ -48,6 +48,7 @@
 #include "citrusleaf/cf_queue.h"
 #include "citrusleaf/cf_random.h"
 
+#include "cf_mutex.h"
 #include "fault.h"
 #include "hist.h"
 #include "vmapx.h"
@@ -55,7 +56,6 @@
 #include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/index.h"
-#include "base/ldt.h"
 #include "base/proto.h"
 #include "base/rec_props.h"
 #include "base/secondary_index.h"
@@ -77,16 +77,7 @@ extern bool as_cold_start_evict_if_needed(as_namespace* ns);
 // Constants.
 //
 
-#define MAX_WRITE_BLOCK_SIZE	(1024 * 1024)
-#define LOAD_BUF_SIZE			MAX_WRITE_BLOCK_SIZE // must be multiple of MAX_WRITE_BLOCK_SIZE
-
-// We round usable device/file size down to SSD_DEFAULT_HEADER_LENGTH plus a
-// multiple of LOAD_BUF_SIZE. If we ever change SSD_DEFAULT_HEADER_LENGTH we
-// may break backward compatibility since an old header with different size
-// could render the rounding ineffective. (There are backward compatibility
-// issues anyway if we think we need to change SSD_DEFAULT_HEADER_LENGTH...)
-#define SSD_DEFAULT_HEADER_LENGTH	(1024 * 1024)
-#define SSD_HEADER_INFO_STRIDE		(128)
+#define SSD_HEADER_INFO_STRIDE	(128)
 
 #define DEFRAG_STARTUP_RESERVE	4
 #define DEFRAG_RUNTIME_RESERVE	4
@@ -101,18 +92,6 @@ typedef struct info_buf_s {
 	uint32_t unused; // used to be len, but was never read
 	as_partition_version version;
 } __attribute__ ((__packed__)) info_buf;
-
-
-//------------------------------------------------
-// Per-bin metadata on device.
-//
-typedef struct drv_ssd_bin_s {
-	char		name[AS_ID_BIN_SZ];	// 15 aligns well
-	uint8_t		version;			// now unused
-	uint32_t	offset;				// offset of bin data within block
-	uint32_t	len;				// size of bin data
-	uint32_t	next;				// location of next bin: block offset
-} __attribute__ ((__packed__)) drv_ssd_bin;
 
 
 //==========================================================
@@ -226,13 +205,13 @@ available_size(drv_ssd *ssd)
 			ssd->file_size;
 
 	// Note - returns 100% available during cold start, to make it irrelevant in
-	// cold-start eviction threshold check.
+	// cold start eviction threshold check.
 }
 
 
-// Since some write threads can't yet unwind on failure, we ensure that they'll
-// succeed by checking before writing on all threads that there's at least one
-// wblock per thread. TODO - deprecate this methodology when we can unwind.
+// Since UDF writes can't yet unwind on failure, we ensure that they'll succeed
+// by checking before writing on all threads that there's at least one wblock
+// per thread. TODO - deprecate this methodology when everything can unwind.
 static inline int
 min_free_wblocks(as_namespace *ns)
 {
@@ -250,7 +229,44 @@ min_free_wblocks(as_namespace *ns)
 			1 +							// always 1 defrag thread
 			DEFRAG_RUNTIME_RESERVE +	// reserve for defrag at runtime
 			DEFRAG_STARTUP_RESERVE;		// reserve for defrag at startup
-			// TODO - what about UDFs?
+}
+
+
+void
+ssd_release_vacated_wblock(drv_ssd *ssd, uint32_t wblock_id,
+		ssd_wblock_state* p_wblock_state)
+{
+	// Sanity checks.
+	cf_assert(! p_wblock_state->swb, AS_DRV_SSD,
+			"device %s: wblock-id %u swb not null while defragging",
+			ssd->name, wblock_id);
+	cf_assert(p_wblock_state->state == WBLOCK_STATE_DEFRAG, AS_DRV_SSD,
+			"device %s: wblock-id %u state not DEFRAG while defragging",
+			ssd->name, wblock_id);
+
+	int32_t n_vac_dests = cf_atomic32_decr(&p_wblock_state->n_vac_dests);
+
+	if (n_vac_dests > 0) {
+		return;
+	}
+	// else - all wblocks we defragged into have been flushed.
+
+	cf_assert(n_vac_dests == 0, AS_DRV_SSD,
+			"device %s: wblock-id %u vacation destinations underflow",
+			ssd->name, wblock_id);
+
+	cf_mutex_lock(&p_wblock_state->LOCK);
+
+	p_wblock_state->state = WBLOCK_STATE_NONE;
+
+	// Free the wblock if it's empty.
+	if (cf_atomic32_get(p_wblock_state->inuse_sz) == 0 &&
+			// TODO - given assertions above, this condition is superfluous:
+			! p_wblock_state->swb) {
+		push_wblock_to_free_q(ssd, wblock_id, FREE_TO_HEAD);
+	}
+
+	cf_mutex_unlock(&p_wblock_state->LOCK);
 }
 
 
@@ -258,23 +274,19 @@ min_free_wblocks(as_namespace *ns)
 // ssd_write_buf "swb" methods.
 //
 
+#define VACATED_CAPACITY_STEP 128 // allocate in 1K chunks
+
 static inline ssd_write_buf*
 swb_create(drv_ssd *ssd)
 {
 	ssd_write_buf *swb = (ssd_write_buf*)cf_malloc(sizeof(ssd_write_buf));
 
-	if (! swb) {
-		cf_warning(AS_DRV_SSD, "device %s - swb malloc failed", ssd->name);
-		return NULL;
-	}
-
 	swb->buf = cf_valloc(ssd->write_block_size);
 
-	if (! swb->buf) {
-		cf_warning(AS_DRV_SSD, "device %s - swb buf valloc failed", ssd->name);
-		cf_free(swb);
-		return NULL;
-	}
+	swb->n_vacated = 0;
+	swb->vacated_capacity = VACATED_CAPACITY_STEP;
+	swb->vacated_wblocks =
+			cf_malloc(sizeof(vacated_wblock) * swb->vacated_capacity);
 
 	return swb;
 }
@@ -282,6 +294,7 @@ swb_create(drv_ssd *ssd)
 static inline void
 swb_destroy(ssd_write_buf *swb)
 {
+	cf_free(swb->vacated_wblocks);
 	cf_free(swb->buf);
 	cf_free(swb);
 }
@@ -299,14 +312,14 @@ swb_reset(ssd_write_buf *swb)
 static inline void
 swb_check_and_reserve(ssd_wblock_state *wblock_state, ssd_write_buf **p_swb)
 {
-	pthread_mutex_lock(&wblock_state->LOCK);
+	cf_mutex_lock(&wblock_state->LOCK);
 
 	if (wblock_state->swb) {
 		*p_swb = wblock_state->swb;
 		swb_reserve(*p_swb);
 	}
 
-	pthread_mutex_unlock(&wblock_state->LOCK);
+	cf_mutex_unlock(&wblock_state->LOCK);
 }
 
 static inline void
@@ -326,7 +339,7 @@ swb_dereference_and_release(drv_ssd *ssd, uint32_t wblock_id,
 {
 	ssd_wblock_state *wblock_state = &ssd->alloc_table->wblock_state[wblock_id];
 
-	pthread_mutex_lock(&wblock_state->LOCK);
+	cf_mutex_lock(&wblock_state->LOCK);
 
 	if (swb != wblock_state->swb) {
 		cf_warning(AS_DRV_SSD, "releasing wrong swb! %p (%d) != %p (%d), thread %lu",
@@ -354,7 +367,7 @@ swb_dereference_and_release(drv_ssd *ssd, uint32_t wblock_id,
 				ssd->name, wblock_id);
 	}
 
-	pthread_mutex_unlock(&wblock_state->LOCK);
+	cf_mutex_unlock(&wblock_state->LOCK);
 }
 
 ssd_write_buf *
@@ -363,10 +376,7 @@ swb_get(drv_ssd *ssd)
 	ssd_write_buf *swb;
 
 	if (CF_QUEUE_OK != cf_queue_pop(ssd->swb_free_q, &swb, CF_QUEUE_NOWAIT)) {
-		if (! (swb = swb_create(ssd))) {
-			return NULL;
-		}
-
+		swb = swb_create(ssd);
 		swb->rc = 0;
 		swb->n_writers = 0;
 		swb->skip_post_write_q = false;
@@ -400,14 +410,57 @@ swb_get(drv_ssd *ssd)
 				ssd->name, swb->wblock_id);
 	}
 
-	pthread_mutex_lock(&p_wblock_state->LOCK);
+	cf_mutex_lock(&p_wblock_state->LOCK);
 
 	swb_reserve(swb);
 	p_wblock_state->swb = swb;
 
-	pthread_mutex_unlock(&p_wblock_state->LOCK);
+	cf_mutex_unlock(&p_wblock_state->LOCK);
 
 	return swb;
+}
+
+bool
+swb_add_unique_vacated_wblock(ssd_write_buf* swb, uint32_t src_file_id,
+		uint32_t src_wblock_id)
+{
+	for (uint32_t i = 0; i < swb->n_vacated; i++) {
+		vacated_wblock *vw = &swb->vacated_wblocks[i];
+
+		if (vw->wblock_id == src_wblock_id && vw->file_id == src_file_id) {
+			return false; // already present
+		}
+	}
+
+	if (swb->n_vacated == swb->vacated_capacity) {
+		swb->vacated_capacity += VACATED_CAPACITY_STEP;
+		swb->vacated_wblocks = cf_realloc(swb->vacated_wblocks,
+				sizeof(vacated_wblock) * swb->vacated_capacity);
+	}
+
+	swb->vacated_wblocks[swb->n_vacated].file_id = src_file_id;
+	swb->vacated_wblocks[swb->n_vacated].wblock_id = src_wblock_id;
+	swb->n_vacated++;
+
+	return true; // added to list
+}
+
+void
+swb_release_all_vacated_wblocks(ssd_write_buf* swb)
+{
+	drv_ssds *ssds = (drv_ssds *)swb->ssd->ns->storage_private;
+
+	for (uint32_t i = 0; i < swb->n_vacated; i++) {
+		vacated_wblock *vw = &swb->vacated_wblocks[i];
+
+		drv_ssd *src_ssd = &ssds->ssds[vw->file_id];
+		ssd_alloc_table* at = src_ssd->alloc_table;
+		ssd_wblock_state* p_wblock_state = &at->wblock_state[vw->wblock_id];
+
+		ssd_release_vacated_wblock(src_ssd, vw->wblock_id, p_wblock_state);
+	}
+
+	swb->n_vacated = 0;
 }
 
 //
@@ -434,7 +487,7 @@ ssd_block_free(drv_ssd *ssd, uint64_t rblock_id, uint64_t n_rblocks, char *msg)
 	ssd_alloc_table *at = ssd->alloc_table;
 
 	// Sanity-checks.
-	if (! (start_byte >= ssd->header_size && wblock_id < at->n_wblocks &&
+	if (! (start_byte >= SSD_HEADER_SIZE && wblock_id < at->n_wblocks &&
 			wblock_id == end_wblock_id)) {
 		cf_warning(AS_DRV_SSD, "%s: %s: invalid range to free, rblock_id %lu, n_rblocks %lu",
 				ssd->name, msg, rblock_id, n_rblocks);
@@ -445,7 +498,7 @@ ssd_block_free(drv_ssd *ssd, uint64_t rblock_id, uint64_t n_rblocks, char *msg)
 
 	ssd_wblock_state *p_wblock_state = &at->wblock_state[wblock_id];
 
-	pthread_mutex_lock(&p_wblock_state->LOCK);
+	cf_mutex_lock(&p_wblock_state->LOCK);
 
 	int64_t resulting_inuse_sz = cf_atomic32_sub(&p_wblock_state->inuse_sz,
 			(int32_t)size);
@@ -472,7 +525,7 @@ ssd_block_free(drv_ssd *ssd, uint64_t rblock_id, uint64_t n_rblocks, char *msg)
 		}
 	}
 
-	pthread_mutex_unlock(&p_wblock_state->LOCK);
+	cf_mutex_unlock(&p_wblock_state->LOCK);
 }
 
 
@@ -480,20 +533,20 @@ static void
 log_bad_record(const char* ns_name, uint32_t n_bins, uint32_t block_bins,
 		const drv_ssd_bin* ssd_bin, const char* tag)
 {
-	cf_info(AS_DRV_SSD, "untrustworthy data from disk [%s], ignoring record", tag);
+	cf_info(AS_DRV_SSD, "untrustworthy data from disk [%s]", tag);
 	cf_info(AS_DRV_SSD, "   ns->name = %s", ns_name);
-	cf_info(AS_DRV_SSD, "   bin %" PRIu32 " [of %" PRIu32 "]", (block_bins - n_bins) + 1, block_bins);
+	cf_info(AS_DRV_SSD, "   bin %u [of %u]", (block_bins - n_bins) + 1, block_bins);
 
 	if (ssd_bin) {
-		cf_info(AS_DRV_SSD, "   ssd_bin->offset = %" PRIu32, ssd_bin->offset);
-		cf_info(AS_DRV_SSD, "   ssd_bin->len = %" PRIu32, ssd_bin->len);
-		cf_info(AS_DRV_SSD, "   ssd_bin->next = %" PRIu32, ssd_bin->next);
+		cf_info(AS_DRV_SSD, "   ssd_bin->offset = %u", ssd_bin->offset);
+		cf_info(AS_DRV_SSD, "   ssd_bin->len = %u", ssd_bin->len);
+		cf_info(AS_DRV_SSD, "   ssd_bin->next = %u", ssd_bin->next);
 	}
 }
 
 
 // TODO - sanity-check rec-props?
-static bool
+bool
 is_valid_record(const drv_ssd_block* block, const char* ns_name)
 {
 	uint8_t* block_head = (uint8_t*)block;
@@ -544,22 +597,22 @@ is_valid_record(const drv_ssd_block* block, const char* ns_name)
 
 
 void
-defrag_move_record(drv_ssd *ssd, drv_ssd_block *block, as_index *r)
+defrag_move_record(drv_ssd *src_ssd, uint32_t src_wblock_id,
+		drv_ssd_block *block, as_index *r)
 {
-	drv_ssd *old_ssd = ssd;
 	uint64_t old_rblock_id = r->rblock_id;
 	uint16_t old_n_rblocks = r->n_rblocks;
 
-	drv_ssds *ssds = (drv_ssds*)ssd->ns->storage_private;
+	drv_ssds *ssds = (drv_ssds*)src_ssd->ns->storage_private;
 
 	// Figure out which device to write to. When replacing an old record, it's
 	// possible this is different from the old device (e.g. if we've added a
 	// fresh device), so derive it from the digest each time.
-	ssd = &ssds->ssds[ssd_get_file_id(ssds, &block->keyd)];
+	drv_ssd *ssd = &ssds->ssds[ssd_get_file_id(ssds, &block->keyd)];
 
 	if (! ssd) {
 		cf_warning(AS_DRV_SSD, "{%s} defrag_move_record: no drv_ssd for file_id %u",
-				ssds->ns->name, ssd_get_file_id(ssds, &block->keyd));
+				ssds->ns->name, ssd->file_id);
 		return;
 	}
 
@@ -607,8 +660,12 @@ defrag_move_record(drv_ssd *ssd, drv_ssd_block *block, as_index *r)
 
 	memcpy(swb->buf + swb->pos, (const uint8_t*)block, write_size);
 
+	uint64_t write_offset = WBLOCK_ID_TO_BYTES(ssd, swb->wblock_id) + swb->pos;
+
+	ssd_encrypt(ssd, write_offset, (drv_ssd_block *)(swb->buf + swb->pos));
+
 	r->file_id = ssd->file_id;
-	r->rblock_id = BYTES_TO_RBLOCKS(WBLOCK_ID_TO_BYTES(ssd, swb->wblock_id) + swb->pos);
+	r->rblock_id = BYTES_TO_RBLOCKS(write_offset);
 	r->n_rblocks = BYTES_TO_RBLOCKS(write_size);
 
 	swb->pos += write_size;
@@ -616,51 +673,51 @@ defrag_move_record(drv_ssd *ssd, drv_ssd_block *block, as_index *r)
 	cf_atomic64_add(&ssd->inuse_size, (int64_t)write_size);
 	cf_atomic32_add(&ssd->alloc_table->wblock_state[swb->wblock_id].inuse_sz, (int32_t)write_size);
 
+	// If we just defragged into a new destination swb, count it.
+	if (swb_add_unique_vacated_wblock(swb, src_ssd->file_id, src_wblock_id)) {
+		ssd_wblock_state* p_wblock_state =
+				&src_ssd->alloc_table->wblock_state[src_wblock_id];
+
+		cf_atomic32_incr(&p_wblock_state->n_vac_dests);
+	}
+
 	pthread_mutex_unlock(&ssd->defrag_lock);
 
-	ssd_block_free(old_ssd, old_rblock_id, old_n_rblocks, "defrag-write");
+	ssd_block_free(src_ssd, old_rblock_id, old_n_rblocks, "defrag-write");
 }
 
 
 int
-ssd_record_defrag(drv_ssd *ssd, drv_ssd_block *block, uint64_t rblock_id,
-		uint32_t n_rblocks, uint64_t filepos)
+ssd_record_defrag(drv_ssd *ssd, uint32_t wblock_id, drv_ssd_block *block,
+		uint64_t rblock_id, uint32_t n_rblocks)
 {
 	as_namespace *ns = ssd->ns;
 	as_partition_reservation rsv;
 	uint32_t pid = as_partition_getid(&block->keyd);
 
-	as_partition_reserve_migrate(ns, pid, &rsv, 0);
+	as_partition_reserve(ns, pid, &rsv);
 
 	int rv;
 	as_index_ref r_ref;
 	r_ref.skip_lock = false;
 
 	bool found = 0 == as_record_get(rsv.tree, &block->keyd, &r_ref);
-	bool is_subrec = false;
-
-	if (ns->ldt_enabled && ! found) {
-		found = 0 == as_record_get(rsv.sub_tree, &block->keyd, &r_ref);
-		is_subrec = true;
-	}
 
 	if (found) {
 		as_index *r = r_ref.r;
 
 		if (r->file_id == ssd->file_id && r->rblock_id == rblock_id) {
 			if (r->generation != block->generation) {
-				cf_warning_digest(AS_DRV_SSD, &r->keyd, "device %s defrag: rblock_id %lu generation mismatch (%u:%u)%s ",
-						ssd->name, rblock_id, r->generation, block->generation,
-						is_subrec ? " subrec" : "");
+				cf_warning_digest(AS_DRV_SSD, &r->keyd, "device %s defrag: rblock_id %lu generation mismatch (%u:%u) ",
+						ssd->name, rblock_id, r->generation, block->generation);
 			}
 
 			if (r->n_rblocks != n_rblocks) {
-				cf_warning_digest(AS_DRV_SSD, &r->keyd, "device %s defrag: rblock_id %lu n_blocks mismatch (%u:%u)%s ",
-						ssd->name, rblock_id, r->n_rblocks, n_rblocks,
-						is_subrec ? " subrec" : "");
+				cf_warning_digest(AS_DRV_SSD, &r->keyd, "device %s defrag: rblock_id %lu n_blocks mismatch (%u:%u) ",
+						ssd->name, rblock_id, r->n_rblocks, n_rblocks);
 			}
 
-			defrag_move_record(ssd, block, r);
+			defrag_move_record(ssd, wblock_id, block, r);
 
 			rv = 0; // record was in index tree and current - moved it
 		}
@@ -689,11 +746,11 @@ ssd_is_full(drv_ssd *ssd, uint32_t wblock_id)
 
 	ssd_wblock_state* p_wblock_state = &ssd->alloc_table->wblock_state[wblock_id];
 
-	pthread_mutex_lock(&p_wblock_state->LOCK);
+	cf_mutex_lock(&p_wblock_state->LOCK);
 
 	if (cf_atomic32_get(p_wblock_state->inuse_sz) == 0) {
 		// Lucky - wblock is empty, let ssd_defrag_wblock() free it.
-		pthread_mutex_unlock(&p_wblock_state->LOCK);
+		cf_mutex_unlock(&p_wblock_state->LOCK);
 
 		return false;
 	}
@@ -705,7 +762,7 @@ ssd_is_full(drv_ssd *ssd, uint32_t wblock_id)
 	// definitely have a queue, and it's better to push back to head.
 	cf_queue_push_head(ssd->defrag_wblock_q, &wblock_id);
 
-	pthread_mutex_unlock(&p_wblock_state->LOCK);
+	cf_mutex_unlock(&p_wblock_state->LOCK);
 
 	// If we got here, we used all our runtime reserve wblocks, but the wblocks
 	// we defragged must still have non-zero inuse_sz. Must wait for those to
@@ -728,6 +785,12 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 	int num_deleted_records = 0;
 
 	ssd_wblock_state* p_wblock_state = &ssd->alloc_table->wblock_state[wblock_id];
+
+	cf_assert(p_wblock_state->n_vac_dests == 0, AS_DRV_SSD,
+			"n-vacations not 0 beginning defrag wblock");
+
+	// Make sure this can't decrement to 0 while defragging this wblock.
+	cf_atomic32_set(&p_wblock_state->n_vac_dests, 1);
 
 	if (cf_atomic32_get(p_wblock_state->inuse_sz) == 0) {
 		goto Finished;
@@ -768,6 +831,8 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 			cf_atomic32_get(p_wblock_state->inuse_sz) != 0) {
 		drv_ssd_block *block = (drv_ssd_block*)&read_buf[wblock_offset];
 
+		ssd_decrypt(ssd, file_offset + wblock_offset, block);
+
 		if (block->magic != SSD_BLOCK_MAGIC) {
 			// First block must have magic.
 			if (wblock_offset == 0) {
@@ -787,16 +852,15 @@ ssd_defrag_wblock(drv_ssd *ssd, uint32_t wblock_id, uint8_t *read_buf)
 				BYTES_TO_RBLOCK_BYTES(block->length + LENGTH_BASE);
 
 		if (next_wblock_offset > ssd->write_block_size) {
-			cf_warning(AS_DRV_SSD, "error: block extends over read size: foff %"PRIu64" boff %"PRIu64" blen %"PRIu64,
-				file_offset, wblock_offset, (uint64_t)block->length);
+			cf_warning(AS_DRV_SSD, "error: block extends over read size: foff %lu boff %lu blen %lu",
+					file_offset, wblock_offset, (uint64_t)block->length);
 			break;
 		}
 
 		// Found a good record, move it if it's current.
-		int rv = ssd_record_defrag(ssd, block,
+		int rv = ssd_record_defrag(ssd, wblock_id, block,
 				BYTES_TO_RBLOCKS(file_offset + wblock_offset),
-				(uint32_t)BYTES_TO_RBLOCKS(next_wblock_offset - wblock_offset),
-				file_offset + wblock_offset);
+				(uint32_t)BYTES_TO_RBLOCKS(next_wblock_offset - wblock_offset));
 
 		if (rv == 0) {
 			record_count++;
@@ -822,27 +886,7 @@ Finished:
 			ssd->name, wblock_id, cf_atomic32_get(p_wblock_state->inuse_sz),
 			record_count, num_old_records, num_deleted_records);
 
-	// Sanity checks.
-	if (p_wblock_state->swb) {
-		cf_warning(AS_DRV_SSD, "device %s: wblock-id %u swb not null while defragging",
-				ssd->name, wblock_id);
-	}
-	if (p_wblock_state->state != WBLOCK_STATE_DEFRAG) {
-		cf_warning(AS_DRV_SSD, "device %s: wblock-id %u state not DEFRAG while defragging",
-				ssd->name, wblock_id);
-	}
-
-	pthread_mutex_lock(&p_wblock_state->LOCK);
-
-	p_wblock_state->state = WBLOCK_STATE_NONE;
-
-	// Free the wblock if it's empty.
-	if (cf_atomic32_get(p_wblock_state->inuse_sz) == 0 &&
-			! p_wblock_state->swb) {
-		push_wblock_to_free_q(ssd, wblock_id, FREE_TO_HEAD);
-	}
-
-	pthread_mutex_unlock(&p_wblock_state->LOCK);
+	ssd_release_vacated_wblock(ssd, wblock_id, p_wblock_state);
 
 	return record_count;
 }
@@ -855,10 +899,6 @@ run_defrag(void *pv_data)
 	drv_ssd *ssd = (drv_ssd*)pv_data;
 	uint32_t wblock_id;
 	uint8_t *read_buf = cf_valloc(ssd->write_block_size);
-
-	if (! read_buf) {
-		cf_crash(AS_DRV_SSD, "device %s: defrag valloc failed", ssd->name);
-	}
 
 	while (true) {
 		uint32_t q_min = ssd->ns->storage_defrag_queue_min;
@@ -1006,13 +1046,8 @@ run_load_queues(void *pv_data)
 	drv_ssd *ssd = (drv_ssd*)pv_data;
 
 	// TODO - would be nice to have a queue create of specified capacity.
-	if (! (ssd->free_wblock_q = cf_queue_create(sizeof(uint32_t), true))) {
-		cf_crash(AS_DRV_SSD, "%s free wblock queue create failed", ssd->name);
-	}
-
-	if (! (ssd->defrag_wblock_q = cf_queue_create(sizeof(uint32_t), true))) {
-		cf_crash(AS_DRV_SSD, "%s defrag queue create failed", ssd->name);
-	}
+	ssd->free_wblock_q = cf_queue_create(sizeof(uint32_t), true);
+	ssd->defrag_wblock_q = cf_queue_create(sizeof(uint32_t), true);
 
 	as_namespace *ns = ssd->ns;
 	uint32_t lwm_pct = ns->storage_defrag_lwm_pct;
@@ -1024,7 +1059,7 @@ run_load_queues(void *pv_data)
 	}
 
 	ssd_alloc_table* at = ssd->alloc_table;
-	uint32_t first_id = BYTES_TO_WBLOCK_ID(ssd, ssd->header_size);
+	uint32_t first_id = BYTES_TO_WBLOCK_ID(ssd, SSD_HEADER_SIZE);
 	uint32_t last_id = at->n_wblocks;
 
 	for (uint32_t wblock_id = first_id; wblock_id < last_id; wblock_id++) {
@@ -1087,7 +1122,7 @@ ssd_load_wblock_queues(drv_ssds *ssds)
 void
 ssd_wblock_init(drv_ssd *ssd)
 {
-	uint32_t n_wblocks = ssd->file_size / ssd->write_block_size;
+	uint32_t n_wblocks = (uint32_t)(ssd->file_size / ssd->write_block_size);
 
 	cf_info(AS_DRV_SSD, "%s has %u wblocks of size %u", ssd->name, n_wblocks,
 			ssd->write_block_size);
@@ -1098,10 +1133,13 @@ ssd_wblock_init(drv_ssd *ssd)
 
 	// Device header wblocks' inuse_sz will (also) be 0 but that doesn't matter.
 	for (uint32_t i = 0; i < n_wblocks; i++) {
-		pthread_mutex_init(&at->wblock_state[i].LOCK, 0);
-		at->wblock_state[i].state = WBLOCK_STATE_NONE;
-		cf_atomic32_set(&at->wblock_state[i].inuse_sz, 0);
-		at->wblock_state[i].swb = 0;
+		ssd_wblock_state * p_wblock_state = &at->wblock_state[i];
+
+		cf_atomic32_set(&p_wblock_state->inuse_sz, 0);
+		cf_mutex_init(&p_wblock_state->LOCK);
+		p_wblock_state->swb = NULL;
+		p_wblock_state->state = WBLOCK_STATE_NONE;
+		p_wblock_state->n_vac_dests = 0;
 	}
 
 	ssd->alloc_table = at;
@@ -1141,16 +1179,13 @@ ssd_read_record(as_storage_rd *rd)
 		cf_atomic32_incr(&ns->n_reads_from_cache);
 
 		read_buf = cf_malloc(record_size);
-
-		if (! read_buf) {
-			return -1;
-		}
-
 		block = (drv_ssd_block*)read_buf;
 
 		int swb_offset = record_offset - WBLOCK_ID_TO_BYTES(ssd, wblock);
 		memcpy(read_buf, swb->buf + swb_offset, record_size);
 		swb_release(swb);
+
+		ssd_decrypt(ssd, record_offset, block);
 	}
 	else {
 		// Normal case - data is read from device.
@@ -1163,10 +1198,6 @@ ssd_read_record(as_storage_rd *rd)
 		uint64_t record_buf_indent = record_offset - read_offset;
 
 		read_buf = cf_valloc(read_size);
-
-		if (! read_buf) {
-			return -1;
-		}
 
 		int fd = ssd_fd_get(ssd);
 
@@ -1197,17 +1228,38 @@ ssd_read_record(as_storage_rd *rd)
 		ssd_fd_put(ssd, fd);
 
 		block = (drv_ssd_block*)(read_buf + record_buf_indent);
+		ssd_decrypt(ssd, record_offset, block);
 
 		// Sanity checks.
+
 		if (block->magic != SSD_BLOCK_MAGIC) {
-			cf_warning(AS_DRV_SSD, "read: bad block magic offset %"PRIu64,
+			cf_warning(AS_DRV_SSD, "read: bad block magic offset %lu",
 					read_offset);
 			cf_free(read_buf);
 			return -1;
 		}
+
+		if (block->length + LENGTH_BASE > read_size) {
+			cf_warning(AS_DRV_SSD, "read: bad block length %u", block->length);
+			cf_free(read_buf);
+			return -1;
+		}
+
 		if (0 != cf_digest_compare(&block->keyd, &r->keyd)) {
-			cf_warning(AS_DRV_SSD, "read: read wrong key: expecting %"PRIx64" got %"PRIx64,
-				*(uint64_t*)&r->keyd, *(uint64_t*)&block->keyd);
+			cf_warning(AS_DRV_SSD, "read: read wrong key: expecting %lx got %lx",
+					*(uint64_t*)&r->keyd, *(uint64_t*)&block->keyd);
+			cf_free(read_buf);
+			return -1;
+		}
+
+		if (block->n_bins > BIN_NAMES_QUOTA) {
+			cf_warning(AS_DRV_SSD, "read: bad block n_bins %u", block->n_bins);
+			cf_free(read_buf);
+			return -1;
+		}
+
+		if (block->bins_offset + offsetof(drv_ssd_block, data) > read_size) {
+			cf_warning(AS_DRV_SSD, "read: bad block bins_offset %u", block->bins_offset);
 			cf_free(read_buf);
 			return -1;
 		}
@@ -1447,6 +1499,9 @@ ssd_write_worker(void *arg)
 			cf_queue_push(ssd->swb_shadow_q, &swb);
 		}
 		else {
+			// If this swb was a defrag destination, release the sources.
+			swb_release_all_vacated_wblocks(swb);
+
 			// Transfer to post-write queue, or release swb, as appropriate.
 			ssd_post_write(ssd, swb);
 		}
@@ -1474,6 +1529,9 @@ ssd_shadow_worker(void *arg)
 
 		// Flush to the shadow device.
 		ssd_shadow_flush_swb(ssd, swb);
+
+		// If this swb was a defrag destination, release the sources.
+		swb_release_all_vacated_wblocks(swb);
 
 		// Transfer to post-write queue, or release swb, as appropriate.
 		ssd_post_write(ssd, swb);
@@ -1568,8 +1626,8 @@ ssd_write_bins(as_storage_rd *rd)
 	uint32_t write_size = ssd_write_calculate_size(rd);
 
 	if (write_size > ssd->write_block_size) {
-		cf_warning(AS_DRV_SSD, "write: rejecting %"PRIx64" write size: %u",
-				*(uint64_t*)&r->keyd, write_size);
+		cf_detail_digest(AS_DRV_SSD, &r->keyd, "write: size %u - rejecting ",
+				write_size);
 		return -AS_PROTO_RESULT_FAIL_RECORD_TOO_BIG;
 	}
 
@@ -1679,8 +1737,12 @@ ssd_write_bins(as_storage_rd *rd)
 	block->n_bins = n_bins_written;
 	block->last_update_time = r->last_update_time;
 
+	uint64_t write_offset = WBLOCK_ID_TO_BYTES(ssd, swb->wblock_id) + swb_pos;
+
+	ssd_encrypt(ssd, write_offset, block);
+
 	r->file_id = ssd->file_id;
-	r->rblock_id = BYTES_TO_RBLOCKS(WBLOCK_ID_TO_BYTES(ssd, swb->wblock_id) + swb_pos);
+	r->rblock_id = BYTES_TO_RBLOCKS(write_offset);
 	r->n_rblocks = BYTES_TO_RBLOCKS(write_size);
 
 	cf_atomic64_add(&ssd->inuse_size, (int64_t)write_size);
@@ -1782,7 +1844,7 @@ as_storage_show_wblock_stats(as_namespace *ns)
 				}
 				else {
 					if (inuse_sz > ssd->write_block_size || inuse_sz < lwm_size) {
-						cf_info(AS_DRV_SSD, "dev %d, wblock %"PRIu32", inuse_sz %"PRIu32", %s swb",
+						cf_info(AS_DRV_SSD, "dev %d, wblock %u, inuse_sz %u, %s swb",
 								d, i, inuse_sz, wblock_state->swb ? "has" : "no");
 
 						num_defraggable++;
@@ -1926,11 +1988,6 @@ as_storage_analyze_wblock(as_namespace* ns, int device_index,
 	drv_ssd* ssd = &ssds->ssds[device_index];
 	uint8_t* read_buf = cf_valloc(ssd->write_block_size);
 
-	if (! read_buf) {
-		cf_warning(AS_DRV_SSD, "analyze wblock ERROR: fail valloc");
-		return -1;
-	}
-
 	int fd = ssd_fd_get(ssd);
 	uint64_t file_offset = WBLOCK_ID_TO_BYTES(ssd, wblock_id);
 
@@ -1967,6 +2024,8 @@ as_storage_analyze_wblock(as_namespace* ns, int device_index,
 	while (offset < ssd->write_block_size) {
 		drv_ssd_block* p_block = (drv_ssd_block*)&read_buf[offset];
 
+		ssd_decrypt(ssd, file_offset + offset, p_block);
+
 		if (p_block->magic != SSD_BLOCK_MAGIC) {
 			if (offset == 0) {
 				// First block must have magic.
@@ -1998,22 +2057,12 @@ as_storage_analyze_wblock(as_namespace* ns, int device_index,
 		uint32_t pid = as_partition_getid(&p_block->keyd);
 		as_partition_reservation rsv;
 
-		as_partition_reserve_migrate(ns, pid, &rsv, 0);
+		as_partition_reserve(ns, pid, &rsv);
 
 		as_index_ref r_ref;
 		r_ref.skip_lock = false;
 
 		if (0 == as_record_get(rsv.tree, &p_block->keyd, &r_ref)) {
-			as_index* r = r_ref.r;
-
-			if (r->rblock_id == rblock_id && r->n_rblocks == n_rblocks) {
-				living = true;
-			}
-
-			as_record_done(&r_ref, ns);
-		}
-		else if (ns->ldt_enabled &&
-				0 == as_record_get(rsv.sub_tree, &p_block->keyd, &r_ref)) {
 			as_index* r = r_ref.r;
 
 			if (r->rblock_id == rblock_id && r->n_rblocks == n_rblocks) {
@@ -2184,57 +2233,13 @@ ssd_flush_current_swb(drv_ssd *ssd, uint64_t *p_prev_n_writes,
 
 		// Flush it.
 		ssd_flush_swb(ssd, swb);
+
+		if (ssd->shadow_name) {
+			ssd_shadow_flush_swb(ssd, swb);
+		}
 	}
 
 	pthread_mutex_unlock(&ssd->write_lock);
-}
-
-
-void
-ssd_flush_defrag_swb(drv_ssd *ssd, uint64_t *p_prev_n_writes,
-		uint32_t *p_prev_size)
-{
-	uint64_t n_writes = cf_atomic64_get(ssd->n_defrag_wblock_writes);
-
-	// If there's an active write load, we don't need to flush.
-	if (n_writes != *p_prev_n_writes) {
-		*p_prev_n_writes = n_writes;
-		*p_prev_size = 0;
-		return;
-	}
-
-	pthread_mutex_lock(&ssd->defrag_lock);
-
-	n_writes = cf_atomic64_get(ssd->n_defrag_wblock_writes);
-
-	// Must check under the lock, could be racing a defrag swb just queued.
-	if (n_writes != *p_prev_n_writes) {
-
-		pthread_mutex_unlock(&ssd->defrag_lock);
-
-		*p_prev_n_writes = n_writes;
-		*p_prev_size = 0;
-		return;
-	}
-
-	// Flush the defrag swb if it isn't empty, and has been written to since
-	// last flushed.
-
-	ssd_write_buf *swb = ssd->defrag_swb;
-
-	if (swb && swb->pos != *p_prev_size) {
-		*p_prev_size = swb->pos;
-
-		// Clean the end of the buffer before flushing.
-		if (ssd->write_block_size != swb->pos) {
-			memset(&swb->buf[swb->pos], 0, ssd->write_block_size - swb->pos);
-		}
-
-		// Flush it.
-		ssd_flush_swb(ssd, swb);
-	}
-
-	pthread_mutex_unlock(&ssd->defrag_lock);
 }
 
 
@@ -2261,14 +2266,14 @@ void
 ssd_defrag_sweep(drv_ssd *ssd)
 {
 	ssd_alloc_table* at = ssd->alloc_table;
-	uint32_t first_id = BYTES_TO_WBLOCK_ID(ssd, ssd->header_size);
+	uint32_t first_id = BYTES_TO_WBLOCK_ID(ssd, SSD_HEADER_SIZE);
 	uint32_t last_id = at->n_wblocks;
 	uint32_t n_queued = 0;
 
 	for (uint32_t wblock_id = first_id; wblock_id < last_id; wblock_id++) {
 		ssd_wblock_state *p_wblock_state = &at->wblock_state[wblock_id];
 
-		pthread_mutex_lock(&p_wblock_state->LOCK);
+		cf_mutex_lock(&p_wblock_state->LOCK);
 
 		uint32_t inuse_sz = cf_atomic32_get(p_wblock_state->inuse_sz);
 
@@ -2280,7 +2285,7 @@ ssd_defrag_sweep(drv_ssd *ssd)
 			n_queued++;
 		}
 
-		pthread_mutex_unlock(&p_wblock_state->LOCK);
+		cf_mutex_unlock(&p_wblock_state->LOCK);
 	}
 
 	cf_info(AS_DRV_SSD, "... %s sweep queued %u wblocks for defrag", ssd->name,
@@ -2316,8 +2321,6 @@ run_ssd_maintenance(void *udata)
 
 	uint64_t prev_n_writes_flush = 0;
 	uint32_t prev_size_flush = 0;
-	uint64_t prev_n_writes_defrag_flush = 0;
-	uint32_t prev_size_defrag_flush = 0;
 
 	uint64_t now = cf_getus();
 	uint64_t next = now + MAX_INTERVAL;
@@ -2325,7 +2328,6 @@ run_ssd_maintenance(void *udata)
 	uint64_t prev_log_stats = now;
 	uint64_t prev_free_swbs = now;
 	uint64_t prev_flush = now;
-	uint64_t prev_defrag_flush = now;
 	uint64_t prev_fsync = now;
 
 	// If any job's (initial) interval is less than MAX_INTERVAL and we want it
@@ -2361,12 +2363,6 @@ run_ssd_maintenance(void *udata)
 			next = next_time(now, flush_max_us, next);
 		}
 
-		if (flush_max_us != 0 && now >= prev_defrag_flush + flush_max_us) {
-			ssd_flush_defrag_swb(ssd, &prev_n_writes_defrag_flush, &prev_size_defrag_flush);
-			prev_defrag_flush = now;
-			next = next_time(now, flush_max_us, next);
-		}
-
 		uint64_t fsync_max_us = ns->storage_fsync_max_us;
 
 		if (fsync_max_us != 0 && now >= prev_fsync + fsync_max_us) {
@@ -2390,7 +2386,7 @@ run_ssd_maintenance(void *udata)
 }
 
 
-static void
+void
 ssd_start_maintenance_threads(drv_ssds *ssds)
 {
 	cf_info(AS_DRV_SSD, "{%s} starting device maintenance threads",
@@ -2411,8 +2407,7 @@ ssd_start_maintenance_threads(drv_ssds *ssds)
 // -1 means unrecoverable error
 // -2 means not formatted, please overwrite me
 int
-as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
-		ssd_device_header **header_r)
+ssd_read_header(drv_ssd *ssd, as_namespace *ns, ssd_device_header **header_r)
 {
 	*header_r = 0;
 
@@ -2424,10 +2419,6 @@ as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
 
 	size_t peek_size = BYTES_UP_TO_IO_MIN(ssd, sizeof(ssd_device_header));
 	ssd_device_header *header = cf_valloc(peek_size);
-
-	if (! header) {
-		goto Fail;
-	}
 
 	if (lseek(fd, 0, SEEK_SET) != 0) {
 		cf_warning(AS_DRV_SSD, "%s: seek failed: errno %d (%s)", ssd_name,
@@ -2477,9 +2468,15 @@ as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
 		goto Fail;
 	}
 
-	if (header->devices_n > 100) {
-		cf_warning(AS_DRV_SSD, "read header: device %s don't support %u devices, corrupt read",
+	if (header->devices_n > AS_STORAGE_MAX_DEVICES) {
+		cf_warning(AS_DRV_SSD, "read header: device %s bad number of devices %u",
 				ssd_name, header->devices_n);
+		goto Fail;
+	}
+
+	if (header->header_length != SSD_HEADER_SIZE) {
+		cf_warning(AS_DRV_SSD, "read header: device %s incompatible header size %u",
+				ssd_name, header->header_length);
 		goto Fail;
 	}
 
@@ -2494,10 +2491,6 @@ as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
 	cf_free(header);
 
 	header = cf_valloc(h_len);
-
-	if (! header) {
-		goto Fail;
-	}
 
 	if (lseek(fd, 0, SEEK_SET) != 0) {
 		cf_warning(AS_DRV_SSD, "%s: seek failed: errno %d (%s)", ssd_name,
@@ -2517,8 +2510,12 @@ as_storage_read_header(drv_ssd *ssd, as_namespace *ns,
 		goto Fail;
 	}
 
-	cf_detail(AS_DRV_SSD, "device %s: header read success: version %d devices %d random %"PRIu64,
+	cf_detail(AS_DRV_SSD, "device %s: header read success: version %d devices %d random %lu",
 			ssd_name, header->version, header->devices_n, header->random);
+
+	if (! ssd_header_is_valid_cfg(ns, header)) {
+		goto Fail;
+	}
 
 	// In case we're bumping the version - ensure the new version gets written.
 	header->version = SSD_VERSION;
@@ -2547,44 +2544,37 @@ Fail:
 
 
 ssd_device_header *
-as_storage_init_header(as_namespace *ns)
+ssd_init_header(as_namespace *ns)
 {
-	ssd_device_header *h = cf_valloc(SSD_DEFAULT_HEADER_LENGTH);
+	ssd_device_header *h = cf_valloc(SSD_HEADER_SIZE);
 
-	if (! h) {
-		return 0;
-	}
-
-	memset(h, 0, SSD_DEFAULT_HEADER_LENGTH);
+	memset(h, 0, SSD_HEADER_SIZE);
 
 	h->magic = SSD_HEADER_MAGIC;
 	h->random = 0;
 	h->write_block_size = ns->storage_write_block_size;
 	h->last_evict_void_time = 0;
 	h->version = SSD_VERSION;
+	h->flags = 0;
 	h->devices_n = 0;
-	h->header_length = SSD_DEFAULT_HEADER_LENGTH;
+	h->header_length = SSD_HEADER_SIZE;
 	memset(h->namespace, 0, sizeof(h->namespace));
 	strcpy(h->namespace, ns->name);
 	h->info_n = AS_PARTITIONS;
 	h->info_stride = SSD_HEADER_INFO_STRIDE;
+
+	ssd_header_init_cfg(ns, h);
 
 	return h;
 }
 
 
 bool
-as_storage_empty_header(int fd, const char* device_name)
+ssd_empty_header(int fd, const char* device_name)
 {
-	void *h = cf_valloc(SSD_DEFAULT_HEADER_LENGTH);
+	void *h = cf_valloc(SSD_HEADER_SIZE);
 
-	if (! h) {
-		cf_warning(AS_DRV_SSD, "device %s: empty header: valloc failed",
-				device_name);
-		return false;
-	}
-
-	memset(h, 0, SSD_DEFAULT_HEADER_LENGTH);
+	memset(h, 0, SSD_HEADER_SIZE);
 
 	if (0 != lseek(fd, 0, SEEK_SET)) {
 		cf_warning(AS_DRV_SSD, "device %s: empty header: seek error: %s",
@@ -2593,7 +2583,7 @@ as_storage_empty_header(int fd, const char* device_name)
 		return false;
 	}
 
-	if (SSD_DEFAULT_HEADER_LENGTH != write(fd, h, SSD_DEFAULT_HEADER_LENGTH)) {
+	if (SSD_HEADER_SIZE != write(fd, h, SSD_HEADER_SIZE)) {
 		cf_warning(AS_DRV_SSD, "device %s: empty header: write error: %s",
 				device_name, cf_strerror(errno));
 		cf_free(h);
@@ -2608,16 +2598,19 @@ as_storage_empty_header(int fd, const char* device_name)
 
 
 void
-as_storage_write_header(drv_ssd *ssd, ssd_device_header *header, size_t size)
+ssd_write_header(drv_ssd *ssd, ssd_device_header *header, off_t offset,
+		size_t size)
 {
 	int fd = ssd_fd_get(ssd);
 
-	if (lseek(fd, 0, SEEK_SET) != 0) {
+	if (lseek(fd, offset, SEEK_SET) != offset) {
 		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED seek: errno %d (%s)",
 				ssd->name, errno, cf_strerror(errno));
 	}
 
-	ssize_t sz = write(fd, (void*)header, size);
+	uint8_t *from = (uint8_t*)header + offset;
+
+	ssize_t sz = write(fd, (void*)from, size);
 
 	if (sz != (ssize_t)size) {
 		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
@@ -2632,12 +2625,12 @@ as_storage_write_header(drv_ssd *ssd, ssd_device_header *header, size_t size)
 
 	fd = ssd_shadow_fd_get(ssd);
 
-	if (lseek(fd, 0, SEEK_SET) != 0) {
+	if (lseek(fd, offset, SEEK_SET) != offset) {
 		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED seek: errno %d (%s)",
 				ssd->shadow_name, errno, cf_strerror(errno));
 	}
 
-	sz = write(fd, (void*)header, size);
+	sz = write(fd, (void*)from, size);
 
 	if (sz != (ssize_t)size) {
 		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
@@ -2721,35 +2714,71 @@ is_record_expired(as_namespace* ns, const drv_ssd_block* block,
 }
 
 
+void
+apply_rec_props(as_record* r, as_namespace* ns, const as_rec_props* p_props)
+{
+	// Set record's set-id. (If it already has one, assume they're the same.)
+	if (! as_index_has_set(r) && p_props->size != 0) {
+		const char* set_name;
+
+		if (as_rec_props_get_value(p_props, CL_REC_PROPS_FIELD_SET_NAME, NULL,
+				(uint8_t**)&set_name) == 0) {
+			as_index_set_set(r, ns, set_name, false);
+		}
+	}
+
+	uint32_t key_size;
+	uint8_t* key;
+	bool got_key = p_props->size != 0 &&
+			as_rec_props_get_value(p_props, CL_REC_PROPS_FIELD_KEY, &key_size,
+					&key) == 0;
+
+	// If a key wasn't stored, and we got one, accommodate it.
+	if (r->key_stored == 0) {
+		if (got_key) {
+			if (ns->storage_data_in_memory) {
+				as_record_allocate_key(r, key, key_size);
+			}
+
+			r->key_stored = 1;
+		}
+	}
+	// If a key was stored, but we didn't get one, remove the key.
+	else if (! got_key) {
+		if (ns->storage_data_in_memory) {
+			as_record_remove_key(r);
+		}
+
+		r->key_stored = 0;
+	}
+}
+
+
 // Add a record just read from drive to the index, if all is well.
-// Return values:
-//  0 - success, record added or updated
-// -1 - skipped or deleted this record for a "normal" reason
-// -2 - serious limit encountered, caller won't continue
-// -3 - couldn't parse this record, but caller will continue
-int
-ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
+void
+ssd_cold_start_add_record(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		uint64_t rblock_id, uint32_t n_rblocks)
 {
 	uint32_t pid = as_partition_getid(&block->keyd);
 
 	// If this isn't a partition we're interested in, skip this record.
 	if (! ssds->get_state_from_storage[pid]) {
-		return -1;
+		return;
 	}
 
 	as_namespace* ns = ssds->ns;
 
 	// If eviction is necessary, evict previously added records closest to
 	// expiration. (If evicting, this call will block for a long time.) This
-	// call may also update the cold-start threshold void-time.
+	// call may also update the cold start threshold void-time.
 	if (! as_cold_start_evict_if_needed(ns)) {
-		return -2;
+		cf_crash(AS_DRV_SSD, "hit stop-writes limit before drive scan completed");
 	}
 
 	// Sanity-check the record.
 	if (! is_valid_record(block, ns->name)) {
-		return -3;
+		cf_warning_digest(AS_DRV_SSD, &block->keyd, "invalid data on device - ignoring record ");
+		return; // caller will continue and try next record
 	}
 
 	// Don't bother with reservations - partition trees aren't going anywhere.
@@ -2759,55 +2788,19 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 	as_index_ref r_ref;
 	r_ref.skip_lock = false;
 
-	// Read LDT rec-prop.
-	as_rec_props props;
-
-	props.p_data = block->data;
-	props.size = block->bins_offset;
-
-	bool is_ldt_sub;
-	bool is_ldt_parent;
-
-	as_ldt_get_property(&props, &is_ldt_parent, &is_ldt_sub);
-
-	if (ssd->sub_sweep) {
-		if (! is_ldt_sub) {
-			return -1;
-		}
-	}
-	else {
-		if (is_ldt_sub || (is_ldt_parent && ! ns->ldt_enabled)) {
-			return -1;
-		}
-	}
+	// Prepare to read rec-props.
+	as_rec_props props = { .p_data = block->data, .size = block->bins_offset };
 
 	if (ssd_cold_start_is_record_truncated(ns, block, &props)) {
-		return -1;
+		return;
 	}
 
 	// Get/create the record from/in the appropriate index tree.
-	int rv;
-	int retries = 0;
-
-	while (true) {
-		if ((rv = as_record_get_create(
-				is_ldt_sub ? p_partition->sub_vp : p_partition->vp,
-						&block->keyd, &r_ref, ns, is_ldt_sub)) != -1) {
-			break;
-		}
-
-		// rv = -1 - race can occur if versions of this record are on more than
-		// one drive - wait for other thread to finish create.
-		usleep(50);
-
-		if (++retries % 20000 == 0) {
-			cf_warning_digest(AS_DRV_SSD, &block->keyd, "record-add as_record_get_create() stuck ");
-		}
-	}
+	int rv = as_record_get_create(p_partition->vp, &block->keyd, &r_ref, ns);
 
 	if (rv < 0) {
 		cf_warning_digest(AS_DRV_SSD, &block->keyd, "record-add as_record_get_create() failed ");
-		return -1;
+		return;
 	}
 
 	bool is_create = rv == 1;
@@ -2828,18 +2821,17 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 			ssd_cold_start_adjust_cenotaph(ns, block, r);
 			as_record_done(&r_ref, ns);
 			ssd->record_add_older_counter++;
-			return -1;
+			return;
 		}
 	}
 	// The record we're now reading is the latest version (so far) ...
 
-	// Skip records that have expired. (LDT subrecords are expired via their
-	// their parent record.)
-	if (! is_ldt_sub && is_record_expired(ns, block, &props)) {
+	// Skip records that have expired.
+	if (is_record_expired(ns, block, &props)) {
 		as_index_delete(p_partition->vp, &block->keyd);
 		as_record_done(&r_ref, ns);
 		ssd->record_add_expired_counter++;
-		return -1;
+		return;
 	}
 
 	// We'll keep the record we're now reading ...
@@ -2849,7 +2841,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 	r->generation = block->generation;
 
 	// Set/reset the record's void-time, truncating it if beyond max-ttl.
-	if (! is_ldt_sub && block->void_time > ns->cold_start_max_void_time) {
+	if (block->void_time > ns->cold_start_max_void_time) {
 		cf_detail(AS_DRV_SSD, "record-add truncating void-time %lu > max %u",
 				block->void_time, ns->cold_start_max_void_time);
 
@@ -2882,12 +2874,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		uint64_t bytes_memory = as_storage_record_get_n_bytes_memory(&rd);
 
 		// Do this early since set-id is needed for the secondary index update.
-		if (props.size != 0) {
-			as_record_apply_properties(r, ns, &props);
-		}
-		else {
-			as_record_clear_properties(r, ns);
-		}
+		apply_rec_props(r, ns, &props);
 
 		uint16_t old_n_bins = rd.n_bins;
 
@@ -2913,7 +2900,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 
 		if (rd.ns->single_bin) {
 			if (delta_bins < 0) {
-				as_record_clean_bins(&rd);
+				as_record_destroy_bins(&rd);
 			}
 		}
 		else if (delta_bins != 0) {
@@ -2921,7 +2908,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 				sbins_populated += as_sindex_sbins_from_rd(&rd, (uint16_t)block->n_bins, old_n_bins, sbins, AS_SINDEX_OP_DELETE);
 			}
 
-			as_bin_allocate_bin_space(r, &rd, delta_bins);
+			as_bin_allocate_bin_space(&rd, delta_bins);
 		}
 
 		for (uint16_t i = 0; i < block->n_bins; i++) {
@@ -2968,12 +2955,7 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 		as_storage_record_close(&rd);
 	}
 	else {
-		if (props.size != 0) {
-			as_record_apply_properties(r, ns, &props);
-		}
-		else {
-			as_record_clear_properties(r, ns);
-		}
+		apply_rec_props(r, ns, &props);
 	}
 
 	if (is_create) {
@@ -3003,144 +2985,110 @@ ssd_record_add(drv_ssds* ssds, drv_ssd* ssd, drv_ssd_block* block,
 	r->rblock_id = rblock_id;
 	r->n_rblocks = n_rblocks;
 
-	// Make sure subrecord sweep happens.
-	if (is_ldt_parent) {
-		ssd->has_ldt = true;
-	}
-
 	as_record_done(&r_ref, ns);
-
-	return 0;
 }
 
 
-// Sweep through storage devices and rebuild the index.
-//
-// If there are LDT records the sweep is done twice, once for LDT parent records
-// and then again for LDT subrecords.
-int
-ssd_load_device_sweep(drv_ssds *ssds, drv_ssd *ssd)
+// Sweep through a storage device to rebuild the index.
+void
+ssd_cold_start_sweep(drv_ssds *ssds, drv_ssd *ssd)
 {
-	uint8_t *buf = cf_valloc(LOAD_BUF_SIZE);
+	size_t wblock_size = ssd->write_block_size;
 
-	bool read_shadow = ssd->shadow_name && ! ssd->sub_sweep;
+	uint8_t *buf = cf_valloc(wblock_size);
+
+	bool read_shadow = ssd->shadow_name;
 	char *read_ssd_name = read_shadow ? ssd->shadow_name : ssd->name;
 	int fd = read_shadow ? ssd_shadow_fd_get(ssd) : ssd_fd_get(ssd);
 	int write_fd = read_shadow ? ssd_fd_get(ssd) : -1;
 
 	// Seek past the header.
-	off_t file_offset = ssds->header->header_length;
 
-	if (lseek(fd, file_offset, SEEK_SET) != file_offset) {
-		cf_warning(AS_DRV_SSD, "%s: seek failed: offset %ld: errno %d (%s)",
-				read_ssd_name, file_offset, errno, cf_strerror(errno));
-		close(fd);
-		fd = -1;
-		goto Finished;
+	if (lseek(fd, SSD_HEADER_SIZE, SEEK_SET) != SSD_HEADER_SIZE) {
+		cf_crash(AS_DRV_SSD, "%s: seek failed: errno %d (%s)", read_ssd_name,
+				errno, cf_strerror(errno));
 	}
 
-	if (read_shadow && lseek(write_fd, file_offset, SEEK_SET) != file_offset) {
-		cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED seek: offset %ld: errno %d (%s)",
-				ssd->name, file_offset, errno, cf_strerror(errno));
+	if (read_shadow &&
+			lseek(write_fd, SSD_HEADER_SIZE, SEEK_SET) != SSD_HEADER_SIZE) {
+		cf_crash(AS_DRV_SSD, "%s: seek failed: errno %d (%s)", ssd->name,
+				errno, cf_strerror(errno));
 	}
 
-	int error_count = 0;
+	// Loop over all wblocks, unless we encounter 10 contiguous unused wblocks.
 
-	ssd->cold_start_block_counter = file_offset / LOAD_BUF_SIZE;
+	ssd->sweep_wblock_id = SSD_HEADER_SIZE / (uint32_t)wblock_size;
 
-	// Loop over all blocks in device.
-	while (true) {
-		ssize_t rlen = read(fd, buf, LOAD_BUF_SIZE);
+	uint64_t file_offset = SSD_HEADER_SIZE;
+	uint32_t n_unused_wblocks = 0;
 
-		if (rlen != LOAD_BUF_SIZE) {
-			cf_warning(AS_DRV_SSD, "%s: read failed (%ld): errno %d (%s)",
-					read_ssd_name, rlen, errno, cf_strerror(errno));
-			close(fd);
-			fd = -1;
-			goto Finished;
+	while (file_offset < ssd->file_size && n_unused_wblocks < 10) {
+		if (read(fd, buf, wblock_size) != wblock_size) {
+			cf_crash(AS_DRV_SSD, "%s: read failed: errno %d (%s)",
+					read_ssd_name, errno, cf_strerror(errno));
 		}
 
-		if (read_shadow) {
-			// TODO - ok to always write 1Mb blocks?
-			ssize_t sz = write(write_fd, (void*)buf, LOAD_BUF_SIZE);
-
-			if (sz != LOAD_BUF_SIZE) {
-				cf_crash(AS_DRV_SSD, "%s: DEVICE FAILED write: errno %d (%s)",
-						ssd->name, errno, cf_strerror(errno));
-			}
+		if (read_shadow &&
+				write(write_fd, (void*)buf, wblock_size) != wblock_size) {
+			cf_crash(AS_DRV_SSD, "%s: write failed: errno %d (%s)", ssd->name,
+					errno, cf_strerror(errno));
 		}
 
-		size_t block_offset = 0; // current offset within the 1M block, in bytes
+		size_t indent = 0; // current offset within wblock, in bytes
 
-		while (block_offset < LOAD_BUF_SIZE) {
-			drv_ssd_block *block = (drv_ssd_block*)&buf[block_offset];
+		while (indent < wblock_size) {
+			drv_ssd_block *block = (drv_ssd_block*)&buf[indent];
+
+			ssd_decrypt(ssd, file_offset + indent, block);
 
 			// Look for record magic.
 			if (block->magic != SSD_BLOCK_MAGIC) {
-				// No record found here.
-				// (Includes normal case of nothing ever written here).
-
-				block_offset += RBLOCK_SIZE;
-
-				// We always write some at the start of a 1M block.
-				if (block_offset == RBLOCK_SIZE) {
-					error_count++;
-					goto NextBlock;
+				// Should always find a record at beginning of used wblock. if
+				// not, we've likely encountered the unused part of the device.
+				if (indent == 0) {
+					n_unused_wblocks++;
+					break; // try next wblock
 				}
-				else {
-					// Otherwise check the next rblock, looking for magic.
-					continue;
-				}
+				// else - nothing more in this wblock, but keep looking for
+				// magic - necessary if we want to be able to increase
+				// write-block-size across restarts.
+
+				indent += RBLOCK_SIZE;
+				continue; // try next rblock
+			}
+
+			if (n_unused_wblocks != 0) {
+				cf_warning(AS_DRV_SSD, "%s: found used wblock after skipping %u unused",
+						ssd->name, n_unused_wblocks);
+
+				n_unused_wblocks = 0; // restart contiguous count
 			}
 
 			// Note - if block->length is sane, we don't need to round up to a
 			// multiple of RBLOCK_SIZE, but let's do it anyway just to be safe.
-			size_t next_block_offset = block_offset +
+			size_t next_indent = indent +
 					BYTES_TO_RBLOCK_BYTES(block->length + LENGTH_BASE);
 
-			// Sanity-check for 1M block overruns.
-			// TODO - check write_block_size boundaries!
-			if (next_block_offset > LOAD_BUF_SIZE) {
-				cf_warning(AS_DRV_SSD, "error: block extends over read size: foff %"PRIu64" boff %"PRIu64" blen %"PRIu64,
-					file_offset, block_offset, (uint64_t)block->length);
-
-				error_count++;
-				goto NextBlock;
+			// Sanity-check for wblock overruns.
+			if (next_indent > wblock_size) {
+				cf_warning(AS_DRV_SSD, "%s: record crosses wblock boundary: block-length %u",
+						ssd->name, block->length);
+				break; // skip this record, try next wblock
 			}
 
 			// Found a record - try to add it to the index.
-			int add_rv = ssd_record_add(ssds, ssd, block,
-					BYTES_TO_RBLOCKS(file_offset + block_offset),
-					(uint32_t)BYTES_TO_RBLOCKS(next_block_offset - block_offset));
+			ssd_cold_start_add_record(ssds, ssd, block,
+					BYTES_TO_RBLOCKS(file_offset + indent),
+					(uint32_t)BYTES_TO_RBLOCKS(next_indent - indent));
 
-			if (add_rv == -2) {
-				cf_crash(AS_DRV_SSD, "hit stop-writes limit before drive scan completed");
-			}
-
-			if (add_rv == -3) {
-				error_count++;
-				goto NextBlock;
-			}
-
-			error_count = 0;
-			block_offset = next_block_offset;
+			indent = next_indent;
 		}
 
-NextBlock:
-
-		// If we encounter enough 1M blocks that have no records, assume we've
-		// read all our data and we're done.
-		if (error_count > 10) {
-			goto Finished;
-		}
-
-		file_offset += LOAD_BUF_SIZE;
-		ssd->cold_start_block_counter++;
+		file_offset += wblock_size;
+		ssd->sweep_wblock_id++;
 	}
 
-Finished:
-
-	ssd->cold_start_block_counter = ssd->file_size / LOAD_BUF_SIZE;
+	ssd->sweep_wblock_id = (uint32_t)(ssd->file_size / wblock_size);
 
 	if (fd != -1) {
 		read_shadow ? ssd_shadow_fd_put(ssd, fd) : ssd_fd_put(ssd, fd);
@@ -3151,65 +3099,39 @@ Finished:
 	}
 
 	cf_free(buf);
-
-	return 0;
 }
 
 
-typedef struct {
-	drv_ssds *ssds;
-	drv_ssd *ssd;
-	cf_queue *complete_q;
-	void *complete_udata;
-	void *complete_rc;
-} ssd_load_devices_data;
-
-// Thread "run" function to read a device and rebuild the index.
+// Thread "run" function to read a storage device and rebuild the index.
 void *
-ssd_load_devices_fn(void *udata)
+run_ssd_cold_start(void *udata)
 {
-	ssd_load_devices_data *ldd = (ssd_load_devices_data*)udata;
-	drv_ssd *ssd = ldd->ssd;
-	drv_ssds *ssds = ldd->ssds;
-	cf_queue *complete_q = ldd->complete_q;
-	void *complete_udata = ldd->complete_udata;
-	void *complete_rc = ldd->complete_rc;
+	ssd_load_records_info *lri = (ssd_load_records_info*)udata;
+	drv_ssd *ssd = lri->ssd;
+	drv_ssds *ssds = lri->ssds;
+	cf_queue *complete_q = lri->complete_q;
+	void *complete_udata = lri->complete_udata;
+	void *complete_rc = lri->complete_rc;
+
+	cf_free(lri);
 
 	as_namespace* ns = ssds->ns;
-
-	cf_free(ldd);
-	ldd = 0;
 
 	cf_info(AS_DRV_SSD, "device %s: reading device to load index", ssd->name);
 
 	CF_ALLOC_SET_NS_ARENA(ns);
 
-	ssd->sub_sweep	= false;
-	ssd->has_ldt	= false;
+	ssd_cold_start_sweep(ssds, ssd);
 
-	ssd_load_device_sweep(ssds, ssd);
+	cf_info(AS_DRV_SSD, "device %s: read complete: UNIQUE %lu (REPLACED %lu) (OLDER %lu) (EXPIRED %lu) (MAX-TTL %lu) records",
+			ssd->name, ssd->record_add_unique_counter,
+			ssd->record_add_replace_counter, ssd->record_add_older_counter,
+			ssd->record_add_expired_counter, ssd->record_add_max_ttl_counter);
 
-	if (ns->ldt_enabled && ssd->has_ldt) {
-		cf_info(AS_DRV_SSD, "device %s: reading device again to load subrecords",
-				ssd->name);
-		ssd->sub_sweep = true;
-		ssd_load_device_sweep(ssds, ssd);
-	}
-
-	cf_info(AS_DRV_SSD, "device %s: read complete: UNIQUE %"PRIu64" (REPLACED %"PRIu64") (OLDER %"PRIu64") (EXPIRED %"PRIu64") (MAX-TTL %"PRIu64") records",
-		ssd->name, ssd->record_add_unique_counter,
-		ssd->record_add_replace_counter, ssd->record_add_older_counter,
-		ssd->record_add_expired_counter, ssd->record_add_max_ttl_counter);
-
-	if (ssd->record_add_sigfail_counter) {
-		cf_warning(AS_DRV_SSD, "device %s: WARNING: %"PRIu64" elements could not be read due to signature failure. Possible hardware errors.",
-			ssd->name, ssd->record_add_sigfail_counter);
-	}
-
-	if (0 == cf_rc_release(complete_rc)) {
+	if (cf_rc_release(complete_rc) == 0) {
 		// All drives are done reading.
 
-		ns->cold_start_loading = false;
+		ns->loading_records = false;
 		ssd_cold_start_drop_cenotaphs(ns);
 		ssd_load_wblock_queues(ssds);
 
@@ -3226,14 +3148,16 @@ ssd_load_devices_fn(void *udata)
 		ssd_start_defrag_threads(ssds);
 	}
 
-	return 0;
+	return NULL;
 }
 
 
 void
-ssd_load_devices_load(drv_ssds *ssds, cf_queue *complete_q, void *udata)
+start_loading_records(drv_ssds *ssds, cf_queue *complete_q, void *udata)
 {
-	ssds->ns->cold_start_loading = true;
+	as_namespace *ns = ssds->ns;
+
+	ns->loading_records = true;
 
 	void *p = cf_rc_alloc(1);
 
@@ -3241,32 +3165,24 @@ ssd_load_devices_load(drv_ssds *ssds, cf_queue *complete_q, void *udata)
 		cf_rc_reserve(p);
 	}
 
+	pthread_t thread;
+	pthread_attr_t attrs;
+
+	pthread_attr_init(&attrs);
+	pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_DETACHED);
+
 	for (int i = 0; i < ssds->n_ssds; i++) {
 		drv_ssd *ssd = &ssds->ssds[i];
-		ssd_load_devices_data *ldd = cf_malloc(sizeof(ssd_load_devices_data));
+		ssd_load_records_info *lri = cf_malloc(sizeof(ssd_load_records_info));
 
-		if (! ldd) {
-			cf_crash(AS_DRV_SSD, "memory allocation in device load");
-		}
+		lri->ssds = ssds;
+		lri->ssd = ssd;
+		lri->complete_q = complete_q;
+		lri->complete_udata = udata;
+		lri->complete_rc = p;
 
-		ldd->ssds = ssds;
-		ldd->ssd = ssd;
-		ldd->complete_q = complete_q;
-		ldd->complete_udata = udata;
-		ldd->complete_rc = p;
-
-		pthread_create(&ssd->load_device_thread, 0, ssd_load_devices_fn, ldd);
-	}
-}
-
-
-void
-ssd_load_devices_init_header_length(drv_ssds *ssds)
-{
-	for (int i = 0; i < ssds->n_ssds; i++) {
-		drv_ssd *ssd = &ssds->ssds[i];
-
-		ssd->header_size = ssds->header->header_length;
+		pthread_create(&thread, &attrs,
+				ns->cold_start ? run_ssd_cold_start : run_ssd_cool_start, lri);
 	}
 }
 
@@ -3288,8 +3204,18 @@ first_used_device(ssd_device_header *headers[], int n_ssds)
 }
 
 
+static bool
+stored_version_has_data(drv_ssds *ssds, uint32_t pid)
+{
+	info_buf *b = (info_buf*)
+			(ssds->header->info_data + (SSD_HEADER_INFO_STRIDE * pid));
+
+	return ! as_partition_version_is_null(&b->version);
+}
+
+
 bool
-ssd_load_devices(drv_ssds *ssds, cf_queue *complete_q, void *udata)
+ssd_load_records(drv_ssds *ssds, cf_queue *complete_q, void *udata)
 {
 	uint64_t random = cf_get_rand64();
 
@@ -3301,29 +3227,28 @@ ssd_load_devices(drv_ssds *ssds, cf_queue *complete_q, void *udata)
 	// Check all the headers. Pick one as the representative.
 	for (int i = 0; i < n_ssds; i++) {
 		drv_ssd *ssd = &ssds->ssds[i];
-		int rvh = as_storage_read_header(ssd, ns, &headers[i]);
+		int rvh = ssd_read_header(ssd, ns, &headers[i]);
 
 		if (rvh == -1) {
-			cf_crash(AS_DRV_SSD, "unable to read disk header %s: %s",
-					ssd->name, cf_strerror(errno));
+			cf_crash(AS_DRV_SSD, "unable to read disk header %s", ssd->name);
 		}
 
 		if (rvh == -2) {
-			headers[i] = as_storage_init_header(ns);
+			headers[i] = ssd_init_header(ns);
 		}
 	}
 
 	int first_used = first_used_device(headers, n_ssds);
 
 	if (first_used == -1) {
-		// Shouldn't find all fresh headers here during warm restart.
+		// Shouldn't find all fresh headers here during warm or cool restart.
 		if (! ns->cold_start) {
 			// There's no going back to cold start now - do so the harsh way.
-			cf_crash(AS_DRV_SSD, "{%s}: found all %d devices fresh during warm restart",
-					ns->name, n_ssds);
+			cf_crash(AS_DRV_SSD, "{%s}: found all %d devices fresh during %s restart",
+					ns->name, n_ssds, as_namespace_start_mode_str(ns));
 		}
 
-		cf_info(AS_DRV_SSD, "namespace %s: found all %d devices fresh, initializing to random %"PRIu64,
+		cf_info(AS_DRV_SSD, "namespace %s: found all %d devices fresh, initializing to random %lu",
 				ns->name, n_ssds, random);
 
 		ssds->header = headers[0];
@@ -3335,7 +3260,6 @@ ssd_load_devices(drv_ssds *ssds, cf_queue *complete_q, void *udata)
 		ssds->header->random = random;
 		ssds->header->devices_n = n_ssds;
 		as_storage_info_flush_ssd(ns);
-		ssd_load_devices_init_header_length(ssds);
 
 		as_truncate_list_cenotaphs(ns); // all will show as cenotaph
 		as_truncate_done_startup(ns);
@@ -3350,7 +3274,7 @@ ssd_load_devices(drv_ssds *ssds, cf_queue *complete_q, void *udata)
 
 		// Skip fresh devices.
 		if (headers[i]->random == 0) {
-			ssd->started_fresh = true; // warm restart needs to know
+			ssd->started_fresh = true; // warm or cool restart needs to know
 			continue;
 		}
 
@@ -3386,29 +3310,34 @@ ssd_load_devices(drv_ssds *ssds, cf_queue *complete_q, void *udata)
 	ssds->header->random = random;
 	ssds->header->devices_n = n_ssds; // may have added fresh drives
 	as_storage_info_flush_ssd(ns);
-	ssd_load_devices_init_header_length(ssds);
 
 	// Cache booleans indicating whether partitions are owned or not.
 	for (uint32_t pid = 0; pid < AS_PARTITIONS; pid++) {
-		as_partition_version version;
-
-		as_storage_info_get(ns, pid, &version);
 		ssds->get_state_from_storage[pid] =
-				! as_partition_version_is_null(&version);
+				stored_version_has_data(ssds, pid);
 	}
 
-	// Warm restart - imitate device loading by reducing resumed index.
+	// Warm or cool restart.
 	if (! ns->cold_start) {
 		as_truncate_done_startup(ns); // set truncate last-update-times in sets' vmap
 		ssd_resume_devices(ssds);
 
-		return true;
+		if (as_namespace_cool_restarts(ns)) {
+			// Cool restart - fire off threads to load record data - will signal
+			// completion when threads are all done.
+			start_loading_records(ssds, complete_q, udata);
+
+			// Make sure caller doesn't signal completion.
+			return false;
+		}
+
+		return true; // warm restart (done)
 	}
 
-	// Initialize the cold-start eviction machinery.
+	// Initialize the cold start eviction machinery.
 
 	if (0 != pthread_mutex_init(&ns->cold_start_evict_lock, NULL)) {
-		cf_crash(AS_DRV_SSD, "failed cold-start eviction mutex init");
+		cf_crash(AS_DRV_SSD, "failed cold start eviction mutex init");
 	}
 
 	uint32_t now = as_record_void_time_get();
@@ -3436,9 +3365,9 @@ ssd_load_devices(drv_ssds *ssds, cf_queue *complete_q, void *udata)
 
 	ns->cold_start_max_void_time = now + (uint32_t)ns->max_ttl;
 
-	// Fire off threads to load in data - will signal completion when threads
-	// are all done.
-	ssd_load_devices_load(ssds, complete_q, udata);
+	// Fire off threads to load record data - will signal completion when
+	// threads are all done.
+	start_loading_records(ssds, complete_q, udata);
 
 	// Make sure caller doesn't signal completion.
 	return false;
@@ -3518,49 +3447,31 @@ ssd_set_scheduler_mode(const char* device_name, const char* mode)
 }
 
 
-static void
-check_write_block_size(uint32_t write_block_size)
+static uint64_t
+check_file_size(as_namespace *ns, uint64_t file_size, const char *tag)
 {
-	if (write_block_size > MAX_WRITE_BLOCK_SIZE) {
-		cf_crash(AS_DRV_SSD, "attempted to configure write block size in excess of %u",
-				MAX_WRITE_BLOCK_SIZE);
-	}
+	cf_assert(sizeof(off_t) > 4, AS_DRV_SSD, "this OS supports only 32-bit (4g) files - compile with 64 bit offsets");
 
-	if (LOAD_BUF_SIZE % write_block_size != 0 ||
-			SSD_DEFAULT_HEADER_LENGTH % write_block_size != 0) {
-		cf_crash(AS_DRV_SSD, "attempted to configure non-round write block size %u",
-				write_block_size);
-	}
-}
-
-
-static off_t
-check_file_size(off_t file_size, const char *tag)
-{
-	if (sizeof(off_t) <= 4) {
-		cf_warning(AS_DRV_SSD, "this OS supports only 32-bit (4g) files - compile with 64 bit offsets");
-	}
-
-	if (file_size > SSD_DEFAULT_HEADER_LENGTH) {
+	if (file_size > SSD_HEADER_SIZE) {
 		off_t unusable_size =
-				(file_size - SSD_DEFAULT_HEADER_LENGTH) % LOAD_BUF_SIZE;
+				(file_size - SSD_HEADER_SIZE) % ns->storage_write_block_size;
 
 		if (unusable_size != 0) {
 			cf_info(AS_DRV_SSD, "%s size must be header size %u + multiple of %u, rounding down",
-					tag, SSD_DEFAULT_HEADER_LENGTH, LOAD_BUF_SIZE);
+					tag, SSD_HEADER_SIZE, ns->storage_write_block_size);
 			file_size -= unusable_size;
 		}
 
 		if (file_size > AS_STORAGE_MAX_DEVICE_SIZE) {
-			cf_warning(AS_DRV_SSD, "%s size must be <= %"PRId64", trimming original size %"PRId64,
+			cf_warning(AS_DRV_SSD, "%s size must be <= %ld, trimming original size %ld",
 					tag, AS_STORAGE_MAX_DEVICE_SIZE, file_size);
 			file_size = AS_STORAGE_MAX_DEVICE_SIZE;
 		}
 	}
 
-	if (file_size <= SSD_DEFAULT_HEADER_LENGTH) {
-		cf_crash(AS_DRV_SSD, "%s size %"PRId64" must be greater than header size %d",
-				tag, file_size, SSD_DEFAULT_HEADER_LENGTH);
+	if (file_size <= SSD_HEADER_SIZE) {
+		cf_crash(AS_DRV_SSD, "%s size %ld must be greater than header size %d",
+				tag, file_size, SSD_HEADER_SIZE);
 	}
 
 	return file_size;
@@ -3609,11 +3520,6 @@ ssd_init_devices(as_namespace *ns, drv_ssds **ssds_p)
 	size_t ssds_size = sizeof(drv_ssds) + (n_ssds * sizeof(drv_ssd));
 	drv_ssds *ssds = cf_malloc(ssds_size);
 
-	if (! ssds) {
-		cf_warning(AS_DRV_SSD, "failed drv_ssds malloc");
-		return -1;
-	}
-
 	memset(ssds, 0, ssds_size);
 	ssds->n_ssds = n_ssds;
 	ssds->ns = ns;
@@ -3640,11 +3546,11 @@ ssd_init_devices(as_namespace *ns, drv_ssds **ssds_p)
 
 		ioctl(fd, BLKGETSIZE64, &size); // gets the number of bytes
 
-		ssd->file_size = check_file_size((off_t)size, "usable device");
+		ssd->file_size = check_file_size(ns, size, "usable device");
 		ssd->io_min_size = find_io_min_size(fd, ssd->name);
 
 		if (ns->cold_start && ns->storage_cold_start_empty) {
-			if (! as_storage_empty_header(fd, ssd->name)) {
+			if (! ssd_empty_header(fd, ssd->name)) {
 				close(fd);
 				return -1;
 			}
@@ -3712,7 +3618,7 @@ ssd_init_shadows(as_namespace *ns, drv_ssds *ssds)
 
 		ioctl(fd, BLKGETSIZE64, &size); // gets the number of bytes
 
-		if ((off_t)size < ssd->file_size) {
+		if (size < ssd->file_size) {
 			cf_warning(AS_DRV_SSD, "shadow device %s is smaller than main device - %lu < %lu",
 					ssd->shadow_name, size, ssd->file_size);
 			close(fd);
@@ -3720,7 +3626,7 @@ ssd_init_shadows(as_namespace *ns, drv_ssds *ssds)
 		}
 
 		if (ns->cold_start && ns->storage_cold_start_empty) {
-			if (! as_storage_empty_header(fd, ssd->shadow_name)) {
+			if (! ssd_empty_header(fd, ssd->shadow_name)) {
 				close(fd);
 				return -1;
 			}
@@ -3759,11 +3665,6 @@ ssd_init_files(as_namespace *ns, drv_ssds **ssds_p)
 	size_t ssds_size = sizeof(drv_ssds) + (n_ssds * sizeof(drv_ssd));
 	drv_ssds *ssds = cf_malloc(ssds_size);
 
-	if (! ssds) {
-		cf_warning(AS_DRV_SSD, "failed drv_ssds malloc");
-		return -1;
-	}
-
 	memset(ssds, 0, ssds_size);
 	ssds->n_ssds = n_ssds;
 	ssds->ns = ns;
@@ -3798,11 +3699,11 @@ ssd_init_files(as_namespace *ns, drv_ssds **ssds_p)
 			return -1;
 		}
 
-		ssd->file_size = check_file_size(ns->storage_filesize, "file");
+		ssd->file_size = check_file_size(ns, ns->storage_filesize, "file");
 		ssd->io_min_size = LO_IO_MIN_SIZE;
 
 		// Truncate will grow or shrink the file to the correct size.
-		if (0 != ftruncate(fd, ssd->file_size)) {
+		if (0 != ftruncate(fd, (off_t)ssd->file_size)) {
 			cf_warning(AS_DRV_SSD, "unable to truncate file: errno %d", errno);
 			close(fd);
 			return -1;
@@ -3859,8 +3760,6 @@ as_storage_namespace_init_ssd(as_namespace *ns, cf_queue *complete_q,
 	ns->saved_defrag_sleep = ns->storage_defrag_sleep;
 	ns->storage_defrag_sleep = 0;
 
-	check_write_block_size(ns->storage_write_block_size);
-
 	// The queue limit is more efficient to work with.
 	ns->storage_max_write_q = (int)
 			(ns->storage_max_write_cache / ns->storage_write_block_size);
@@ -3874,16 +3773,10 @@ as_storage_namespace_init_ssd(as_namespace *ns, cf_queue *complete_q,
 	char histname[HISTOGRAM_NAME_SIZE];
 
 	snprintf(histname, sizeof(histname), "{%s}-device-read-size", ns->name);
-
-	if (! (ns->device_read_size_hist = histogram_create(histname, HIST_SIZE))) {
-		cf_crash(AS_DRV_SSD, "cannot create histogram %s", histname);
-	}
+	ns->device_read_size_hist = histogram_create(histname, HIST_SIZE);
 
 	snprintf(histname, sizeof(histname), "{%s}-device-write-size", ns->name);
-
-	if (! (ns->device_write_size_hist = histogram_create(histname, HIST_SIZE))) {
-		cf_crash(AS_DRV_SSD, "cannot create histogram %s", histname);
-	}
+	ns->device_write_size_hist = histogram_create(histname, HIST_SIZE);
 
 	// Finish initializing drv_ssd structures (non-zero-value members).
 	for (int i = 0; i < ssds->n_ssds; i++) {
@@ -3904,65 +3797,40 @@ as_storage_namespace_init_ssd(as_namespace *ns, cf_queue *complete_q,
 
 		// Note: free_wblock_q, defrag_wblock_q created after loading devices.
 
-		if (! (ssd->fd_q = cf_queue_create(sizeof(int), true))) {
-			cf_crash(AS_DRV_SSD, "can't create fd queue");
+		ssd->fd_q = cf_queue_create(sizeof(int), true);
+
+		if (ssd->shadow_name) {
+			ssd->shadow_fd_q = cf_queue_create(sizeof(int), true);
 		}
 
-		if (ssd->shadow_name &&
-				! (ssd->shadow_fd_q = cf_queue_create(sizeof(int), true))) {
-			cf_crash(AS_DRV_SSD, "can't create shadow fd queue");
+		ssd->swb_write_q = cf_queue_create(sizeof(void*), true);
+
+		if (ssd->shadow_name) {
+			ssd->swb_shadow_q = cf_queue_create(sizeof(void*), true);
 		}
 
-		if (! (ssd->swb_write_q = cf_queue_create(sizeof(void*), true))) {
-			cf_crash(AS_DRV_SSD, "can't create swb-write queue");
-		}
-
-		if (ssd->shadow_name &&
-				! (ssd->swb_shadow_q = cf_queue_create(sizeof(void*), true))) {
-			cf_crash(AS_DRV_SSD, "can't create swb-shadow queue");
-		}
-
-		if (! (ssd->swb_free_q = cf_queue_create(sizeof(void*), true))) {
-			cf_crash(AS_DRV_SSD, "can't create swb-free queue");
-		}
+		ssd->swb_free_q = cf_queue_create(sizeof(void*), true);
 
 		if (! ns->storage_data_in_memory) {
-			if (! (ssd->post_write_q = cf_queue_create(sizeof(void*), false))) {
-				cf_crash(AS_DRV_SSD, "can't create post-write queue");
-			}
+			ssd->post_write_q = cf_queue_create(sizeof(void*), false);
 		}
 
 		snprintf(histname, sizeof(histname), "{%s}-%s-read", ns->name, ssd->name);
-
-		if (! (ssd->hist_read = histogram_create(histname, HIST_MILLISECONDS))) {
-			cf_crash(AS_DRV_SSD, "cannot create histogram %s", histname);
-		}
+		ssd->hist_read = histogram_create(histname, HIST_MILLISECONDS);
 
 		snprintf(histname, sizeof(histname), "{%s}-%s-large-block-read", ns->name, ssd->name);
-
-		if (! (ssd->hist_large_block_read = histogram_create(histname, HIST_MILLISECONDS))) {
-			cf_crash(AS_DRV_SSD,"cannot create histogram %s", histname);
-		}
+		ssd->hist_large_block_read = histogram_create(histname, HIST_MILLISECONDS);
 
 		snprintf(histname, sizeof(histname), "{%s}-%s-write", ns->name, ssd->name);
-
-		if (! (ssd->hist_write = histogram_create(histname, HIST_MILLISECONDS))) {
-			cf_crash(AS_DRV_SSD, "cannot create histogram %s", histname);
-		}
+		ssd->hist_write = histogram_create(histname, HIST_MILLISECONDS);
 
 		if (ssd->shadow_name) {
 			snprintf(histname, sizeof(histname), "{%s}-%s-shadow-write", ns->name, ssd->name);
-
-			if (! (ssd->hist_shadow_write = histogram_create(histname, HIST_MILLISECONDS))) {
-				cf_crash(AS_DRV_SSD, "cannot create histogram %s", histname);
-			}
+			ssd->hist_shadow_write = histogram_create(histname, HIST_MILLISECONDS);
 		}
 
 		snprintf(histname, sizeof(histname), "{%s}-%s-fsync", ns->name, ssd->name);
-
-		if (! (ssd->hist_fsync = histogram_create(histname, HIST_MILLISECONDS))) {
-			cf_crash(AS_DRV_SSD, "cannot create histogram %s", histname);
-		}
+		ssd->hist_fsync = histogram_create(histname, HIST_MILLISECONDS);
 	}
 
 	// Attempt to load the data.
@@ -3971,7 +3839,7 @@ as_storage_namespace_init_ssd(as_namespace *ns, cf_queue *complete_q,
 	// asynchronously signal completion via the complete_q, 'true' means it's
 	// finished, signal here.
 
-	if (ssd_load_devices(ssds, complete_q, udata)) {
+	if (ssd_load_records(ssds, complete_q, udata)) {
 		ssd_load_wblock_queues(ssds);
 
 		cf_queue_push(complete_q, &udata);
@@ -3986,34 +3854,32 @@ as_storage_namespace_init_ssd(as_namespace *ns, cf_queue *complete_q,
 
 
 void
-as_storage_cold_start_ticker_ssd()
+as_storage_loading_records_ticker_ssd()
 {
 	for (uint32_t i = 0; i < g_config.n_namespaces; i++) {
 		as_namespace *ns = g_config.namespaces[i];
 
-		if (ns->cold_start_loading) {
+		if (ns->loading_records) {
 			char buf[2048];
 			int pos = 0;
 			drv_ssds *ssds = (drv_ssds*)ns->storage_private;
 
 			for (int j = 0; j < ssds->n_ssds; j++) {
 				drv_ssd *ssd = &ssds->ssds[j];
-				uint32_t pct = (ssd->cold_start_block_counter * 100) /
-						(ssd->file_size / LOAD_BUF_SIZE);
+				uint32_t pct = (uint32_t)((ssd->sweep_wblock_id * 100UL) /
+						(ssd->file_size / ssd->write_block_size));
 
 				pos += sprintf(buf + pos, ", %s %u%%", ssd->name, pct);
 			}
 
-			// TODO - selective on sub-records also?
 			// TODO - conform with new log standard?
 			if (ns->n_tombstones == 0) {
-				cf_info(AS_DRV_SSD, "{%s} loaded %lu records, %lu subrecords%s",
-						ns->name, ns->n_objects, ns->n_sub_objects, buf);
+				cf_info(AS_DRV_SSD, "{%s} loaded %lu objects%s", ns->name,
+						ns->n_objects, buf);
 			}
 			else {
-				cf_info(AS_DRV_SSD, "{%s} loaded %lu records, %lu subrecords, %lu tombstones%s",
-						ns->name, ns->n_objects, ns->n_sub_objects,
-						ns->n_tombstones, buf);
+				cf_info(AS_DRV_SSD, "{%s} loaded %lu objects, %lu tombstones%s",
+						ns->name, ns->n_objects, ns->n_tombstones, buf);
 			}
 		}
 	}
@@ -4208,27 +4074,43 @@ as_storage_defrag_sweep_ssd(as_namespace *ns)
 //
 
 void
-as_storage_info_set_ssd(as_namespace *ns, uint32_t pid,
-		const as_partition_version *version)
+as_storage_info_set_ssd(as_namespace *ns, const as_partition *p, bool flush)
 {
 	drv_ssds *ssds = (drv_ssds*)ns->storage_private;
 	info_buf *b = (info_buf*)
-			(ssds->header->info_data + (SSD_HEADER_INFO_STRIDE * pid));
+			(ssds->header->info_data + (SSD_HEADER_INFO_STRIDE * p->id));
 
 	b->unused = 0;
-	b->version = *version;
+	b->version = p->version;
+
+	if (flush) {
+		// TODO - in future storage format change, arrange for each stride to
+		// never cross an io-min-size boundary, so we can do less math here.
+
+		uint64_t offset = (uint8_t*)b - (uint8_t*)ssds->header;
+		uint64_t end_offset = offset + SSD_HEADER_INFO_STRIDE;
+
+		for (int i = 0; i < ssds->n_ssds; i++) {
+			drv_ssd *ssd = &ssds->ssds[i];
+
+			uint64_t flush_offset = BYTES_DOWN_TO_IO_MIN(ssd, offset);
+			uint64_t flush_end_offset = BYTES_UP_TO_IO_MIN(ssd, end_offset);
+
+			ssd_write_header(ssd, ssds->header,
+					flush_offset, flush_end_offset - flush_offset);
+		}
+	}
 }
 
 
 void
-as_storage_info_get_ssd(as_namespace *ns, uint32_t pid,
-		as_partition_version *version)
+as_storage_info_get_ssd(as_namespace *ns, as_partition *p)
 {
 	drv_ssds *ssds = (drv_ssds*)ns->storage_private;
 	info_buf *b = (info_buf*)
-			(ssds->header->info_data + (SSD_HEADER_INFO_STRIDE * pid));
+			(ssds->header->info_data + (SSD_HEADER_INFO_STRIDE * p->id));
 
-	*version = b->version;
+	p->version = b->version;
 }
 
 
@@ -4240,7 +4122,7 @@ as_storage_info_flush_ssd(as_namespace *ns)
 	for (int i = 0; i < ssds->n_ssds; i++) {
 		drv_ssd *ssd = &ssds->ssds[i];
 
-		as_storage_write_header(ssd, ssds->header, ssds->header->header_length);
+		ssd_write_header(ssd, ssds->header, 0, SSD_HEADER_SIZE);
 	}
 
 	return 0;
@@ -4262,7 +4144,7 @@ as_storage_save_evict_void_time_ssd(as_namespace *ns, uint32_t evict_void_time)
 		drv_ssd* ssd = &ssds->ssds[i];
 		size_t peek_size = BYTES_UP_TO_IO_MIN(ssd, sizeof(ssd_device_header));
 
-		as_storage_write_header(ssd, ssds->header, peek_size);
+		ssd_write_header(ssd, ssds->header, 0, peek_size);
 	}
 }
 

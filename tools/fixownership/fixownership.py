@@ -32,16 +32,20 @@ params = {'user': '',
           'file': '',
           'user-path': '',
           'device': '',
-          'namedpipe-path': '',
-          'digestlog-path': '',
-          'errorlog-path': '',
-          'xdr-pidfile': ''
+          'namedpipe-path': '', # legacy
+          'digestlog-path': '', # legacy
+          'errorlog-path': '',  # legacy
+          'xdr-pidfile': '',    # legacy
+          'system-path': '',
+          'xdr-digestlog-path' : '',
+          'ca-file' : '',
+          'ca-path' : '',
+          'cert-file' : '',
+          'key-file' : '',
+          'encryption-key-file' : '',
+          'dc-security-config-file' : ''
           }
-# Default values of some of the params which need to be upgraded if no
-# config values are present
-params_def = {'work-directory': '/opt/aerospike/smd',
-              'user-path': '/opt/aerospike/usr'
-              }
+
 # this is the dictionary for not running default chown
 # devices dont persist ownership change through reboots.
 # Hence adding it to exception list
@@ -85,12 +89,6 @@ try:
                         # The param already has a value, append
                         params[line_param] = params[line_param] + \
                             "," + p_value
-                    # add the parent directory to  dict
-                    # This helps in changing the ownership of the
-                    # parent directory as well
-                    if not line_param in params_exc:
-                            params[line_param] = params[line_param] + \
-                                "," + os.path.dirname(p_value)
 except IOError as e:
     print 'Error while trying to read config file, please check ' + \
         u_configfile + ': ' + e.strerror
@@ -162,10 +160,48 @@ params.pop('device')
 params.pop('user')
 params.pop('group')
 
-#check for the default params list. If its not in config params, add it
+# Default values of some of the params which need to be upgraded if no
+# config values are present
+params_def = {'work-directory': '/opt/aerospike',
+              'user-path': '/opt/aerospike/usr',
+              'system-path': '/opt/aerospike/sys'
+              }
 for k in params_def:
     if not len(params[k]) > 0:
         params[k] = params_def[k]
+
+params_derived = {
+                'smd-path' : params['work-directory'] + '/smd'
+                }
+
+for k in params_derived:
+    if k not in params or not len(params[k]) > 0:
+        params[k] = params_derived[k]
+
+# Add parent directory and all subdirectory and file
+# recursively to dict. This helps in changing ownership.
+params_recursive_def = ['user-path', 'system-path', 'ca-path' , 'smd-path']
+
+def update_recursive(param, path):
+    try:
+        for root, dirs, files in os.walk(path):
+            for d in dirs:
+                param = param + "," + os.path.join(root, d)
+            for f in files:
+                param = param + "," + os.path.join(root, f)
+
+        return param
+
+    except OSError as e:
+        print "Error: " + e.strerror
+        return param
+
+for k in params_recursive_def:
+    if k in params and len(params[k]) > 0:
+        dirname = os.path.dirname(params[k])
+        params[k] = update_recursive(params[k], params[k])
+        params[k] = params[k] + "," + dirname
+
 
 # chown for all params
 for k in params:
@@ -193,10 +229,12 @@ for k in params:
 
                 if do_chown == 'y':
                     try:
-                        os.chown(n_param, uid, gid)
-                        print ("Ownership changed of " + n_param +
-                               " to user " + u_user +
-                               " group " + u_group)
+                        # ok if file does not exist
+                        if os.path.exists(n_param):
+                            os.chown(n_param, uid, gid)
+                            print ("Ownership changed of " + n_param +
+                                   " to user " + u_user +
+                                   " group " + u_group)
                     except OSError as e:
                         print "Error: " + n_param, e.strerror
                         #prompt for all except pid file
@@ -238,7 +276,7 @@ if do_delshm == 'y':
         exit(9)
 
 #If we have come this far, there have been no exits, we should be good to print
-#an INFO message saying all good. This message should be used as a debug param 
+#an INFO message saying all good. This message should be used as a debug param
 #for successful execution
-print "INFO: Successful execution of fixownership script finished" 
+print "INFO: Successful execution of fixownership script finished"
 

@@ -154,7 +154,7 @@ as_sig_handle_int(int sig_num)
 
 	if (! g_startup_complete) {
 		cf_warning(AS_AS, "startup was not complete, exiting immediately");
-		_exit(0);
+		_exit(1);
 	}
 
 	xdr_sig_handler(sig_num);

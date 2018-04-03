@@ -334,10 +334,6 @@ geojson_to_asval(const as_particle *p)
 	char const *jsonptr = as_geojson_mem_jsonstr(p, &jsonsz);
 	char *buf = cf_malloc(jsonsz + 1);
 
-	if (! buf) {
-		return NULL;
-	}
-
 	memcpy(buf, jsonptr, jsonsz);
 	buf[jsonsz] = '\0';
 

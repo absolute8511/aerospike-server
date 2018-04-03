@@ -116,7 +116,6 @@ int udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns,
 typedef struct scan_options_s {
 	int			priority;
 	bool		fail_on_cluster_change;
-	bool		include_ldt_data;
 	uint32_t	sample_pct;
 } scan_options;
 
@@ -125,8 +124,7 @@ scan_type get_scan_type(as_transaction* tr);
 bool get_scan_options(as_transaction* tr, scan_options* options);
 bool get_scan_socket_timeout(as_transaction* tr, uint32_t* timeout);
 bool get_scan_predexp(as_transaction* tr, predexp_eval_t** p_predexp);
-size_t send_blocking_response_chunk(cf_socket* sock, uint8_t* buf, size_t size, int32_t timeout);
-size_t send_blocking_response_fin(cf_socket* sock, int result_code, int32_t timeout);
+size_t send_blocking_response_chunk(as_file_handle* fd_h, uint8_t* buf, size_t size, int32_t timeout);
 static inline bool excluded_set(as_index* r, uint16_t set_id);
 
 
@@ -271,8 +269,9 @@ get_scan_set_id(as_transaction* tr, as_namespace* ns, uint16_t* p_set_id)
 		set_id = as_namespace_get_set_id(ns, set_name);
 
 		if (set_id == INVALID_SET_ID) {
-			cf_warning(AS_SCAN, "scan msg has unrecognized set %s", set_name);
-			return AS_PROTO_RESULT_FAIL_NOTFOUND;
+			cf_warning(AS_SCAN, "scan msg from %s has unrecognized set %s",
+					tr->from.proto_fd_h->client, set_name);
+			return AS_PROTO_RESULT_FAIL_NOT_FOUND;
 		}
 	}
 
@@ -320,8 +319,6 @@ get_scan_options(as_transaction* tr, scan_options* options)
 	options->priority = AS_MSG_FIELD_SCAN_PRIORITY(f->data[0]);
 	options->fail_on_cluster_change =
 			(AS_MSG_FIELD_SCAN_FAIL_ON_CLUSTER_CHANGE & f->data[0]) != 0;
-	options->include_ldt_data =
-			(AS_MSG_FIELD_SCAN_INCLUDE_LDT_DATA & f->data[0]) != 0;
 	options->sample_pct = f->data[1];
 
 	return true;
@@ -363,9 +360,10 @@ get_scan_predexp(as_transaction* tr, predexp_eval_t** p_predexp)
 }
 
 size_t
-send_blocking_response_chunk(cf_socket* sock, uint8_t* buf, size_t size,
+send_blocking_response_chunk(as_file_handle* fd_h, uint8_t* buf, size_t size,
 		int32_t timeout)
 {
+	cf_socket* sock = &fd_h->sock;
 	as_proto proto;
 
 	proto.version = PROTO_VERSION;
@@ -375,51 +373,18 @@ send_blocking_response_chunk(cf_socket* sock, uint8_t* buf, size_t size,
 
 	if (cf_socket_send_all(sock, (uint8_t*)&proto, sizeof(as_proto),
 			MSG_NOSIGNAL | MSG_MORE, timeout) < 0) {
-		cf_warning(AS_SCAN, "send error - fd %d %s", CSFD(sock),
-				cf_strerror(errno));
+		cf_warning(AS_SCAN, "error sending to %s - fd %d %s", fd_h->client,
+				CSFD(sock), cf_strerror(errno));
 		return 0;
 	}
 
 	if (cf_socket_send_all(sock, buf, size, MSG_NOSIGNAL, timeout) < 0) {
-		cf_warning(AS_SCAN, "send error - fd %d sz %lu %s", CSFD(sock),
-				size, cf_strerror(errno));
+		cf_warning(AS_SCAN, "error sending to %s - fd %d sz %lu %s",
+				fd_h->client, CSFD(sock), size, cf_strerror(errno));
 		return 0;
 	}
 
 	return sizeof(as_proto) + size;
-}
-
-size_t
-send_blocking_response_fin(cf_socket* sock, int result_code, int32_t timeout)
-{
-	cl_msg m;
-
-	m.proto.version = PROTO_VERSION;
-	m.proto.type = PROTO_TYPE_AS_MSG;
-	m.proto.sz = sizeof(as_msg);
-	as_proto_swap(&m.proto);
-
-	m.msg.header_sz = sizeof(as_msg);
-	m.msg.info1 = 0;
-	m.msg.info2 = 0;
-	m.msg.info3 = AS_MSG_INFO3_LAST;
-	m.msg.unused = 0;
-	m.msg.result_code = result_code;
-	m.msg.generation = 0;
-	m.msg.record_ttl = 0;
-	m.msg.transaction_ttl = 0;
-	m.msg.n_fields = 0;
-	m.msg.n_ops = 0;
-	as_msg_swap_header(&m.msg);
-
-	if (cf_socket_send_all(sock, (uint8_t*)&m, sizeof(cl_msg), MSG_NOSIGNAL,
-			timeout) < 0) {
-		cf_warning(AS_SCAN, "send error - fd %d %s", CSFD(sock),
-				cf_strerror(errno));
-		return 0;
-	}
-
-	return sizeof(cl_msg);
 }
 
 static inline bool
@@ -490,7 +455,7 @@ conn_scan_job_finish(conn_scan_job* job)
 
 	if (job->fd_h) {
 		// TODO - perhaps reflect in monitor if send fails?
-		size_t size_sent = send_blocking_response_fin(&job->fd_h->sock,
+		size_t size_sent = as_msg_send_fin_timeout(&job->fd_h->sock,
 				_job->abandoned, job->fd_timeout);
 
 		job->net_io_bytes += size_sent;
@@ -513,8 +478,8 @@ conn_scan_job_send_response(conn_scan_job* job, uint8_t* buf, size_t size)
 		return false;
 	}
 
-	size_t size_sent = send_blocking_response_chunk(&job->fd_h->sock, buf,
-			size, job->fd_timeout);
+	size_t size_sent = send_blocking_response_chunk(job->fd_h, buf, size,
+			job->fd_timeout);
 
 	if (size_sent == 0) {
 		int reason = errno == ETIMEDOUT ?
@@ -564,7 +529,6 @@ typedef struct basic_scan_job_s {
 	// Derived class data:
 	uint64_t		cluster_key;
 	bool			fail_on_cluster_change;
-	bool			include_ldt_data;
 	bool			no_bin_data;
 	uint32_t		sample_pct;
 	predexp_eval_t*	predexp;
@@ -601,12 +565,7 @@ basic_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	basic_scan_job* job = cf_malloc(sizeof(basic_scan_job));
 	as_job* _job = (as_job*)job;
 
-	if (! job) {
-		cf_warning(AS_SCAN, "basic scan job failed alloc");
-		return AS_PROTO_RESULT_FAIL_UNKNOWN;
-	}
-
-	scan_options options = { 0, false, false, 100 };
+	scan_options options = { .sample_pct = 100 };
 	uint32_t timeout = CF_SOCKET_TIMEOUT;
 	predexp_eval_t* predexp = NULL;
 
@@ -623,8 +582,7 @@ basic_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 
 	job->cluster_key = as_exchange_cluster_key();
 	job->fail_on_cluster_change = options.fail_on_cluster_change;
-	job->include_ldt_data = options.include_ldt_data;
-	job->no_bin_data = (tr->msgp->msg.info1 & AS_MSG_INFO1_GET_NOBINDATA) != 0;
+	job->no_bin_data = (tr->msgp->msg.info1 & AS_MSG_INFO1_GET_NO_BINS) != 0;
 	job->sample_pct = options.sample_pct;
 	job->predexp = predexp;
 
@@ -649,12 +607,11 @@ basic_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	// Take ownership of socket from transaction.
 	conn_scan_job_own_fd((conn_scan_job*)job, tr->from.proto_fd_h, timeout);
 
-	cf_info(AS_SCAN, "starting basic scan job %lu {%s:%s} priority %u, sample-pct %u%s%s%s",
+	cf_info(AS_SCAN, "starting basic scan job %lu {%s:%s} priority %u, sample-pct %u%s%s",
 			_job->trid, ns->name, as_namespace_get_set_name(ns, set_id),
 			_job->priority, job->sample_pct,
 			job->no_bin_data ? ", metadata-only" : "",
-			job->fail_on_cluster_change ? ", fail-on-cluster-change" : "",
-			job->include_ldt_data ? ", include-ldt-data" : "");
+			job->fail_on_cluster_change ? ", fail-on-cluster-change" : "");
 
 	if ((result = as_job_manager_start_job(_job->mgr, _job)) != 0) {
 		cf_warning(AS_SCAN, "basic scan job %lu failed to start (%d)",
@@ -795,26 +752,17 @@ basic_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 		return;
 	}
 
+	as_storage_rd rd;
+
+	as_storage_record_open(ns, r, &rd);
+
 	if (job->no_bin_data) {
 		// TODO - suppose the predexp needs bin values???
 
-		if (as_index_is_flag_set(r, AS_INDEX_FLAG_KEY_STORED)) {
-			as_storage_rd rd;
-
-			as_storage_record_open(ns, r, &rd);
-			as_msg_make_response_bufbuilder(r, &rd, slice->bb_r, true, NULL,
-					job->include_ldt_data, true, true, NULL);
-			as_storage_record_close(&rd);
-		}
-		else {
-			as_msg_make_response_bufbuilder(r, NULL, slice->bb_r, true,
-					ns->name, job->include_ldt_data, false, true, NULL);
-		}
+		as_msg_make_response_bufbuilder(slice->bb_r, &rd, true, true, true,
+				NULL);
 	}
 	else {
-		as_storage_rd rd;
-
-		as_storage_record_open(ns, r, &rd);
 		as_storage_rd_load_n_bins(&rd); // TODO - handle error returned
 
 		as_bin stack_bins[rd.ns->storage_data_in_memory ? 0 : rd.n_bins];
@@ -829,11 +777,11 @@ basic_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 			return;
 		}
 
-		as_msg_make_response_bufbuilder(r, &rd, slice->bb_r, false, NULL,
-				job->include_ldt_data, true, true, job->bin_names);
-		as_storage_record_close(&rd);
+		as_msg_make_response_bufbuilder(slice->bb_r, &rd, false, true, true,
+				job->bin_names);
 	}
 
+	as_storage_record_close(&rd);
 	as_record_done(r_ref, ns);
 
 	cf_atomic64_incr(&_job->n_records_read);
@@ -949,12 +897,7 @@ aggr_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	aggr_scan_job* job = cf_malloc(sizeof(aggr_scan_job));
 	as_job* _job = (as_job*)job;
 
-	if (! job) {
-		cf_warning(AS_SCAN, "aggregation scan job failed alloc");
-		return AS_PROTO_RESULT_FAIL_UNKNOWN;
-	}
-
-	scan_options options = { 0, false, false, 100 };
+	scan_options options = { .sample_pct = 100 };
 	uint32_t timeout = CF_SOCKET_TIMEOUT;
 
 	if (! get_scan_options(tr, &options) ||
@@ -1181,10 +1124,7 @@ aggr_scan_add_digest(cf_ll* ll, cf_digest* keyd)
 			return false;
 		}
 
-		if (! (tail_e = cf_malloc(sizeof(as_index_keys_ll_element)))) {
-			cf_free(keys_arr);
-			return false;
-		}
+		tail_e = cf_malloc(sizeof(as_index_keys_ll_element));
 
 		tail_e->keys_arr = keys_arr;
 		cf_ll_append(ll, (cf_ll_element*)tail_e);
@@ -1288,12 +1228,7 @@ udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 	udf_bg_scan_job* job = cf_malloc(sizeof(udf_bg_scan_job));
 	as_job* _job = (as_job*)job;
 
-	if (! job) {
-		cf_warning(AS_SCAN, "udf-bg scan job failed alloc");
-		return AS_PROTO_RESULT_FAIL_UNKNOWN;
-	}
-
-	scan_options options = { 0, false, false, 100 };
+	scan_options options = { .sample_pct = 100 };
 	predexp_eval_t* predexp = NULL;
 
 	if (! get_scan_options(tr, &options) || ! get_scan_predexp(tr, &predexp)) {
@@ -1333,7 +1268,7 @@ udf_bg_scan_job_start(as_transaction* tr, as_namespace* ns, uint16_t set_id)
 		return result;
 	}
 
-	if (as_msg_send_fin(&tr->from.proto_fd_h->sock, AS_PROTO_RESULT_OK) == 0) {
+	if (as_msg_send_fin(&tr->from.proto_fd_h->sock, AS_PROTO_RESULT_OK)) {
 		tr->from.proto_fd_h->last_used = cf_getms();
 		as_end_of_transaction_ok(tr->from.proto_fd_h);
 	}
@@ -1454,11 +1389,7 @@ udf_bg_scan_job_reduce_cb(as_index_ref* r_ref, void* udata)
 
 	as_transaction tr;
 
-	if (as_transaction_init_iudf(&tr, ns, &d, &job->origin,
-			job->is_durable_delete) != 0) {
-		as_job_manager_abandon_job(_job->mgr, _job, AS_JOB_FAIL_UNKNOWN);
-		return;
-	}
+	as_transaction_init_iudf(&tr, ns, &d, &job->origin, job->is_durable_delete);
 
 	cf_atomic64_incr(&_job->n_records_read);
 	cf_atomic32_incr(&job->n_active_tr);

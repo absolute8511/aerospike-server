@@ -39,7 +39,7 @@
 
 
 //==========================================================
-// Constants.
+// Typedefs & constants.
 //
 
 const uint32_t MY_MIG_FEATURES = 0;
@@ -55,20 +55,10 @@ should_emigrate_record(emigration *emig, as_index_ref *r_ref)
 	return true;
 }
 
-void
-emigration_flag_pickle(const uint8_t *buf, uint32_t *info)
+uint32_t
+emigration_pack_info(const emigration *emig, const as_record *r)
 {
-}
-
-emig_meta_q *
-emig_meta_q_create()
-{
-	return NULL;
-}
-
-void
-emig_meta_q_destroy(emig_meta_q *emq)
-{
+	return 0;
 }
 
 void
@@ -79,7 +69,7 @@ emigration_handle_meta_batch_request(cf_node src, msg *m)
 }
 
 bool
-immigration_ignore_pickle(const uint8_t *buf, const msg *m)
+immigration_ignore_pickle(const uint8_t *buf, uint32_t info)
 {
 	return as_record_pickle_is_binless(buf);
 }
@@ -96,14 +86,4 @@ immigration_start_meta_sender(immigration *immig, uint32_t emig_features,
 		uint64_t emig_partition_sz)
 {
 	return false;
-}
-
-void
-immig_meta_q_init(immig_meta_q *imq)
-{
-}
-
-void
-immig_meta_q_destroy(immig_meta_q *imq)
-{
 }

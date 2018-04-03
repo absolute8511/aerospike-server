@@ -174,6 +174,7 @@ typedef struct as_query_transaction_s {
 	as_sindex              * si;
 	as_sindex_range        * srange;
 	query_type               job_type;  // Job type [LOOKUP/AGG/UDF]
+	bool                     no_bin_data;
 	predexp_eval_t         * predexp_eval;
 	cf_vector              * binlist;
 	as_file_handle         * fd_h;      // ref counted nonetheless
@@ -460,9 +461,7 @@ bb_poolrelease(cf_buf_builder *bb_r)
 		cf_buf_builder_free(bb_r);
 	} else {
 		cf_detail(AS_QUERY, "Pushed %p %"PRIu64" %d ", bb_r, g_config.query_buf_size, cf_buf_builder_size(bb_r));
-		if (cf_queue_push(g_query_response_bb_pool, &bb_r) != CF_QUEUE_OK) {
-			cf_crash(AS_QUERY, "Failed to push into bb pool queue !!");
-		}
+		cf_queue_push(g_query_response_bb_pool, &bb_r);
 	}
 	return ret;
 }
@@ -502,9 +501,7 @@ qwork_poolrelease(query_work *qwork)
 	int ret = AS_QUERY_OK;
 	if (cf_queue_sz(g_query_qwork_pool) < AS_QUERY_MAX_QREQ) {
 		cf_detail(AS_QUERY, "Pushed qwork %p", qwork);
-		if (cf_queue_push(g_query_qwork_pool, &qwork) != CF_QUEUE_OK) {
-			cf_crash(AS_QUERY, "Failed to push into query work object pool Queue !!");
-		}
+		cf_queue_push(g_query_qwork_pool, &qwork);
 	} else {
 		cf_detail(AS_QUERY, "Freed qwork %p", qwork);
 		cf_free(qwork);
@@ -520,9 +517,6 @@ qwork_poolrequest()
 	int rv = cf_queue_pop(g_query_qwork_pool, &qwork, CF_QUEUE_NOWAIT);
 	if (rv == CF_QUEUE_EMPTY) {
 		qwork = cf_malloc(sizeof(query_work));
-		if (!qwork) {
-			cf_crash(AS_QUERY, "Allocation Error in Query Work Object Pool !!");
-		}
 		memset(qwork, 0, sizeof(query_work));
 	} else if (rv != CF_QUEUE_OK) {
 		cf_warning(AS_QUERY, "Failed to find query work in the pool");
@@ -992,7 +986,7 @@ query_netio(as_query_transaction *qtr)
 	io.seq         = cf_atomic32_incr(&qtr->netio_push_seq);
 	io.start_time  = cf_getns();
 
-	int ret        = as_netio_send(&io, NULL, qtr->blocking);
+	int ret        = as_netio_send(&io, false, qtr->blocking);
 	qtr->bb_r      = bb_poolrequest();
    	cf_buf_builder_reserve(&qtr->bb_r, 8, NULL);
 
@@ -1026,7 +1020,7 @@ query_reserve_partition(as_namespace * ns, as_query_transaction * qtr, uint32_t 
 		cf_warning(AS_QUERY, "rsv is null while reserving partition.");
 		return NULL;
 	}
-	AS_PARTITION_RESERVATION_INITP(rsv);
+
 	if (0 != as_partition_reserve_query(ns, pid, rsv)) {
 		return NULL;
 	}
@@ -1052,9 +1046,6 @@ as_query_pre_reserve_partitions(as_query_transaction * qtr)
 	}
 	if (qtr->qctx.partitions_pre_reserved) {
 		qtr->rsv = cf_malloc(sizeof(as_partition_reservation) * AS_PARTITIONS);
-		if (!qtr->rsv) {
-			cf_crash(AS_QUERY, "Allocation Error in Query Prereserve !!");
-		}
 		as_partition_prereserve_query(qtr->ns, qtr->qctx.can_partition_query, qtr->rsv);
 	} else {
 		qtr->rsv = NULL;
@@ -1159,12 +1150,13 @@ hash_track_qtr(as_query_transaction *qtr)
  * 		Takes a lock over qtr->buf
  */
 static int
-query_add_response(void *void_qtr, as_index_ref *r_ref, as_storage_rd *rd)
+query_add_response(void *void_qtr, as_storage_rd *rd)
 {
-	as_record *r = r_ref->r;
 	as_query_transaction *qtr = (as_query_transaction *)void_qtr;
-	size_t msg_sz = as_msg_response_msgsize(r, rd, false, NULL, false,
-			qtr->binlist);
+
+	// TODO - check and handle error result (< 0 - drive IO) explicitly?
+	size_t msg_sz = (size_t)as_msg_make_response_bufbuilder(NULL, rd,
+			qtr->no_bin_data, true, true, qtr->binlist);
 	int ret = 0;
 
 	pthread_mutex_lock(&qtr->buf_mutex);
@@ -1179,9 +1171,11 @@ query_add_response(void *void_qtr, as_index_ref *r_ref, as_storage_rd *rd)
 		query_netio(qtr);
 	}
 
-	ret = as_msg_make_response_bufbuilder(r, rd, &qtr->bb_r, false,
-			NULL, false, true, true, qtr->binlist);
-	if (ret != 0) {
+	int32_t result = as_msg_make_response_bufbuilder(&qtr->bb_r, rd,
+			qtr->no_bin_data, true, true, qtr->binlist);
+
+	if (result < 0) {
+		ret = result;
 		cf_warning(AS_QUERY, "Weird there is space but still the packing failed "
 				"available = %zd msg size = %zu",
 				bb_r->alloc_sz - bb_r->used_sz, msg_sz);
@@ -1241,7 +1235,7 @@ static void
 query_send_bg_udf_response(as_transaction *tr)
 {
 	cf_detail(AS_QUERY, "Send Fin for Background UDF");
-	bool force_close = as_msg_send_fin(&tr->from.proto_fd_h->sock, AS_PROTO_RESULT_OK) != 0;
+	bool force_close = ! as_msg_send_fin(&tr->from.proto_fd_h->sock, AS_PROTO_RESULT_OK);
 	query_release_fd(tr->from.proto_fd_h, force_close);
 	tr->from.proto_fd_h = NULL;
 }
@@ -1614,6 +1608,11 @@ query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 		as_storage_rd rd;
 		as_storage_record_open(ns, r, &rd);
 		qtr->n_read_success += 1;
+
+		// TODO - even if qtr->no_bin_data is true, we still read bins in order
+		// to check via query_record_matches() below. If sindex evolves to not
+		// have to do that, optimize this case and bypass reading bins.
+
 		as_storage_rd_load_n_bins(&rd); // TODO - handle error returned
 
 		// Note: This array must stay in scope until the response
@@ -1646,7 +1645,7 @@ query_io(as_query_transaction *qtr, cf_digest *dig, as_sindex_key * skey)
 			return AS_QUERY_OK;
 		}
 
-		int ret = query_add_response(qtr, &r_ref, &rd);
+		int ret = query_add_response(qtr, &rd);
 		if (ret != 0) {
 			as_storage_record_close(&rd);
 			as_record_done(&r_ref, ns);
@@ -1691,8 +1690,6 @@ query_add_val_response(void *void_qtr, const as_val *val, bool success)
 		cf_warning(AS_PROTO, "particle to buf: could not copy data!");
 	}
 
-	int ret = 0;
-
 	pthread_mutex_lock(&qtr->buf_mutex);
 	cf_buf_builder *bb_r = qtr->bb_r;
 	if (bb_r == NULL) {
@@ -1705,17 +1702,12 @@ query_add_val_response(void *void_qtr, const as_val *val, bool success)
 		query_netio(qtr);
 	}
 
-	ret = as_msg_make_val_response_bufbuilder(val, &qtr->bb_r, msg_sz, success);
-	if (ret != 0) {
-		cf_warning(AS_QUERY, "Weird there is space but still the packing failed "
-				"available = %zd msg size = %d",
-				bb_r->alloc_sz - bb_r->used_sz, msg_sz);
-	}
+	as_msg_make_val_response_bufbuilder(val, &qtr->bb_r, msg_sz, success);
 	cf_atomic64_incr(&qtr->n_result_records);
-	pthread_mutex_unlock(&qtr->buf_mutex);
-	return ret;
-}
 
+	pthread_mutex_unlock(&qtr->buf_mutex);
+	return 0;
+}
 
 
 static void
@@ -1885,10 +1877,7 @@ query_udf_bg_tr_start(as_query_transaction *qtr, cf_digest *keyd)
 
 	as_transaction tr;
 
-	if (as_transaction_init_iudf(&tr, qtr->ns, keyd, &qtr->origin, qtr->is_durable_delete)) {
-		qtr_set_err(qtr, AS_PROTO_RESULT_FAIL_QUERY_CBERROR, __FILE__, __LINE__);
-		return AS_QUERY_OK;
-	}
+	as_transaction_init_iudf(&tr, qtr->ns, keyd, &qtr->origin, qtr->is_durable_delete);
 
 	qtr_reserve(qtr, __FILE__, __LINE__);
 	cf_atomic32_incr(&qtr->n_udf_tr_queued);
@@ -2180,9 +2169,6 @@ query_get_nextbatch(as_query_transaction *qtr)
 
 	if (!qctx->recl) {
 		qctx->recl = cf_malloc(sizeof(cf_ll));
-		if (!qctx->recl) {
-			cf_crash(AS_QUERY, "Allocation Error in Query !!");
-		}
 		cf_ll_init(qctx->recl, as_index_keys_ll_destroy_fn, false /*no lock*/);
 		qctx->n_bdigs        = 0;
 	} else {
@@ -2326,9 +2312,8 @@ query_qtr_enqueue(as_query_transaction *qtr, bool is_requeue)
 	if (!is_requeue && (size > limit)) {
 		cf_atomic64_incr(queue_full_err);
 		return AS_QUERY_ERR;
-	} else if (cf_queue_push(q, &qtr) != CF_QUEUE_OK) {
-		cf_crash(AS_QUERY, "Failed to push into Query Queue !!");
 	} else {
+		cf_queue_push(q, &qtr);
 		cf_detail(AS_QUERY, "Logged query ");
 	}
 
@@ -2475,10 +2460,7 @@ qtr_process(as_query_transaction *qtr)
 		// Successfully queued
 		cf_atomic32_incr(&qtr->n_qwork_active);
 		qwork_setup(qworkp, qtr);
-
-		if (cf_queue_push(g_query_work_queue, &qworkp)) {
-			cf_crash(AS_QUERY, "Push into Query Work Queue fail ... !!!");
-		}
+		cf_queue_push(g_query_work_queue, &qworkp);
 
 	}
 	return AS_QUERY_OK;
@@ -2767,13 +2749,15 @@ query_setup(as_transaction *tr, as_namespace *ns, as_query_transaction **qtrp)
 		goto Cleanup;
 	}
 
+	as_msg *m = &tr->msgp->msg;
+
 	// TODO - still lots of redundant msg field parsing (e.g. for set) - fix.
-	if ((si = as_sindex_from_msg(ns, &tr->msgp->msg)) == NULL) {
+	if ((si = as_sindex_from_msg(ns, m)) == NULL) {
 		cf_debug(AS_QUERY, "No Index Defined in the Query");
 	}
 
     ASD_SINDEX_MSGRANGE_STARTING(nodeid, trid);
-	int ret = as_sindex_rangep_from_msg(ns, &tr->msgp->msg, &srange);
+	int ret = as_sindex_rangep_from_msg(ns, m, &srange);
 	if (AS_QUERY_OK != ret) {
 		cf_debug(AS_QUERY, "Could not instantiate index range metadata... "
 				"Err, %s", as_sindex_err_str(ret));
@@ -2784,7 +2768,7 @@ query_setup(as_transaction *tr, as_namespace *ns, as_query_transaction **qtrp)
 	ASD_SINDEX_MSGRANGE_FINISHED(nodeid, trid);
 	// get optional set
 	as_msg_field *sfp = as_transaction_has_set(tr) ?
-			as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_SET) : NULL;
+			as_msg_field_get(m, AS_MSG_FIELD_TYPE_SET) : NULL;
 
 	if (sfp) {
 		uint32_t setname_len = as_msg_field_get_value_sz(sfp);
@@ -2814,8 +2798,7 @@ query_setup(as_transaction *tr, as_namespace *ns, as_query_transaction **qtrp)
 	}
 
 	if (as_transaction_has_predexp(tr)) {
-		as_msg_field * pfp =
-			as_msg_field_get(&tr->msgp->msg, AS_MSG_FIELD_TYPE_PREDEXP);
+		as_msg_field * pfp = as_msg_field_get(m, AS_MSG_FIELD_TYPE_PREDEXP);
 		predexp_eval = predexp_build(pfp);
 		if (! predexp_eval) {
 			cf_warning(AS_QUERY, "Failed to build predicate expression");
@@ -2826,7 +2809,7 @@ query_setup(as_transaction *tr, as_namespace *ns, as_query_transaction **qtrp)
 	
 	int numbins = 0;
 	// Populate binlist to be Projected by the Query
-	binlist = as_sindex_binlist_from_msg(ns, &tr->msgp->msg, &numbins);
+	binlist = as_sindex_binlist_from_msg(ns, m, &numbins);
 
 	// If anyone of the bin in the bin is bad, fail the query
 	if (numbins != 0 && !binlist) {
@@ -2889,6 +2872,7 @@ query_setup(as_transaction *tr, as_namespace *ns, as_query_transaction **qtrp)
 
 	if (qtr->job_type == QUERY_TYPE_LOOKUP) {
 		qtr->predexp_eval = predexp_eval;
+		qtr->no_bin_data = (m->info1 & AS_MSG_INFO1_GET_NO_BINS) != 0;
 	}
 	else if (qtr->job_type == QUERY_TYPE_UDF_BG) {
 		qtr->origin.predexp = predexp_eval;
@@ -2954,7 +2938,7 @@ as_query(as_transaction *tr, as_namespace *ns)
 
 	if (rv == AS_QUERY_DONE) {
 		// Send FIN packet to client to ignore this.
-		bool force_close = as_msg_send_fin(&tr->from.proto_fd_h->sock, AS_PROTO_RESULT_OK) != 0;
+		bool force_close = ! as_msg_send_fin(&tr->from.proto_fd_h->sock, AS_PROTO_RESULT_OK);
 		query_release_fd(tr->from.proto_fd_h, force_close);
 		tr->from.proto_fd_h = NULL; // Paranoid
 		return AS_QUERY_OK;
@@ -3126,10 +3110,6 @@ as_query_get_jobstat(uint64_t trid)
 	}
 	else {
 		stat = cf_malloc(sizeof(as_mon_jobstat));
-		if (!stat) {
-			cf_crash(AS_QUERY, "Allocation Error in job stat !!");
-		}
-
 		as_query_fill_jobstat(qtr, stat);
 		qtr_release(qtr, __FILE__, __LINE__);
 	}
@@ -3161,9 +3141,6 @@ as_query_get_jobstat_all(int * size)
 	query_jobstat     job_pool;
 
 	job_stats          = (as_mon_jobstat *) cf_malloc(sizeof(as_mon_jobstat) * (*size));
-	if (!job_stats) {
-		cf_crash(AS_QUERY, "Allocation Error in job stat all !!");
-	}
 	job_pool.jobstat  = &job_stats;
 	job_pool.index    = 0;
 	job_pool.max_size = *size;
@@ -3239,24 +3216,12 @@ as_query_init()
 	cf_detail(AS_QUERY, "Initialize %d Query Worker threads.", g_config.query_threads);
 
 	// global job hash to keep track of the query job
-	int rc = cf_rchash_create(&g_query_job_hash, cf_rchash_fn_u32, NULL, sizeof(uint64_t), 64, CF_RCHASH_CR_MT_MANYLOCK);
-	if (rc) {
-		cf_crash(AS_QUERY, "Failed to create query job hash");
-	}
+	cf_rchash_create(&g_query_job_hash, cf_rchash_fn_u32, NULL, sizeof(uint64_t), 64, CF_RCHASH_MANY_LOCK);
 
 	// I/O threads
 	g_query_qwork_pool = cf_queue_create(sizeof(query_work *), true);
-	if (!g_query_qwork_pool)
-		cf_crash(AS_QUERY, "Failed to create query io queue");
-
 	g_query_response_bb_pool = cf_queue_create(sizeof(void *), true);
-	if (!g_query_response_bb_pool)
-		cf_crash(AS_QUERY, "Failed to create response buffer query");
-
-
 	g_query_work_queue = cf_queue_create(sizeof(query_work *), true);
-	if (!g_query_work_queue)
-		cf_crash(AS_QUERY, "Failed to create query io queue");
 
 	// Create the query worker threads detached so we don't need to join with them.
 	if (pthread_attr_init(&g_query_worker_th_attr)) {
@@ -3272,12 +3237,7 @@ as_query_init()
 	}
 
 	g_query_short_queue = cf_queue_create(sizeof(as_query_transaction *), true);
-	if (!g_query_short_queue)
-		cf_crash(AS_QUERY, "Failed to create short query transaction queue");
-
 	g_query_long_queue = cf_queue_create(sizeof(as_query_transaction *), true);
-	if (!g_query_long_queue)
-		cf_crash(AS_QUERY, "Failed to create long query transaction queue");
 
 	// Create the query threads detached so we don't need to join with them.
 	if (pthread_attr_init(&g_query_th_attr)) {
@@ -3296,36 +3256,26 @@ as_query_init()
 			cf_crash(AS_QUERY, "Failed to create query transaction threads for query short queue");
 		}
 	}
+
 	char hist_name[64];
+
 	sprintf(hist_name, "query_txn_q_wait_us");
-	if (NULL == (query_txn_q_wait_hist = histogram_create(hist_name, HIST_MICROSECONDS))) {
-		cf_warning(AS_SINDEX, "couldn't create histogram for the time spent in transaction queue by queries.");
-	}
+	query_txn_q_wait_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "query_query_q_wait_us");
-	if (NULL == (query_query_q_wait_hist = histogram_create(hist_name, HIST_MICROSECONDS))) {
-		cf_warning(AS_SINDEX, "couldn't create histogram for time spent waiting for batch creation phase");
-	}
+	query_query_q_wait_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "query_prepare_batch_us");
-	if (NULL == (query_prepare_batch_hist = histogram_create(hist_name, HIST_MICROSECONDS))) {
-		cf_warning(AS_SINDEX, "couldn't create histogram for query batch creation phase");
-	}
+	query_prepare_batch_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "query_batch_io_q_wait_us");
-	if (NULL == (query_batch_io_q_wait_hist = histogram_create(hist_name, HIST_MICROSECONDS))) {
-		cf_warning(AS_SINDEX, "couldn't create histogram for i/o response time for query batches");
-	}
+	query_batch_io_q_wait_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "query_batch_io_us");
-	if (NULL == (query_batch_io_hist = histogram_create(hist_name, HIST_MICROSECONDS))) {
-		cf_warning(AS_SINDEX, "couldn't create histogram for i/o of query batches");
-	}
+	query_batch_io_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	sprintf(hist_name, "query_net_io_us");
-	if (NULL == (query_net_io_hist = histogram_create(hist_name, HIST_MICROSECONDS))) {
-		cf_warning(AS_SINDEX, "couldn't create histogram for query net-i/o");
-	}
+	query_net_io_hist = histogram_create(hist_name, HIST_MICROSECONDS);
 
 	g_config.query_enable_histogram	 = false;
 }

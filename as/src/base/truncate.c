@@ -34,12 +34,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "citrusleaf/cf_atomic.h"
 #include "citrusleaf/cf_clock.h"
-#include "citrusleaf/cf_shash.h"
 
 #include "fault.h"
+#include "shash.h"
 #include "vmapx.h"
 
 #include "base/datamodel.h"
@@ -79,12 +80,12 @@ static const uint64_t WARN_CLOCK_SKEW_MS = 1000UL * 5;
 // Globals.
 //
 
-static shash* g_truncate_filter_hash = NULL;
+static cf_shash* g_truncate_filter_hash = NULL;
 static bool g_truncate_smd_loaded = false;
 
 
 //==========================================================
-// Forward declarations & inlines.
+// Forward declarations.
 //
 
 bool filter_hash_put(const as_smd_item_t* item);
@@ -100,6 +101,11 @@ void truncate_all(as_namespace* ns);
 void* run_truncate(void* arg);
 void truncate_finish(as_namespace* ns);
 void truncate_reduce_cb(as_index_ref* r_ref, void* udata);
+
+
+//==========================================================
+// Inlines & macros.
+//
 
 static inline uint64_t
 lut_from_smd(const as_smd_item_t* item)
@@ -119,20 +125,17 @@ as_truncate_init(as_namespace* ns)
 
 	ns->truncate.state = TRUNCATE_IDLE;
 	pthread_mutex_init(&ns->truncate.state_lock, 0);
-
-	// Lazily create the global filter shash used on the SMD principal.
-	if (! g_truncate_filter_hash &&
-			shash_create(&g_truncate_filter_hash, cf_shash_fn_zstr,
-					TRUNCATE_KEY_SIZE, sizeof(truncate_hval),
-					1024 * g_config.n_namespaces, 0) != SHASH_OK) {
-		cf_crash(AS_TRUNCATE, "truncate init - failed filter-hash create");
-	}
 }
 
 
 void
 as_truncate_init_smd()
 {
+	// Create the global filter shash used on the SMD principal.
+	g_truncate_filter_hash = cf_shash_create(cf_shash_fn_zstr,
+			TRUNCATE_KEY_SIZE, sizeof(truncate_hval),
+			1024 * g_config.n_namespaces, 0);
+
 	// Register the system metadata custom callbacks.
 	if (as_smd_create_module(TRUNCATE_MODULE,
 			NULL, NULL,
@@ -140,6 +143,10 @@ as_truncate_init_smd()
 			truncate_smd_accept_cb, NULL,
 			truncate_smd_can_accept_cb, NULL) != 0) {
 		cf_crash(AS_TRUNCATE, "truncate init - failed smd create module");
+	}
+
+	while (! g_truncate_smd_loaded) {
+		usleep(1000);
 	}
 }
 
@@ -281,11 +288,9 @@ filter_hash_put(const as_smd_item_t* item)
 	truncate_hval new_hval = { .lut = lut_from_smd(item) };
 	truncate_hval ex_hval;
 
-	if (shash_get(g_truncate_filter_hash, hkey, &ex_hval) != SHASH_OK ||
+	if (cf_shash_get(g_truncate_filter_hash, hkey, &ex_hval) != CF_SHASH_OK ||
 			new_hval.lut > ex_hval.lut) {
-		if (shash_put(g_truncate_filter_hash, hkey, &new_hval) != SHASH_OK) {
-			cf_warning(AS_TRUNCATE, "{%s} failed filter-hash put", item->key);
-		}
+		cf_shash_put(g_truncate_filter_hash, hkey, &new_hval);
 
 		return true;
 	}
@@ -305,7 +310,7 @@ filter_hash_delete(const as_smd_item_t* item)
 
 	strcpy(hkey, item->key);
 
-	if (shash_delete(g_truncate_filter_hash, hkey) != SHASH_OK) {
+	if (cf_shash_delete(g_truncate_filter_hash, hkey) != CF_SHASH_OK) {
 		cf_warning(AS_TRUNCATE, "{%s} failed filter-hash delete", item->key);
 	}
 }
@@ -541,7 +546,7 @@ run_truncate(void* arg)
 	while ((pid = (uint32_t)cf_atomic32_incr(&ns->truncate.pid)) <
 			AS_PARTITIONS) {
 		as_partition_reservation rsv;
-		as_partition_reserve_migrate(ns, pid, &rsv, NULL);
+		as_partition_reserve(ns, pid, &rsv);
 
 		truncate_reduce_cb_info cb_info = { .ns = ns, .tree = rsv.tree };
 

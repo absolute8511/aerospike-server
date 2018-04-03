@@ -112,10 +112,11 @@ as_transaction_init_from_rw(as_transaction *tr, rw_request *rw)
 	// Note - destructor will still release the reservation.
 
 	tr->end_time = rw->end_time;
-	tr->result_code = AS_PROTO_RESULT_OK;
-	tr->flags = 0;
+	tr->result_code = rw->result_code;
+	tr->flags = rw->flags;
 	tr->generation = rw->generation;
 	tr->void_time = rw->void_time;
+	tr->last_update_time = rw->last_update_time;
 }
 
 void
@@ -203,9 +204,8 @@ as_transaction_set_msg_field_flag(as_transaction *tr, uint8_t type)
 	return true;
 }
 
-// TODO - check m->n_fields against PROTO_NFIELDS_MAX_WARNING?
 bool
-as_transaction_demarshal_prepare(as_transaction *tr)
+as_transaction_prepare(as_transaction *tr, bool swap)
 {
 	uint64_t size = tr->msgp->proto.sz;
 
@@ -217,7 +217,9 @@ as_transaction_demarshal_prepare(as_transaction *tr)
 	// The proto data is not smaller than an as_msg - safe to swap header.
 	as_msg *m = &tr->msgp->msg;
 
-	as_msg_swap_header(m);
+	if (swap) {
+		as_msg_swap_header(m);
+	}
 
 	uint8_t* p_end = (uint8_t*)m + size;
 	uint8_t* p_read = m->data;
@@ -231,7 +233,10 @@ as_transaction_demarshal_prepare(as_transaction *tr)
 
 		as_msg_field* p_field = (as_msg_field*)p_read;
 
-		as_msg_swap_field(p_field);
+		if (swap) {
+			as_msg_swap_field(p_field);
+		}
+
 		p_read = as_msg_field_skip(p_field);
 
 		if (! p_read) {
@@ -259,7 +264,10 @@ as_transaction_demarshal_prepare(as_transaction *tr)
 
 		as_msg_op* op = (as_msg_op*)p_read;
 
-		as_msg_swap_op(op);
+		if (swap) {
+			as_msg_swap_op(op);
+		}
+
 		p_read = as_msg_op_skip(op);
 
 		if (! p_read) {
@@ -273,59 +281,25 @@ as_transaction_demarshal_prepare(as_transaction *tr)
 		}
 	}
 
-	// Temporarily skip the check for extra message bytes, for compatibility
-	// with legacy clients.
-
-//	if (p_read != p_end) {
-//		cf_warning(AS_PROTO, "extra bytes follow fields and bin-ops");
-//		return false;
-//	}
+	if (p_read != p_end) {
+		cf_warning(AS_PROTO, "extra bytes follow fields and bin-ops");
+		return false;
+	}
 
 	return true;
-}
-
-void
-as_transaction_proxyee_prepare(as_transaction *tr)
-{
-	as_msg *m = &tr->msgp->msg;
-	as_msg_field* p_field = (as_msg_field*)m->data;
-
-	// Store which message fields are present - prevents lots of re-parsing.
-	// Proto header, field sizes already swapped to host order by proxyer.
-	for (uint16_t n = 0; n < m->n_fields; n++) {
-		if (! as_transaction_set_msg_field_flag(tr, p_field->type)) {
-			cf_debug(AS_PROTO, "skipping as_msg_field type %u", p_field->type);
-		}
-
-		p_field = as_msg_field_get_next(p_field);
-	}
 }
 
 // Initialize an internal UDF transaction (for a UDF scan/query). Allocates a
 // message with namespace and digest - no set for now, since these transactions
 // won't get security checked, and they can't create a record.
-int
+void
 as_transaction_init_iudf(as_transaction *tr, as_namespace *ns, cf_digest *keyd,
 		iudf_origin* iudf_orig, bool is_durable_delete)
 {
-	size_t msg_sz = sizeof(cl_msg);
-	int ns_len = strlen(ns->name);
-
-	msg_sz += sizeof(as_msg_field) + ns_len;
-	msg_sz += sizeof(as_msg_field) + sizeof(cf_digest);
-
-	cl_msg *msgp = (cl_msg *)cf_malloc(msg_sz);
-
-	if (! msgp) {
-		return -1;
-	}
-
-	uint8_t *b = (uint8_t *)msgp;
 	uint8_t info2 = AS_MSG_INFO2_WRITE |
 			(is_durable_delete ? AS_MSG_INFO2_DURABLE_DELETE : 0);
 
-	b = as_msg_write_header(b, msg_sz, 0, info2, 0, 0, 0, 0, 2, 0);
-	b = as_msg_write_fields(b, ns->name, ns_len, NULL, 0, keyd, 0);
+	cl_msg *msgp = as_msg_create_internal(ns->name, keyd, 0, info2, 0);
 
 	as_transaction_init_head(tr, NULL, msgp);
 
@@ -337,14 +311,12 @@ as_transaction_init_iudf(as_transaction *tr, as_namespace *ns, cf_digest *keyd,
 
 	// Do this last, to exclude the setup time in this function.
 	tr->start_time = cf_getns();
-
-	return 0;
 }
 
 void
 as_transaction_demarshal_error(as_transaction* tr, uint32_t error_code)
 {
-	as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, 0, NULL);
+	as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, 0);
 	tr->from.proto_fd_h = NULL;
 
 	cf_free(tr->msgp);
@@ -374,23 +346,18 @@ as_transaction_error(as_transaction* tr, as_namespace* ns, uint32_t error_code)
 		error_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 	}
 
-	// The 'from' checks below should not be necessary, but there's a known race
-	// between duplicate-resolution's cluster-key-mismatch handler (which
-	// re-queues transactions) and retransmit thread timeouts which can allow a
-	// null 'from' to get here. That race will be fixed in a future release, but
-	// for now these checks keep us safe.
-
+	// The 'from' checks below are unnecessary, only paranoia.
 	switch (tr->origin) {
 	case FROM_CLIENT:
 		if (tr->from.proto_fd_h) {
-			as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
+			as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr));
 			tr->from.proto_fd_h = NULL; // pattern, not needed
 		}
 		UPDATE_ERROR_STATS(client);
 		break;
 	case FROM_PROXY:
 		if (tr->from.proxy_node != 0) {
-			as_proxy_send_response(tr->from.proxy_node, tr->from_data.proxy_tid, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
+			as_proxy_send_response(tr->from.proxy_node, tr->from_data.proxy_tid, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr));
 			tr->from.proxy_node = 0; // pattern, not needed
 		}
 		break;
@@ -430,16 +397,11 @@ as_multi_rec_transaction_error(as_transaction* tr, uint32_t error_code)
 	switch (tr->origin) {
 	case FROM_CLIENT:
 		if (tr->from.proto_fd_h) {
-			as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr), NULL);
+			as_msg_send_reply(tr->from.proto_fd_h, error_code, 0, 0, NULL, NULL, 0, NULL, as_transaction_trid(tr));
 			tr->from.proto_fd_h = NULL; // pattern, not needed
 		}
 		cf_atomic64_incr(&g_stats.n_tsvc_client_error);
 		break;
-	case FROM_PROXY:
-	case FROM_BATCH:
-	case FROM_IUDF:
-	case FROM_NSUP:
-		// It should be impossible for non-client origins to get here.
 	default:
 		cf_crash(AS_PROTO, "unexpected transaction origin %u", tr->origin);
 		break;

@@ -29,34 +29,49 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "citrusleaf/cf_digest.h"
+
 #include "msg.h"
 #include "node.h"
 
 #include "base/cfg.h"
 #include "base/datamodel.h"
-#include "base/index.h"
 #include "base/secondary_index.h"
 #include "base/transaction.h"
 #include "base/transaction_policy.h"
-#include "base/udf_record.h"
-#include "storage/storage.h"
 #include "transaction/rw_request.h"
 #include "transaction/udf.h"
 
 
 //==========================================================
-// Typedefs and constants.
+// Forward declarations.
 //
+
+struct as_bin_s;
+struct as_index_s;
+struct as_index_tree_s;
+struct as_msg_s;
+struct as_namespace_s;
+struct as_storage_rd_s;
+struct as_transaction_s;
+struct rw_request_s;
+struct udf_record_s;
+
+
+//==========================================================
+// Typedefs & constants.
+//
+
+typedef struct index_metadata_s {
+	uint32_t void_time;
+	uint64_t last_update_time;
+	uint16_t generation;
+} index_metadata;
 
 typedef struct now_times_s {
 	uint64_t now_ns;
 	uint64_t now_ms;
 } now_times;
-
-typedef struct rw_paxos_change_struct_t {
-	cf_node succession[AS_CLUSTER_SZ];
-	cf_node deletions[AS_CLUSTER_SZ];
-} rw_paxos_change_struct;
 
 // For now, use only for as_msg record_ttl special values.
 #define TTL_NAMESPACE_DEFAULT	0
@@ -68,20 +83,22 @@ typedef struct rw_paxos_change_struct_t {
 // Public API.
 //
 
-bool xdr_allows_write(as_transaction* tr);
-void send_rw_messages(rw_request* rw);
-bool generation_check(const as_record* r, const as_msg* m);
-int set_set_from_msg(as_record* r, as_namespace* ns, as_msg* m);
-int set_delete_durablility(const as_transaction* tr, as_storage_rd* rd);
-bool check_msg_key(as_msg* m, as_storage_rd* rd);
-bool get_msg_key(as_transaction* tr, as_storage_rd* rd);
-int handle_msg_key(as_transaction* tr, as_storage_rd* rd);
-void update_metadata_in_index(as_transaction* tr, bool increment_generation, as_record* r);
-bool pickle_all(as_storage_rd* rd, rw_request* rw);
-void record_delete_adjust_sindex(as_record* r, as_namespace* ns);
-void delete_adjust_sindex(as_storage_rd* rd);
-void remove_from_sindex(as_namespace* ns, const char* set_name, cf_digest* keyd, as_bin* bins, uint32_t n_bins);
-bool xdr_must_ship_delete(as_namespace* ns, bool is_nsup_delete, bool is_xdr_op);
+bool xdr_allows_write(struct as_transaction_s* tr);
+void send_rw_messages(struct rw_request_s* rw);
+void send_rw_messages_forget(struct rw_request_s* rw);
+bool generation_check(const struct as_index_s* r, const struct as_msg_s* m);
+int set_set_from_msg(struct as_index_s* r, struct as_namespace_s* ns, struct as_msg_s* m);
+int set_delete_durablility(const struct as_transaction_s* tr, struct as_storage_rd_s* rd);
+bool check_msg_key(struct as_msg_s* m, struct as_storage_rd_s* rd);
+bool get_msg_key(struct as_transaction_s* tr, struct as_storage_rd_s* rd);
+int handle_msg_key(struct as_transaction_s* tr, struct as_storage_rd_s* rd);
+void update_metadata_in_index(struct as_transaction_s* tr, bool increment_generation, struct as_index_s* r);
+void pickle_all(struct as_storage_rd_s* rd, struct rw_request_s* rw);
+bool write_sindex_update(struct as_namespace_s* ns, const char* set_name, cf_digest* keyd, struct as_bin_s* old_bins, uint32_t n_old_bins, struct as_bin_s* new_bins, uint32_t n_new_bins);
+void record_delete_adjust_sindex(struct as_index_s* r, struct as_namespace_s* ns);
+void delete_adjust_sindex(struct as_storage_rd_s* rd);
+void remove_from_sindex(struct as_namespace_s* ns, const char* set_name, cf_digest* keyd, struct as_bin_s* bins, uint32_t n_bins);
+bool xdr_must_ship_delete(struct as_namespace_s* ns, bool is_nsup_delete, bool is_xdr_op);
 
 
 // TODO - rename as as_record_... and move to record.c?
@@ -102,8 +119,7 @@ static inline bool
 respond_on_master_complete(as_transaction* tr)
 {
 	return tr->origin == FROM_CLIENT &&
-			(g_config.respond_client_on_master_completion ||
-			TRANSACTION_COMMIT_LEVEL(tr) == AS_POLICY_COMMIT_LEVEL_MASTER);
+			TR_WRITE_COMMIT_LEVEL(tr) == AS_WRITE_COMMIT_LEVEL_MASTER;
 }
 
 
@@ -137,10 +153,10 @@ is_valid_ttl(as_namespace* ns, uint32_t ttl)
 
 
 static inline void
-clear_delete_response_metadata(rw_request* rw, as_transaction* tr)
+clear_delete_response_metadata(as_transaction* tr)
 {
 	// If write became delete, respond to origin with no metadata.
-	if (as_record_pickle_is_binless(rw->pickled_buf)) {
+	if ((tr->flags & AS_TRANSACTION_FLAG_IS_DELETE) != 0) {
 		tr->generation = 0;
 		tr->void_time = 0;
 		tr->last_update_time = 0;
@@ -152,13 +168,16 @@ clear_delete_response_metadata(rw_request* rw, as_transaction* tr)
 // Private API - for enterprise separation only.
 //
 
-bool create_only_check(const as_record* r, const as_msg* m);
-void write_delete_record(as_record* r, as_index_tree* tree);
+bool create_only_check(const struct as_index_s* r, const struct as_msg_s* m);
+void write_delete_record(struct as_index_s* r, struct as_index_tree_s* tree);
 
-udf_optype udf_finish_delete(udf_record* urecord);
+udf_optype udf_finish_delete(struct udf_record_s* urecord);
 
-void dup_res_flag_pickle(const uint8_t* buf, uint32_t* info);
-bool dup_res_ignore_pickle(const uint8_t* buf, const msg* m);
+uint32_t dup_res_pack_info(const struct as_index_s* r, struct as_namespace_s* ns);
+bool dup_res_ignore_pickle(const uint8_t* buf, uint32_t info);
+bool dup_res_should_retry_transaction(struct rw_request_s* rw, uint32_t result_code);
+void dup_res_translate_result_code(struct rw_request_s* rw);
 
-void repl_write_flag_pickle(const as_transaction* tr, const uint8_t* buf, uint32_t* info);
+void repl_write_flag_pickle(const struct as_transaction_s* tr, const uint8_t* buf, uint32_t* info);
 bool repl_write_pickle_is_drop(const uint8_t* buf, uint32_t info);
+bool repl_write_should_retransmit_replicas(struct rw_request_s* rw, uint32_t result_code);

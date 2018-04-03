@@ -255,10 +255,6 @@ blob_to_asval(const as_particle *p)
 
 	uint8_t *value = cf_malloc(p_blob_mem->sz);
 
-	if (! value) {
-		return NULL;
-	}
-
 	memcpy(value, p_blob_mem->data, p_blob_mem->sz);
 
 	return (as_val *)as_bytes_new_wrap(value, p_blob_mem->sz, true);
@@ -365,12 +361,6 @@ blob_from_flat(const uint8_t *flat, uint32_t flat_size, as_particle **pp)
 	}
 
 	blob_mem *p_blob_mem = (blob_mem *)cf_malloc_ns((size_t)mem_size);
-
-	if (! p_blob_mem) {
-		cf_warning(AS_PARTICLE, "failed malloc for blob/string (%d)", mem_size);
-		return -AS_PROTO_RESULT_FAIL_UNKNOWN;
-	}
-
 	const blob_flat *p_blob_flat = (const blob_flat *)flat;
 
 	p_blob_mem->type = p_blob_flat->type;
@@ -433,7 +423,6 @@ blob_bytes_type_to_particle_type(as_bytes_type type)
 	case AS_BYTES_MAP:
 	case AS_BYTES_LIST:
 	case AS_BYTES_UNDEF:
-	case AS_BYTES_LDT:
 	default:
 		break;
 	}

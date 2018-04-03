@@ -32,12 +32,19 @@
 #include "aerospike/as_list.h"
 
 #include "base/predexp.h"
-#include "base/proto.h"
 #include "base/transaction.h"
 
 
 //==========================================================
-// Typedefs and constants.
+// Forward declarations.
+//
+
+struct as_transaction_s;
+struct predexp_eval_base_s;
+
+
+//==========================================================
+// Typedefs & constants.
 //
 
 typedef enum {
@@ -60,7 +67,7 @@ typedef int (*iudf_cb)(void* udata, int retcode);
 
 typedef struct iudf_origin_s {
 	udf_def			def;
-	predexp_eval_t*	predexp;
+	struct predexp_eval_base_s*	predexp;
 	iudf_cb			cb;
 	void*			udata;
 } iudf_origin;
@@ -83,8 +90,8 @@ iudf_origin_destroy(iudf_origin* origin)
 }
 
 void as_udf_init();
-udf_def* udf_def_init_from_msg(udf_def* def, const as_transaction* tr);
+udf_def* udf_def_init_from_msg(udf_def* def, const struct as_transaction_s* tr);
 
-transaction_status as_udf_start(as_transaction* tr);
+transaction_status as_udf_start(struct as_transaction_s* tr);
 
 extern as_aerospike g_as_aerospike;

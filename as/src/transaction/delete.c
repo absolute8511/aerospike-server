@@ -57,33 +57,53 @@
 
 
 //==========================================================
-// Forward Declarations.
+// Forward declarations.
 //
 
-bool start_delete_dup_res(rw_request* rw, as_transaction* tr);
-bool start_delete_repl_write(rw_request* rw, as_transaction* tr);
+void start_delete_dup_res(rw_request* rw, as_transaction* tr);
+void start_delete_repl_write(rw_request* rw, as_transaction* tr);
+void start_delete_repl_write_forget(rw_request* rw, as_transaction* tr);
 bool delete_dup_res_cb(rw_request* rw);
-bool delete_repl_write_after_dup_res(rw_request* rw, as_transaction* tr);
+void delete_repl_write_after_dup_res(rw_request* rw, as_transaction* tr);
+void delete_repl_write_forget_after_dup_res(rw_request* rw, as_transaction* tr);
 void delete_repl_write_cb(rw_request* rw);
 
 void send_delete_response(as_transaction* tr);
 void delete_timeout_cb(rw_request* rw);
 
+
+//==========================================================
+// Inlines & macros.
+//
+
 static inline void
-client_delete_update_stats(as_namespace* ns, uint8_t result_code)
+client_delete_update_stats(as_namespace* ns, uint8_t result_code,
+		bool is_xdr_op)
 {
 	switch (result_code) {
 	case AS_PROTO_RESULT_OK:
 		cf_atomic64_incr(&ns->n_client_delete_success);
+		if (is_xdr_op) {
+			cf_atomic64_incr(&ns->n_xdr_delete_success);
+		}
 		break;
 	case AS_PROTO_RESULT_FAIL_TIMEOUT:
 		cf_atomic64_incr(&ns->n_client_delete_timeout);
+		if (is_xdr_op) {
+			cf_atomic64_incr(&ns->n_xdr_delete_timeout);
+		}
 		break;
 	default:
 		cf_atomic64_incr(&ns->n_client_delete_error);
+		if (is_xdr_op) {
+			cf_atomic64_incr(&ns->n_xdr_delete_error);
+		}
 		break;
-	case AS_PROTO_RESULT_FAIL_NOTFOUND:
+	case AS_PROTO_RESULT_FAIL_NOT_FOUND:
 		cf_atomic64_incr(&ns->n_client_delete_not_found);
+		if (is_xdr_op) {
+			cf_atomic64_incr(&ns->n_xdr_delete_not_found);
+		}
 		break;
 	}
 }
@@ -98,7 +118,7 @@ as_delete_start(as_transaction* tr)
 {
 	// Apply XDR filter.
 	if (! xdr_allows_write(tr)) {
-		tr->result_code = AS_PROTO_RESULT_FAIL_FORBIDDEN;
+		tr->result_code = AS_PROTO_RESULT_FAIL_ALWAYS_FORBIDDEN;
 		send_delete_response(tr);
 		return TRANS_DONE_ERROR;
 	}
@@ -126,7 +146,7 @@ as_delete_start(as_transaction* tr)
 	}
 	// else - rw_request is now in hash, continue...
 
-	if (g_config.write_duplicate_resolution_disable ||
+	if (tr->rsv.ns->write_dup_res_disabled ||
 			as_transaction_is_nsup_delete(tr)) {
 		// Note - preventing duplicate resolution this way allows
 		// rw_request_destroy() to handle dup_msg[] cleanup correctly.
@@ -136,17 +156,16 @@ as_delete_start(as_transaction* tr)
 	// If there are duplicates to resolve, start doing so.
 	// TODO - should we bother if there's no generation check?
 	if (tr->rsv.n_dupl != 0) {
-		if (! start_delete_dup_res(rw, tr)) {
-			rw_request_hash_delete(&hkey, rw);
-			tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
-			send_delete_response(tr);
-			return TRANS_DONE_ERROR;
-		}
+		start_delete_dup_res(rw, tr);
 
 		// Started duplicate resolution.
 		return TRANS_IN_PROGRESS;
 	}
 	// else - no duplicate resolution phase, apply operation to master.
+
+	// Set up the nodes to which we'll write replicas.
+	rw->n_dest_nodes = as_partition_get_other_replicas(tr->rsv.p,
+			rw->dest_nodes);
 
 	// If error, transaction is finished.
 	if ((status = delete_master(tr, rw)) != TRANS_IN_PROGRESS) {
@@ -155,24 +174,22 @@ as_delete_start(as_transaction* tr)
 		return status;
 	}
 
-	// Set up the nodes to which we'll write replicas.
-	rw->n_dest_nodes = as_partition_get_other_replicas(tr->rsv.p,
-			rw->dest_nodes);
-
 	// If we don't need replica writes, transaction is finished.
-	// TODO - consider a single-node fast path bypassing hash?
 	if (rw->n_dest_nodes == 0) {
 		rw_request_hash_delete(&hkey, rw);
 		send_delete_response(tr);
 		return TRANS_DONE_SUCCESS;
 	}
 
-	if (! start_delete_repl_write(rw, tr)) {
+	// If we don't need to wait for replica write acks, fire and forget.
+	if (as_transaction_is_nsup_delete(tr) || respond_on_master_complete(tr)) {
+		start_delete_repl_write_forget(rw, tr);
 		rw_request_hash_delete(&hkey, rw);
-		tr->result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
 		send_delete_response(tr);
-		return TRANS_DONE_ERROR;
+		return TRANS_DONE_SUCCESS;
 	}
+
+	start_delete_repl_write(rw, tr);
 
 	// Started replica write.
 	return TRANS_IN_PROGRESS;
@@ -183,16 +200,12 @@ as_delete_start(as_transaction* tr)
 // Local helpers - transaction flow.
 //
 
-bool
+void
 start_delete_dup_res(rw_request* rw, as_transaction* tr)
 {
 	// Finish initializing rw, construct and send dup-res message.
 
-	if (! dup_res_make_message(rw, tr)) {
-		return false;
-	}
-
-	rw->respond_client_on_master_completion = respond_on_master_complete(tr);
+	dup_res_make_message(rw, tr);
 
 	pthread_mutex_lock(&rw->lock);
 
@@ -200,27 +213,15 @@ start_delete_dup_res(rw_request* rw, as_transaction* tr)
 	send_rw_messages(rw);
 
 	pthread_mutex_unlock(&rw->lock);
-
-	return true;
 }
 
 
-bool
+void
 start_delete_repl_write(rw_request* rw, as_transaction* tr)
 {
 	// Finish initializing rw, construct and send repl-delete message.
 
-	if (! repl_write_make_message(rw, tr)) {
-		return false;
-	}
-
-	rw->respond_client_on_master_completion = respond_on_master_complete(tr);
-
-	if (rw->respond_client_on_master_completion) {
-		// Don't wait for replication. When replication is complete, we won't
-		// call send_delete_response() again.
-		send_delete_response(tr);
-	}
+	repl_write_make_message(rw, tr);
 
 	pthread_mutex_lock(&rw->lock);
 
@@ -228,8 +229,16 @@ start_delete_repl_write(rw_request* rw, as_transaction* tr)
 	send_rw_messages(rw);
 
 	pthread_mutex_unlock(&rw->lock);
+}
 
-	return true;
+
+void
+start_delete_repl_write_forget(rw_request* rw, as_transaction* tr)
+{
+	// Construct and send repl-write message. No need to finish rw setup.
+
+	repl_write_make_message(rw, tr);
+	send_rw_messages_forget(rw);
 }
 
 
@@ -238,6 +247,11 @@ delete_dup_res_cb(rw_request* rw)
 {
 	as_transaction tr;
 	as_transaction_init_from_rw(&tr, rw);
+
+	if (tr.result_code != AS_PROTO_RESULT_OK) {
+		send_delete_response(&tr);
+		return true;
+	}
 
 	transaction_status status = delete_master(&tr, rw);
 
@@ -256,37 +270,41 @@ delete_dup_res_cb(rw_request* rw)
 		return true;
 	}
 
-	if (! delete_repl_write_after_dup_res(rw, &tr)) {
-		tr.result_code = AS_PROTO_RESULT_FAIL_UNKNOWN;
+	// If we don't need to wait for replica write acks, fire and forget.
+	// (Remember that nsup deletes can't get here, so no need to check.)
+	if (respond_on_master_complete(&tr)) {
+		delete_repl_write_forget_after_dup_res(rw, &tr);
 		send_delete_response(&tr);
 		return true;
 	}
+
+	delete_repl_write_after_dup_res(rw, &tr);
 
 	// Started replica write - don't delete rw_request from hash.
 	return false;
 }
 
 
-bool
+void
 delete_repl_write_after_dup_res(rw_request* rw, as_transaction* tr)
 {
 	// Recycle rw_request that was just used for duplicate resolution to now do
 	// replica writes. Note - we are under the rw_request lock here!
 
-	if (! repl_write_make_message(rw, tr)) {
-		return false;
-	}
-
-	if (rw->respond_client_on_master_completion) {
-		// Don't wait for replication. When replication is complete, we won't
-		// call send_delete_response() again.
-		send_delete_response(tr);
-	}
-
+	repl_write_make_message(rw, tr);
 	repl_write_reset_rw(rw, tr, delete_repl_write_cb);
 	send_rw_messages(rw);
+}
 
-	return true;
+
+void
+delete_repl_write_forget_after_dup_res(rw_request* rw, as_transaction* tr)
+{
+	// Send replica writes. Not waiting for acks, so need to reset rw_request.
+	// Note - we are under the rw_request lock here!
+
+	repl_write_make_message(rw, tr);
+	send_rw_messages_forget(rw);
 }
 
 
@@ -321,48 +339,45 @@ send_delete_response(as_transaction* tr)
 	switch (tr->origin) {
 	case FROM_CLIENT:
 		as_msg_send_reply(tr->from.proto_fd_h, tr->result_code, 0, 0, NULL,
-				NULL, 0, NULL, as_transaction_trid(tr), NULL);
-		client_delete_update_stats(tr->rsv.ns, tr->result_code);
+				NULL, 0, tr->rsv.ns, as_transaction_trid(tr));
+		client_delete_update_stats(tr->rsv.ns, tr->result_code,
+				as_transaction_is_xdr(tr));
 		break;
 	case FROM_PROXY:
 		as_proxy_send_response(tr->from.proxy_node, tr->from_data.proxy_tid,
-				tr->result_code, 0, 0, NULL, NULL, 0, NULL,
-				as_transaction_trid(tr), NULL);
+				tr->result_code, 0, 0, NULL, NULL, 0, tr->rsv.ns,
+				as_transaction_trid(tr));
 		break;
 	case FROM_NSUP:
 		break;
-	case FROM_BATCH:
-	case FROM_IUDF:
-		// Should be impossible for batch reads and internal UDFs to get here.
 	default:
 		cf_crash(AS_RW, "unexpected transaction origin %u", tr->origin);
 		break;
 	}
 
-	tr->from.any = NULL; // needed only for respond-on-master-complete
+	tr->from.any = NULL; // pattern, not needed
 }
 
 
 void
 delete_timeout_cb(rw_request* rw)
 {
-	if (! rw->from.any && rw->origin != FROM_NSUP) {
+	// Paranoia - remove eventually.
+	cf_assert(rw->origin != FROM_NSUP, AS_RW, "nsup delete got timeout cb");
+
+	if (! rw->from.any) {
 		return; // lost race against dup-res or repl-write callback
 	}
 
 	switch (rw->origin) {
 	case FROM_CLIENT:
 		as_msg_send_reply(rw->from.proto_fd_h, AS_PROTO_RESULT_FAIL_TIMEOUT, 0,
-				0, NULL, NULL, 0, NULL, rw_request_trid(rw), NULL);
-		client_delete_update_stats(rw->rsv.ns, AS_PROTO_RESULT_FAIL_TIMEOUT);
+				0, NULL, NULL, 0, rw->rsv.ns, rw_request_trid(rw));
+		client_delete_update_stats(rw->rsv.ns, AS_PROTO_RESULT_FAIL_TIMEOUT,
+				as_msg_is_xdr(&rw->msgp->msg));
 		break;
 	case FROM_PROXY:
 		break;
-	case FROM_NSUP:
-		break;
-	case FROM_BATCH:
-	case FROM_IUDF:
-		// Should be impossible for batch reads and internal UDFs to get here.
 	default:
 		cf_crash(AS_RW, "unexpected transaction origin %u", rw->origin);
 		break;
@@ -419,9 +434,6 @@ drop_master(as_transaction* tr, as_index_ref* r_ref, rw_request* rw)
 	// are useless for a drop.
 	rw->pickled_sz = sizeof(uint16_t);
 	rw->pickled_buf = cf_malloc(rw->pickled_sz);
-
-	cf_assert(rw->pickled_buf, AS_RW, "failed pickle allocation");
-
 	*(uint16_t*)rw->pickled_buf = 0;
 
 	// Save the set-ID for XDR.
@@ -432,7 +444,7 @@ drop_master(as_transaction* tr, as_index_ref* r_ref, rw_request* rw)
 
 	if (xdr_must_ship_delete(ns, as_transaction_is_nsup_delete(tr),
 			as_msg_is_xdr(m))) {
-		xdr_write(ns, tr->keyd, 0, 0, XDR_OP_TYPE_DROP, set_id, NULL);
+		xdr_write(ns, &tr->keyd, 0, 0, XDR_OP_TYPE_DROP, set_id, NULL);
 	}
 
 	return TRANS_IN_PROGRESS;

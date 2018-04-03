@@ -104,6 +104,30 @@ typedef enum as_clustering_event_type_e
 } as_clustering_event_type;
 
 /**
+ * Clustering event type.
+ */
+typedef enum as_clustering_event_qualifier_e
+{
+	/**
+	 * The default qualifier for cases where a qualifier is not applicable.
+	 */
+	AS_CLUSTERING_QUALIFIER_NA,
+
+	/**
+	 * Cluster membership lost since the principal evicted this node or is no
+	 * longer reachable or the cluster is invalid. Relevant only for orphaned
+	 * event.
+	 */
+	AS_CLUSTERING_MEMBERSHIP_LOST,
+
+	/**
+	 * This node became an orphan node in order to attempt a merge. Relevant
+	 * only for orphaned event.
+	 */
+	AS_CLUSTERING_ATTEMPTING_MERGE,
+} as_clustering_event_qualifier;
+
+/**
  * Clustering event.
  */
 typedef struct as_clustering_event_s
@@ -112,6 +136,11 @@ typedef struct as_clustering_event_s
 	 * The clustering event type.
 	 */
 	as_clustering_event_type type;
+
+	/**
+	 * The clustering event qualifier.
+	 */
+	as_clustering_event_qualifier qualifier;
 
 	/**
 	 * The cluster key. Will be non-zero if this is a cluster change event.
@@ -165,8 +194,45 @@ as_clustering_cluster_reform();
  * Return the quantum interval, i.e., the interval at which cluster change
  * decisions are taken. The unit is milliseconds.
  */
-uint32_t
+uint64_t
 as_clustering_quantum_interval();
+
+/**
+ * Log a vector of node-ids at input severity spliting long vectors over
+ * multiple lines. The call might not work if the vector is not protected
+ * against multi-threaded access.
+ *
+ * @param context the logging context.
+ * @param severity the log severity.
+ * @param file_name the source file name for the log line.
+ * @param line the source file line number for the log line.
+ * @param message the message prefix for each log line. Message and node list
+ * will be separated with a space. Can be NULL for no prefix.
+ * @param nodes the vector of nodes.
+ */
+void
+as_clustering_cf_node_vector_event(cf_fault_severity severity,
+		cf_fault_context context, char* file_name, int line, char* message,
+		cf_vector* nodes);
+
+/**
+ * Log an array of node-ids at input severity spliting long vectors over
+ * multiple lines. The call might not work if the array is not protected against
+ * multi-threaded access.
+ *
+ * @param context the logging context.
+ * @param severity the log severity.
+ * @param file_name the source file name for the log line.
+ * @param line the source file line number for the log line.
+ * @param message the message prefix for each log line. Message and node list
+ * will be separated with a space. Can be NULL for no prefix.
+ * @param nodes the array of nodes.
+ * @param node_count the count of nodes in the array.
+ */
+void
+as_clustering_cf_node_array_event(cf_fault_severity severity,
+		cf_fault_context context, char* file_name, int line, char* message,
+		cf_node* nodes, int node_count);
 
 /**
  * Log a vector of node-ids at input severity spliting long vectors over
@@ -179,9 +245,9 @@ as_clustering_quantum_interval();
  * will be separated with a space. Can be NULL for no prefix.
  * @param nodes the vector of nodes.
  */
-void
-as_clustering_log_cf_node_vector(cf_fault_severity severity,
-		cf_fault_context context, char* message, cf_vector* nodes);
+#define as_clustering_log_cf_node_vector(severity, context, message, nodes)					\
+	as_clustering_cf_node_vector_event(severity, context, __FILENAME__,	\
+									   __LINE__, message, nodes)
 
 /**
  * Log an array of node-ids at input severity spliting long vectors over
@@ -195,10 +261,11 @@ as_clustering_log_cf_node_vector(cf_fault_severity severity,
  * @param nodes the array of nodes.
  * @param node_count the count of nodes in the array.
  */
-void
-as_clustering_log_cf_node_array(cf_fault_severity severity,
-		cf_fault_context context, char* message, cf_node* nodes,
-		int node_count);
+#define as_clustering_log_cf_node_array(severity, context, message, nodes,	\
+		node_count)															\
+as_clustering_cf_node_array_event(severity, context, __FILENAME__,			\
+		__LINE__, message, nodes, node_count);
+
 
 /*
  * ---- Clustering info command functions. ----
